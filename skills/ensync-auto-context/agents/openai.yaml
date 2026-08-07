@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ensync Auto Context"
+  short_description: "Route one full-context task across subscriptions"
+  default_prompt: "Use $ensync-auto-context to continue this project task with automatic provider routing and complete handoff context."

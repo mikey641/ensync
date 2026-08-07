@@ -1,0 +1,716 @@
+import { readNdjsonStream } from './ndjsonStream.mjs'
+
+export type CliProviderId =
+  | 'claude'
+  | 'codex'
+  | 'kimi'
+  | 'antigravity'
+  | 'jules'
+  | 'copilot'
+  | 'cursor'
+  | 'kiro'
+  | 'qoder'
+  | 'codebuddy'
+  | 'droid'
+  | 'auggie'
+  | 'amp'
+  | 'gitlab_duo'
+  | 'oz'
+  | 'junie'
+  | 'ollama'
+
+export type AuthenticationState =
+  | 'authenticated'
+  | 'not_authenticated'
+  | 'not_required'
+  | 'unknown'
+  | 'unavailable'
+
+export type ConnectionState =
+  | 'ready'
+  | 'needs_authentication'
+  | 'installed_unverified'
+  | 'checking_failed'
+  | 'unavailable'
+
+export type ProviderAuthentication = {
+  state: AuthenticationState
+  method: string | null
+  accountLogin?: string | null
+  reason: string
+  source: 'cli'
+  checkedAt: string
+  exactPlan?: string | null
+}
+
+export type ProviderUsage = {
+  availability: 'partial' | 'unavailable'
+  source: 'cli' | 'unavailable'
+  kind: 'subscription_quota' | 'session_only' | 'local_runtime' | 'unavailable'
+  plan: string | null
+  model: string | null
+  usedPercent: number | null
+  remainingPercent: number | null
+  resetAt: string | null
+  /** Exact provider-rendered reset schedule when no absolute timestamp is exposed. */
+  resetLabel?: string | null
+  /** Provider-reported quota window associated with resetLabel. */
+  resetWindow?: string | null
+  checkedAt: string
+  details: Array<{ label: string; value: string }>
+  reason: string
+}
+
+export type CliModel = {
+  id: string
+  displayName: string
+  isDefault: boolean
+}
+
+export type CliProviderStatus = {
+  id: CliProviderId
+  name: string
+  command: string
+  installed: boolean
+  executable: string | null
+  version: string | null
+  connectionState: ConnectionState
+  authentication: ProviderAuthentication
+  usage: ProviderUsage
+  availableModels: CliModel[]
+  canConnect: boolean
+  connectReason: string | null
+  canUpdate: boolean
+  updateReason: string
+  routeKind: 'subscription' | 'local'
+  chatExecution: 'supported' | 'discovery_only'
+  setupKind: 'login_command' | 'interactive_onboarding' | 'none'
+  documentationUrl: string | null
+  catalogReason: string
+  checkedAt: string
+}
+
+export type ProviderStatusesResponse = {
+  providers: CliProviderStatus[]
+  checkedAt: string
+}
+
+export type UsageStatus = Pick<
+  CliProviderStatus,
+  'id' | 'name' | 'installed' | 'connectionState'
+> & ProviderUsage
+
+export type UsageResponse = {
+  providers: UsageStatus[]
+  checkedAt: string
+}
+
+export type ConnectResponse = {
+  started: boolean
+  launchMode: 'terminal' | 'manual'
+  reason?: string
+  command: {
+    executable: string
+    args: string[]
+    display: string
+  }
+  message: string
+}
+
+export type ProviderUpdateResponse = ConnectResponse & {
+  previousVersion: string | null
+}
+
+export type ProjectInstructionAdapter = {
+  provider: 'codex' | 'claude'
+  name: string
+  file: 'AGENTS.md' | 'CLAUDE.md'
+}
+
+export type ProjectInspection = {
+  id: string
+  name: string
+  path: string
+  host: 'local'
+  context: {
+    relayDirectory: boolean
+    files: string[]
+    featureFiles: string[]
+    truncated: boolean
+    error: string | null
+    instructionAdapters: ProjectInstructionAdapter[]
+  }
+  inspectedAt: string
+}
+
+export type GitRemote = {
+  name: string
+  fetchUrls: string[]
+  pushUrls: string[]
+}
+
+export type GitStatus = {
+  repositoryPath: string
+  branch: string | null
+  detached: boolean
+  upstream: string | null
+  ahead: number | null
+  behind: number | null
+  dirty: boolean
+  changedFiles: number
+  remotes: GitRemote[]
+  preferredRemote: string | null
+  productionBranch: string | null
+  productionBranchSource: 'remote' | 'unavailable'
+  checkedAt: string
+}
+
+export type GitConnection = {
+  remote: string
+  connected: true
+  defaultBranch: string | null
+  authentication: 'existing_git_credentials'
+  message: string
+  checkedAt: string
+}
+
+export type GitPushMode = 'current_branch' | 'production'
+
+export type GitPushResult = {
+  push: {
+    mode: GitPushMode
+    remote: string
+    sourceBranch: string
+    targetBranch: string
+    completedAt: string
+  }
+  git: GitStatus
+}
+
+export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude'>
+export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
+
+export type ChatRunRequest = {
+  provider: ChatProviderId
+  projectPath: string
+  prompt: string
+  /** Absolute local file paths explicitly attached by the user. */
+  attachments?: string[]
+  sessionId?: string | null
+  model?: string | null
+  effort?: ChatModelEffort | null
+  timeoutMs?: number
+}
+
+export type ChatRunUsage = {
+  source: 'cli'
+  inputTokens: number | null
+  outputTokens: number | null
+  cachedInputTokens: number | null
+}
+
+export type ChatRunResponse = {
+  provider: ChatProviderId
+  projectPath: string
+  response: string
+  sessionId: string | null
+  /** Exact model reported by the CLI, or null when the CLI does not report one. */
+  model: string | null
+  /** The model alias/name requested by the user, kept separate from CLI-reported model data. */
+  requestedModel: string | null
+  /** The strict effort override requested for the provider's default model, or null. */
+  requestedEffort: ChatModelEffort | null
+  /** Exact per-run token counts reported by the CLI, or null. Never estimated. */
+  usage: ChatRunUsage | null
+  durationMs: number
+  completedAt: string
+}
+
+export type ChatExecutionEvent =
+  | {
+      type: 'notice'
+      message: string
+      at: string
+      /** Monotonic Host job sequence used to resume a detached stream without duplication. */
+      sequence?: number
+    }
+  | {
+      type: 'started'
+      provider: ChatProviderId
+      cwd: string
+      command: string
+      at: string
+      sequence?: number
+    }
+  | {
+      type: 'output'
+      stream: 'stdout' | 'stderr'
+      text: string
+      redacted: boolean
+      at: string
+      sequence?: number
+    }
+  | {
+      type: 'finished'
+      outcome: 'completed' | 'failed' | 'cancelled' | 'interrupted'
+      message: string
+      code: string | null
+      safeToRetry: boolean
+      at: string
+      sequence?: number
+    }
+
+type ChatStreamCompletedEvent = {
+  type: 'completed'
+  result: ChatRunResponse
+  at: string
+  sequence?: number
+}
+
+type ChatStreamErrorEvent = {
+  type: 'error'
+  error: string
+  code: string
+  status: number
+  safeToRetry: boolean
+  at: string
+  sequence?: number
+}
+
+type ChatStreamCancelledEvent = {
+  type: 'cancelled'
+  message: string
+  code: 'run_cancelled'
+  status: number
+  safeToRetry: false
+  at: string
+  sequence?: number
+}
+
+export type ChatJobKind = 'local' | 'ssh'
+
+export type ChatJobSnapshot = {
+  id: string
+  kind: ChatJobKind
+  state: 'running' | 'completed' | 'failed' | 'cancelled'
+  startedAt: string
+  finishedAt: string | null
+  firstSequence: number
+  lastSequence: number
+  providerProcessStarted: boolean
+}
+
+export type ChatSteerResponse = {
+  job: ChatJobSnapshot
+  delivery: { turnId: string }
+}
+
+type ErrorPayload = { error?: string; code?: string; safeToRetry?: boolean }
+
+export class EnsyncHostError extends Error {
+  status: number
+  payload: unknown
+  code: string | null
+  safeToRetry: boolean
+
+  constructor(message: string, status: number, payload: unknown) {
+    super(message)
+    this.name = 'EnsyncHostError'
+    this.status = status
+    this.payload = payload
+    this.code =
+      typeof payload === 'object'
+      && payload !== null
+      && typeof (payload as ErrorPayload).code === 'string'
+        ? (payload as ErrorPayload).code ?? null
+        : null
+    this.safeToRetry =
+      typeof payload === 'object'
+      && payload !== null
+      && (payload as ErrorPayload).safeToRetry === true
+  }
+}
+
+export class EnsyncHostClient {
+  readonly baseUrl: string
+
+  constructor(baseUrl = '/api') {
+    this.baseUrl = baseUrl.replace(/\/$/, '')
+  }
+
+  private async request<T>(path: string, init?: RequestInit): Promise<T> {
+    const response = await fetch(`${this.baseUrl}${path}`, {
+      ...init,
+      headers: {
+        Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...init?.headers,
+      },
+    })
+    const payload: unknown = await response.json()
+    if (!response.ok) {
+      const errorPayload =
+        typeof payload === 'object' && payload !== null ? (payload as ErrorPayload) : null
+      const message = errorPayload?.error
+        ? errorPayload.error
+        : `Ensync Host request failed (${response.status}).`
+      throw new EnsyncHostError(message, response.status, payload)
+    }
+    return payload as T
+  }
+
+  providers(refresh = false) {
+    return this.request<ProviderStatusesResponse>(`/providers${refresh ? '?refresh=1' : ''}`)
+  }
+
+  provider(id: CliProviderId, refresh = false) {
+    return this.request<{ provider: CliProviderStatus }>(
+      `/providers/${id}/status${refresh ? '?refresh=1' : ''}`,
+    )
+  }
+
+  usage(refresh = false) {
+    return this.request<UsageResponse>(`/usage${refresh ? '?refresh=1' : ''}`)
+  }
+
+  connect(id: CliProviderId, launch = true) {
+    return this.request<ConnectResponse>(`/providers/${id}/connect`, {
+      method: 'POST',
+      body: JSON.stringify({ launch }),
+    })
+  }
+
+  updateProvider(id: CliProviderId, launch = true) {
+    return this.request<ProviderUpdateResponse>(`/providers/${id}/update`, {
+      method: 'POST',
+      body: JSON.stringify({ launch }),
+    })
+  }
+
+  currentProject() {
+    return this.request<{ project: ProjectInspection }>('/projects/current')
+  }
+
+  inspectProject(path: string) {
+    return this.request<{ project: ProjectInspection }>('/projects/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+  }
+
+  cloneRepository(repositoryUrl: string, destinationPath: string) {
+    return this.request<{ project: ProjectInspection; git: GitStatus }>('/git/clone', {
+      method: 'POST',
+      body: JSON.stringify({ repositoryUrl, destinationPath }),
+    })
+  }
+
+  gitStatus(projectPath: string) {
+    return this.request<{ git: GitStatus }>('/git/status', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath }),
+    })
+  }
+
+  verifyGitRemote(projectPath: string, remote: string) {
+    return this.request<{ connection: GitConnection }>('/git/verify-remote', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath, remote }),
+    })
+  }
+
+  pushGit(input: {
+    projectPath: string
+    remote: string
+    mode: GitPushMode
+    productionBranch?: string
+    allowProduction?: boolean
+    confirmation?: string
+  }) {
+    return this.request<GitPushResult>('/git/push', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  runChat(request: ChatRunRequest, signal?: AbortSignal) {
+    return this.request<ChatRunResponse>('/chat/run', {
+      method: 'POST',
+      body: JSON.stringify(request),
+      signal,
+    })
+  }
+
+  startChatJob(jobId: string, kind: ChatJobKind, request: object) {
+    return this.request<{ job: ChatJobSnapshot }>('/chat/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ jobId, kind, request }),
+    })
+  }
+
+  chatJob(jobId: string) {
+    return this.request<{ job: ChatJobSnapshot }>(`/chat/jobs/${encodeURIComponent(jobId)}`)
+  }
+
+  cancelChatJob(jobId: string) {
+    return this.request<{ job: ChatJobSnapshot }>(`/chat/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: 'POST',
+    })
+  }
+
+  steerChatJob(jobId: string, prompt: string, attachments: string[] = []) {
+    return this.request<ChatSteerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/steer`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt, attachments }),
+    })
+  }
+
+  async attachChatJob(
+    jobId: string,
+    onEvent: (event: ChatExecutionEvent) => void,
+    signal?: AbortSignal,
+    afterSequence = 0,
+  ): Promise<ChatRunResponse> {
+    let cancellationReported = false
+    let result: ChatRunResponse | null = null
+    let terminalError: EnsyncHostError | null = null
+    const cancelledError = () => new EnsyncHostError(
+      'Run stopped by user. The provider process was terminated.',
+      499,
+      { code: 'run_cancelled', safeToRetry: false },
+    )
+    const reportCancellation = () => {
+      if (cancellationReported) return
+      cancellationReported = true
+      onEvent({
+        type: 'finished',
+        outcome: 'cancelled',
+        message: 'Run stopped by user. The provider process was terminated.',
+        code: 'run_cancelled',
+        safeToRetry: false,
+        at: new Date().toISOString(),
+      })
+    }
+    const requestCancellation = () => {
+      void this.cancelChatJob(jobId).catch(() => {})
+    }
+    if (signal?.aborted) {
+      requestCancellation()
+      reportCancellation()
+      throw cancelledError()
+    }
+    signal?.addEventListener('abort', requestCancellation, { once: true })
+
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/chat/jobs/${encodeURIComponent(jobId)}/stream?after=${Math.max(0, afterSequence)}`,
+        {
+          method: 'GET',
+          headers: { Accept: 'application/x-ndjson' },
+          signal,
+        },
+      )
+      if (!response.ok) {
+        const payload: unknown = await response.json()
+        const message = typeof payload === 'object' && payload !== null && typeof (payload as ErrorPayload).error === 'string'
+          ? (payload as ErrorPayload).error!
+          : `Ensync Host request failed (${response.status}).`
+        throw new EnsyncHostError(message, response.status, payload)
+      }
+      if (!response.body) throw new EnsyncHostError('Ensync Host returned no retained job stream.', 502, {})
+
+      const readEvent = (value: unknown) => {
+        const event = value as ChatExecutionEvent | ChatStreamCompletedEvent | ChatStreamErrorEvent | ChatStreamCancelledEvent
+        if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
+          throw new EnsyncHostError('Ensync Host returned an invalid retained job event.', 502, event)
+        }
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice') {
+          onEvent(event)
+        } else if (event.type === 'completed') {
+          result = event.result
+          onEvent({
+            type: 'finished',
+            outcome: 'completed',
+            message: 'CLI process completed successfully.',
+            code: null,
+            safeToRetry: false,
+            at: event.at,
+            sequence: event.sequence,
+          })
+        } else if (event.type === 'error') {
+          onEvent({
+            type: 'finished',
+            outcome: 'failed',
+            message: event.error,
+            code: event.code,
+            safeToRetry: event.safeToRetry,
+            at: event.at,
+            sequence: event.sequence,
+          })
+          terminalError = new EnsyncHostError(event.error, event.status, event)
+        } else if (event.type === 'cancelled') {
+          reportCancellation()
+          terminalError = new EnsyncHostError(event.message, event.status, event)
+        } else {
+          throw new EnsyncHostError('Ensync Host returned an unknown retained job event.', 502, event)
+        }
+      }
+      await readNdjsonStream(response.body, readEvent)
+      if (terminalError) throw terminalError
+      if (!result) {
+        throw new EnsyncHostError(
+          'The retained Ensync Host job stream ended before a terminal result was available.',
+          502,
+          { code: 'chat_job_stream_disconnected', safeToRetry: false },
+        )
+      }
+      return result
+    } catch (error) {
+      if (signal?.aborted) {
+        reportCancellation()
+        throw cancelledError()
+      }
+      if (error instanceof EnsyncHostError) throw error
+      throw new EnsyncHostError(
+        error instanceof RangeError
+          ? 'Ensync Host returned an oversized retained job event.'
+          : 'Ensync Host returned a malformed retained job event.',
+        502,
+        { code: 'invalid_chat_job_stream', safeToRetry: false },
+      )
+    } finally {
+      signal?.removeEventListener('abort', requestCancellation)
+    }
+  }
+
+  async runChatJob(
+    jobId: string,
+    kind: ChatJobKind,
+    request: object,
+    onEvent: (event: ChatExecutionEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatRunResponse> {
+    await this.startChatJob(jobId, kind, request)
+    let cursor = 0
+    for (;;) {
+      try {
+        return await this.attachChatJob(jobId, (event) => {
+          if (typeof event.sequence === 'number') cursor = Math.max(cursor, event.sequence)
+          onEvent(event)
+        }, signal, cursor)
+      } catch (error) {
+        if (signal?.aborted) throw error
+        const reconnectable = !(error instanceof EnsyncHostError)
+          || error.code === 'chat_job_stream_disconnected'
+          || error.code === 'invalid_chat_job_stream'
+          || (error.code === null && error.status >= 500)
+        if (!reconnectable) throw error
+        await new Promise<void>((resolve) => setTimeout(resolve, 750))
+      }
+    }
+  }
+
+  async runChatStream(
+    request: ChatRunRequest,
+    onEvent: (event: ChatExecutionEvent) => void,
+    signal?: AbortSignal,
+  ): Promise<ChatRunResponse> {
+    let cancellationReported = false
+    const cancelledError = () => new EnsyncHostError(
+      'Run stopped by user. The provider process was terminated.',
+      499,
+      { code: 'run_cancelled', safeToRetry: false },
+    )
+    const reportCancellation = () => {
+      if (cancellationReported) return
+      cancellationReported = true
+      onEvent({
+        type: 'finished',
+        outcome: 'cancelled',
+        message: 'Run stopped by user. The provider process was terminated.',
+        code: 'run_cancelled',
+        safeToRetry: false,
+        at: new Date().toISOString(),
+      })
+    }
+
+    try {
+      const response = await fetch(`${this.baseUrl}/chat/run/stream`, {
+        method: 'POST',
+        headers: {
+          Accept: 'application/x-ndjson',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(request),
+        signal,
+      })
+      if (!response.ok) {
+        const payload: unknown = await response.json()
+        const message = typeof payload === 'object' && payload !== null && typeof (payload as ErrorPayload).error === 'string'
+          ? (payload as ErrorPayload).error!
+          : `Ensync Host request failed (${response.status}).`
+        throw new EnsyncHostError(message, response.status, payload)
+      }
+      if (!response.body) throw new EnsyncHostError('Ensync Host returned no execution stream.', 502, {})
+
+      let result: ChatRunResponse | null = null
+      const readEvent = (value: unknown) => {
+        const event = value as ChatExecutionEvent | ChatStreamCompletedEvent | ChatStreamErrorEvent | ChatStreamCancelledEvent
+        if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
+          throw new EnsyncHostError('Ensync Host returned an invalid execution event.', 502, event)
+        }
+        if (event.type === 'started' || event.type === 'output') {
+          onEvent(event)
+        } else if (event.type === 'completed') {
+          result = event.result
+          onEvent({
+            type: 'finished',
+            outcome: 'completed',
+            message: 'CLI process completed successfully.',
+            code: null,
+            safeToRetry: false,
+            at: event.at,
+          })
+        } else if (event.type === 'error') {
+          onEvent({
+            type: 'finished',
+            outcome: 'failed',
+            message: event.error,
+            code: event.code,
+            safeToRetry: event.safeToRetry,
+            at: event.at,
+          })
+          throw new EnsyncHostError(event.error, event.status, event)
+        } else if (event.type === 'cancelled') {
+          reportCancellation()
+          throw new EnsyncHostError(event.message, event.status, event)
+        } else {
+          throw new EnsyncHostError('Ensync Host returned an unknown execution event.', 502, event)
+        }
+      }
+      await readNdjsonStream(response.body, readEvent)
+      if (!result) throw new EnsyncHostError('Ensync Host stream ended without a completion event.', 502, {})
+      return result
+    } catch (error) {
+      if (signal?.aborted) {
+        reportCancellation()
+        throw cancelledError()
+      }
+      if (error instanceof EnsyncHostError) throw error
+      throw new EnsyncHostError(
+        error instanceof RangeError
+          ? 'Ensync Host returned an oversized execution event.'
+          : 'Ensync Host returned a malformed execution event.',
+        502,
+        {},
+      )
+    }
+  }
+}
+
+export const ensyncHost = new EnsyncHostClient()
+
+// Compatibility aliases keep integrations built against the prototype name working.
+export const RelayHostError = EnsyncHostError
+export const RelayHostClient = EnsyncHostClient
+export const relayHost = ensyncHost

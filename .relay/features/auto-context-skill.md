@@ -1,0 +1,28 @@
+---
+name: Ensync Auto Context skill
+description: Opt-in provider-neutral task continuity across local and SSH subscription CLIs.
+---
+
+# Ensync Auto Context skill
+
+Auto Context is off until the user enables it from Settings or the composer chip. Enabling it applies to the workspace but does not change a chat's provider mode, fixed provider, Model size, or Automatic fallback preference. Provider routing, provider-neutral Model size, context continuity, and fallback are independent controls.
+
+The reusable skill source is `skills/ensync-auto-context/SKILL.md`. Its runtime contract is implemented in the app instead of relying on prompt text alone.
+
+For every Auto Context run, Ensync keeps the currently focused canonical project and the selected execution target. A chat may use Auto or pin a connected tested Codex/Claude runner. The vendor model remains `null`, so each destination CLI uses its own current default model, while the provider-neutral Model size effort is preserved. A fallback never changes an SSH/VM task to the local computer.
+
+When the same provider session, execution target, and synchronized message count still match, Ensync resumes that native session and sends the new request with the Auto Context rules. When any of those facts differ, Ensync starts a fresh provider session and sends the retained conversation plus the focused project's verified `.relay` and instruction-file names. The provider is told to read applicable project, architecture, feature, `AGENTS.md`, and `CLAUDE.md` contents from the verified working directory before editing.
+
+The local/remote host accepts at most 100,000 prompt characters. Auto Context budgets 96,000 characters for its envelope. If an unusually long transcript cannot fit, the UI adds an explicit omission notice and retains the newest conversation state; it does not silently claim the entire transcript was sent.
+
+Every successful response is required to end with a concise semantic `Ensync continuation` section containing the outcome, remaining work, durable decisions, files changed, checks actually run, and next action. This section is private provider-handoff metadata: the app removes it from the user-visible message, retains its body in structured continuation state, and strips legacy visible sections while hydrating saved chats. The app separately records verified turn, attempt/fallback, provider, reported model, target, session, completion, and available before/after Git metadata in the persistent chat. Failed ambiguous runs are marked `reconciliation_required`. Durable architecture and feature truth still belongs in the existing `.relay` Markdown files rather than a competing memory store.
+
+Fallback runs only when the separate Automatic fallback setting is enabled and follows the host's structured `safeToRetry` proof. Preflight unavailability can switch providers. A provider quota/capacity failure can switch only when the complete structured event stream ends in failure and proves that no tool, command, file, or unknown work item ran. Timeouts, malformed or incomplete streams, missing completion, and any observed or unknown activity stop without replaying the task. Safe attempts advance through the saved ranking without repeating a provider. A fixed provider remains pinned after a one-turn safe fallback, and the selected Model size follows the fallback attempt.
+
+The same provider-neutral capsule is a baseline requirement for every actual provider fallback, even if the workspace Auto Context toggle is off. This does not silently enable Auto Context for normal same-provider turns; it only prevents a quota handoff from losing the focused project, prior transcript or synchronized destination session, relevant feature/instruction file names, available verified Git state, continuation metadata, and exact local or SSH execution target.
+
+Successful sessions record the synchronized transcript count. A missing session ID deletes the older session record, and legacy session records without a transcript cursor must receive one full handoff before they may resume. This prevents a chat from resuming a stale Claude or Codex session that missed another provider's work.
+
+When a same-chat turn was queued during another run, its enqueue-time provider/size/fallback/target choices remain fixed, but its context capsule is compiled only when it actually starts. The compiler uses the newly updated executed transcript and matching session cursor, stops before that queued user's message, and excludes all later queued prompts. Only a verified successful predecessor auto-releases the next turn; unsafe or incomplete predecessors require the user's persisted `Run next after review` acknowledgement.
+
+An eligible local Codex `turn/steer` correction is part of the already-active provider turn, not a provider handoff or later queued task. It keeps the same project, target, provider, model-size effort, mutation boundary, and continuation record. A verified completion counts every steered user message before the one agent reply when synchronizing the reusable Codex thread; unconfirmed steering delivery is never replayed or converted into an automatic fallback.

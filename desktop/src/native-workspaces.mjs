@@ -1,0 +1,208 @@
+import { createHash, randomUUID } from 'node:crypto'
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { dirname } from 'node:path'
+
+export const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
+export const NATIVE_WORKSPACE_STATE_FILENAME = 'native-workspaces-v1.json'
+export const NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+const FORMAT = 'ensync-native-workspaces'
+const VERSION = 1
+
+export function isNativeWorkspaceIdentity(value) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && NATIVE_WORKSPACE_ID_PATTERN.test(value.id)
+    && (value.kind === 'canonical' || value.kind === 'isolated'),
+  )
+}
+
+export function shouldRetainNativeWorkspaceOnClose({ identity, quitting, platform, openWindowCount }) {
+  if (!isNativeWorkspaceIdentity(identity)) return false
+  return identity.kind === 'canonical'
+    || Boolean(quitting)
+    || (platform !== 'darwin' && openWindowCount === 1)
+}
+
+export function createNativeWorkspaceIdentity(kind, createId = randomUUID) {
+  const identity = { id: createId(), kind }
+  if (!isNativeWorkspaceIdentity(identity)) throw new Error('Could not create a valid native workspace identity.')
+  return Object.freeze({ id: identity.id.toLowerCase(), kind })
+}
+
+/** The historical unsuffixed workspace always opens before clean UUID scopes. */
+export function nativeWorkspaceRestorationOrder(workspaces) {
+  const normalized = normalizeWorkspaces(workspaces)
+  if (!normalized) throw new TypeError('Valid native workspace identities are required.')
+  return [
+    ...normalized.filter((identity) => identity.kind === 'canonical'),
+    ...normalized.filter((identity) => identity.kind === 'isolated'),
+  ]
+}
+
+function checksum(value) {
+  return createHash('sha256').update(value).digest('hex')
+}
+
+function normalizeWorkspaces(value) {
+  if (!Array.isArray(value) || value.length > 32) return null
+  const result = []
+  const ids = new Set()
+  let canonicalCount = 0
+  for (const candidate of value) {
+    if (!isNativeWorkspaceIdentity(candidate) || ids.has(candidate.id.toLowerCase())) return null
+    const identity = Object.freeze({ id: candidate.id.toLowerCase(), kind: candidate.kind })
+    ids.add(identity.id)
+    if (identity.kind === 'canonical') canonicalCount += 1
+    if (canonicalCount > 1) return null
+    result.push(identity)
+  }
+  return result
+}
+
+function decode(value) {
+  try {
+    const envelope = JSON.parse(value)
+    if (!envelope || envelope.format !== FORMAT || envelope.version !== VERSION
+      || !Number.isSafeInteger(envelope.revision) || envelope.revision < 1
+      || typeof envelope.payload !== 'string' || envelope.checksum !== checksum(envelope.payload)) return null
+    const workspaces = normalizeWorkspaces(JSON.parse(envelope.payload))
+    return workspaces ? { revision: envelope.revision, workspaces } : null
+  } catch {
+    return null
+  }
+}
+
+function encode(workspaces, revision) {
+  const payload = JSON.stringify(workspaces)
+  return JSON.stringify({
+    format: FORMAT,
+    version: VERSION,
+    revision,
+    checksum: checksum(payload),
+    payload,
+  })
+}
+
+/**
+ * Records only the identities of native workspaces that should reopen. Chat
+ * content remains in Chromium's stable-origin localStorage under scoped keys.
+ */
+export function createNativeWorkspaceStore({ filePath, createId = randomUUID } = {}) {
+  if (typeof filePath !== 'string' || !filePath) throw new TypeError('A native workspace state path is required.')
+  const stagingPath = `${filePath}.staging`
+  const readCandidate = (path) => {
+    try { return decode(readFileSync(path, 'utf8')) } catch { return null }
+  }
+  const candidates = [readCandidate(filePath), readCandidate(stagingPath)].filter(Boolean)
+  candidates.sort((left, right) => right.revision - left.revision)
+  let revision = candidates[0]?.revision ?? 0
+  let workspaces = candidates[0]?.workspaces ?? []
+
+  const persist = () => {
+    revision += 1
+    const encoded = encode(workspaces, revision)
+    mkdirSync(dirname(filePath), { recursive: true })
+    writeFileSync(stagingPath, encoded, { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(filePath, encoded, { encoding: 'utf8', mode: 0o600 })
+    try { rmSync(stagingPath) } catch {}
+  }
+
+  const create = (kind) => {
+    const identity = createNativeWorkspaceIdentity(kind, createId)
+    if (workspaces.some((item) => item.id === identity.id)) throw new Error('Native workspace identity collision.')
+    if (kind === 'canonical' && workspaces.some((item) => item.kind === 'canonical')) {
+      throw new Error('The canonical native workspace already exists.')
+    }
+    workspaces = [...workspaces, identity]
+    persist()
+    return identity
+  }
+
+  return {
+    list() { return workspaces.map((identity) => ({ ...identity })) },
+    ensureCanonical() {
+      return workspaces.find((identity) => identity.kind === 'canonical') ?? create('canonical')
+    },
+    createIsolated() { return create('isolated') },
+    remove(id) {
+      const next = workspaces.filter((identity) => identity.id !== id)
+      if (next.length === workspaces.length) return false
+      workspaces = next
+      persist()
+      return true
+    },
+    touch(id) {
+      const index = workspaces.findIndex((identity) => identity.id === id)
+      if (index < 0 || index === workspaces.length - 1) return false
+      const identity = workspaces[index]
+      workspaces = [...workspaces.slice(0, index), ...workspaces.slice(index + 1), identity]
+      persist()
+      return true
+    },
+  }
+}
+
+export function createWorkspaceIdentityHandler({ isAuthorized, identityForWebContents, retainedIdentities }) {
+  if (typeof isAuthorized !== 'function' || typeof identityForWebContents !== 'function'
+    || typeof retainedIdentities !== 'function') {
+    throw new TypeError('Workspace identity authorization is required.')
+  }
+  return async (event) => {
+    if (!isAuthorized(event)) return null
+    const identity = identityForWebContents(event.sender)
+    const retainedWorkspaceIds = retainedIdentities()
+      .filter(isNativeWorkspaceIdentity)
+      .map((item) => item.id)
+    return isNativeWorkspaceIdentity(identity)
+      ? { id: identity.id, kind: identity.kind, retainedWorkspaceIds }
+      : null
+  }
+}
+
+/**
+ * Owns the single workspace-identity IPC handler for the lifetime of the native
+ * window registry. Registration is synchronous and idempotent so startup,
+ * activation, crash recovery, and New Window can all assert the bridge exists
+ * immediately before a renderer is allowed to load.
+ */
+export function createWorkspaceIdentityIpcManager({
+  ipcMain,
+  isAuthorized,
+  identityForWebContents,
+  retainedIdentities,
+  hasRegisteredWindows,
+}) {
+  if (!ipcMain || typeof ipcMain.handle !== 'function' || typeof ipcMain.removeHandler !== 'function') {
+    throw new TypeError('Electron IPC registration is required.')
+  }
+  if (typeof hasRegisteredWindows !== 'function') {
+    throw new TypeError('Native window lifecycle state is required.')
+  }
+
+  const handler = createWorkspaceIdentityHandler({
+    isAuthorized,
+    identityForWebContents,
+    retainedIdentities,
+  })
+  let registered = false
+
+  return Object.freeze({
+    register() {
+      if (registered) return false
+      ipcMain.handle(WORKSPACE_IDENTITY_CHANNEL, handler)
+      registered = true
+      return true
+    },
+    dispose() {
+      if (!registered || hasRegisteredWindows()) return false
+      ipcMain.removeHandler(WORKSPACE_IDENTITY_CHANNEL)
+      registered = false
+      return true
+    },
+    get registered() {
+      return registered
+    },
+  })
+}

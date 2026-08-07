@@ -1,0 +1,35 @@
+{
+  "name": "ensync-agent-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node host/dev.mjs",
+    "dev:web": "vite",
+    "host": "node host/server.mjs",
+    "test:host": "node --test host/*.test.mjs",
+    "build": "tsc --noEmit -p tsconfig.app.json && vite build",
+    "lint": "eslint .",
+    "release:verify": "npm run lint && npm run test:host && npm --prefix desktop run verify && npm --prefix site test",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "latest",
+    "vite": "latest"
+  },
+  "devDependencies": {
+    "@eslint/js": "latest",
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "eslint": "latest",
+    "eslint-plugin-react-hooks": "latest",
+    "eslint-plugin-react-refresh": "latest",
+    "globals": "latest",
+    "typescript-eslint": "latest"
+  }
+}

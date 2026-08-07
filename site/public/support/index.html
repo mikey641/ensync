@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Ensync help desk, troubleshooting, and safe bug report guidance." />
+    <title>Help desk — Ensync</title>
+    <script>try{const t=localStorage.getItem('ensync-site-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header"><div class="container nav-shell"><a class="brand" href="/" aria-label="Ensync home"><span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>ensync</span></a><button class="icon-button menu-button" type="button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation"><span class="sr-only">Toggle navigation</span><span class="menu-lines" aria-hidden="true"></span></button><nav id="site-navigation" class="site-nav" data-navigation aria-label="Main navigation"><a href="/#product">Product</a><a href="/#providers">Providers</a><a href="/docs/">Docs</a><a href="/support/" aria-current="page">Help desk</a><a href="/#download">Download</a><button class="theme-button" type="button" data-theme-toggle aria-pressed="false"><span class="theme-dot" aria-hidden="true"></span><span data-theme-label>Dark</span></button></nav></div></header>
+    <main id="main">
+      <header class="page-hero"><div class="container"><div><p class="eyebrow">Help desk</p><h1>Get unstuck safely.</h1></div><div><p class="page-lede">Troubleshoot the local host, prepare a useful bug report, and see which support channels are actually configured.</p><span class="support-status">Public ticket intake not configured</span></div></div></header>
+      <div class="container support-grid">
+        <article class="support-card"><div class="support-icon" aria-hidden="true">?</div><h2>Read the product docs</h2><p>Review provider status, usage semantics, download verification, and the subscription-only security model.</p><a class="button button-secondary" href="/docs/">Open documentation</a></article>
+        <article class="support-card"><div class="support-icon" aria-hidden="true">!</div><h2>Prepare a bug report</h2><p>Copy a structured template with reproduction steps and safe diagnostics. This creates a template; it does not pretend to submit a ticket.</p><button class="button button-primary" type="button" data-copy-support-template>Copy support template</button></article>
+        <article class="support-card"><div class="support-icon" aria-hidden="true">↗</div><h2>Issue tracker</h2><p>The public issue tracker has not been connected to this site. Configure a verified HTTPS destination before publishing the link.</p><a class="button button-secondary is-disabled" data-config-link="issueTracker" aria-disabled="true">Issue tracker not configured</a></article>
+        <article class="support-card"><div class="support-icon" aria-hidden="true">@</div><h2>Contact support</h2><p>A public support mailbox has not been configured. The site will not display a placeholder address that cannot receive requests.</p><a class="button button-secondary is-disabled" data-support-email aria-disabled="true">Support email not configured</a></article>
+        <article class="support-card full"><p class="eyebrow">Before reporting</p><h2>Safe diagnostic checklist</h2><ul class="checklist"><li>Record the Ensync and operating-system version.</li><li>Record the provider CLI name and exact version.</li><li>Say whether the task used the local host or an SSH worker.</li><li>Include the exact error after removing secrets.</li><li>State whether a command, tool call, or file mutation began.</li><li>Do not include passwords, tokens, API keys, private keys, or subscription cookies.</li><li>Include only the minimum source context needed to reproduce the issue.</li><li>For a download issue, include the platform and release-manifest status shown on the site.</li></ul></article>
+      </div>
+    </main>
+    <footer class="site-footer"><div class="container footer-bottom"><span>© <span data-copy-year></span> Ensync</span><span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/privacy/">Privacy</a></span></div></footer>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

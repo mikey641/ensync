@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#212121" />
+    <meta name="description" content="Ensync — the universal workspace where coding agents stay in sync." />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231d6f38'/%3E%3Cpath d='M20 16h27v8H29v8h15v8H29v8h18v8H20z' fill='white'/%3E%3C/svg%3E" />
+    <title>Ensync</title>
+    <script>
+      (() => {
+        const storageKey = 'ensync-display-preferences-v2'
+        const legacyStorageKey = 'ensync-display-preferences-v1'
+        const legacyRelayStorageKey = 'relay-display-preferences-v1'
+        const root = document.documentElement
+        let themePreference = 'system'
+        let textSize = 'large'
+        let completionIndicator = 'dot'
+
+        try {
+          const saved = JSON.parse(localStorage.getItem(storageKey) || localStorage.getItem(legacyStorageKey) || localStorage.getItem(legacyRelayStorageKey) || '{}')
+          if (saved.theme === 'light' || saved.theme === 'dark' || saved.theme === 'system') themePreference = saved.theme
+          if (saved.textSize === 'comfortable' || saved.textSize === 'large') textSize = saved.textSize
+          if (saved.completionIndicator === 'dot' || saved.completionIndicator === 'header' || saved.completionIndicator === 'tab') completionIndicator = saved.completionIndicator
+        } catch {
+          // Invalid local state falls back to the real system preference.
+        }
+
+        const systemTheme = matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark'
+        const resolvedTheme = themePreference === 'system' ? systemTheme : themePreference
+        root.dataset.theme = resolvedTheme
+        root.dataset.themePreference = themePreference
+        root.dataset.textSize = textSize
+        root.dataset.completionIndicator = completionIndicator
+        root.style.colorScheme = resolvedTheme
+        document.querySelector('meta[name="theme-color"]')?.setAttribute('content', resolvedTheme === 'light' ? '#f7f7f5' : '#212121')
+      })()
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

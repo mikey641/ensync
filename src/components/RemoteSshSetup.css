@@ -1,0 +1,219 @@
+.ensync-remote-ssh {
+  display: grid;
+  gap: 18px;
+  width: min(100%, 720px);
+  color: var(--text-primary);
+}
+
+.ensync-remote-ssh__header {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.ensync-remote-ssh__header > span {
+  display: grid;
+  place-items: center;
+  flex: 0 0 38px;
+  height: 38px;
+  border: 1px solid var(--border-default);
+  border-radius: 10px;
+  background: var(--surface-elevated);
+}
+
+.ensync-remote-ssh h3,
+.ensync-remote-ssh p {
+  margin: 0;
+}
+
+.ensync-remote-ssh h3 {
+  font-size: 1rem;
+}
+
+.ensync-remote-ssh__header p,
+.ensync-remote-ssh label > small,
+.ensync-remote-ssh__ephemeral {
+  margin-top: 4px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  line-height: 1.45;
+}
+
+.ensync-remote-ssh__security,
+.ensync-remote-ssh__notice,
+.ensync-remote-ssh__result-title {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+
+.ensync-remote-ssh__security {
+  padding: 11px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border-default));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-elevated));
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.ensync-remote-ssh__security svg,
+.ensync-remote-ssh__notice svg,
+.ensync-remote-ssh__result-title svg {
+  flex: 0 0 auto;
+  margin-top: 1px;
+}
+
+.ensync-remote-ssh__form {
+  display: grid;
+  gap: 14px;
+}
+
+.ensync-remote-ssh__grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 1fr) minmax(140px, 0.7fr) 100px;
+  gap: 10px;
+}
+
+.ensync-remote-ssh label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  color: var(--text-secondary);
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.ensync-remote-ssh label small {
+  font-weight: 400;
+}
+
+.ensync-remote-ssh input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  height: 39px;
+  padding: 0 11px;
+  border: 1px solid var(--border-default);
+  border-radius: 8px;
+  outline: none;
+  background: var(--surface-elevated);
+  color: var(--text-primary);
+  font: inherit;
+  font-weight: 400;
+}
+
+.ensync-remote-ssh input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent);
+}
+
+.ensync-remote-ssh__input {
+  position: relative;
+  display: block;
+}
+
+.ensync-remote-ssh__input > svg {
+  position: absolute;
+  z-index: 1;
+  top: 11px;
+  left: 10px;
+  color: var(--text-secondary);
+}
+
+.ensync-remote-ssh__input > input {
+  padding-left: 34px;
+}
+
+.ensync-remote-ssh__form > button {
+  display: inline-flex;
+  justify-content: center;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: 8px;
+  background: var(--accent);
+  color: white;
+  font: inherit;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.ensync-remote-ssh__form > button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.ensync-remote-ssh__spinner {
+  animation: ensync-remote-ssh-spin 0.9s linear infinite;
+}
+
+.ensync-remote-ssh__notice,
+.ensync-remote-ssh__result {
+  padding: 11px 12px;
+  border: 1px solid var(--border-default);
+  border-radius: 9px;
+  background: var(--surface-elevated);
+  overflow-wrap: anywhere;
+}
+
+.ensync-remote-ssh__notice--error {
+  border-color: color-mix(in srgb, #e45757 48%, var(--border-default));
+  color: #d94a4a;
+}
+
+.ensync-remote-ssh__notice--warning {
+  margin-top: 12px;
+  color: var(--text-secondary);
+}
+
+.ensync-remote-ssh__result {
+  display: grid;
+  gap: 10px;
+}
+
+.ensync-remote-ssh__result-title {
+  color: #3c9d67;
+}
+
+.ensync-remote-ssh__result dl {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+}
+
+.ensync-remote-ssh__result dl > div {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: 10px;
+}
+
+.ensync-remote-ssh__result dt {
+  color: var(--text-secondary);
+}
+
+.ensync-remote-ssh__result dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+@keyframes ensync-remote-ssh-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 620px) {
+  .ensync-remote-ssh__grid {
+    grid-template-columns: minmax(0, 1fr) 92px;
+  }
+
+  .ensync-remote-ssh__grid label:first-child {
+    grid-column: 1 / -1;
+  }
+
+  .ensync-remote-ssh__result dl > div {
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
+}

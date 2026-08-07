@@ -1,0 +1,49 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - 'host/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/desktop-ci.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'desktop/**'
+      - 'host/**'
+      - 'src/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/desktop-ci.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  desktop-smoke:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - name: Install UI and host dependencies
+        run: npm ci
+      - name: Install desktop dependencies
+        run: npm --prefix desktop ci
+      - name: Test existing host
+        run: npm run test:host
+      - name: Test and smoke-check desktop runtime
+        run: npm --prefix desktop run verify

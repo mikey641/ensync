@@ -1,0 +1,14 @@
+node_modules/
+dist/
+desktop/release/
+release-input/
+release-assets/
+.DS_Store
+*.local
+*.p12
+*.pfx
+*.tsbuildinfo
+vite.config.js
+vite.config.d.ts
+playwright-report/
+test-results/

@@ -1,0 +1,109 @@
+import assert from 'node:assert/strict'
+import test from 'node:test'
+
+import {
+  appendPromptToQueue,
+  approveNextQueuedPrompt,
+  insertAgentReplyBeforeLaterQueued,
+  normalizePromptQueues,
+  predecessorTurnIdForPrompt,
+  promptQueueComposerState,
+  queuedPromptGate,
+  removePromptFromQueue,
+  transcriptMessagesBeforeTurn,
+} from '../src/lib/promptQueue.mjs'
+
+const entry = (turnId, predecessorTurnId = null) => ({
+  id: `queue-${turnId}`,
+  turnId,
+  messageId: `message-${turnId}`,
+  prompt: turnId,
+  enqueuedAt: '2026-08-06T12:00:00.000Z',
+  predecessorTurnId,
+  preferences: { providerMode: 'fixed' },
+})
+
+test('per-chat queues preserve FIFO order and independent chat state', () => {
+  let queues = appendPromptToQueue({}, 'chat-a', entry('turn-1'))
+  queues = appendPromptToQueue(queues, 'chat-a', entry('turn-2', 'turn-1'))
+  queues = appendPromptToQueue(queues, 'chat-b', entry('turn-b'))
+  assert.deepEqual(queues['chat-a'].map((item) => item.turnId), ['turn-1', 'turn-2'])
+  assert.deepEqual(queues['chat-b'].map((item) => item.turnId), ['turn-b'])
+  queues = removePromptFromQueue(queues, 'chat-a', 'queue-turn-1')
+  assert.deepEqual(queues['chat-a'].map((item) => item.turnId), ['turn-2'])
+  assert.deepEqual(queues['chat-b'].map((item) => item.turnId), ['turn-b'])
+})
+
+test('automatic queue advancement requires a matching verified reply', () => {
+  const queued = entry('turn-2', 'turn-1')
+  const pending = { messages: [{ role: 'user', turnId: 'turn-1', deliveryStatus: 'pending' }] }
+  const failed = { messages: [{ role: 'user', turnId: 'turn-1', deliveryStatus: 'failed' }] }
+  const incomplete = { messages: [{ role: 'user', turnId: 'turn-1', deliveryStatus: 'completed' }] }
+  const completed = { messages: [
+    { role: 'user', turnId: 'turn-1', deliveryStatus: 'completed' },
+    { role: 'agent', turnId: 'turn-1' },
+  ] }
+  assert.equal(queuedPromptGate(pending, queued).state, 'waiting')
+  assert.equal(queuedPromptGate(failed, queued).state, 'paused')
+  assert.equal(queuedPromptGate(incomplete, queued).state, 'paused')
+  assert.equal(queuedPromptGate(completed, queued).state, 'ready')
+})
+
+test('explicit review approval releases only the next prompt', () => {
+  const queues = { 'chat-a': [entry('turn-2', 'turn-1'), entry('turn-3', 'turn-2')] }
+  const approved = approveNextQueuedPrompt(queues, 'chat-a', '2026-08-06T12:01:00.000Z')
+  assert.equal(queuedPromptGate({ messages: [] }, approved['chat-a'][0]).state, 'ready')
+  assert.equal(approved['chat-a'][1].resumeApprovedAt, undefined)
+})
+
+test('execution context stops before its own prompt and replies precede future queued prompts', () => {
+  const messages = [
+    { id: 'u1', role: 'user', turnId: 'turn-1', deliveryStatus: 'completed' },
+    { id: 'a1', role: 'agent', turnId: 'turn-1' },
+    { id: 'u2', role: 'user', turnId: 'turn-2', deliveryStatus: 'pending' },
+    { id: 'u3', role: 'user', turnId: 'turn-3', deliveryStatus: 'queued' },
+  ]
+  assert.deepEqual(transcriptMessagesBeforeTurn(messages, 'turn-2').map((message) => message.id), ['u1', 'a1'])
+  const ordered = insertAgentReplyBeforeLaterQueued(messages, 'turn-2', { id: 'a2', role: 'agent', turnId: 'turn-2' })
+  assert.deepEqual(ordered.map((message) => message.id), ['u1', 'a1', 'u2', 'a2', 'u3'])
+})
+
+test('predecessors chain through the active turn and then queued tail', () => {
+  assert.equal(predecessorTurnIdForPrompt([], [], { turnId: 'active' }), 'active')
+  assert.equal(predecessorTurnIdForPrompt([entry('queued')], [], { turnId: 'active' }), 'queued')
+})
+
+test('normalization keeps only structurally complete persisted entries', () => {
+  const queues = normalizePromptQueues({
+    good: [{ ...entry('turn-1'), attachments: [
+      { name: 'reference.png', path: '/tmp/reference.png' },
+      { name: 'duplicate.png', path: '/tmp/reference.png' },
+    ] }],
+    bad: [{ id: 'missing-fields' }],
+  })
+  assert.deepEqual(Object.keys(queues), ['good'])
+  assert.deepEqual(queues.good[0].attachments, [
+    { name: 'reference.png', path: '/tmp/reference.png' },
+  ])
+})
+
+test('composer keeps separate Stop and enabled Send controls while a chat is running', () => {
+  assert.deepEqual(promptQueueComposerState({ sending: true, draft: 'next prompt', canRun: true }), {
+    sendEnabled: true,
+    sendLabel: 'Queue message in this chat',
+    stopVisible: true,
+    hint: '↵ queue · stop ends current only',
+  })
+  assert.equal(promptQueueComposerState({ sending: true, draft: '   ', canRun: true }).sendEnabled, false)
+  assert.deepEqual(promptQueueComposerState({
+    sending: true,
+    draft: 'correct the active task',
+    canRun: true,
+    liveSteering: true,
+  }), {
+    sendEnabled: true,
+    sendLabel: 'Steer the active Codex turn',
+    stopVisible: true,
+    hint: '↵ steer now · stop ends turn',
+  })
+})

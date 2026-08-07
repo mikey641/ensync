@@ -1,0 +1,34 @@
+---
+name: Remote runtime
+description: Local host, SSH host, and guided VirtualBox execution.
+---
+
+# Remote runtime
+
+Ensync Host runs logged-in coding CLIs on the local computer controlled by the user, avoiding per-token API billing. The host binds to loopback. The UI must keep unavailable paths disabled or explicitly labeled; it may never simulate a connection.
+
+The target setup paths are this computer, an SSH-accessible machine, or a guided Ubuntu VirtualBox VM.
+
+The runner must isolate model API-key environment variables in subscription-only mode, bind internal tool servers to loopback, and keep a durable idempotent job registry. The authenticated native Host daemon outlives Electron while a local or SSH job is active; its checksummed journal stores request hashes and bounded redacted public events/results, never prompts, attachments, raw streams, environments, or credentials. A future brokered transport must encrypt stored secrets and provide device pairing plus two-sided revocation. The direct SSH transport is deliberately ephemeral: it relies on the user's existing OpenSSH identities and `known_hosts`, and it does not claim Ensync-specific pairing, credential storage, or revocation.
+
+## SSH worker transport
+
+The SSH worker transport is implemented as an OpenSSH subprocess adapter and a focused, ephemeral setup UI. Ensync discovers the local `ssh` executable through `PATH` on macOS and Windows, accepts only a strictly validated hostname/IP, username, port, optional existing absolute identity-file path, and absolute non-root remote project path, and never accepts a password, key contents, passphrase, or token. Connection form values remain in component memory only; no connection profile or credential is written to browser storage.
+
+Every automated operation uses public-key authentication in `BatchMode`, disables terminal allocation, agent/X11/port forwarding, local commands, and password prompts, and explicitly requires `StrictHostKeyChecking=yes`. The normal OpenSSH `known_hosts` database remains authoritative: an unknown or changed key fails, and Ensync never uses `StrictHostKeyChecking=no`. Ensync invokes the local executable with an argument array and `shell: false`.
+
+Remote chat cancellation aborts the renderer request, the Electron proxy's upstream request, and the Host's exact OpenSSH subprocess. OpenSSH channel teardown ends the fixed remote `node -` command, while the bridge handles parent termination by stopping its active provider child with a bounded graceful-then-force sequence. Cancellation is non-retryable and never falls back; because buffered SSH cannot prove the last remote activity boundary, the stopped turn requires reconciliation before retrying.
+
+The only automated remote command is the fixed `node -`. A dependency-free bridge and a base64-encoded JSON payload travel over SSH stdin, so hostnames, project paths, prompts, models, and session IDs never enter the remote shell command. The bridge canonicalizes the project directory again on the worker, scrubs model API-key and paid-provider override environment variables, discovers tools without a shell, bounds output, and applies the same 15-minute real-activity inactivity watchdog and two-hour hard ceiling as local chat. It emits throttled transport-only progress markers when the remote provider process spawns or produces stdout/stderr; these refresh the parent OpenSSH watchdog but are never mixed into the buffered provider streams or public chat result. The parent watchdogs include transport grace so they cannot preempt the bridge's own inactivity or hard-limit decision.
+
+The non-mutating probe reports only verified remote OS/architecture, Node version, canonical project path, Git availability/version, and CLI/version/authentication facts returned by the remote processes. It discovers every catalog executable remotely, but discovery does not imply execution; Jules and cloud-mode Oz also require a different execution topology from a local worktree runner. If SSH succeeds but Node is unavailable, the result says so explicitly and leaves OS, Git, and provider state unknown. Provider execution currently supports only directly runnable Codex and Claude Code executables with a verified ChatGPT or Claude subscription login; prompts go to the provider over stdin and structured results use the same parsers and safe-retry rules as local chat.
+
+Current constraints are deliberate: the remote non-interactive session must expose Node and the desired CLIs through its inherited path or the fixed common executable locations; Windows `.cmd`/`.bat` shims are detected but remain non-runnable because the bridge will not invoke a command shell. The transport does not install Node or CLIs, collect a host key, forward ssh-agent, save credentials, claim device pairing/revocation, or expose raw provider streams in the public chat response. OpenSSH documents remote command execution, identity files, `known_hosts`, and terminal behavior in its [ssh manual](https://man.openbsd.org/ssh.1); Node documents argument-array process spawning with `shell` disabled by default in its [child-process API](https://nodejs.org/api/child_process.html).
+
+Dropped-file attachments are local-Host inputs only. Ensync does not encode, copy, or upload local file contents through the SSH bridge, so a chat with pending local attachments is blocked before execution and asks the user to remove them or switch back to the local Host. A local absolute path must never be relabeled as a remote attachment.
+
+The first VirtualBox layer is real and deliberately narrow. Ensync discovers `VBoxManage` in the standard Oracle macOS and Windows locations or on `PATH`, reports its exact version, lists registered VMs from `showvminfo --machinereadable`, and reports actual VM state plus NAT SSH forwarding. It can preview and provision an Ubuntu VM definition with CPU, RAM, a dynamically allocated VDI, an attached readable ISO, NAT, and a loopback SSH forward.
+
+VirtualBox mutations are controlled only by the host process, never by a request field. The bundled local host enables them because creation still requires the exact confirmation `CREATE VM <name>`; a host owner can disable every VirtualBox mutation with `ENSYNC_ALLOW_VIRTUALBOX_MUTATION=0`. Each completed step is retained in the result, failures expose partial recovery state, and Ensync never deletes or overwrites an existing VM, machine folder, or disk. Starting is a separate action requiring `START VM <name>`; creation never starts the VM automatically.
+
+Provisioning does not claim the guest OS is installed or remotely ready. The user must start the VM separately and complete the ISO installer. Shared project folders, a guest startup service, guest update policy, and encrypted guest secret storage remain later runtime steps and must stay labeled unavailable until implemented and verified from inside the guest.

@@ -1,0 +1,161 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - 'v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    env:
+      MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      MACOS_CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+      ENSYNC_APPLE_ID: ${{ secrets.ENSYNC_APPLE_ID }}
+      ENSYNC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.ENSYNC_APPLE_APP_SPECIFIC_PASSWORD }}
+      ENSYNC_APPLE_TEAM_ID: ${{ secrets.ENSYNC_APPLE_TEAM_ID }}
+      WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
+      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
+      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
+      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      ENSYNC_RELEASE_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify production signing and deployment inputs
+        run: node desktop/scripts/release-preflight.mjs
+
+  macos:
+    needs: preflight
+    runs-on: macos-14
+    env:
+      CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
+      ENSYNC_APPLE_ID: ${{ secrets.ENSYNC_APPLE_ID }}
+      ENSYNC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.ENSYNC_APPLE_APP_SPECIFIC_PASSWORD }}
+      ENSYNC_APPLE_TEAM_ID: ${{ secrets.ENSYNC_APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      - name: Set package version from tag
+        shell: bash
+        run: npm --prefix desktop version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+      - run: npm run test:host
+      - name: Build, test, sign when configured, and attest macOS artifacts
+        run: npm --prefix desktop run package:mac
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ensync-macos-${{ github.ref_name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            desktop/release/*.dmg
+            desktop/release/*.zip
+            desktop/release/attestation-macos.json
+
+  windows:
+    needs: preflight
+    runs-on: windows-2025
+    env:
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
+      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
+      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
+      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      - name: Set package version from tag
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          npm --prefix desktop version --no-git-tag-version --allow-same-version $version
+      - run: npm run test:host
+      - name: Build, test, sign when configured, and attest Windows artifacts
+        run: npm --prefix desktop run package:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ensync-windows-${{ github.ref_name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.zip
+            desktop/release/attestation-windows.json
+
+  publish:
+    needs: [macos, windows]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ensync-*-${{ github.ref_name }}
+          path: release-input
+      - name: Verify artifacts and generate checksums and site manifest
+        run: >-
+          node desktop/scripts/generate-release.mjs
+          --input release-input
+          --output release-assets
+          --tag "${GITHUB_REF_NAME}"
+          --repository "${GITHUB_REPOSITORY}"
+      - name: Create or repair the verified GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
+            gh release edit "${GITHUB_REF_NAME}" --title "Ensync ${GITHUB_REF_NAME}"
+          else
+            gh release create "${GITHUB_REF_NAME}" release-assets/* --verify-tag --generate-notes --title "Ensync ${GITHUB_REF_NAME}"
+          fi
+      - name: Publish the verified manifest to the production download and update feed
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+        run: |
+          test -n "$VERCEL_TOKEN"
+          test -n "$VERCEL_ORG_ID"
+          test -n "$VERCEL_PROJECT_ID"
+          cp release-assets/releases.json site/public/releases.json
+          npm --prefix site test
+          npx --yes vercel@58.7.1 --cwd site --prod --yes --token "$VERCEL_TOKEN"

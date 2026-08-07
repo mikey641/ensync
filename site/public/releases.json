@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "latest": {
+    "version": null,
+    "publishedAt": null,
+    "notesUrl": null
+  },
+  "platforms": {
+    "macos": {
+      "status": "unavailable",
+      "reason": "No signed macOS build has been published yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": false,
+      "architectures": []
+    },
+    "windows": {
+      "status": "unavailable",
+      "reason": "No signed Windows build has been published yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": null,
+      "architectures": []
+    }
+  }
+}

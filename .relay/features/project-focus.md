@@ -1,0 +1,26 @@
+---
+name: Project focus
+description: VS Code style workspace selection and relevant-context isolation.
+---
+
+# Project focus
+
+An Ensync project maps one local or remote folder to its own chats, tabs, Git branch, instructions, feature memory, search index, and runtime host.
+
+Switching projects must unload the old project's semantic index and tools before enabling the new project. Cross-project recall is forbidden unless the user explicitly attaches another project as read-only context.
+
+The native project switcher opens the operating system's directory dialog—Finder on macOS and the standard folder chooser on Windows—through a sandboxed Electron preload with one fixed IPC method. The bridge exposes no arbitrary path reads, filesystem methods, or general IPC surface. The dialog returns only a selected absolute path; cancellation is a no-op, and native errors are shown honestly. The UI passes every selected path through the same Ensync Host inspection used for manual entry before focusing it.
+
+The browser project switcher supports verified local folders by manually entered absolute path and real Git repository import through Ensync Host. Its native folder action is visibly unavailable rather than simulated because a web page cannot open the desktop directory dialog.
+
+Ensync Host owns local project inspection through `GET /api/projects/current` and `POST /api/projects/inspect`. Both routes canonicalize the directory using the filesystem, reject relative, missing, non-directory, root, and host-disallowed paths, and return a stable project ID derived from the canonical path. The response reports only `.relay` file names, feature Markdown files, and root `AGENTS.md` or `CLAUDE.md` adapters actually found on disk.
+
+Recent projects and the selected project ID persist locally, but persisted metadata is not trusted as current evidence. Ensync re-inspects the remembered or selected path in each app session before marking it focused or allowing a chat run. Chat history, open tabs, search, and the CLI working directory use that verified project ID and canonical path. Context chips and adapter checks remain neutral when no current host inspection exists.
+
+Native Recent Projects is app-wide and shell-owned, while active project focus remains window-workspace-owned. The shell keeps at most 128 neutral local `{name, path, host}` records in `global-recent-projects-v1.json`; it never stores verification, inspection context, chats, messages, tabs, drafts, sessions, queues, layout, or active selection there. Its versioned envelope carries a revision, commit time, and SHA-256 payload checksum, with primary, staging, and previous-primary backup records. The one main process serializes fixed authorized IPC mutations, merges against current state before every commit, normalizes Windows and POSIX paths for deduplication, moves a newly Host-verified focus to the front, and broadcasts the committed list to every registered native window. Selecting any entry still calls Ensync Host inspection before changing that window's focus.
+
+On the first native renderer boot after this registry is introduced, a read-only migration scans the current workspace snapshot first, then the canonical snapshot, then at most 128 UUID-scoped native snapshots. Each source uses the existing checksummed primary/staging/backup reader; valid project paths are reduced to neutral records and merged without changing source localStorage bytes. This recovers project history from retained and retired window namespaces for every current and future native window without transferring any other workspace state. Browser mode remains local to its own workspace storage.
+
+Canonical hydration treats the checksummed v3 snapshot as authoritative while also merging any missing, validated project name/path/ID entries from both legacy v2 workspace keys. This project-only compatibility pass still runs when v3 already exists, because a partial v3 migration must not strand older recent workspaces. Current v3 order and active selection win, path normalization deduplicates entries, recovered entries lose stale inspection context and remain unverified until focused through Ensync Host, and no legacy chats, tabs, drafts, queues, sessions, settings, run state, or layout are imported.
+
+The older canonical-only project safety net remains a compatibility path for already-written workspace snapshots, but new native cross-window discovery uses the shell-owned global registry above. Neither path may import chats, messages, tabs, drafts, queues, sessions, settings, run state, or pane layout from another namespace.

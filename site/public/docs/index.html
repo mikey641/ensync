@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="Ensync product documentation, provider status, and setup model." />
+    <title>Documentation — Ensync</title>
+    <script>try{const t=localStorage.getItem('ensync-site-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <header class="site-header">
+      <div class="container nav-shell">
+        <a class="brand" href="/" aria-label="Ensync home"><span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>ensync</span></a>
+        <button class="icon-button menu-button" type="button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation"><span class="sr-only">Toggle navigation</span><span class="menu-lines" aria-hidden="true"></span></button>
+        <nav id="site-navigation" class="site-nav" data-navigation aria-label="Main navigation">
+          <a href="/#product">Product</a><a href="/#providers">Providers</a><a href="/docs/" aria-current="page">Docs</a><a href="/support/">Help desk</a><a href="/#download">Download</a>
+          <button class="theme-button" type="button" data-theme-toggle aria-pressed="false"><span class="theme-dot" aria-hidden="true"></span><span data-theme-label>Dark</span></button>
+        </nav>
+      </div>
+    </header>
+    <main id="main">
+      <header class="page-hero">
+        <div class="container"><div><p class="eyebrow">Documentation</p><h1>How Ensync works.</h1></div><p class="page-lede">The current product contract, provider support, and setup requirements—without presenting roadmap work as shipped.</p></div>
+      </header>
+      <div class="container docs-layout">
+        <aside class="docs-sidebar" aria-label="Documentation sections"><a href="#status">Current status</a><a href="#concepts">Core concepts</a><a href="#providers">Providers</a><a href="#usage">Usage data</a><a href="#downloads">Desktop releases</a><a href="#security">Security model</a></aside>
+        <div class="docs-content">
+          <section id="status">
+            <p class="eyebrow">Start here</p><h2>Current product status</h2>
+            <div class="callout"><strong>No public desktop release yet</strong><p>The repository contains a local prototype. This site intentionally keeps macOS and Windows download actions disabled until signed artifacts are published in the release manifest.</p></div>
+            <p>In the current prototype, Ensync Host can discover provider CLIs and run verified chats through authenticated Claude Code and Codex subscriptions. The broader catalog is visible for discovery, but it is not yet eligible for automatic chat routing.</p>
+          </section>
+          <section id="concepts">
+            <p class="eyebrow">Core concepts</p><h2>One task above every provider</h2>
+            <h3>Project boundary</h3><p>The selected project is the strict boundary for chats, context, memory, Git state, files, and terminal operations. A provider does not receive unrelated workspace context.</p>
+            <h3>Shared feature memory</h3><p>Durable decisions live in focused Markdown files within the project. Provider-specific instruction files remain thin adapters so the same facts are not copied into competing stores.</p>
+            <h3>Conversation handoff</h3><p>An Ensync task can retain the relevant transcript, feature plan, canonical project, project instructions, and verified Git branch while switching supported providers. Vendor session identifiers remain provider-specific.</p>
+            <h3>Auto Context skill</h3><p>The opt-in Auto Context mode preserves the selected project, conversation, decisions, provider-neutral Model size, and execution target. You can still use Auto or pin Codex/Claude. Automatic fallback remains a separate setting, and a safe handoff stays on the selected local or SSH/VM target.</p>
+            <h3>Automatic priority and safe fallback</h3><p>Settings keeps one persistent top-to-bottom priority list for Auto and fallback. Auto chooses the first connected, tested runner in that order with verified usage below 100%; a runner whose quota is unavailable is considered only after every provider with verified remaining usage. Runtime fallback advances through that same list only after Ensync Host proves the failure is safe to retry and no tool, command, file, or unknown activity occurred.</p>
+          </section>
+          <section id="providers">
+            <p class="eyebrow">Provider matrix</p><h2>Supported CLI catalog</h2>
+            <table class="status-table"><thead><tr><th>Provider</th><th>Current state</th><th>Billing source</th></tr></thead><tbody>
+              <tr><td>Claude Code</td><td>Tested local chat runner</td><td>Claude subscription</td></tr>
+              <tr><td>Codex CLI</td><td>Tested local chat runner</td><td>ChatGPT subscription</td></tr>
+              <tr><td>Kimi Code</td><td>Discovery + OAuth login</td><td>Kimi membership; Extra Usage excluded</td></tr>
+              <tr><td>Google Antigravity</td><td>Discovery + account onboarding</td><td>Google AI plan</td></tr>
+              <tr><td>Google Jules</td><td>Discovery + cloud-session login</td><td>Google AI plan</td></tr>
+              <tr><td>GitHub Copilot CLI</td><td>Signed-in account verified; Ensync runner not ready</td><td>GitHub account with a Copilot plan; paid additional AI Credits excluded</td></tr>
+              <tr><td>Cursor Agent</td><td>Discovery only</td><td>Cursor subscription</td></tr>
+              <tr><td>Kiro CLI</td><td>Discovery only</td><td>Kiro account / plan</td></tr>
+              <tr><td>Qoder CLI</td><td>Discovery + browser login</td><td>Qoder account / plan</td></tr>
+              <tr><td>CodeBuddy Code</td><td>Discovery + account onboarding</td><td>CodeBuddy account / plan</td></tr>
+              <tr><td>Factory Droid</td><td>Discovery + account onboarding</td><td>Factory account / plan; Extra Usage excluded</td></tr>
+              <tr><td>Augment Auggie</td><td>Discovery + account login</td><td>Augment account / plan</td></tr>
+              <tr><td>Amp</td><td>Discovery + account login</td><td>Amp account credits; paid overage excluded</td></tr>
+              <tr><td>GitLab Duo CLI</td><td>Discovery only</td><td>Eligible GitLab namespace</td></tr>
+              <tr><td>Warp Oz</td><td>Discovery + account login</td><td>Warp plan credits; overage excluded</td></tr>
+              <tr><td>Junie CLI</td><td>Discovery only</td><td>JetBrains AI subscription</td></tr>
+              <tr><td>Ollama (local)</td><td>Local runtime discovery</td><td>Local hardware</td></tr>
+            </tbody></table>
+            <h3>Is GitHub Copilot CLI an agent?</h3>
+            <p>Yes. Ensync verifies the signed-in account automatically through Copilot CLI's SDK-compatible <code>auth.getStatus</code> method. The check starts the installed CLI in bounded headless stdio mode, creates no session, sends no prompt, and accepts only an explicit stored-user login and account name. Token environment variables and generic <code>gh</code> authentication are not accepted as proof.</p>
+            <p>“Discovery only” now refers only to Ensync's unfinished Copilot task runner and fallback integration. Account quota also stays blank because the auth response does not contain allowance or reset data. See GitHub's official <a href="https://docs.github.com/en/copilot/how-tos/copilot-sdk/troubleshooting/compatibility" rel="noreferrer">SDK compatibility guide</a>, <a href="https://docs.github.com/en/copilot/how-tos/copilot-sdk/setup/local-cli" rel="noreferrer">local CLI setup</a>, and <a href="https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-copilot-cli" rel="noreferrer">Copilot CLI overview</a>.</p>
+            <h3>Official installation documentation</h3>
+            <div class="external-list">
+              <a href="https://code.claude.com/docs/en/installation" rel="noreferrer">Claude Code ↗</a>
+              <a href="https://developers.openai.com/codex/cli/" rel="noreferrer">Codex CLI ↗</a>
+              <a href="https://www.kimi.com/help/kimi-code/cli-getting-started" rel="noreferrer">Kimi Code ↗</a>
+              <a href="https://antigravity.google/docs/cli/install" rel="noreferrer">Google Antigravity ↗</a>
+              <a href="https://jules.google/docs/cli/reference/" rel="noreferrer">Google Jules ↗</a>
+              <a href="https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli" rel="noreferrer">GitHub Copilot CLI ↗</a>
+              <a href="https://docs.cursor.com/en/cli/installation" rel="noreferrer">Cursor Agent ↗</a>
+              <a href="https://kiro.dev/docs/cli/installation/" rel="noreferrer">Kiro CLI ↗</a>
+              <a href="https://docs.qoder.com/en/cli/quick-start" rel="noreferrer">Qoder CLI ↗</a>
+              <a href="https://www.codebuddy.ai/docs/cli/quickstart" rel="noreferrer">CodeBuddy Code ↗</a>
+              <a href="https://docs.factory.ai/cli/getting-started/quickstart" rel="noreferrer">Factory Droid ↗</a>
+              <a href="https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli" rel="noreferrer">Augment Auggie ↗</a>
+              <a href="https://ampcode.com/manual" rel="noreferrer">Amp ↗</a>
+              <a href="https://docs.gitlab.com/user/gitlab_duo_cli/set_up/" rel="noreferrer">GitLab Duo CLI ↗</a>
+              <a href="https://docs.warp.dev/reference/cli" rel="noreferrer">Warp Oz ↗</a>
+              <a href="https://junie.jetbrains.com/docs/junie-cli.html" rel="noreferrer">Junie CLI ↗</a>
+              <a href="https://ollama.com/download" rel="noreferrer">Ollama ↗</a>
+            </div>
+          </section>
+          <section id="usage">
+            <p class="eyebrow">Usage</p><h2>Provider-reported data only</h2>
+            <p>Ensync does not calculate a subscription percentage from token totals. Quota percentages, plan names, model catalogs, and reset windows appear only when the provider exposes them through a verified, non-consuming CLI surface.</p>
+            <ul><li>Codex usage and model data come from the initialized local app-server.</li><li>Claude usage comes from the CLI's local usage surface only when the structured event proves zero model turns, API duration, tokens, and cost.</li><li>Kimi stays unknown until Ensync has a version-gated, non-consuming quota probe. Its optional paid Extra Usage is never counted as subscription capacity.</li><li>Providers without a verified quota surface remain explicitly unknown.</li><li>Ollama is a local runtime, so it has local model and process capacity rather than a subscription percentage.</li></ul>
+          </section>
+          <section id="downloads">
+            <p class="eyebrow">Releases</p><h2>Manifest-gated downloads</h2>
+            <p>The download page fetches <code>/releases.json</code>. A button becomes active only when the requested platform is marked available, matches the latest version, is explicitly marked signed, uses an HTTPS artifact URL, and includes a 64-character SHA-256 checksum.</p>
+            <p>If the manifest cannot be loaded or fails validation, the site offers no download. macOS and Windows are evaluated independently and held to the same requirements.</p>
+            <a class="button button-secondary" href="/#download">Check release availability</a>
+          </section>
+          <section id="security">
+            <p class="eyebrow">Security</p><h2>Credentials stay with official tools</h2>
+            <p>Ensync is designed to launch fixed, allowlisted CLI login commands. It should not collect provider passwords or translate subscription authentication into provider API keys. Each vendor account remains subject to that vendor's terms, limits, and billing.</p>
+            <p>Before sharing diagnostics, remove passwords, bot tokens, API keys, SSH private keys, subscription cookies, and private source code that is not necessary to reproduce the problem.</p>
+            <a class="text-link" href="/privacy/">Privacy &amp; billing details <span>→</span></a>
+          </section>
+        </div>
+      </div>
+    </main>
+    <footer class="site-footer"><div class="container footer-bottom"><span>© <span data-copy-year></span> Ensync</span><span><a href="/">Home</a> · <a href="/support/">Help desk</a> · <a href="/privacy/">Privacy</a></span></div></footer>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

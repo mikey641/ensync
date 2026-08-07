@@ -1,0 +1,716 @@
+import { realpath, stat } from 'node:fs/promises'
+import { dirname, extname, isAbsolute, relative } from 'node:path'
+import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
+import { finalCodexResponse } from './codex-response.mjs'
+
+const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
+const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+const MAX_TIMEOUT_MS = 10 * 60 * 1_000
+const MAX_PROMPT_LENGTH = 100_000
+const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
+const MAX_ATTACHMENT_COUNT = 64
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/
+const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
+const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
+const QUOTA_PATTERN = /(?:usage|spending|rate)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
+const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
+const SECRET_PATTERNS = [
+  /\b(?:sk-(?:proj-|live-)?|ghp_|github_pat_|glpat-|xox[baprs]-)[a-zA-Z0-9_-]{12,}\b/g,
+  /\bBearer\s+[a-zA-Z0-9._~+\/-]{12,}/gi,
+  /\b[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b/g,
+  /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret|authorization)\b(\s*[:=]\s*["']?)([^\s"',}]{8,})/gi,
+]
+
+export class ChatRunError extends Error {
+  constructor(code, message, status = 400, safeToRetry = false) {
+    super(message)
+    this.name = 'ChatRunError'
+    this.code = code
+    this.status = status
+    this.safeToRetry = safeToRetry
+  }
+}
+
+function cancelledRunError() {
+  return new ChatRunError(
+    'run_cancelled',
+    'Run stopped by user. The provider process was terminated.',
+    499,
+    false,
+  )
+}
+
+function throwIfCancelled(signal) {
+  if (signal?.aborted) throw cancelledRunError()
+}
+
+function timeoutMessage(providerName, timeoutReason) {
+  if (timeoutReason === 'inactivity') {
+    return `${providerName} produced no CLI output or lifecycle progress before Ensync Host's inactivity limit and was stopped. Partial work may exist; review the project before retrying.`
+  }
+  if (timeoutReason === 'hard_limit') {
+    return `${providerName} reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.`
+  }
+  return `${providerName} reached an Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
+}
+
+export function redactTerminalText(value) {
+  let text = typeof value === 'string' ? value : String(value ?? '')
+  let redacted = false
+  for (const pattern of SECRET_PATTERNS) {
+    text = text.replace(pattern, (...parts) => {
+      redacted = true
+      if (parts.length > 4 && typeof parts[1] === 'string' && typeof parts[2] === 'string') {
+        return `${parts[1]}${parts[2]}[REDACTED]`
+      }
+      return '[REDACTED]'
+    })
+  }
+  if (text.length > TERMINAL_EVENT_TEXT_LIMIT) {
+    text = `${text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)}\n[OUTPUT TRUNCATED BY ENSYNC HOST]`
+    redacted = true
+  }
+  return { text, redacted }
+}
+
+function quoteTerminalArgument(argument) {
+  if (/^[a-zA-Z0-9_./:=+-]+$/.test(argument)) return argument
+  return `'${argument.replaceAll("'", "'\\''")}'`
+}
+
+function visibleArguments(request, attachmentPaths) {
+  const imagePaths = new Set(codexImagePaths(attachmentPaths))
+  return argumentsFor(request, attachmentPaths).map((argument, index, argumentsList) => {
+    if (request.sessionId && argument === request.sessionId) return '<session-id>'
+    if (index > 0 && argumentsList[index - 1] === '--resume') return '<session-id>'
+    if (imagePaths.has(argument)) return '<attached-image>'
+    return argument
+  })
+}
+
+function outputForwarder(onEvent) {
+  if (typeof onEvent !== 'function') {
+    return { stdout() {}, stderr() {}, flush() {} }
+  }
+  const buffers = { stdout: '', stderr: '' }
+  const emit = (stream, text) => {
+    if (!text) return
+    const safe = redactTerminalText(text)
+    onEvent({
+      type: 'output',
+      stream,
+      text: safe.text,
+      redacted: safe.redacted,
+      at: new Date().toISOString(),
+    })
+  }
+  const append = (stream, chunk) => {
+    buffers[stream] += chunk
+    const lines = buffers[stream].split(/(?<=\n)/)
+    buffers[stream] = lines.pop() ?? ''
+    for (const line of lines) emit(stream, line)
+  }
+  return {
+    stdout: (chunk) => append('stdout', chunk),
+    stderr: (chunk) => append('stderr', chunk),
+    flush() {
+      emit('stdout', buffers.stdout)
+      emit('stderr', buffers.stderr)
+      buffers.stdout = ''
+      buffers.stderr = ''
+    },
+  }
+}
+
+function asChatRunError(error, code, fallbackMessage, status = 400) {
+  if (error instanceof ChatRunError) return error
+  return new ChatRunError(code, fallbackMessage, status)
+}
+
+function pathIsWithin(candidate, root) {
+  const pathFromRoot = relative(root, candidate)
+  return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+}
+
+export async function validateProjectPath(projectPath, options = {}) {
+  if (typeof projectPath !== 'string' || !projectPath.trim()) {
+    throw new ChatRunError('invalid_project', 'Select a project folder before running a chat.')
+  }
+  if (!isAbsolute(projectPath)) {
+    throw new ChatRunError('invalid_project', 'The project path must be an absolute path.')
+  }
+
+  let resolvedPath
+  try {
+    resolvedPath = await realpath(projectPath)
+    const projectStat = await stat(resolvedPath)
+    if (!projectStat.isDirectory()) {
+      throw new ChatRunError('invalid_project', 'The selected project path is not a directory.')
+    }
+  } catch (error) {
+    throw asChatRunError(
+      error,
+      'invalid_project',
+      'The selected project folder does not exist or cannot be accessed.',
+    )
+  }
+
+  if (dirname(resolvedPath) === resolvedPath) {
+    throw new ChatRunError('invalid_project', 'A filesystem root cannot be used as an Ensync project.')
+  }
+
+  if (Array.isArray(options.allowedRoots) && options.allowedRoots.length > 0) {
+    const allowedRoots = await Promise.all(options.allowedRoots.map(async (root) => realpath(root)))
+    if (!allowedRoots.some((root) => pathIsWithin(resolvedPath, root))) {
+      throw new ChatRunError(
+        'project_not_allowed',
+        'The selected folder is outside the project roots allowed by this Ensync Host.',
+        403,
+      )
+    }
+  }
+
+  return resolvedPath
+}
+
+export async function validateAttachmentPaths(value) {
+  if (value == null) return []
+  if (!Array.isArray(value) || value.length > MAX_ATTACHMENT_COUNT) {
+    throw new ChatRunError(
+      'invalid_attachments',
+      `Attach no more than ${MAX_ATTACHMENT_COUNT} local files to one turn.`,
+      413,
+    )
+  }
+
+  const resolvedPaths = []
+  const seen = new Set()
+  for (const attachmentPath of value) {
+    if (typeof attachmentPath !== 'string' || !attachmentPath.trim() || !isAbsolute(attachmentPath)) {
+      throw new ChatRunError('invalid_attachment', 'Every attached file must have an absolute local path.')
+    }
+    let resolvedPath
+    try {
+      resolvedPath = await realpath(attachmentPath)
+      const attachmentStat = await stat(resolvedPath)
+      if (!attachmentStat.isFile()) {
+        throw new ChatRunError('invalid_attachment', 'Only files can be attached to a chat turn.')
+      }
+    } catch (error) {
+      throw asChatRunError(
+        error,
+        'invalid_attachment',
+        'An attached file no longer exists or cannot be accessed.',
+      )
+    }
+    if (!seen.has(resolvedPath)) {
+      seen.add(resolvedPath)
+      resolvedPaths.push(resolvedPath)
+    }
+  }
+  return resolvedPaths
+}
+
+function validateRequest(request) {
+  if (!request || typeof request !== 'object' || Array.isArray(request)) {
+    throw new ChatRunError('invalid_request', 'The chat run request must be a JSON object.')
+  }
+  if (typeof request.provider !== 'string' || !request.provider) {
+    throw new ChatRunError('invalid_provider', 'A provider is required.')
+  }
+  if (!SUPPORTED_CHAT_PROVIDERS.has(request.provider)) {
+    throw new ChatRunError(
+      'unsupported_provider',
+      `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex or Claude Code.`,
+      422,
+    )
+  }
+  if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
+    throw new ChatRunError('invalid_prompt', 'Enter a message before running the chat.')
+  }
+  if (request.prompt.length > MAX_PROMPT_LENGTH) {
+    throw new ChatRunError(
+      'invalid_prompt',
+      `The message is too large. Ensync Host accepts up to ${MAX_PROMPT_LENGTH.toLocaleString()} characters.`,
+      413,
+    )
+  }
+  if (request.sessionId != null && !SESSION_ID_PATTERN.test(request.sessionId)) {
+    throw new ChatRunError('invalid_session', 'The conversation session ID is invalid.')
+  }
+  if (request.model != null && !MODEL_PATTERN.test(request.model)) {
+    throw new ChatRunError('invalid_model', 'The requested model name is invalid.')
+  }
+  if (request.effort != null && !MODEL_EFFORTS.has(request.effort)) {
+    throw new ChatRunError('invalid_effort', 'The requested model effort must be low, medium, high, or max.')
+  }
+  if (request.attachments != null && !Array.isArray(request.attachments)) {
+    throw new ChatRunError('invalid_attachments', 'Attached files must be provided as a list.')
+  }
+  if (
+    request.timeoutMs != null
+    && (!Number.isInteger(request.timeoutMs) || request.timeoutMs < 1_000 || request.timeoutMs > MAX_TIMEOUT_MS)
+  ) {
+    throw new ChatRunError(
+      'invalid_timeout',
+      `The timeout must be between 1,000 and ${MAX_TIMEOUT_MS.toLocaleString()} milliseconds.`,
+    )
+  }
+}
+
+function subscriptionAuthenticationAllowed(provider) {
+  const method = provider.authentication?.method?.toLowerCase() ?? ''
+  if (provider.id === 'codex') return method.includes('chatgpt')
+  if (provider.id === 'claude') {
+    return ['claude.ai', 'oauth', 'subscription'].some((signal) => method.includes(signal))
+  }
+  return false
+}
+
+function integerOrNull(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null
+}
+
+function usageFrom(value) {
+  if (!value || typeof value !== 'object') return null
+  const inputTokens = integerOrNull(value.input_tokens ?? value.inputTokens)
+  const outputTokens = integerOrNull(value.output_tokens ?? value.outputTokens)
+  const cachedInputTokens = integerOrNull(
+    value.cached_input_tokens
+      ?? value.cachedInputTokens
+      ?? value.cache_read_input_tokens
+      ?? value.cacheReadInputTokens,
+  )
+  if (inputTokens === null && outputTokens === null && cachedInputTokens === null) return null
+  return {
+    source: 'cli',
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+  }
+}
+
+function parseJsonLines(value) {
+  const events = []
+  for (const line of value.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line)
+      if (parsed && typeof parsed === 'object') events.push(parsed)
+    } catch {
+      throw new ChatRunError(
+        'invalid_cli_output',
+        'Codex returned output Ensync Host could not verify as JSON events.',
+        502,
+      )
+    }
+  }
+  return events
+}
+
+function structuredEvents(value) {
+  if (typeof value !== 'string' || !value.trim()) return null
+  try {
+    const events = parseJsonLines(value)
+    return events.length ? events : null
+  } catch {
+    return null
+  }
+}
+
+function codexEventsProveNoActivity(events) {
+  const terminal = events.at(-1)
+  if (!terminal || !['turn.failed', 'error'].includes(terminal.type)) return false
+  const knownLifecycleEvents = new Set(['thread.started', 'turn.started', 'turn.failed', 'error'])
+  const itemEvents = new Set(['item.started', 'item.updated', 'item.completed'])
+
+  return !events.some((event) => {
+    if (knownLifecycleEvents.has(event.type)) return false
+    if (!itemEvents.has(event.type)) return true
+    const itemType = event.item?.type
+    return typeof itemType !== 'string' || !['reasoning', 'agent_message'].includes(itemType)
+  })
+}
+
+function claudeEventsProveNoActivity(events) {
+  const terminal = events.at(-1)
+  if (!terminal || terminal.type !== 'result' || terminal.is_error !== true) return false
+  const knownNonWorkEvents = new Set(['system', 'result', 'rate_limit_event'])
+
+  return !events.some((event) => {
+    if (knownNonWorkEvents.has(event.type)) return false
+    if (!['assistant', 'user'].includes(event.type)) return true
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return true
+    return content.some((block) =>
+      !block
+      || typeof block !== 'object'
+      || !['text', 'thinking', 'redacted_thinking'].includes(block.type))
+  })
+}
+
+export function quotaFailureIsSafe(provider, stdout, stderr = '') {
+  if (!QUOTA_PATTERN.test(`${stdout}\n${stderr}`)) return false
+  const events = structuredEvents(stdout)
+  if (!events) return false
+  return provider === 'codex'
+    ? codexEventsProveNoActivity(events)
+    : provider === 'claude' && claudeEventsProveNoActivity(events)
+}
+
+function quotaError(provider, safeToRetry) {
+  const name = provider === 'codex' ? 'Codex' : 'Claude Code'
+  return new ChatRunError(
+    'provider_quota',
+    `${name} reported a quota, rate-limit, or capacity failure before any tool activity.`,
+    429,
+    safeToRetry,
+  )
+}
+
+export function parseCodexChatResult(stdout) {
+  const events = parseJsonLines(stdout)
+  const agentMessages = []
+  let sessionId = null
+  let usage = null
+  let model = null
+  let completed = false
+  let failed = false
+
+  for (const event of events) {
+    if (event.type === 'thread.started' && typeof event.thread_id === 'string') {
+      sessionId = event.thread_id
+    }
+    if (
+      event.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && typeof event.item.text === 'string'
+      && event.item.text.trim()
+    ) {
+      agentMessages.push(event.item)
+    }
+    if (event.type === 'turn.completed') {
+      completed = true
+      usage = usageFrom(event.usage) ?? usage
+    }
+    if (event.type === 'turn.failed' || event.type === 'error') failed = true
+    if (typeof event.model === 'string' && event.model.trim()) model = event.model.trim()
+  }
+
+  if (failed) {
+    if (quotaFailureIsSafe('codex', stdout)) throw quotaError('codex', true)
+    throw new ChatRunError('cli_failed', 'Codex reported that the run failed.', 502)
+  }
+  if (!completed) {
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Codex returned no verified terminal completion event.',
+      502,
+    )
+  }
+  const response = finalCodexResponse(agentMessages)
+  if (!response) {
+    throw new ChatRunError(
+      'empty_cli_response',
+      'Codex finished without a verifiable final agent response.',
+      502,
+    )
+  }
+  return { response, sessionId, model, usage }
+}
+
+export function parseClaudeChatResult(stdout) {
+  const events = structuredEvents(stdout)
+  if (!events) {
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Claude Code returned output Ensync Host could not verify as JSON.',
+      502,
+    )
+  }
+
+  const result = [...events].reverse().find((event) => event.type === 'result')
+    ?? (events.length === 1 ? events[0] : null)
+
+  if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    throw new ChatRunError('invalid_cli_output', 'Claude Code returned an invalid result.', 502)
+  }
+  if (result.is_error === true) {
+    if (quotaFailureIsSafe('claude', stdout)) throw quotaError('claude', true)
+    throw new ChatRunError(
+      'cli_failed',
+      typeof result.result === 'string' && result.result.trim()
+        ? `Claude Code reported an error: ${redactTerminalText(result.result.trim()).text}`
+        : 'Claude Code reported that the run failed.',
+      502,
+    )
+  }
+  if (result.is_error !== false) {
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Claude Code returned no verified success state.',
+      502,
+    )
+  }
+  if (typeof result.result !== 'string' || !result.result.trim()) {
+    throw new ChatRunError(
+      'empty_cli_response',
+      'Claude Code finished without a verifiable final agent response.',
+      502,
+    )
+  }
+
+  const modelUsage = result.modelUsage && typeof result.modelUsage === 'object'
+    ? Object.keys(result.modelUsage)
+    : []
+  const initModel = events.find((event) =>
+    event.type === 'system'
+    && event.subtype === 'init'
+    && typeof event.model === 'string')?.model
+  const initSessionId = events.find((event) =>
+    event.type === 'system'
+    && event.subtype === 'init'
+    && typeof event.session_id === 'string')?.session_id
+  return {
+    response: result.result.trim(),
+    sessionId: typeof result.session_id === 'string' ? result.session_id : initSessionId ?? null,
+    model: modelUsage.length === 1 ? modelUsage[0] : initModel ?? null,
+    usage: usageFrom(result.usage),
+  }
+}
+
+function codexImagePaths(attachmentPaths = []) {
+  return attachmentPaths.filter((attachmentPath) => CODEX_IMAGE_EXTENSIONS.has(extname(attachmentPath).toLowerCase()))
+}
+
+function codexArguments(request, attachmentPaths = []) {
+  const modelArgs = request.model ? ['--model', request.model] : []
+  const effortArgs = request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []
+  const imagePaths = codexImagePaths(attachmentPaths)
+  const imageArgs = imagePaths.length > 0 ? ['--image', ...imagePaths] : []
+  if (request.sessionId) {
+    return ['exec', 'resume', ...imageArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
+  }
+  return ['exec', ...imageArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
+}
+
+function claudeArguments(request) {
+  const args = ['--print', '--verbose', '--output-format', 'stream-json']
+  if (request.model) args.push('--model', request.model)
+  if (request.effort) args.push('--effort', request.effort)
+  if (request.sessionId) args.push('--resume', request.sessionId)
+  return args
+}
+
+function argumentsFor(request, attachmentPaths = []) {
+  return request.provider === 'codex' ? codexArguments(request, attachmentPaths) : claudeArguments(request)
+}
+
+function parseResult(provider, stdout) {
+  return provider === 'codex' ? parseCodexChatResult(stdout) : parseClaudeChatResult(stdout)
+}
+
+export class ChatRunService {
+  #statusService
+  #processRunner
+  #allowedRoots
+  #environment
+  #inactivityTimeoutMs
+  #hardTimeoutMs
+  #codexLiveTurns
+
+  constructor(options = {}) {
+    if (!options.statusService) throw new TypeError('ChatRunService requires a provider status service.')
+    this.#statusService = options.statusService
+    this.#processRunner = options.processRunner ?? runProcess
+    this.#allowedRoots = options.allowedRoots
+    this.#environment = options.environment ?? process.env
+    this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
+      inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      hardTimeoutMs: this.#hardTimeoutMs,
+    })
+  }
+
+  async run(request, options = {}) {
+    validateRequest(request)
+    throwIfCancelled(options.signal)
+    const projectPath = await validateProjectPath(request.projectPath, {
+      allowedRoots: this.#allowedRoots,
+    })
+    throwIfCancelled(options.signal)
+    const attachmentPaths = await validateAttachmentPaths(request.attachments)
+    throwIfCancelled(options.signal)
+    const provider = await this.#statusService.get(request.provider, { refresh: true })
+    throwIfCancelled(options.signal)
+
+    if (!provider?.installed || !provider.executable) {
+      throw new ChatRunError(
+        'provider_unavailable',
+        `${request.provider === 'codex' ? 'Codex' : 'Claude Code'} is not installed or is not available on PATH.`,
+        409,
+        true,
+      )
+    }
+    if (provider.authentication?.state !== 'authenticated') {
+      throw new ChatRunError(
+        'provider_not_authenticated',
+        provider.authentication?.reason
+          ?? `${provider.name} is not authenticated. Connect it before running a chat.`,
+        409,
+        true,
+      )
+    }
+    if (!subscriptionAuthenticationAllowed(provider)) {
+      throw new ChatRunError(
+        'subscription_auth_required',
+        `${provider.name} must be connected through a subscription login. Ensync Host will not run chat through API-key, Bedrock, Vertex, or Foundry credentials.`,
+        409,
+        true,
+      )
+    }
+
+    if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
+      try {
+        return await this.#codexLiveTurns.run({
+          id: options.liveTurnId,
+          executable: provider.executable,
+          projectPath,
+          prompt: request.prompt,
+          attachmentPaths,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: options.signal,
+          onEvent: (event) => {
+            if (event?.type !== 'output') return options.onEvent?.(event)
+            const safe = redactTerminalText(event.text)
+            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
+          },
+        })
+      } catch (error) {
+        if (error instanceof CodexLiveTurnError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#statusService.invalidate?.()
+      }
+    }
+
+    const startedAt = Date.now()
+    const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
+    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const args = argumentsFor(request, attachmentPaths)
+    const forwarder = outputForwarder(options.onEvent)
+    options.onEvent?.({
+      type: 'started',
+      provider: request.provider,
+      cwd: projectPath,
+      command: [provider.executable, ...visibleArguments(request, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+      at: new Date(startedAt).toISOString(),
+    })
+    let processResult
+    try {
+      processResult = await this.#processRunner(
+        provider.executable,
+        args,
+        {
+          cwd: projectPath,
+          env: subscriptionEnvironment(this.#environment),
+          input: request.prompt,
+          inactivityTimeoutMs,
+          hardTimeoutMs,
+          maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
+          onStdout: forwarder.stdout,
+          onStderr: forwarder.stderr,
+          signal: options.signal,
+        },
+      )
+    } finally {
+      forwarder.flush()
+      // A completed, failed, or cancelled CLI process may have changed the account's real
+      // usage window. Drop the shared Host cache so every renderer's next non-forced read
+      // observes a fresh provider probe without each window forcing its own subprocesses.
+      this.#statusService.invalidate?.()
+    }
+
+    if (processResult.aborted || options.signal?.aborted) throw cancelledRunError()
+    if (processResult.timedOut) {
+      throw new ChatRunError(
+        'run_timed_out',
+        timeoutMessage(provider.name, processResult.timeoutReason),
+        504,
+      )
+    }
+    if (processResult.error) {
+      throw new ChatRunError(
+        'run_start_failed',
+        `${provider.name} could not be started by Ensync Host.`,
+        502,
+        true,
+      )
+    }
+    if (processResult.exitCode !== 0) {
+      if (quotaFailureIsSafe(request.provider, processResult.stdout, processResult.stderr)) {
+        throw quotaError(request.provider, true)
+      }
+      const output = processResult.stderr || processResult.stdout
+      const reason = output ? ` ${redactTerminalText(output.slice(0, 500)).text}` : ''
+      throw new ChatRunError(
+        'cli_failed',
+        `${describeProcessExit(provider.name, processResult)}.${reason}`,
+        502,
+      )
+    }
+
+    const parsed = parseResult(request.provider, processResult.stdout)
+    return {
+      provider: request.provider,
+      projectPath,
+      response: parsed.response,
+      sessionId: parsed.sessionId ?? request.sessionId ?? null,
+      model: parsed.model,
+      requestedModel: request.model ?? null,
+      requestedEffort: request.effort ?? null,
+      usage: parsed.usage,
+      durationMs: Date.now() - startedAt,
+      completedAt: new Date().toISOString(),
+    }
+  }
+
+  async steer(liveTurnId, input) {
+    if (typeof liveTurnId !== 'string' || !liveTurnId) {
+      throw new ChatRunError('invalid_chat_job', 'A retained chat job ID is required.', 400, true)
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new ChatRunError('invalid_request', 'A live instruction is required.', 400, true)
+    }
+    if (typeof input.prompt !== 'string' || !input.prompt.trim()) {
+      throw new ChatRunError('invalid_prompt', 'Enter a message before steering the active turn.', 400, true)
+    }
+    if (input.prompt.length > MAX_PROMPT_LENGTH) {
+      throw new ChatRunError(
+        'invalid_prompt',
+        `The message is too large. Ensync Host accepts up to ${MAX_PROMPT_LENGTH.toLocaleString()} characters.`,
+        413,
+        true,
+      )
+    }
+    const attachmentPaths = await validateAttachmentPaths(input.attachments)
+    try {
+      return await this.#codexLiveTurns.steer(liveTurnId, input.prompt.trim(), attachmentPaths)
+    } catch (error) {
+      if (error instanceof CodexLiveTurnError) {
+        throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+      }
+      throw error
+    }
+  }
+}
