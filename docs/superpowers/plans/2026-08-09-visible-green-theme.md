@@ -6,7 +6,7 @@
 
 **Architecture:** Keep the change in the existing semantic color layer. Desktop and site source styles receive matching neutral graphite/stone surfaces and vivid green accent tokens; the desktop theme adds only color overrides to existing active-header and ready-action selectors. The installed app is updated by transplanting those color values and rules into its current compiled stylesheet rather than replacing its newer JavaScript, layout CSS, or native shell.
 
-**Tech Stack:** React/Vite CSS, Electron packaged assets, Node.js `node:test`, site validator, macOS ad-hoc code signing, Computer Use visual QA.
+**Tech Stack:** React/Vite CSS, Electron packaged assets, production builders/validators, macOS ad-hoc code signing, Computer Use visual QA.
 
 ## Global Constraints
 
@@ -20,44 +20,22 @@
 
 ---
 
-### Task 1: Lock the desktop color contract
+### Task 1: Implement the desktop color contract
 
 **Files:**
-- Create: `host/theme-contract.test.mjs`
 - Modify: `src/theme.css:8-83, 2319-2334`
 
 **Interfaces:**
 - Consumes: semantic CSS variables already loaded after `src/index.css`.
 - Produces: vivid `--accent-ui` tokens plus color-only active-pane, active-tab, mark, focus, status, and ready-send bindings.
 
-- [ ] **Step 1: Write the failing desktop theme contract test**
+- [ ] **Step 1: Capture the failing rendered baseline**
 
-```js
-import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import test from 'node:test'
+Inspect the installed app through Computer Use at 100% scale and record the current semantic tokens from its resolved application stylesheet.
 
-const css = await readFile(new URL('../src/theme.css', import.meta.url), 'utf8')
+Expected: the app reads gray/teal rather than visibly green; the muted dark accent is `#58bd7f`, the light accent is `#2d7d4f`, and no persistent active-pane edge uses the accent.
 
-test('desktop theme keeps neutral surfaces and visible green brand anchors', () => {
-  assert.match(css, /--surface-canvas:\s*#191919;/)
-  assert.match(css, /--accent-ui:\s*#45d483;/)
-  assert.match(css, /:root\[data-theme='light'\][\s\S]*--surface-canvas:\s*#f5f5f2;/)
-  assert.match(css, /:root\[data-theme='light'\][\s\S]*--accent-ui:\s*#178449;/)
-  assert.match(css, /\.wordmark__mark\s*{[^}]*color:\s*var\(--accent-ui\)/s)
-  assert.match(css, /\.relay-split-pane--active\s*>\s*\.relay-split-pane-tab[\s\S]*border-bottom-color:\s*var\(--accent-ui\)/)
-  assert.match(css, /\.relay-tabs-mode-tab--active[\s\S]*border-color:\s*var\(--accent-ui\)/)
-  assert.match(css, /\.composer__toolbar \.send-button--ready[\s\S]*background:\s*var\(--accent-ui\)/)
-})
-```
-
-- [ ] **Step 2: Run the focused test and verify RED**
-
-Run: `node --test host/theme-contract.test.mjs`
-
-Expected: FAIL because the old muted accent and green-tinted surface values remain.
-
-- [ ] **Step 3: Implement the desktop color layer**
+- [ ] **Step 2: Implement the desktop color layer**
 
 Use these dark semantic values in `src/theme.css`:
 
@@ -140,13 +118,7 @@ Add color-only bindings after the established workspace rules:
 }
 ```
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
-
-Run: `node --test host/theme-contract.test.mjs`
-
-Expected: PASS.
-
-- [ ] **Step 5: Run the production build**
+- [ ] **Step 3: Run the production build**
 
 Run: `npm run build`
 
@@ -157,43 +129,17 @@ Expected: TypeScript and Vite production build complete successfully.
 ### Task 2: Match the public-site palette
 
 **Files:**
-- Create: `site/tests/palette.test.mjs`
 - Modify: `site/public/styles.css:1-48, 1347-1415`
 
 **Interfaces:**
 - Consumes: the desktop palette values from Task 1.
 - Produces: matching site tokens and demo-window color overrides without layout changes.
 
-- [ ] **Step 1: Write the failing site palette test**
-
-```js
-import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
-import test from 'node:test'
-
-const css = await readFile(new URL('../public/styles.css', import.meta.url), 'utf8')
-
-test('site uses the visible Ensync green with neutral surfaces', () => {
-  assert.match(css, /--bg:\s*#f5f5f2;/)
-  assert.match(css, /--accent:\s*#178449;/)
-  assert.match(css, /:root\[data-theme="dark"\][\s\S]*--bg:\s*#191919;/)
-  assert.match(css, /:root\[data-theme="dark"\][\s\S]*--accent:\s*#45d483;/)
-  assert.match(css, /\.brand-mark,[\s\S]*color:\s*var\(--accent\)/)
-  assert.match(css, /\.demo-composer b,[\s\S]*background:\s*#45d483;/)
-})
-```
-
-- [ ] **Step 2: Run the site palette test and verify RED**
-
-Run: `node --test site/tests/palette.test.mjs`
-
-Expected: FAIL on the old surface and accent values.
-
-- [ ] **Step 3: Implement matching site color tokens**
+- [ ] **Step 1: Implement matching site color tokens**
 
 Copy the Task 1 light/dark surface and accent values into the corresponding `--bg`, `--surface*`, `--line*`, `--text*`, and `--accent*` site variables. Update only hard-coded colors in the palette-only demo-window finish so its neutral surfaces and green action use the same values; do not modify any dimensions, spacing, radii, or selectors.
 
-- [ ] **Step 4: Run site verification**
+- [ ] **Step 2: Run site verification**
 
 Run: `npm --prefix site test`
 
@@ -206,8 +152,6 @@ Expected: all site tests and the validator pass.
 **Files:**
 - Verify: `src/theme.css`
 - Verify: `site/public/styles.css`
-- Verify: `host/theme-contract.test.mjs`
-- Verify: `site/tests/palette.test.mjs`
 
 **Interfaces:**
 - Consumes: completed source changes from Tasks 1 and 2.
@@ -215,7 +159,7 @@ Expected: all site tests and the validator pass.
 
 - [ ] **Step 1: Run focused and aggregate checks**
 
-Run: `node --test host/theme-contract.test.mjs && npm --prefix site test && npm run build && git diff --check`
+Run: `npm --prefix site test && npm run build && git diff --check`
 
 Expected: every command exits zero.
 
@@ -223,7 +167,7 @@ Expected: every command exits zero.
 
 Run: `git diff -- src/theme.css site/public/styles.css host/theme-contract.test.mjs site/tests/palette.test.mjs`
 
-Expected: production CSS changes are limited to color values and color properties; test files contain only assertions for that contract.
+Expected: production CSS changes are limited to color values and color properties.
 
 ---
 
@@ -272,8 +216,6 @@ Expected: `app.asar`, JavaScript assets, Host/native resources, and the layout C
 **Files:**
 - Commit: `src/theme.css`
 - Commit: `site/public/styles.css`
-- Commit: `host/theme-contract.test.mjs`
-- Commit: `site/tests/palette.test.mjs`
 - Commit: `docs/superpowers/plans/2026-08-09-visible-green-theme.md`
 
 **Interfaces:**
@@ -282,14 +224,14 @@ Expected: `app.asar`, JavaScript assets, Host/native resources, and the layout C
 
 - [ ] **Step 1: Run final verification**
 
-Run: `node --test host/theme-contract.test.mjs && npm --prefix site test && npm run build && git diff --check`
+Run: `npm --prefix site test && npm run build && git diff --check`
 
 Expected: all commands exit zero.
 
 - [ ] **Step 2: Stage only the named theme files**
 
 ```bash
-git add src/theme.css site/public/styles.css host/theme-contract.test.mjs site/tests/palette.test.mjs docs/superpowers/plans/2026-08-09-visible-green-theme.md
+git add src/theme.css site/public/styles.css docs/superpowers/plans/2026-08-09-visible-green-theme.md
 git diff --cached --check
 ```
 
