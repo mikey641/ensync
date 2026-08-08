@@ -165,7 +165,7 @@ Expected: every command exits zero.
 
 - [ ] **Step 2: Inspect the diff for structural changes**
 
-Run: `git diff -- src/theme.css site/public/styles.css host/theme-contract.test.mjs site/tests/palette.test.mjs`
+Run: `git diff -- src/theme.css site/public/styles.css`
 
 Expected: production CSS changes are limited to color values and color properties.
 
