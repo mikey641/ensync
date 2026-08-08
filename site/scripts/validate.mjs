@@ -13,6 +13,7 @@ const requiredFiles = [
   'styles.css',
   'release-manifest.mjs',
   'releases.json',
+  'releases-beta.json',
   'site-config.json',
   'provider-catalog.json',
   'docs/index.html',
@@ -76,20 +77,26 @@ try {
   errors.push(`Invalid provider-catalog.json: ${error.message}`);
 }
 
-try {
-  const manifest = JSON.parse(fileContents.get('releases.json'));
-  for (const platform of ['macos', 'windows']) {
-    const result = resolveDownload(manifest, platform);
-    const declaredAvailable = manifest.platforms?.[platform]?.status === 'available';
-    if (declaredAvailable && !result.available) {
-      errors.push(`${platform} is declared available but cannot be safely resolved: ${result.reason}`);
+for (const [manifestFile, expectedChannel] of [['releases.json', 'stable'], ['releases-beta.json', 'beta']]) {
+  try {
+    const manifest = JSON.parse(fileContents.get(manifestFile));
+    const declaredChannel = manifest.channel ?? 'stable';
+    if (declaredChannel !== expectedChannel) {
+      errors.push(`${manifestFile} declares ${declaredChannel}, expected ${expectedChannel}.`);
     }
-    if (!declaredAvailable && result.available) {
-      errors.push(`${platform} resolved as available without an available manifest status.`);
+    for (const platform of ['macos', 'windows']) {
+      const result = resolveDownload(manifest, platform);
+      const declaredAvailable = manifest.platforms?.[platform]?.status === 'available';
+      if (declaredAvailable && !result.available) {
+        errors.push(`${manifestFile} ${platform} is declared available but cannot be safely resolved: ${result.reason}`);
+      }
+      if (!declaredAvailable && result.available) {
+        errors.push(`${manifestFile} ${platform} resolved as available without an available manifest status.`);
+      }
     }
+  } catch (error) {
+    errors.push(`Invalid ${manifestFile}: ${error.message}`);
   }
-} catch (error) {
-  errors.push(`Invalid releases.json: ${error.message}`);
 }
 
 try {

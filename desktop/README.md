@@ -99,20 +99,23 @@ Unsigned local builds work for testing, but their generated site manifest remain
 | `VERCEL_TOKEN` | release publish job | Deploy the verified release manifest to the public site/update feed |
 | `VERCEL_ORG_ID` | release publish job | Exact Vercel team/account containing the Ensync project |
 | `VERCEL_PROJECT_ID` | release publish job | Exact Vercel `ensync` project identifier |
+| `ENSYNC_RELEASE_TOKEN` | release preflight/publish jobs | Least-privilege token with release-write access to the separate public binary repository |
+
+Set the non-secret GitHub Actions repository variable `ENSYNC_RELEASE_REPOSITORY` to the public binary repository in `owner/repository` form. The source repository may remain private; its workflow token is read-only, and the dedicated release token is used only for public release assets.
 
 Windows may use either the PFX pair or all seven Microsoft Trusted Signing values; configuring both modes or only part of one mode fails before packaging. The packaging wrapper disables certificate auto-discovery unless an explicit signing mode is complete and forces code signing whenever production credentials are supplied. The notarization hooks do nothing when all three Apple notarization values are absent and fail the build if only some are present. The signed app is notarized before packaging; the signed DMG is then notarized and stapled after artifact creation. Build attestations derive `signed` from `codesign --verify` on both app and DMG or PowerShell `Get-AuthenticodeSignature`; they do not infer it from the existence of secrets. macOS notarization is separately checked with `stapler validate` on both app and DMG.
 
 ## Release workflow
 
-Pushing a semantic version tag such as `v0.1.0` starts `.github/workflows/desktop-release.yml`. A preflight job first confirms that the repository is public (the manifest uses public GitHub release URLs), macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The remaining jobs:
+Pushing a semantic version tag such as `v0.1.0` starts `.github/workflows/desktop-release.yml`. A preflight job first confirms that the separately configured binary repository exists and is public (the manifest uses public GitHub release URLs), its dedicated token exists, macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The source repository remains private. The remaining jobs:
 
 1. build and test on native macOS and Windows runners;
 2. upload only the signed/notarized DMG, signed NSIS EXE, ZIP archives, and verification attestations produced by those jobs;
 3. compare every artifact's hash and size against its attestation;
 4. require verified Windows signing plus verified macOS signing and notarization;
 5. generate `SHA256SUMS.txt` and the shared schema-v1 `releases.json` only after all four production artifacts pass those checks;
-6. create the GitHub release and upload those real files;
-7. copy that exact generated manifest into `site/public/releases.json`, validate the site, and deploy the production Vercel site using the explicit Vercel release secrets.
+6. create the release in the separate public binary repository and upload those real files;
+7. copy that exact generated manifest into `site/public/releases.json` for stable or `site/public/releases-beta.json` for prerelease tags, recover the opposite channel's current manifest from the fixed HTTPS production origin when present, validate both feeds together, and deploy the production Vercel site using the explicit Vercel release secrets.
 
 If signing or macOS notarization cannot be verified, the publish job fails before creating a GitHub release. Native CI artifacts retain their short-lived test-build attestations for diagnosis, but no unsigned installer becomes a public release. If Vercel credentials or deployment fail after GitHub publication, installed apps and the site continue to see the previous production manifest and do not fabricate availability. Re-running the same tagged workflow repairs or replaces its verified release assets before retrying the feed deployment.
 

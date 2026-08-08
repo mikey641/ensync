@@ -11,13 +11,24 @@ const inputRoot = resolve(option('--input', 'release-input'))
 const outputRoot = resolve(option('--output', 'release-assets'))
 const tag = option('--tag')
 const repository = option('--repository')
+const channel = option('--channel')
 if (!tag || !/^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
   throw new Error('--tag must be a semantic release tag such as v1.2.3.')
 }
 if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
   throw new Error('--repository must be a GitHub owner/repository name.')
 }
+if (!['stable', 'beta'].includes(channel)) {
+  throw new Error('--channel must be stable or beta.')
+}
 const version = tag.replace(/^v/, '')
+const prerelease = version.split('+')[0].includes('-')
+if (channel === 'stable' && prerelease) {
+  throw new Error('A prerelease tag may publish only to the beta channel.')
+}
+if (channel === 'beta' && !prerelease) {
+  throw new Error('The beta channel requires a semantic prerelease tag.')
+}
 
 async function walk(root) {
   const files = []
@@ -109,6 +120,7 @@ await writeFile(join(outputRoot, 'SHA256SUMS.txt'), checksums, { flag: 'wx' })
 
 const manifest = {
   schemaVersion: 1,
+  channel,
   latest: {
     version,
     publishedAt: new Date().toISOString(),
@@ -119,5 +131,6 @@ const manifest = {
     windows: platformRelease('windows', '-windows-', '.exe'),
   },
 }
-await writeFile(join(outputRoot, 'releases.json'), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' })
-console.log(`Prepared ${records.length} verified artifacts, checksums, and releases.json for ${tag}.`)
+const manifestName = channel === 'beta' ? 'releases-beta.json' : 'releases.json'
+await writeFile(join(outputRoot, manifestName), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' })
+console.log(`Prepared ${records.length} verified artifacts, checksums, and ${manifestName} for ${tag}.`)

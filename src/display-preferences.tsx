@@ -192,7 +192,7 @@ export function DisplayPreferences({ className = '' }: { className?: string }) {
       <div className="display-preferences__heading">
         <div>
           <h3 id="display-preferences-title">Appearance</h3>
-          <p>Theme and text size are saved on this device.</p>
+          <p>Theme, text size, and the finished-task style follow your signed-in Ensync account.</p>
         </div>
         <span className="display-preferences__status">{resolvedTheme} active</span>
       </div>

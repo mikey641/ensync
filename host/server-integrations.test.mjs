@@ -52,6 +52,95 @@ test('support repair route returns only the injected subscription repair result'
   assert.deepEqual(calls, [request])
 })
 
+test('account sync routes expose only status and encrypted-service workflow results', async (context) => {
+  const calls = []
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: false, username: null }),
+    register: async (input) => {
+      calls.push(['register', input])
+      return { configured: true, authenticated: true, username: input.username }
+    },
+    login: async (input) => {
+      calls.push(['login', input])
+      return { configured: true, authenticated: true, username: input.username }
+    },
+    logout: async () => ({ configured: true, authenticated: false, username: null }),
+    pull: async () => ({ state: { chats: [] }, revision: 4, updatedAt: '2026-08-07T10:00:00.000Z' }),
+    push: async (state, baseRevision) => {
+      calls.push(['push', state, baseRevision])
+      return { status: 'saved', revision: baseRevision + 1, updatedAt: '2026-08-07T10:01:00.000Z' }
+    },
+  }
+  const baseUrl = await withHost(context, { accountSyncService })
+
+  const status = await fetch(`${baseUrl}/api/account-sync/status`).then((response) => response.json())
+  assert.equal(status.authenticated, false)
+
+  const registerResponse = await fetch(`${baseUrl}/api/account-sync/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'account-user', password: 'not-returned' }),
+  })
+  assert.equal(registerResponse.status, 201)
+  assert.equal((await registerResponse.json()).username, 'account-user')
+
+  const pulled = await fetch(`${baseUrl}/api/account-sync/workspace`).then((response) => response.json())
+  assert.equal(pulled.revision, 4)
+  const pushed = await fetch(`${baseUrl}/api/account-sync/workspace`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: { chats: [{ id: 'chat-a' }] }, baseRevision: 4 }),
+  }).then((response) => response.json())
+  assert.equal(pushed.revision, 5)
+  assert.deepEqual(calls, [
+    ['register', { username: 'account-user', password: 'not-returned' }],
+    ['push', { chats: [{ id: 'chat-a' }] }, 4],
+  ])
+})
+
+test('account sync live route relays authenticated server revision events', async (context) => {
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: true, username: 'live-user' }),
+    async subscribe({ signal, onOpen, onEvent }) {
+      onOpen()
+      onEvent({ type: 'connected', revision: 7, updatedAt: '2026-08-08T10:00:00.000Z' })
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+    },
+  }
+  const baseUrl = await withHost(context, { accountSyncService })
+  const controller = new AbortController()
+  const response = await fetch(`${baseUrl}/api/account-sync/events?after=6`, { signal: controller.signal })
+  assert.equal(response.status, 200)
+  assert.match(response.headers.get('content-type'), /^text\/event-stream/)
+  const reader = response.body.getReader()
+  const first = await reader.read()
+  assert.match(Buffer.from(first.value).toString('utf8'), /"type":"connected","revision":7/)
+  controller.abort()
+})
+
+test('a signed-in local Host proxies provider APIs to the account execution server', async (context) => {
+  const calls = []
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: true, username: 'server-user' }),
+    usesAccountServerExecution: () => true,
+    async executionRequest(path, options) {
+      calls.push({ path, method: options.method })
+      return new Response(JSON.stringify({ providers: [{ id: 'codex', location: 'server' }] }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    },
+  }
+  const baseUrl = await withHost(context, {
+    accountSyncService,
+    statusService: { list: async () => { throw new Error('local discovery must not run') } },
+  })
+  const response = await fetch(`${baseUrl}/api/providers?refresh=1`)
+  assert.equal(response.status, 200)
+  assert.equal((await response.json()).providers[0].location, 'server')
+  assert.deepEqual(calls, [{ path: '/api/providers?refresh=1', method: 'GET' }])
+})
+
 test('support repair route preserves explicit non-automatic retry policy', async (context) => {
   const supportRepairService = {
     async run() {

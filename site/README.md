@@ -28,7 +28,7 @@ The macOS and Windows buttons read `public/releases.json`. A platform download s
 - `url` is a real HTTPS artifact URL;
 - `sha256` is the artifact's real 64-character SHA-256 checksum.
 
-The repository intentionally starts with both platforms unavailable. Do not add placeholder files or mark a build signed before verification. After editing the manifest, run `npm test`; validation fails closed when an available entry is incomplete.
+The repository intentionally starts with both platforms unavailable. `releases.json` is the stable download/site feed and `releases-beta.json` is the opt-in desktop beta feed; publishing either channel must preserve the other file. Do not add placeholder artifacts or mark a build signed before verification. After editing either manifest, run `npm test`; validation fails closed when an available entry is incomplete or a file declares the wrong channel.
 
 Example shape for a real platform entry:
 

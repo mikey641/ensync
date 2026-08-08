@@ -30,6 +30,11 @@ const VERCEL_NAMES = [
   'VERCEL_PROJECT_ID',
 ]
 
+const GITHUB_RELEASE_NAMES = [
+  'ENSYNC_RELEASE_REPOSITORY',
+  'ENSYNC_RELEASE_TOKEN',
+]
+
 function hasValue(environment, name) {
   return typeof environment[name] === 'string' && environment[name].trim().length > 0
 }
@@ -88,6 +93,7 @@ export function validateReleasePrerequisites(environment = process.env) {
   const errors = []
   const mac = inspectGroup(environment, MAC_SIGNING_NAMES)
   const vercel = inspectGroup(environment, VERCEL_NAMES)
+  const githubRelease = inspectGroup(environment, GITHUB_RELEASE_NAMES)
 
   if (!mac.complete) errors.push(incompleteMessage('macOS signing and notarization', mac))
   try {
@@ -96,15 +102,22 @@ export function validateReleasePrerequisites(environment = process.env) {
     errors.push(error instanceof Error ? error.message : String(error))
   }
   if (!vercel.complete) errors.push(incompleteMessage('Vercel production deployment', vercel))
+  if (!githubRelease.complete) errors.push(incompleteMessage('public GitHub binary release', githubRelease))
+
+  const releaseRepository = environment.ENSYNC_RELEASE_REPOSITORY
+  if (hasValue(environment, 'ENSYNC_RELEASE_REPOSITORY')
+    && !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(releaseRepository.trim())) {
+    errors.push('ENSYNC_RELEASE_REPOSITORY must be an owner/repository name.')
+  }
 
   const tag = environment.GITHUB_REF_NAME
   if (tag && !/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
     errors.push(`Release tag ${tag} is not a supported semantic version tag.`)
   }
   const visibility = environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY
-  if (visibility && visibility !== 'public') {
-    errors.push('The release repository must be public because the production manifest uses public GitHub asset URLs.')
-  }
+  if (visibility !== 'public') errors.push(
+    'The binary release repository must exist and be verified public because the production manifest uses public GitHub asset URLs.',
+  )
   return errors
 }
 
@@ -114,4 +127,5 @@ export const RELEASE_SECRET_NAMES = Object.freeze({
   windowsAzureConfig: WINDOWS_AZURE_CONFIG_NAMES,
   windowsAzureAuth: WINDOWS_AZURE_AUTH_NAMES,
   vercel: VERCEL_NAMES,
+  githubRelease: GITHUB_RELEASE_NAMES,
 })

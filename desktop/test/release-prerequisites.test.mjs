@@ -12,6 +12,8 @@ function completeEnvironment() {
   for (const name of RELEASE_SECRET_NAMES.macos) environment[name] = `value-${name}`
   for (const name of RELEASE_SECRET_NAMES.windowsCertificate) environment[name] = `value-${name}`
   for (const name of RELEASE_SECRET_NAMES.vercel) environment[name] = `value-${name}`
+  for (const name of RELEASE_SECRET_NAMES.githubRelease) environment[name] = `value-${name}`
+  environment.ENSYNC_RELEASE_REPOSITORY = 'ensync/ensync-releases'
   environment.GITHUB_REF_NAME = 'v1.2.3'
   environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY = 'public'
   return environment
@@ -44,12 +46,14 @@ test('release preflight rejects partial, competing, or missing signing configura
 
   const privateRelease = completeEnvironment()
   privateRelease.ENSYNC_RELEASE_REPOSITORY_VISIBILITY = 'private'
-  assert.match(validateReleasePrerequisites(privateRelease)[0], /must be public/)
+  assert.match(validateReleasePrerequisites(privateRelease)[0], /verified public/)
 
   const errors = validateReleasePrerequisites({ GITHUB_REF_NAME: 'release-latest' })
-  assert.equal(errors.length, 4)
+  assert.equal(errors.length, 6)
   assert.equal(errors.some((error) => error.includes('macOS')), true)
   assert.equal(errors.some((error) => error.includes('Windows')), true)
   assert.equal(errors.some((error) => error.includes('Vercel')), true)
+  assert.equal(errors.some((error) => error.includes('GitHub')), true)
+  assert.equal(errors.some((error) => error.includes('verified public')), true)
   assert.equal(errors.some((error) => error.includes('semantic version')), true)
 })
