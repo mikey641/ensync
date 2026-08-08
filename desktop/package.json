@@ -21,7 +21,7 @@
     "start": "npm run open",
     "open": "npm run build:ui && node scripts/open.mjs",
     "start:foreground": "npm run build:ui && electron .",
-    "test": "node --test test/*.test.mjs",
+    "test": "node test/run-tests.mjs",
     "smoke": "node scripts/smoke.mjs",
     "verify": "npm run build:ui && npm test && npm run smoke",
     "release:preflight": "node scripts/release-preflight.mjs",
