@@ -8,7 +8,7 @@
     "dev:web": "vite",
     "host": "node host/server.mjs",
     "sync-service": "node sync-service/server.mjs",
-    "test:host": "node --test host/*.test.mjs",
+    "test:host": "node host/run-tests.mjs",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
     "lint": "eslint .",
     "release:verify": "npm run lint && npm run test:host && npm --prefix desktop run verify && npm --prefix site test",
