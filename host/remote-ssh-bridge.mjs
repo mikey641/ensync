@@ -31,6 +31,7 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
   const PROTOCOL = 'ensync-ssh-bridge-v1'
   const MAX_PROBE_BYTES = 512 * 1024
   const MAX_CHAT_BYTES = 4 * 1024 * 1024
+  const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
   const PAID_PROVIDER_KEYS = new Set([
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
@@ -402,7 +403,7 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       await runGit(gitExecutable, repository.path, ['read-tree', repository.head], {
         environment: snapshotEnvironment,
       })
-      await runGit(gitExecutable, repository.path, ['add', '-A', '--', '.'], {
+      await runGit(gitExecutable, repository.path, [...BYTE_PRESERVING_GIT_CONFIG, 'add', '-A', '--', '.'], {
         environment: snapshotEnvironment,
         code: 'shared_checkout_snapshot_failed',
         message: 'Git could not capture the remote shared checkout for the protected workspace.',
@@ -609,12 +610,15 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
           }
         }
         await fs.promises.mkdir(path.dirname(configuredPath), { recursive: true, mode: 0o700 })
+        const worktreeArgs = branchExists
+          ? ['worktree', 'add', configuredPath, branch]
+          : ['worktree', 'add', '-b', branch, configuredPath, startingPoint]
         await runGit(
           git.executable,
           repositoryPath,
-          branchExists
-            ? ['worktree', 'add', configuredPath, branch]
-            : ['worktree', 'add', '-b', branch, configuredPath, startingPoint],
+          seededFromSharedCheckout
+            ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
+            : worktreeArgs,
           {
             environment,
             code: 'managed_worktree_create_failed',
