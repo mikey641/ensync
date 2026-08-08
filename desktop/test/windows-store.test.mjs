@@ -64,7 +64,7 @@ test('Store package attestation verifies AppX identity without claiming Store ce
   })
   assert.throws(
     () => verifyWindowsStoreManifest(manifest.replace('Version="1.1.42.0"', 'Version="1.1.41.0"'), expected),
-    /packageVersion/,
+    /packageVersion.*expected "1\.1\.42\.0", received "1\.1\.41\.0"/,
   )
 })
 
