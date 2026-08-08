@@ -27,6 +27,7 @@
     "release:preflight": "node scripts/release-preflight.mjs",
     "package:mac": "npm run verify && node scripts/package-native.mjs --platform macos && node scripts/attest-build.mjs --platform macos",
     "package:win": "npm run verify && node scripts/package-native.mjs --platform windows && node scripts/attest-build.mjs --platform windows",
+    "package:win-store": "npm run verify && node scripts/package-native.mjs --platform windows-store && node scripts/attest-build.mjs --platform windows-store",
     "manifest": "node scripts/generate-release.mjs"
   },
   "devDependencies": {
@@ -130,6 +131,21 @@
       "createStartMenuShortcut": true,
       "shortcutName": "Ensync",
       "uninstallDisplayName": "Ensync"
+    },
+    "appx": {
+      "applicationId": "Ensync",
+      "displayName": "Ensync",
+      "artifactName": "${productName}-${version}-windows-store-${arch}.${ext}",
+      "languages": [
+        "en-US"
+      ],
+      "capabilities": [
+        "runFullTrust",
+        "internetClient",
+        "privateNetworkClientServer"
+      ],
+      "minVersion": "10.0.17763.0",
+      "showNameOnTiles": true
     }
   }
 }

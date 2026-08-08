@@ -22,15 +22,10 @@ jobs:
       ENSYNC_APPLE_ID: ${{ secrets.ENSYNC_APPLE_ID }}
       ENSYNC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.ENSYNC_APPLE_APP_SPECIFIC_PASSWORD }}
       ENSYNC_APPLE_TEAM_ID: ${{ secrets.ENSYNC_APPLE_TEAM_ID }}
-      WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
-      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
-      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
-      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
@@ -39,7 +34,7 @@ jobs:
       GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify production signing and deployment inputs
+      - name: Verify macOS signing, Store identity, and deployment inputs
         shell: bash
         run: |
           visibility=""
@@ -84,19 +79,14 @@ jobs:
             desktop/release/*.zip
             desktop/release/attestation-macos.json
 
-  windows:
+  windows-store:
     needs: preflight
     runs-on: windows-2025
     env:
-      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
-      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
-      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
-      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -114,20 +104,19 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
-      - name: Build, test, sign when configured, and attest Windows artifacts
-        run: npm --prefix desktop run package:win
+      - name: Build and attest the private Partner Center upload package
+        run: npm --prefix desktop run package:win-store
       - uses: actions/upload-artifact@v4
         with:
-          name: ensync-windows-${{ github.ref_name }}
+          name: ensync-windows-store-${{ github.ref_name }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            desktop/release/*.exe
-            desktop/release/*.zip
-            desktop/release/attestation-windows.json
+            desktop/release/*.appx
+            desktop/release/attestation-windows-store.json
 
   publish:
-    needs: [macos, windows]
+    needs: [macos, windows-store]
     runs-on: ubuntu-24.04
     env:
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
@@ -139,7 +128,7 @@ jobs:
           node-version: 20
       - uses: actions/download-artifact@v4
         with:
-          pattern: ensync-*-${{ github.ref_name }}
+          name: ensync-macos-${{ github.ref_name }}
           path: release-input
       - name: Select the isolated release channel
         shell: bash
@@ -172,7 +161,7 @@ jobs:
             gh release create "${GITHUB_REF_NAME}" release-assets/* \
               --repo "$ENSYNC_RELEASE_REPOSITORY" \
               --title "Ensync ${GITHUB_REF_NAME}" \
-              --notes "Verified Ensync desktop artifacts built from private source revision ${GITHUB_SHA}." \
+              --notes "Verified Ensync macOS artifacts built from private source revision ${GITHUB_SHA}. The Windows Store package remains a private Actions artifact pending Partner Center certification." \
               "${prerelease[@]}"
           fi
       - name: Publish the verified manifest to the production download and update feed

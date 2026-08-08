@@ -1,20 +1,24 @@
 import { spawn } from 'node:child_process'
-import { unlink } from 'node:fs/promises'
+import { readFile, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveWindowsSigning } from './release-prerequisites.mjs'
+import { resolveWindowsStorePackageConfig } from './windows-store.mjs'
 
 const platformIndex = process.argv.indexOf('--platform')
 const platform = platformIndex >= 0 ? process.argv[platformIndex + 1] : null
-if (!['macos', 'windows'].includes(platform)) {
-  throw new Error('Use --platform macos or --platform windows.')
+if (!['macos', 'windows', 'windows-store'].includes(platform)) {
+  throw new Error('Use --platform macos, windows, or windows-store.')
 }
 if (platform === 'macos' && process.platform !== 'darwin') {
   throw new Error('macOS artifacts must be packaged on macOS.')
 }
-if (platform === 'windows' && process.platform !== 'win32') {
+if (platform.startsWith('windows') && process.platform !== 'win32') {
   throw new Error('Windows artifacts must be packaged on Windows.')
 }
+
+const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const packageJson = JSON.parse(await readFile(join(desktopRoot, 'package.json'), 'utf8'))
 
 const certificate = process.env.CSC_LINK
 const password = process.env.CSC_KEY_PASSWORD
@@ -28,9 +32,15 @@ const windowsSigning = platform === 'windows'
       WINDOWS_CSC_KEY_PASSWORD: password,
     })
   : null
+const windowsStore = platform === 'windows-store'
+  ? resolveWindowsStorePackageConfig(process.env, { productVersion: packageJson.version })
+  : null
+if (windowsStore && (certificate || password)) {
+  throw new Error('Windows Store packages must use Microsoft Store certification, not CSC_LINK signing inputs.')
+}
 
 const env = { ...process.env }
-if (!certificate && windowsSigning?.mode !== 'azure') {
+if (windowsStore || (!certificate && windowsSigning?.mode !== 'azure')) {
   // Prevent electron-builder from discovering an unrelated local identity. A
   // package is signed only when the documented certificate inputs are explicit.
   env.CSC_IDENTITY_AUTO_DISCOVERY = 'false'
@@ -38,14 +48,15 @@ if (!certificate && windowsSigning?.mode !== 'azure') {
   delete env.CSC_IDENTITY_AUTO_DISCOVERY
 }
 
-const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 await unlink(join(desktopRoot, 'release', `attestation-${platform}.json`)).catch((error) => {
   if (error?.code !== 'ENOENT') throw error
 })
 const builderCli = resolve(desktopRoot, 'node_modules', 'electron-builder', 'out', 'cli', 'cli.js')
 const args = platform === 'macos'
   ? [builderCli, '--mac', '--universal', '--publish', 'never']
-  : [builderCli, '--win', '--x64', '--publish', 'never']
+  : platform === 'windows-store'
+    ? [builderCli, '--win', 'appx', '--x64', '--publish', 'never']
+    : [builderCli, '--win', '--x64', '--publish', 'never']
 
 if (certificate || windowsSigning?.mode === 'azure') {
   args.push('--config.forceCodeSigning=true')
@@ -54,6 +65,15 @@ if (windowsSigning?.mode === 'azure') {
   for (const [name, value] of Object.entries(windowsSigning.azureSignOptions)) {
     args.push(`--config.win.azureSignOptions.${name}=${value}`)
   }
+}
+if (windowsStore) {
+  args.push(
+    `--config.buildVersion=${windowsStore.packageVersion}`,
+    `--config.appx.applicationId=${windowsStore.applicationId}`,
+    `--config.appx.identityName=${windowsStore.identityName}`,
+    `--config.appx.publisher=${windowsStore.publisher}`,
+    `--config.appx.publisherDisplayName=${windowsStore.publisherDisplayName}`,
+  )
 }
 
 const child = spawn(process.execPath, args, {

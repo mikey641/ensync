@@ -10,7 +10,7 @@ The UI is a React/Vite prototype. A production build should use a small native d
 ## Boundaries
 
 1. Desktop and browser apps are authenticated views. They own rendering, physical-device presentation state, and credential prompts, but account conversations, portable settings, and executable task identity belong to the account server.
-2. The always-on account server runs a private loopback Ensync Host which owns projects, CLI discovery and login, process isolation, provider sessions, job queues, usage telemetry, Git worktrees, and execution. A cloud VM is one deployment option, not a protocol requirement.
+2. The always-on account server runs a private loopback Ensync Host which owns projects, CLI discovery and login, process isolation, provider sessions, job queues, usage telemetry, Git worktrees, and execution. A cloud VM is one deployment option, not a protocol requirement. Desktop clients are authenticated views of this server-owned state; installing a Windows client through Microsoft Store does not move execution or provider credentials onto that client.
 3. Agent adapters normalize streaming events, session IDs, limit/reset signals, tool calls, and final responses.
 4. The router retries another subscription only for availability, authentication, quota, or capacity failures. It must not replay after a mutating tool call.
 5. The context compiler reads `.relay` and emits thin provider-specific instruction files without duplicating durable project facts.

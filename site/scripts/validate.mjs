@@ -2,7 +2,7 @@ import { readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { resolveDownload } from '../public/release-manifest.mjs';
+import { resolveDownload, resolveWindowsStoreListing } from '../public/release-manifest.mjs';
 
 const siteRoot = resolve(fileURLToPath(new URL('../', import.meta.url)));
 const publicRoot = resolve(siteRoot, 'public');
@@ -112,6 +112,11 @@ try {
       errors.push(`${name} must be null or a verified HTTPS URL.`);
     }
   }
+
+  const storeUrl = config.downloads?.windowsStoreUrl;
+  if (storeUrl !== null && !resolveWindowsStoreListing(config).available) {
+    errors.push('downloads.windowsStoreUrl must be null or an exact https://apps.microsoft.com/detail/... listing URL.');
+  }
 } catch (error) {
   errors.push(`Invalid site-config.json: ${error.message}`);
 }
@@ -120,5 +125,5 @@ if (errors.length) {
   console.error(errors.map((error) => `- ${error}`).join('\n'));
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${requiredFiles.length + requiredBinaryFiles.length} public files and manifest-gated macOS/Windows downloads.`);
+  console.log(`Validated ${requiredFiles.length + requiredBinaryFiles.length} public files, manifest-gated macOS downloads, and the Microsoft Store Windows link.`);
 }

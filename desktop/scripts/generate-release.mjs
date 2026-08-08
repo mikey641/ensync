@@ -45,13 +45,13 @@ async function sha256(file) {
 }
 
 const inputFiles = await walk(inputRoot)
-const artifactExtensions = new Set(['.dmg', '.exe', '.zip'])
+const artifactExtensions = new Set(['.dmg', '.zip'])
 const artifacts = inputFiles.filter((file) => artifactExtensions.has(extname(file).toLowerCase()))
 const attestations = new Map()
 
-for (const file of inputFiles.filter((item) => /^attestation-(macos|windows)\.json$/.test(basename(item)))) {
+for (const file of inputFiles.filter((item) => basename(item) === 'attestation-macos.json')) {
   const attestation = JSON.parse(await readFile(file, 'utf8'))
-  if (attestation.schemaVersion !== 1 || !['macos', 'windows'].includes(attestation.platform)) {
+  if (attestation.schemaVersion !== 1 || attestation.platform !== 'macos') {
     throw new Error(`Invalid build attestation: ${relative(inputRoot, file)}`)
   }
   if (attestation.version !== version) {
@@ -77,7 +77,10 @@ for (const artifact of artifacts.sort()) {
   records.push({ name, bytes: details.size, sha256: await sha256(artifact) })
 }
 
-function platformRelease(platform, marker, installerExtension) {
+function macosRelease() {
+  const platform = 'macos'
+  const marker = '-mac-'
+  const installerExtension = '.dmg'
   const attestation = attestations.get(platform)
   const platformRecords = records.filter((record) => record.name.includes(marker))
   const installer = platformRecords.filter((record) => record.name.endsWith(installerExtension))
@@ -95,7 +98,7 @@ function platformRelease(platform, marker, installerExtension) {
   if (attestation.signed !== true) {
     throw new Error(`${platform} artifacts are unsigned; refusing to create a public release.`)
   }
-  if (platform === 'macos' && attestation.notarized !== true) {
+  if (attestation.notarized !== true) {
     throw new Error('macOS artifacts are not notarized; refusing to create a public release.')
   }
   const primary = installer[0]
@@ -106,13 +109,13 @@ function platformRelease(platform, marker, installerExtension) {
     url: `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(primary.name)}`,
     sha256: primary.sha256,
     signed: true,
-    notarized: platform === 'macos' ? true : null,
+    notarized: true,
     architectures: attestation.architectures ?? [],
   }
 }
 
-if (records.length !== 4) {
-  throw new Error(`Expected four real release artifacts (DMG, NSIS EXE, and two ZIP files), found ${records.length}.`)
+if (records.length !== 2) {
+  throw new Error(`Expected two real public macOS release artifacts (DMG and ZIP), found ${records.length}.`)
 }
 
 const checksums = `${records.map((record) => `${record.sha256}  ${record.name}`).join('\n')}\n`
@@ -127,10 +130,19 @@ const manifest = {
     notesUrl: `https://github.com/${repository}/releases/tag/${tag}`,
   },
   platforms: {
-    macos: platformRelease('macos', '-mac-', '.dmg'),
-    windows: platformRelease('windows', '-windows-', '.exe'),
+    macos: macosRelease(),
+    windows: {
+      status: 'unavailable',
+      reason: 'Windows releases are delivered through Microsoft Store after Partner Center certification.',
+      version: null,
+      url: null,
+      sha256: null,
+      signed: false,
+      notarized: null,
+      architectures: [],
+    },
   },
 }
 const manifestName = channel === 'beta' ? 'releases-beta.json' : 'releases.json'
 await writeFile(join(outputRoot, manifestName), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' })
-console.log(`Prepared ${records.length} verified artifacts, checksums, and ${manifestName} for ${tag}.`)
+console.log(`Prepared ${records.length} verified public macOS artifacts, checksums, and ${manifestName} for ${tag}.`)

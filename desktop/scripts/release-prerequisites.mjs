@@ -1,3 +1,5 @@
+import { resolveWindowsStorePackageConfig, WINDOWS_STORE_INPUT_NAMES } from './windows-store.mjs'
+
 const MAC_SIGNING_NAMES = [
   'MACOS_CSC_LINK',
   'MACOS_CSC_KEY_PASSWORD',
@@ -96,11 +98,8 @@ export function validateReleasePrerequisites(environment = process.env) {
   const githubRelease = inspectGroup(environment, GITHUB_RELEASE_NAMES)
 
   if (!mac.complete) errors.push(incompleteMessage('macOS signing and notarization', mac))
-  try {
-    resolveWindowsSigning(environment, { required: true })
-  } catch (error) {
-    errors.push(error instanceof Error ? error.message : String(error))
-  }
+  const store = inspectGroup(environment, WINDOWS_STORE_INPUT_NAMES)
+  if (!store.complete) errors.push(incompleteMessage('Windows Store package identity', store))
   if (!vercel.complete) errors.push(incompleteMessage('Vercel production deployment', vercel))
   if (!githubRelease.complete) errors.push(incompleteMessage('public GitHub binary release', githubRelease))
 
@@ -114,6 +113,13 @@ export function validateReleasePrerequisites(environment = process.env) {
   if (tag && !/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
     errors.push(`Release tag ${tag} is not a supported semantic version tag.`)
   }
+  if (store.complete && tag && /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
+    try {
+      resolveWindowsStorePackageConfig(environment, { productVersion: tag.slice(1) })
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : String(error))
+    }
+  }
   const visibility = environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY
   if (visibility !== 'public') errors.push(
     'The binary release repository must exist and be verified public because the production manifest uses public GitHub asset URLs.',
@@ -126,6 +132,7 @@ export const RELEASE_SECRET_NAMES = Object.freeze({
   windowsCertificate: WINDOWS_CERTIFICATE_NAMES,
   windowsAzureConfig: WINDOWS_AZURE_CONFIG_NAMES,
   windowsAzureAuth: WINDOWS_AZURE_AUTH_NAMES,
+  windowsStore: WINDOWS_STORE_INPUT_NAMES,
   vercel: VERCEL_NAMES,
   githubRelease: GITHUB_RELEASE_NAMES,
 })

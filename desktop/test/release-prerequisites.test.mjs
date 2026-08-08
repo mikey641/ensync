@@ -10,7 +10,10 @@ import {
 function completeEnvironment() {
   const environment = {}
   for (const name of RELEASE_SECRET_NAMES.macos) environment[name] = `value-${name}`
-  for (const name of RELEASE_SECRET_NAMES.windowsCertificate) environment[name] = `value-${name}`
+  environment.ENSYNC_WINDOWS_STORE_IDENTITY_NAME = '12345Ensync'
+  environment.ENSYNC_WINDOWS_STORE_PUBLISHER = 'CN=12345678-1234-1234-1234-123456789012'
+  environment.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME = 'Mikey Hasson'
+  environment.GITHUB_RUN_NUMBER = '42'
   for (const name of RELEASE_SECRET_NAMES.vercel) environment[name] = `value-${name}`
   for (const name of RELEASE_SECRET_NAMES.githubRelease) environment[name] = `value-${name}`
   environment.ENSYNC_RELEASE_REPOSITORY = 'ensync/ensync-releases'
@@ -19,7 +22,7 @@ function completeEnvironment() {
   return environment
 }
 
-test('release preflight accepts one complete signing route per platform and Vercel credentials', () => {
+test('release preflight accepts macOS signing, Store identity, and deployment credentials', () => {
   assert.deepEqual(validateReleasePrerequisites(completeEnvironment()), [])
 })
 
@@ -40,6 +43,7 @@ test('release preflight rejects partial, competing, or missing signing configura
   )
 
   const competing = completeEnvironment()
+  for (const name of RELEASE_SECRET_NAMES.windowsCertificate) competing[name] = `value-${name}`
   for (const name of RELEASE_SECRET_NAMES.windowsAzureConfig) competing[name] = `value-${name}`
   for (const name of RELEASE_SECRET_NAMES.windowsAzureAuth) competing[name] = `value-${name}`
   assert.throws(() => resolveWindowsSigning(competing), /not both/)
@@ -51,7 +55,7 @@ test('release preflight rejects partial, competing, or missing signing configura
   const errors = validateReleasePrerequisites({ GITHUB_REF_NAME: 'release-latest' })
   assert.equal(errors.length, 6)
   assert.equal(errors.some((error) => error.includes('macOS')), true)
-  assert.equal(errors.some((error) => error.includes('Windows')), true)
+  assert.equal(errors.some((error) => error.includes('Windows Store')), true)
   assert.equal(errors.some((error) => error.includes('Vercel')), true)
   assert.equal(errors.some((error) => error.includes('GitHub')), true)
   assert.equal(errors.some((error) => error.includes('verified public')), true)

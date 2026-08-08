@@ -19,7 +19,7 @@
     },
     "windows": {
       "status": "unavailable",
-      "reason": "No signed Windows beta build has been published yet.",
+      "reason": "The Microsoft Store beta package has not been certified for a package flight yet.",
       "version": null,
       "url": null,
       "sha256": null,

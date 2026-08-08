@@ -38,9 +38,9 @@ The packaged host still launches the user's installed coding CLIs. Provider subs
 
 Settings shows `app.getVersion()` and the exact native update phase. Ensync does not check in the background. **Check for updates** fetches `https://ensync.vercel.app/releases.json` with cache disabled only after a click. It offers a release only when the current packaged app is signed and the manifest has a newer matching platform version, a real HTTPS installer, a valid SHA-256, verified signing, and explicit macOS notarization.
 
-**Download update** is a second action. Progress uses only received bytes and a real `Content-Length`; when the total is absent, no percentage is invented. After download, Ensync verifies the manifest checksum and requires the installer publisher to match the installed app: macOS compares the Developer ID team and Gatekeeper-assesses the signed/notarized DMG; Windows compares the valid Authenticode certificate subject. A mismatch deletes the temporary installer and never enables opening it.
+**Download update** is a second action for direct releases. Progress uses only received bytes and a real `Content-Length`; when the total is absent, no percentage is invented. After download, Ensync verifies the manifest checksum and requires the installer publisher to match the installed app: macOS compares the Developer ID team and Gatekeeper-assesses the signed/notarized DMG. A mismatch deletes the temporary installer and never enables opening it.
 
-**Open disk image / Open installer** is a third action. It asks the operating system to open the verified artifact but does not quit Ensync, restart it, run a silent install, or claim completion. Development mode, unsupported platforms, invalid or missing HTTPS feed configuration, unsigned installed builds, unsigned/unnotarized releases, failed checks, and invalid downloads are visibly unavailable or errored rather than treated as current.
+**Open disk image** is a third action. It asks macOS to open the verified artifact but does not quit Ensync, restart it, run a silent install, or claim completion. Microsoft Store Windows installations skip this direct updater entirely: Settings reports **Managed by Store**, and Microsoft Store owns signing, installation, and updates. Development mode, unsupported platforms, invalid or missing HTTPS feed configuration, unsigned installed builds, unsigned/unnotarized releases, failed checks, and invalid downloads are visibly unavailable or errored rather than treated as current.
 
 ## Local setup
 
@@ -71,12 +71,12 @@ Build macOS artifacts on macOS and Windows artifacts on Windows:
 
 ```sh
 npm --prefix desktop run package:mac
-npm --prefix desktop run package:win
+npm --prefix desktop run package:win-store
 ```
 
-The macOS command creates a universal DMG and ZIP. The Windows command creates an x64 NSIS installer and ZIP. Outputs and a build attestation are written under `desktop/release/`. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
+The macOS command creates a universal DMG and ZIP. The Store command creates one x64 AppX whose manifest identity must exactly match Partner Center. Outputs and a build attestation are written under `desktop/release/`. The AppX attestation deliberately says certification is pending; the file remains private until Microsoft accepts it. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
 
-## Signing and notarization secrets
+## Release credentials and Store identity
 
 Unsigned local builds work for testing, but their generated site manifest remains unavailable. Signing is activated only when these secrets are supplied to the release workflow:
 
@@ -87,36 +87,37 @@ Unsigned local builds work for testing, but their generated site manifest remain
 | `ENSYNC_APPLE_ID` | same name | Apple account used by notarytool |
 | `ENSYNC_APPLE_APP_SPECIFIC_PASSWORD` | same name | App-specific Apple password |
 | `ENSYNC_APPLE_TEAM_ID` | same name | Apple Developer team identifier |
-| `WINDOWS_CSC_LINK` | `CSC_LINK` on Windows | Base64 Windows code-signing certificate or secure certificate URL |
-| `WINDOWS_CSC_KEY_PASSWORD` | `CSC_KEY_PASSWORD` on Windows | Windows certificate password |
-| `ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME` | same name | Microsoft Trusted Signing certificate common name |
-| `ENSYNC_WINDOWS_AZURE_ENDPOINT` | same name | Trusted Signing regional endpoint |
-| `ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME` | same name | Trusted Signing certificate profile |
-| `ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME` | same name | Trusted Signing account name |
-| `AZURE_TENANT_ID` | same name | Microsoft Entra tenant for Trusted Signing |
-| `AZURE_CLIENT_ID` | same name | Trusted Signing service principal application ID |
-| `AZURE_CLIENT_SECRET` | same name | Trusted Signing service principal secret |
 | `VERCEL_TOKEN` | release publish job | Deploy the verified release manifest to the public site/update feed |
 | `VERCEL_ORG_ID` | release publish job | Exact Vercel team/account containing the Ensync project |
 | `VERCEL_PROJECT_ID` | release publish job | Exact Vercel `ensync` project identifier |
 | `ENSYNC_RELEASE_TOKEN` | release preflight/publish jobs | Least-privilege token with release-write access to the separate public binary repository |
 
-Set the non-secret GitHub Actions repository variable `ENSYNC_RELEASE_REPOSITORY` to the public binary repository in `owner/repository` form. The source repository may remain private; its workflow token is read-only, and the dedicated release token is used only for public release assets.
+Set these non-secret GitHub Actions repository variables:
 
-Windows may use either the PFX pair or all seven Microsoft Trusted Signing values; configuring both modes or only part of one mode fails before packaging. The packaging wrapper disables certificate auto-discovery unless an explicit signing mode is complete and forces code signing whenever production credentials are supplied. The notarization hooks do nothing when all three Apple notarization values are absent and fail the build if only some are present. The signed app is notarized before packaging; the signed DMG is then notarized and stapled after artifact creation. Build attestations derive `signed` from `codesign --verify` on both app and DMG or PowerShell `Get-AuthenticodeSignature`; they do not infer it from the existence of secrets. macOS notarization is separately checked with `stapler validate` on both app and DMG.
+| Repository variable | Source |
+| --- | --- |
+| `ENSYNC_RELEASE_REPOSITORY` | Public binary repository in `owner/repository` form |
+| `ENSYNC_WINDOWS_STORE_IDENTITY_NAME` | Exact Partner Center **Package/Identity/Name** value |
+| `ENSYNC_WINDOWS_STORE_PUBLISHER` | Exact Partner Center **Package/Identity/Publisher** value |
+| `ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME` | Exact Partner Center publisher display name |
+
+The source repository may remain private; its workflow token is read-only, and the dedicated release token is used only for public macOS release assets. Store identity values are public manifest data, not credentials, but the workflow still refuses missing, malformed, or mismatched values.
+
+The Windows Store package wrapper disables certificate auto-discovery, injects only the guarded Partner Center identity, and maps the product version plus GitHub run number to a monotonic four-part Store package version ending in `.0`. It verifies those exact fields from the produced `AppxManifest.xml`. Store signing is not claimed before Partner Center certification. The notarization hooks do nothing when all three Apple notarization values are absent and fail the build if only some are present. The signed app is notarized before packaging; the signed DMG is then notarized and stapled after artifact creation. macOS attestations derive `signed` from `codesign --verify`, and notarization from `stapler validate`; they do not infer either from secret presence.
 
 ## Release workflow
 
-Pushing a semantic version tag such as `v0.1.0` starts `.github/workflows/desktop-release.yml`. A preflight job first confirms that the separately configured binary repository exists and is public (the manifest uses public GitHub release URLs), its dedicated token exists, macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The source repository remains private. The remaining jobs:
+Pushing a semantic version tag such as `v0.1.0` starts `.github/workflows/desktop-release.yml`. A preflight job first confirms that the separately configured binary repository exists and is public, its dedicated token exists, macOS signing/notarization is complete, all three exact Partner Center identity values exist, and Vercel deployment credentials exist without printing their values. The source repository remains private. The remaining jobs:
 
 1. build and test on native macOS and Windows runners;
-2. upload only the signed/notarized DMG, signed NSIS EXE, ZIP archives, and verification attestations produced by those jobs;
-3. compare every artifact's hash and size against its attestation;
-4. require verified Windows signing plus verified macOS signing and notarization;
-5. generate `SHA256SUMS.txt` and the shared schema-v1 `releases.json` only after all four production artifacts pass those checks;
-6. create the release in the separate public binary repository and upload those real files;
-7. copy that exact generated manifest into `site/public/releases.json` for stable or `site/public/releases-beta.json` for prerelease tags, recover the opposite channel's current manifest from the fixed HTTPS production origin when present, validate both feeds together, and deploy the production Vercel site using the explicit Vercel release secrets.
+2. retain the AppX and its pending-certification attestation as a private, short-lived Actions artifact;
+3. compare the DMG and ZIP hashes and sizes against the signed/notarized macOS attestation;
+4. generate `SHA256SUMS.txt` and the schema-v1 manifest only after both public macOS artifacts pass;
+5. create the release in the separate public binary repository with only those verified macOS files;
+6. copy that exact generated manifest into `site/public/releases.json` for stable or `site/public/releases-beta.json` for prerelease tags, recover the opposite channel's current manifest from production when present, validate both feeds together, and deploy the production Vercel site.
 
-If signing or macOS notarization cannot be verified, the publish job fails before creating a GitHub release. Native CI artifacts retain their short-lived test-build attestations for diagnosis, but no unsigned installer becomes a public release. If Vercel credentials or deployment fail after GitHub publication, installed apps and the site continue to see the previous production manifest and do not fabricate availability. Re-running the same tagged workflow repairs or replaces its verified release assets before retrying the feed deployment.
+If macOS signing or notarization cannot be verified, the publish job fails before creating a GitHub release. The AppX is never copied into public release assets. Upload it to Partner Center, use a private package flight for beta, and publish the certified listing for stable. Only after Microsoft provides the real `https://apps.microsoft.com/detail/...` product URL may `site/public/site-config.json` enable the Windows button. If Vercel deployment fails, installed apps and the site continue to see the previous production configuration.
 
-The manual flow follows Electron's requirement that macOS updates use signed apps and electron-builder's signed macOS/NSIS artifact guidance, while deliberately avoiding background `autoUpdater` behavior: [Electron updates](https://www.electronjs.org/docs/latest/tutorial/updates) and [electron-builder auto update](https://www.electron.build/docs/features/auto-update/).
+While Apple approval is pending, `.github/workflows/windows-store-package.yml` can be run manually with a semantic version. It creates the same private AppX without tagging or publishing a GitHub release. Download that Actions artifact and submit it in Partner Center; do not upload the attestation JSON as a Store package.
+
+The direct macOS flow follows Electron's requirement that updates use signed apps while deliberately avoiding background `autoUpdater` behavior. Windows uses Store-managed updates instead: [Electron updates](https://www.electronjs.org/docs/latest/tutorial/updates) and [electron-builder AppX](https://www.electron.build/appx.html).
