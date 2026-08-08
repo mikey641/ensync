@@ -98,7 +98,10 @@ export function verifyWindowsStoreManifest(source, expected) {
   const fields = ['identityName', 'publisher', 'publisherDisplayName', 'packageVersion', 'applicationId']
   for (const field of fields) {
     if (actual[field] !== expected[field]) {
-      throw new Error(`AppX manifest ${field} does not match the guarded Partner Center configuration.`)
+      throw new Error(
+        `AppX manifest ${field} does not match the guarded Partner Center configuration `
+        + `(expected ${JSON.stringify(expected[field])}, received ${JSON.stringify(actual[field])}).`,
+      )
     }
   }
   if (actual.architecture !== 'x64') throw new Error('The AppX manifest is not an x64 package.')
