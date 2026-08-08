@@ -71,6 +71,7 @@ test('Store package attestation verifies AppX identity without claiming Store ce
 test('desktop packaging exposes only the guarded Store command and AppX target', async () => {
   const desktopRoot = resolve(import.meta.dirname, '..')
   const manifest = JSON.parse(await readFile(resolve(desktopRoot, 'package.json'), 'utf8'))
+  assert.equal(manifest.scripts.test, 'node test/run-tests.mjs')
   assert.match(manifest.scripts['package:win-store'], /windows-store/)
   assert.equal(manifest.build.appx.applicationId, 'Ensync')
   assert.deepEqual(manifest.build.appx.capabilities, [
