@@ -101,6 +101,11 @@ for (const [manifestFile, expectedChannel] of [['releases.json', 'stable'], ['re
 
 try {
   const config = JSON.parse(fileContents.get('site-config.json'));
+  const supportEmail = config.support?.email;
+  if (supportEmail !== null && (typeof supportEmail !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(supportEmail))) {
+    errors.push('support.email must be null or a valid email address.');
+  }
+
   const urlValues = [
     ['support.issueTrackerUrl', config.support?.issueTrackerUrl],
     ['support.statusPageUrl', config.support?.statusPageUrl],
@@ -116,6 +121,17 @@ try {
   const storeUrl = config.downloads?.windowsStoreUrl;
   if (storeUrl !== null && !resolveWindowsStoreListing(config).available) {
     errors.push('downloads.windowsStoreUrl must be null or an exact https://apps.microsoft.com/detail/... listing URL.');
+  }
+
+  const privacyPage = fileContents.get('privacy/index.html') ?? '';
+  if (privacyPage.includes('not a published legal privacy policy')) {
+    errors.push('privacy/index.html still disclaims being a legal privacy policy.');
+  }
+  if (!privacyPage.includes('Privacy Policy') || !privacyPage.includes('Information Ensync processes') || !privacyPage.includes('Retention and deletion')) {
+    errors.push('privacy/index.html is missing required privacy-policy disclosures.');
+  }
+  if (supportEmail && (!privacyPage.includes(supportEmail) || !fileContents.get('support/index.html')?.includes(supportEmail))) {
+    errors.push('The configured support email must appear on the privacy and support pages.');
   }
 } catch (error) {
   errors.push(`Invalid site-config.json: ${error.message}`);
