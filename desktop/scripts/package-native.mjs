@@ -47,6 +47,7 @@ if (windowsStore || (!certificate && windowsSigning?.mode !== 'azure')) {
 } else {
   delete env.CSC_IDENTITY_AUTO_DISCOVERY
 }
+if (windowsStore) env.ENSYNC_WINDOWS_STORE_PACKAGE_VERSION = windowsStore.packageVersion
 
 await unlink(join(desktopRoot, 'release', `attestation-${platform}.json`)).catch((error) => {
   if (error?.code !== 'ENOENT') throw error
@@ -68,7 +69,7 @@ if (windowsSigning?.mode === 'azure') {
 }
 if (windowsStore) {
   args.push(
-    `--config.buildVersion=${windowsStore.packageVersion}`,
+    '--config.appxManifestCreated=scripts/appx-manifest-created.cjs',
     `--config.appx.applicationId=${windowsStore.applicationId}`,
     `--config.appx.identityName=${windowsStore.identityName}`,
     `--config.appx.publisher=${windowsStore.publisher}`,
