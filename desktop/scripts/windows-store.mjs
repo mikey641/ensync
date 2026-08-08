@@ -72,7 +72,7 @@ function decodeXml(value) {
 
 function tagAttribute(source, tagName, attributeName) {
   const tag = source.match(new RegExp(`<${tagName}\\b[^>]*>`, 'i'))?.[0]
-  const value = tag?.match(new RegExp(`\\b${attributeName}="([^"]*)"`, 'i'))?.[1]
+  const value = tag?.match(new RegExp(`\\b${attributeName}\\s*=\\s*(["'])(.*?)\\1`, 'i'))?.[2]
   return typeof value === 'string' ? decodeXml(value) : null
 }
 

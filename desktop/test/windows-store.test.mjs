@@ -48,7 +48,7 @@ test('Store identity uses exact guarded Partner Center values', () => {
 test('Store package attestation verifies AppX identity without claiming Store certification', () => {
   const manifest = `<?xml version="1.0" encoding="utf-8"?>
     <Package>
-      <Identity Name="12345Ensync" Publisher="CN=12345678-1234-1234-1234-123456789012" Version="1.1.42.0" ProcessorArchitecture="x64" />
+      <Identity Name="12345Ensync" Publisher='CN=12345678-1234-1234-1234-123456789012' Version="1.1.42.0" ProcessorArchitecture="x64" />
       <Properties><PublisherDisplayName>Mikey &amp; Hasson</PublisherDisplayName></Properties>
       <Applications><Application Id="Ensync" Executable="Ensync.exe" /></Applications>
     </Package>`
