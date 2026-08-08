@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -317,14 +317,23 @@ export class ProjectIsolationService {
         }
         await writeOwner()
 
+        const refreshOwner = async () => {
+          const current = JSON.parse(await readFile(ownerPath, 'utf8'))
+          if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
+          const heartbeatAt = new Date(this.#now())
+          // Keep the owner record immutable after acquisition. Replacing an
+          // existing file can fail on Windows while another Host is reading it,
+          // whereas updating timestamps preserves atomic metadata reads and is
+          // already the conservative freshness source used by stale detection.
+          await utimes(ownerPath, heartbeatAt, heartbeatAt)
+        }
+
         const heartbeat = setInterval(() => {
           if (released || heartbeatInFlight) return
           heartbeatInFlight = true
           void (async () => {
             try {
-              const current = JSON.parse(await readFile(ownerPath, 'utf8'))
-              if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
-              await writeOwner()
+              await refreshOwner()
             } catch (error) {
               if (released) return
               failure = new ProjectIsolationError(

@@ -117,6 +117,10 @@ test('separate Host instances allow different conversation worktrees in one repo
     join(workspaceLockPath(fixture.repository, commonDirectory, 'window-a:chat-a'), 'owner.json'),
     join(workspaceLockPath(fixture.repository, commonDirectory, 'window-b:chat-b'), 'owner.json'),
   ]
+  const initialHeartbeats = new Map()
+  for (const ownerPath of ownerPaths) {
+    initialHeartbeats.set(ownerPath, JSON.parse(await readFile(ownerPath, 'utf8')).heartbeatAt)
+  }
   // Exercise several rapid heartbeats while reading from another observer.
   // Every read must see a complete JSON record, never an in-place truncation.
   for (let attempt = 0; attempt < 80; attempt += 1) {
@@ -124,6 +128,7 @@ test('separate Host instances allow different conversation worktrees in one repo
       const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
       assert.equal(owner.version, 2)
       assert.equal(owner.pid, process.pid)
+      assert.equal(owner.heartbeatAt, initialHeartbeats.get(ownerPath))
     }
     await new Promise((resolveWait) => setTimeout(resolveWait, 1))
   }
