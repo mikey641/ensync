@@ -81,3 +81,37 @@ export function releaseLabel(download) {
   const architectures = download.architectures.join(' + ');
   return architectures ? `Version ${download.version} · ${architectures}` : `Version ${download.version}`;
 }
+
+export function resolveWindowsStoreListing(config) {
+  const value = config?.downloads?.windowsStoreUrl;
+  if (value === null || value === undefined || value === '') {
+    return unavailable('The Microsoft Store listing is not published yet.');
+  }
+  if (typeof value !== 'string') {
+    return unavailable('The Microsoft Store listing URL is invalid.');
+  }
+
+  try {
+    const url = new URL(value);
+    const detailPath = url.pathname.match(/^\/detail\/(.+)$/i)?.[1];
+    if (
+      url.origin !== 'https://apps.microsoft.com'
+      || url.username
+      || url.password
+      || !detailPath
+      || !detailPath.split('/').every(Boolean)
+    ) {
+      return unavailable('The Microsoft Store listing URL is invalid.');
+    }
+    return {
+      available: true,
+      reason: null,
+      version: null,
+      url: url.href,
+      sha256: null,
+      architectures: [],
+    };
+  } catch {
+    return unavailable('The Microsoft Store listing URL is invalid.');
+  }
+}

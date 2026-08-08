@@ -302,6 +302,7 @@ export function createNativeUpdateManager({
   installedVersion,
   installedBuildId = null,
   platform,
+  storeManaged = false,
   isPackaged,
   executablePath,
   manifestUrl,
@@ -354,6 +355,14 @@ export function createNativeUpdateManager({
     }
     if (!supportedPlatform(platform)) {
       return publish({ phase: 'unavailable', message: 'Native updates are supported only on macOS and Windows.' })
+    }
+    if (platform === 'win32' && storeManaged) {
+      return publish({
+        phase: 'managed',
+        message: 'Updates for this Microsoft Store installation are delivered by Microsoft Store.',
+        canCheck: false,
+        canChangeChannel: false,
+      })
     }
     if (!secureUrl(feeds[channel])) {
       return publish({
@@ -612,6 +621,7 @@ export function createNativeUpdateManager({
   }
 
   async function setChannel(value) {
+    if (platform === 'win32' && storeManaged) return initialize()
     const nextChannel = value === 'stable' || value === 'beta' ? value : null
     if (!nextChannel || nextChannel === channel || operation || state.canCancel) return state
     return runExclusive(async () => {

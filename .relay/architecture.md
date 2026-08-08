@@ -10,7 +10,7 @@ The UI is a React/Vite prototype. A production build should use a small native d
 ## Boundaries
 
 1. The desktop app owns windows, tabs, preferences, credential prompts, and local project selection.
-2. Ensync Host owns CLI discovery, process isolation, subscriptions, job queues, usage telemetry, and encrypted remote access.
+2. Ensync Host owns CLI discovery, process isolation, subscriptions, job queues, usage telemetry, and encrypted remote access. Installing a Windows client through Microsoft Store does not move execution or provider credentials away from the selected local or remote Host.
 3. Agent adapters normalize streaming events, session IDs, limit/reset signals, tool calls, and final responses.
 4. The router retries another subscription only for availability, authentication, quota, or capacity failures. It must not replay after a mutating tool call.
 5. The context compiler reads `.relay` and emits thin provider-specific instruction files without duplicating durable project facts.
