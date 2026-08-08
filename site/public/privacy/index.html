@@ -3,8 +3,8 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="description" content="Ensync privacy, credentials, subscriptions, and billing model." />
-    <title>Privacy &amp; billing — Ensync</title>
+    <meta name="description" content="Ensync Privacy Policy covering account, workspace, execution, website, and support data." />
+    <title>Privacy Policy — Ensync</title>
     <script>try{const t=localStorage.getItem('ensync-site-theme');if(t==='light'||t==='dark')document.documentElement.dataset.theme=t}catch{}</script>
     <link rel="stylesheet" href="/styles.css" />
   </head>
@@ -12,18 +12,45 @@
     <a class="skip-link" href="#main">Skip to content</a>
     <header class="site-header"><div class="container nav-shell"><a class="brand" href="/" aria-label="Ensync home"><span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>ensync</span></a><button class="icon-button menu-button" type="button" data-menu-toggle aria-expanded="false" aria-controls="site-navigation"><span class="sr-only">Toggle navigation</span><span class="menu-lines" aria-hidden="true"></span></button><nav id="site-navigation" class="site-nav" data-navigation aria-label="Main navigation"><a href="/#product">Product</a><a href="/#providers">Providers</a><a href="/docs/">Docs</a><a href="/support/">Help desk</a><a href="/#download">Download</a><button class="theme-button" type="button" data-theme-toggle aria-pressed="false"><span class="theme-dot" aria-hidden="true"></span><span data-theme-label>Dark</span></button></nav></div></header>
     <main id="main">
-      <header class="page-hero"><div class="container"><div><p class="eyebrow">Privacy &amp; billing</p><h1>Clear boundaries.</h1></div><p class="page-lede">A concise product model for local project data, provider credentials, subscription usage, diagnostics, and this static website.</p></div></header>
+      <header class="page-hero"><div class="container"><div><p class="eyebrow">Privacy Policy</p><h1>Your data stays tied to your work.</h1></div><p class="page-lede">This policy explains what Ensync processes, why it is needed, where it goes, and the choices you have.</p></div></header>
       <article class="container legal-content">
-        <p class="updated">Product model · Updated August 6, 2026</p>
-        <div class="callout"><strong>This is a product architecture summary, not a published legal privacy policy.</strong><p>A formal policy must be reviewed and published before collecting accounts, analytics, payments, or support tickets.</p></div>
-        <h2>Website data</h2><p>This static website does not currently include analytics, account creation, payments, or a working support intake. It reads two same-origin JSON files: the release manifest and public site configuration. The light/dark preference is stored in the browser's local storage.</p>
-        <h2>Provider subscriptions</h2><p>Ensync is designed to use each provider's official CLI and account-based subscription mode. Subscription entitlements do not transfer between vendors. Your ChatGPT subscription backs Codex; your Claude subscription backs Claude Code; other providers use their own plans.</p><p>Ensync must not silently use per-token provider APIs as a fallback. A vendor may still impose its own limits, credit rules, terms, and billing.</p>
-        <h2>Credentials</h2><p>Provider authentication should remain inside the vendor's official CLI login flow. The desktop app should launch fixed, allowlisted commands and should not ask the website to receive passwords, API keys, subscription cookies, SSH private keys, or bot tokens.</p>
-        <h2>Project data</h2><p>The selected project is the context boundary. The local Ensync Host may inspect only the project context needed to run the requested task, including focused memory, root agent instructions, relevant transcript, and host-verified Git state. Provider CLIs receive data according to their own behavior and terms.</p>
-        <h2>Usage telemetry</h2><p>Provider usage is displayed only when returned by a verified provider surface. Ensync does not infer subscription percentages or reset windows from token counts. Missing telemetry remains unknown. Ollama is treated as a local runtime without a subscription quota percentage.</p>
-        <h2>Support diagnostics</h2><p>The help page currently creates a local report template; it does not submit data. Before any future submission, remove secrets and minimize private source content. A production help desk must publish its retention, access, deletion, and incident-response rules before accepting tickets.</p>
-        <h2>Remote execution</h2><p>Remote workers and Telegram access add separate trust boundaries. Their production release requires verified transport, strict project binding, explicit approval for risky actions, and documented credential storage. The public download site does not claim those capabilities are shipped.</p>
-        <h2>Questions</h2><p>A public privacy contact has not been configured. The website intentionally does not display a placeholder address. Check the <a class="text-link" href="/support/">help desk <span>→</span></a> for current contact availability.</p>
+        <p class="updated">Effective and last updated August 8, 2026</p>
+        <p>This Privacy Policy applies to the Ensync desktop application, account service, execution service, and website (collectively, “Ensync”). Ensync is operated by Michael Hasson in Israel.</p>
+
+        <h2>Information Ensync processes</h2>
+        <p><strong>Account information.</strong> When you create an account, Ensync processes your username, a salted password verifier, authentication-session records, and security metadata needed to sign you in and protect the service. Ensync does not store your plaintext account password.</p>
+        <p><strong>Workspace and settings information.</strong> Live account sync may process an encrypted workspace document containing conversation messages, task and provider identifiers, bounded execution events and results, project names or path hints, and portable account settings. Local attachment contents and device-specific paths are not included in that synchronized document.</p>
+        <p><strong>Project and execution information.</strong> When you ask an agent to work, the selected execution host may process your prompts, project files, Git metadata and worktrees, agent instructions, provider-session identifiers, command output, and task status as needed to perform the request. Provider login credentials and source checkouts stay on the selected execution host rather than being synchronized to client devices.</p>
+        <p><strong>Device and local information.</strong> The desktop application stores application preferences, window and workspace state, recent user-selected projects, and bounded recovery records on your device. Ensync may inspect coarse operating-system, application, Git, and installed-provider information to show compatibility and diagnostics.</p>
+        <p><strong>Website and support information.</strong> The website stores your light or dark theme choice in browser local storage and does not currently use advertising or product analytics. Hosting providers may process standard request information, such as IP address, browser type, requested page, and time, to deliver and secure the site. If you email support, Ensync receives your email address and the information you choose to include.</p>
+
+        <h2>How information is used</h2>
+        <p>Ensync uses this information to authenticate accounts; synchronize conversations and portable settings; execute requested tasks; maintain continuity between devices and providers; secure, troubleshoot, and improve reliability; respond to support and privacy requests; and comply with legal obligations. Ensync does not sell personal information or use it for third-party advertising.</p>
+
+        <h2>How information is shared</h2>
+        <p>Information is disclosed only as needed to provide the service: to the AI provider you select through its official command-line tool; to infrastructure and hosting providers that operate the website, account service, or execution host; to Microsoft for Store distribution; when you direct Ensync to use another connected service; or when required by law, security, or the protection of rights. Each selected AI provider processes information under its own terms and privacy policy. Ensync does not silently route a task to usage-billed model APIs.</p>
+
+        <h2>Security</h2>
+        <p>Public account connections must use HTTPS. Synchronized workspace documents are encrypted with AES-256-GCM using a password-derived key retained by the client Host, account passwords are verified with a salted memory-hard hash, sessions expire and can be revoked by signing out, and local Host communication uses authenticated loopback connections. No system can guarantee absolute security, so users should still avoid including unnecessary secrets in prompts or support messages.</p>
+
+        <h2>Retention and deletion</h2>
+        <p>Account records and encrypted synchronized workspace data are retained while needed to provide the account service. Local records remain on the applicable device or execution host until removed through Ensync, operating-system controls, or deletion of the relevant workspace. Authentication sessions expire after a limited period or are revoked on logout. Support correspondence and security records are retained only as reasonably necessary to respond, prevent abuse, meet legal obligations, or resolve disputes.</p>
+        <p>You may request access, correction, export, or deletion of personal information associated with your Ensync account by emailing the address below. Ensync may need to verify that you control the relevant account before completing a request. Some information may be retained where legally required or necessary for security and fraud prevention.</p>
+
+        <h2>Your choices</h2>
+        <p>You choose the projects, providers, execution target, and information supplied in prompts or support messages. You can sign out to revoke the current account session, use device-only mode when available, remove local application data through device controls, and request account-data deletion. Provider subscription and credential controls remain with the applicable provider.</p>
+
+        <h2>International processing</h2>
+        <p>Ensync and its service providers may process information in Israel and other countries where the selected providers or infrastructure operate. Those countries may have different data-protection laws from your country.</p>
+
+        <h2>Children</h2>
+        <p>Ensync is not directed to children under 13, and Ensync does not knowingly collect personal information from children under 13. If you believe a child has provided personal information, contact Ensync to request its deletion.</p>
+
+        <h2>Changes to this policy</h2>
+        <p>This policy may be updated when Ensync’s features or legal obligations change. The effective date above will be updated, and material changes will be communicated through the website, application, or account service when appropriate.</p>
+
+        <h2>Contact</h2>
+        <p>Ensync privacy requests and questions can be sent to Michael Hasson at <a class="text-link" href="mailto:mikey641@gmail.com">mikey641@gmail.com</a>.</p>
       </article>
     </main>
     <footer class="site-footer"><div class="container footer-bottom"><span>© <span data-copy-year></span> Ensync</span><span><a href="/">Home</a> · <a href="/docs/">Docs</a> · <a href="/support/">Help desk</a></span></div></footer>

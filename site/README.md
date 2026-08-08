@@ -51,9 +51,9 @@ Keep macOS `unavailable` if its signed artifact is not ready. The macOS desktop 
 
 ## Support configuration
 
-`public/site-config.json` contains the public Microsoft Store listing plus support destinations. Its links remain visibly unavailable until they are configured with verified destinations. The help page's report button only copies or downloads a template; it never claims to create a ticket.
+`public/site-config.json` contains the public Microsoft Store listing plus support destinations. Its links remain visibly unavailable until they are configured with verified destinations. The help page's report button only copies or downloads a template; it never claims to create a ticket. The configured email is the public support and privacy contact; changing it requires updating and reviewing the privacy policy.
 
-Before enabling ticket intake, publish a reviewed privacy policy covering the help-desk processor, retention, access, deletion, and incident response. The current privacy page explicitly identifies itself as a product architecture summary rather than a legal policy.
+The privacy page is the public Ensync policy used for Store distribution. Keep its account, workspace, execution, provider-disclosure, security, retention, access, deletion, and contact statements aligned with the shipped product before every release. Email contact does not imply a staffed ticket queue or response SLA.
 
 ## Vercel deployment
 
