@@ -9,6 +9,7 @@ import {
   verifyWindowsStoreManifest,
   windowsStorePackageVersion,
 } from '../scripts/windows-store.mjs'
+import appxManifestCreated from '../scripts/appx-manifest-created.cjs'
 
 function environment(overrides = {}) {
   return {
@@ -68,11 +69,26 @@ test('Store package attestation verifies AppX identity without claiming Store ce
   )
 })
 
+test('Store packaging rewrites only the generated AppX identity version', () => {
+  const source = '<Package><Identity Name="12345Ensync" Publisher=\'CN=123\' Version="0.1.0.0" /><Other Version="9.9.9.9" /></Package>'
+  const updated = appxManifestCreated.rewriteWindowsStoreManifestVersion(source, '1.1.42.0')
+  assert.match(updated, /<Identity\b[^>]*Version="1\.1\.42\.0"/)
+  assert.match(updated, /<Other Version="9\.9\.9\.9"/)
+  assert.throws(
+    () => appxManifestCreated.rewriteWindowsStoreManifestVersion(source, '1.1.70000.0'),
+    /version is invalid/,
+  )
+})
+
 test('desktop packaging exposes only the guarded Store command and AppX target', async () => {
   const desktopRoot = resolve(import.meta.dirname, '..')
   const manifest = JSON.parse(await readFile(resolve(desktopRoot, 'package.json'), 'utf8'))
   assert.equal(manifest.scripts.test, 'node test/run-tests.mjs')
   assert.match(manifest.scripts['package:win-store'], /windows-store/)
+  assert.match(
+    await readFile(resolve(desktopRoot, 'scripts/package-native.mjs'), 'utf8'),
+    /appxManifestCreated=scripts\/appx-manifest-created\.cjs/,
+  )
   assert.equal(manifest.build.appx.applicationId, 'Ensync')
   assert.deepEqual(manifest.build.appx.capabilities, [
     'runFullTrust',
