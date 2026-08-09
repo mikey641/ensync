@@ -447,6 +447,62 @@ test('commitAgentWork commits worktree changes to the conversation branch with t
   assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
 })
 
+test('a chat run auto-commits agent work at run end, on success and on failure', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  for (const [key, exitCode, outcome] of [
+    ['window-a:chat-autocommit-ok', 0, 'succeeded'],
+    ['window-a:chat-autocommit-fail', 1, 'failed'],
+  ]) {
+    const events = []
+    let worktreeProjectPath = null
+    const chats = new ChatRunService({
+      projectIsolation: isolation,
+      statusService: {
+        async get() {
+          return {
+            id: 'codex',
+            name: 'Codex',
+            installed: true,
+            executable: '/test/bin/codex',
+            authentication: { state: 'authenticated', method: 'chatgpt' },
+          }
+        },
+        invalidate() {},
+      },
+      processRunner: async (_executable, _args, options) => {
+        worktreeProjectPath = options.cwd
+        await writeFile(join(options.cwd, 'made-by-agent.txt'), 'partial or complete work\n')
+        return {
+          exitCode,
+          stdout: exitCode === 0
+            ? '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}\n'
+            : '',
+          stderr: exitCode === 0 ? '' : 'provider exploded',
+          aborted: false,
+          timedOut: false,
+          error: null,
+        }
+      },
+    })
+
+    const run = chats.run(
+      { provider: 'codex', prompt: 'do work', projectPath: fixture.repository, workspaceKey: key },
+      { onEvent: (event) => events.push(event) },
+    )
+    if (exitCode === 0) await run
+    else await assert.rejects(run)
+
+    const committed = events.find((event) => event.code === 'agent_work_committed')
+    assert.ok(committed, `expected agent_work_committed event for exit ${exitCode}`)
+    assert.match(committed.message, /made-by-agent|1 changed file/i)
+    const branchLog = await git(worktreeProjectPath, ['log', '-1', '--format=%s'])
+    assert.equal(branchLog, `Ensync agent work (${outcome})`)
+    assert.equal(await git(worktreeProjectPath, ['status', '--porcelain']), '')
+  }
+})
+
 test('commitAgentWork on a clean worktree commits nothing', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })

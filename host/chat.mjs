@@ -708,6 +708,7 @@ export class ChatRunService {
       gitBefore: workspace.gitBefore,
     } : null
 
+    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
@@ -731,6 +732,7 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -831,6 +833,7 @@ export class ChatRunService {
 
     const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
+    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -845,8 +848,36 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } catch (error) {
+      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
+      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
+      throw error
     } finally {
       combinedSignal.dispose()
+      if (workspace && this.#projectIsolation) {
+        try {
+          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
+            outcome: runOutcome,
+            provider: request.provider,
+            jobId: typeof options.jobId === 'string' ? options.jobId : null,
+          })
+          if (workCommit.committed) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'agent_work_committed',
+              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch (error) {
+          options.onEvent?.({
+            type: 'notice',
+            code: 'agent_work_commit_failed',
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${error instanceof Error ? error.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            at: new Date().toISOString(),
+          })
+        }
+      }
       await workspaceLease?.release()
     }
   }
