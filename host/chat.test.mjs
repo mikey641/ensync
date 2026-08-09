@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
+  argumentsFor,
   ChatRunError,
   ChatRunService,
   parseClaudeChatResult,
@@ -982,4 +983,42 @@ test('stream cancellation has a distinct non-retryable terminal event', async (c
   assert.equal(event.code, 'run_cancelled')
   assert.equal(event.status, 499)
   assert.equal(event.safeToRetry, false)
+})
+
+test('codex arguments pin the OS sandbox to the protected worktree', () => {
+  const containment = { worktreePath: '/tmp/worktree', canonicalRepositoryPath: '/tmp/shared' }
+  const args = argumentsFor(
+    { provider: 'codex', prompt: 'p', projectPath: '/tmp/shared' },
+    [],
+    containment,
+  )
+  assert.ok(args.includes('--sandbox'), 'expected --sandbox flag')
+  assert.equal(args[args.indexOf('--sandbox') + 1], 'workspace-write')
+  const configIndex = args.findIndex((value) => typeof value === 'string' && value.includes('writable_roots'))
+  assert.ok(configIndex > 0, 'expected writable_roots override')
+  assert.match(args[configIndex], /\/tmp\/worktree/)
+})
+
+test('claude arguments pin deny rules for the canonical checkout', () => {
+  const containment = { worktreePath: '/tmp/worktree', canonicalRepositoryPath: '/tmp/shared' }
+  const args = argumentsFor(
+    { provider: 'claude', prompt: 'p', projectPath: '/tmp/shared' },
+    [],
+    containment,
+  )
+  const settingsIndex = args.indexOf('--settings')
+  assert.ok(settingsIndex > 0, 'expected --settings flag')
+  const settings = JSON.parse(args[settingsIndex + 1])
+  assert.deepEqual(settings.permissions.deny, [
+    'Write(/tmp/shared/**)',
+    'Edit(/tmp/shared/**)',
+  ])
+})
+
+test('arguments carry no containment flags without a protected workspace', () => {
+  for (const provider of ['codex', 'claude']) {
+    const args = argumentsFor({ provider, prompt: 'p', projectPath: '/tmp/shared' }, [], null)
+    assert.equal(args.includes('--sandbox'), false)
+    assert.equal(args.includes('--settings'), false)
+  }
 })

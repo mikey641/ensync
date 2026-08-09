@@ -6,6 +6,12 @@ import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
+// Verified containment levels per the catalog capability contract. A provider
+// with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
+const CHAT_PROVIDER_CONTAINMENT = {
+  codex: { level: 'os_sandbox' },
+  claude: { level: 'permission_config' },
+}
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
@@ -111,9 +117,9 @@ function quoteTerminalArgument(argument) {
   return `'${argument.replaceAll("'", "'\\''")}'`
 }
 
-function visibleArguments(request, attachmentPaths) {
+function visibleArguments(request, attachmentPaths, containment = null) {
   const imagePaths = new Set(codexImagePaths(attachmentPaths))
-  return argumentsFor(request, attachmentPaths).map((argument, index, argumentsList) => {
+  return argumentsFor(request, attachmentPaths, containment).map((argument, index, argumentsList) => {
     if (request.sessionId && argument === request.sessionId) return '<session-id>'
     if (index > 0 && argumentsList[index - 1] === '--resume') return '<session-id>'
     if (imagePaths.has(argument)) return '<attached-image>'
@@ -302,6 +308,14 @@ function validateRequest(request) {
       'unsupported_provider',
       `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex or Claude Code.`,
       422,
+    )
+  }
+  if (!CHAT_PROVIDER_CONTAINMENT[request.provider]) {
+    throw new ChatRunError(
+      'provider_containment_unrecorded',
+      `${request.provider} has no verified workspace-containment record and cannot run.`,
+      409,
+      false,
     )
   }
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
@@ -574,27 +588,62 @@ function codexImagePaths(attachmentPaths = []) {
   return attachmentPaths.filter((attachmentPath) => CODEX_IMAGE_EXTENSIONS.has(extname(attachmentPath).toLowerCase()))
 }
 
-function codexArguments(request, attachmentPaths = []) {
+// Pinned per Step 0 verification against the installed Codex CLI (codex-cli 0.146.0):
+// `codex exec --help` documents `-s/--sandbox <SANDBOX_MODE>` with `workspace-write` as a
+// possible value; `-c` accepts dotted-path TOML overrides, and `sandbox_workspace_write.writable_roots`
+// is a documented config key ("Additional writable roots when sandbox_mode = \"workspace-write\"").
+// Host, not the renderer, chooses these flags — they are not user- or renderer-selectable.
+function codexContainmentArguments(containment) {
+  if (!containment) return []
+  return [
+    '--sandbox', 'workspace-write',
+    '-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(containment.worktreePath)}]`,
+  ]
+}
+
+function codexArguments(request, attachmentPaths = [], containment = null) {
   const modelArgs = request.model ? ['--model', request.model] : []
   const effortArgs = request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []
   const imagePaths = codexImagePaths(attachmentPaths)
   const imageArgs = imagePaths.length > 0 ? ['--image', ...imagePaths] : []
+  const containmentArgs = codexContainmentArguments(containment)
   if (request.sessionId) {
-    return ['exec', 'resume', ...imageArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
+    return ['exec', 'resume', ...imageArgs, ...containmentArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
   }
-  return ['exec', ...imageArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
+  return ['exec', ...imageArgs, ...containmentArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
 }
 
-function claudeArguments(request) {
+// Pinned per Step 0 verification against the installed Claude Code CLI (2.1.226): `claude --help`
+// documents `--settings <file-or-json>`; the bundled settings schema documents `permissions.deny`
+// as a string array, and the CLI's own permission-rule validator documents `Tool(specifier)` glob
+// syntax with examples including `Edit(docs/**)`, with "Write" and "Edit" both in its
+// `filePatternTools` list. Host, not the renderer, chooses these flags.
+function claudeContainmentArguments(containment) {
+  if (!containment) return []
+  const settings = {
+    permissions: {
+      deny: [
+        `Write(${containment.canonicalRepositoryPath}/**)`,
+        `Edit(${containment.canonicalRepositoryPath}/**)`,
+      ],
+    },
+  }
+  return ['--settings', JSON.stringify(settings)]
+}
+
+function claudeArguments(request, containment = null) {
   const args = ['--print', '--verbose', '--output-format', 'stream-json']
   if (request.model) args.push('--model', request.model)
   if (request.effort) args.push('--effort', request.effort)
   if (request.sessionId) args.push('--resume', request.sessionId)
+  args.push(...claudeContainmentArguments(containment))
   return args
 }
 
-function argumentsFor(request, attachmentPaths = []) {
-  return request.provider === 'codex' ? codexArguments(request, attachmentPaths) : claudeArguments(request)
+export function argumentsFor(request, attachmentPaths = [], containment = null) {
+  return request.provider === 'codex'
+    ? codexArguments(request, attachmentPaths, containment)
+    : claudeArguments(request, containment)
 }
 
 function parseResult(provider, stdout) {
@@ -707,12 +756,23 @@ export class ChatRunService {
       reused: workspace.reused,
       gitBefore: workspace.gitBefore,
     } : null
+    // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
+    // canonical shared checkout that provider processes must not write to directly.
+    const containment = workspace ? {
+      worktreePath: workspace.repositoryPath,
+      canonicalRepositoryPath: workspace.shared.repositoryPath,
+    } : null
 
     let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
       try {
+        // Live-turn containment is pinned in codex-live-turn session configuration; verify
+        // separately before enabling sandbox there. Step 0 verification for this task found a
+        // `sandboxPolicy` field on `TurnStartParams` in the app-server v2 protocol schema, but
+        // could not confirm it applies under the non-experimental `initialize` handshake this
+        // runner uses (no `experimentalApi: true`), so it was not pinned here. Do not guess.
         const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
@@ -757,7 +817,7 @@ export class ChatRunService {
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
     const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths)
+    const args = argumentsFor(executionRequest, attachmentPaths, containment)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1
     let processResult
@@ -766,7 +826,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(

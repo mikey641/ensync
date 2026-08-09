@@ -550,6 +550,7 @@ test('a chat run skips auto-commit when the workspace write lease is lost', asyn
           repositoryPath: fixture.repository,
           branch: 'ensync/chat-lease-lost',
           reused: false,
+          shared: { repositoryPath: fixture.repository, head: headBefore, statusEntries: [] },
           gitBefore: { branch: 'ensync/chat-lease-lost', head: headBefore, changedFiles: 0, dirty: false },
         },
         signal: leaseController.signal,
