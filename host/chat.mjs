@@ -6,6 +6,17 @@ import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
+// Verified containment levels per the catalog capability contract. A provider
+// with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
+const CHAT_PROVIDER_CONTAINMENT = {
+  codex: { level: 'os_sandbox' },
+  // permission_config gap (verified via `claude --help`): in `-p`/`--print` mode, settings
+  // files that fail validation are silently ignored (no error dialog is shown) — a malformed
+  // --settings payload fails open rather than blocking the run. Also, Bash is governed by
+  // command-prefix rules, not the file-pattern rules our deny list uses, so Write(...)/Edit(...)
+  // deny rules do not constrain shell commands run through the Bash tool.
+  claude: { level: 'permission_config' },
+}
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
@@ -18,7 +29,6 @@ const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const QUOTA_PATTERN = /(?:usage|spending|rate)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
-const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
   /\b(?:sk-(?:proj-|live-)?|ghp_|github_pat_|glpat-|xox[baprs]-)[a-zA-Z0-9_-]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._~+\/-]{12,}/gi,
@@ -112,9 +122,9 @@ function quoteTerminalArgument(argument) {
   return `'${argument.replaceAll("'", "'\\''")}'`
 }
 
-function visibleArguments(request, attachmentPaths) {
+function visibleArguments(request, attachmentPaths, containment = null) {
   const imagePaths = new Set(codexImagePaths(attachmentPaths))
-  return argumentsFor(request, attachmentPaths).map((argument, index, argumentsList) => {
+  return argumentsFor(request, attachmentPaths, containment).map((argument, index, argumentsList) => {
     if (request.sessionId && argument === request.sessionId) return '<session-id>'
     if (index > 0 && argumentsList[index - 1] === '--resume') return '<session-id>'
     if (imagePaths.has(argument)) return '<attached-image>'
@@ -122,71 +132,33 @@ function visibleArguments(request, attachmentPaths) {
   })
 }
 
-function assistantTextBlocks(content) {
-  return content
+function providerNoteFromEvent(provider, event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
+
+  if (
+    provider === 'codex'
+    && event.type === 'item.completed'
+    && event.item?.type === 'agent_message'
+    && event.item.phase === 'commentary'
+    && typeof event.item.text === 'string'
+    && event.item.text.trim()
+  ) {
+    return event.item.text.trim()
+  }
+
+  if (provider !== 'claude' || event.type !== 'assistant') return null
+  const content = event.message?.content ?? event.content
+  if (!Array.isArray(content)) return null
+  // Claude has no commentary/final phase marker. Only surface assistant text
+  // when the same message also starts provider work; a text-only assistant
+  // message is the final response and should not briefly appear as a note.
+  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
+  const text = content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-}
-
-/**
- * Claude has no commentary/final phase marker. Only surface assistant text when
- * the same message also starts provider work; a text-only assistant message is
- * the final response and must not briefly appear as a note.
- *
- * Claude Code streams one assistant event per content block, so that message's
- * text and its tool call arrive as separate events sharing `message.id`. Text is
- * therefore held until the same message ID starts tool work, and dropped when it
- * never does. Older combined-content events still resolve within one event.
- */
-function claudeNoteExtractor() {
-  const pending = new Map()
-
-  const remember = (id, text) => {
-    const held = pending.get(id) ?? { text: '', toolStarted: false }
-    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
-    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
-    pending.set(id, held)
-    // Blocks of one message stream contiguously; a small bound keeps interleaved
-    // subagent messages working without retaining a whole run's commentary.
-    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
-    return held
-  }
-
-  return (event) => {
-    if (event.type !== 'assistant') return null
-    const content = event.message?.content ?? event.content
-    if (!Array.isArray(content)) return null
-    const text = assistantTextBlocks(content)
-    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
-    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
-    if (!id) return startsToolWork ? text || null : null
-
-    const held = remember(id, text)
-    if (!startsToolWork && !held.toolStarted) return null
-    held.toolStarted = true
-    const note = held.text
-    held.text = ''
-    return note || null
-  }
-}
-
-function providerNoteExtractor(provider) {
-  if (provider === 'claude') return claudeNoteExtractor()
-  return (event) => {
-    if (
-      provider === 'codex'
-      && event.type === 'item.completed'
-      && event.item?.type === 'agent_message'
-      && event.item.phase === 'commentary'
-      && typeof event.item.text === 'string'
-      && event.item.text.trim()
-    ) {
-      return event.item.text.trim()
-    }
-    return null
-  }
+  return text || null
 }
 
 function outputForwarder(onEvent, provider) {
@@ -194,7 +166,6 @@ function outputForwarder(onEvent, provider) {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
-  const noteFromEvent = providerNoteExtractor(provider)
   const emit = (stream, text) => {
     if (!text) return
     const safe = redactTerminalText(text)
@@ -212,8 +183,7 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
-    const note = noteFromEvent(structured)
+    const note = providerNoteFromEvent(provider, structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
@@ -343,6 +313,14 @@ function validateRequest(request) {
       'unsupported_provider',
       `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex or Claude Code.`,
       422,
+    )
+  }
+  if (!CHAT_PROVIDER_CONTAINMENT[request.provider]) {
+    throw new ChatRunError(
+      'provider_containment_unrecorded',
+      `${request.provider} has no verified workspace-containment record and cannot run.`,
+      409,
+      false,
     )
   }
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
@@ -615,27 +593,74 @@ function codexImagePaths(attachmentPaths = []) {
   return attachmentPaths.filter((attachmentPath) => CODEX_IMAGE_EXTENSIONS.has(extname(attachmentPath).toLowerCase()))
 }
 
-function codexArguments(request, attachmentPaths = []) {
+// Pinned per Step 0 verification against the installed Codex CLI (codex-cli 0.146.0):
+// `codex exec --help` documents `-s/--sandbox <SANDBOX_MODE>` with `workspace-write` as a
+// possible value; `-c` accepts dotted-path TOML overrides, and `sandbox_workspace_write.writable_roots`
+// is a documented config key ("Additional writable roots when sandbox_mode = \"workspace-write\"").
+// Host, not the renderer, chooses these flags — they are not user- or renderer-selectable.
+//
+// `codex exec resume` does NOT accept `--sandbox` — verified against the installed binary:
+// `codex exec resume --sandbox workspace-write ...` -> `error: unexpected argument '--sandbox'
+// found` (exit 2, argv parse failure, before any session lookup). On resume the sandbox must be
+// expressed purely as `-c` config overrides instead; verified this parses and passes
+// `--strict-config` (the invocation proceeds to a real `thread/resume` session lookup rather
+// than an argv error).
+function codexContainmentArguments(containment, { resume = false } = {}) {
+  if (!containment) return []
+  const writableRootsArgs = ['-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(containment.worktreePath)}]`]
+  if (resume) {
+    return ['-c', 'sandbox_mode="workspace-write"', ...writableRootsArgs]
+  }
+  return ['--sandbox', 'workspace-write', ...writableRootsArgs]
+}
+
+function codexArguments(request, attachmentPaths = [], containment = null) {
   const modelArgs = request.model ? ['--model', request.model] : []
   const effortArgs = request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []
   const imagePaths = codexImagePaths(attachmentPaths)
   const imageArgs = imagePaths.length > 0 ? ['--image', ...imagePaths] : []
   if (request.sessionId) {
-    return ['exec', 'resume', ...imageArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
+    const containmentArgs = codexContainmentArguments(containment, { resume: true })
+    return ['exec', 'resume', ...imageArgs, ...containmentArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
   }
-  return ['exec', ...imageArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
+  const containmentArgs = codexContainmentArguments(containment)
+  return ['exec', ...imageArgs, ...containmentArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
 }
 
-function claudeArguments(request) {
+// Pinned per Step 0 verification against the installed Claude Code CLI (2.1.226): `claude --help`
+// documents `--settings <file-or-json>`; the bundled settings schema documents `permissions.deny`
+// as a string array, and the CLI's own permission-rule validator documents `Tool(specifier)` glob
+// syntax with examples including `Edit(docs/**)`, with "Write", "Edit", and "NotebookEdit" all in
+// its `filePatternTools` list. Host, not the renderer, chooses these flags. This is a fail-open
+// gap, not a sandbox: see the CHAT_PROVIDER_CONTAINMENT claude record for the `-p` mode
+// silent-validation-failure and Bash-is-unconstrained caveats.
+function claudeContainmentArguments(containment) {
+  if (!containment) return []
+  const settings = {
+    permissions: {
+      deny: [
+        `Write(${containment.canonicalRepositoryPath}/**)`,
+        `Edit(${containment.canonicalRepositoryPath}/**)`,
+        `NotebookEdit(${containment.canonicalRepositoryPath}/**)`,
+      ],
+    },
+  }
+  return ['--settings', JSON.stringify(settings)]
+}
+
+function claudeArguments(request, containment = null) {
   const args = ['--print', '--verbose', '--output-format', 'stream-json']
   if (request.model) args.push('--model', request.model)
   if (request.effort) args.push('--effort', request.effort)
   if (request.sessionId) args.push('--resume', request.sessionId)
+  args.push(...claudeContainmentArguments(containment))
   return args
 }
 
-function argumentsFor(request, attachmentPaths = []) {
-  return request.provider === 'codex' ? codexArguments(request, attachmentPaths) : claudeArguments(request)
+export function argumentsFor(request, attachmentPaths = [], containment = null) {
+  return request.provider === 'codex'
+    ? codexArguments(request, attachmentPaths, containment)
+    : claudeArguments(request, containment)
 }
 
 function parseResult(provider, stdout) {
@@ -748,11 +773,23 @@ export class ChatRunService {
       reused: workspace.reused,
       gitBefore: workspace.gitBefore,
     } : null
+    // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
+    // canonical shared checkout that provider processes must not write to directly.
+    const containment = workspace ? {
+      worktreePath: workspace.repositoryPath,
+      canonicalRepositoryPath: workspace.shared.repositoryPath,
+    } : null
 
+    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
       try {
+        // Live-turn containment is pinned in codex-live-turn session configuration; verify
+        // separately before enabling sandbox there. Step 0 verification for this task found a
+        // `sandboxPolicy` field on `TurnStartParams` in the app-server v2 protocol schema, but
+        // could not confirm it applies under the non-experimental `initialize` handshake this
+        // runner uses (no `experimentalApi: true`), so it was not pinned here. Do not guess.
         const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
@@ -772,6 +809,7 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -796,7 +834,7 @@ export class ChatRunService {
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
     const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths)
+    const args = argumentsFor(executionRequest, attachmentPaths, containment)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1
     let processResult
@@ -805,7 +843,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(
@@ -872,6 +910,7 @@ export class ChatRunService {
 
     const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
+    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -886,8 +925,54 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } catch (error) {
+      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
+      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
+      throw error
     } finally {
       combinedSignal.dispose()
+      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
+        try {
+          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
+            outcome: runOutcome,
+            provider: request.provider,
+            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
+          })
+          if (workCommit.committed) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'agent_work_committed',
+              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch (commitError) {
+          options.onEvent?.({
+            type: 'notice',
+            code: 'agent_work_commit_failed',
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            at: new Date().toISOString(),
+          })
+        }
+        try {
+          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+          if (sharedCheck.available && sharedCheck.changed) {
+            const message = sharedCheck.destructive
+              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+              : sharedCheck.landed
+                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
+                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
+            options.onEvent?.({
+              type: 'notice',
+              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+              message,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch {
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+        }
+      }
       await workspaceLease?.release()
     }
   }

@@ -17,6 +17,7 @@ import {
   type GitConnection,
   type GitPushMode,
   type GitStatus,
+  type GitUnlandedBranch,
   type ProjectInspection,
 } from '../lib/relayHost'
 import './GitWorkflowModal.css'
@@ -66,14 +67,16 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [destinationPath, setDestinationPath] = useState('')
   const [status, setStatus] = useState<GitStatus | null>(null)
+  const [unlanded, setUnlanded] = useState<GitUnlandedBranch[]>([])
   const [remote, setRemote] = useState('')
   const [connection, setConnection] = useState<GitConnection | null>(null)
   const [pushMode, setPushMode] = useState<GitPushMode>('current_branch')
   const [productionBranch, setProductionBranch] = useState(() => project?.path ? readProductionBranch(project.path) : '')
   const [confirmation, setConfirmation] = useState('')
-  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | null>(null)
+  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'land' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [noticeHeading, setNoticeHeading] = useState<string>('Completed')
 
   const exactConfirmation = productionBranch ? `PUSH TO ${productionBranch}` : ''
   const selectedRemote = status?.remotes.find((item) => item.name === remote)
@@ -95,6 +98,13 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         : response.git.preferredRemote ?? response.git.remotes[0]?.name ?? ''
       setRemote(nextRemote)
       setProductionBranch((current) => current || response.git.productionBranch || '')
+      try {
+        const unlandedResponse = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(unlandedResponse.unlanded.branches)
+      } catch (unlandedError) {
+        setUnlanded([])
+        setError(unlandedError instanceof Error ? unlandedError.message : 'Ensync Host could not inspect unlanded work.')
+      }
     } catch (statusError) {
       setStatus(null)
       setError(statusError instanceof Error ? statusError.message : 'Ensync Host could not inspect Git status.')
@@ -162,9 +172,33 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
       setStatus(result.git)
       if (pushMode === 'production') storeProductionBranch(project.path, productionBranch)
       setConfirmation('')
+      setNoticeHeading('Push completed')
       setNotice(`Pushed ${result.push.sourceBranch} to ${result.push.remote}/${result.push.targetBranch}.`)
     } catch (pushError) {
       setError(pushError instanceof Error ? pushError.message : 'Git could not push this branch.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const landBranch = async (branch: string) => {
+    if (!project) return
+    setBusy('land')
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await ensyncHost.landGitBranch({ projectPath: project.path, branch })
+      setStatus(result.git)
+      setNoticeHeading('Landed')
+      setNotice(`Landed ${branch} into ${result.land.mergedInto}.`)
+      try {
+        const refreshed = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(refreshed.unlanded.branches)
+      } catch {
+        // The land succeeded; a stale unlanded list self-corrects on the next refresh.
+      }
+    } catch (landError) {
+      setError(landError instanceof Error ? landError.message : 'Landing failed.')
     } finally {
       setBusy(null)
     }
@@ -226,6 +260,35 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
                     {statusFacts.map((fact) => <div key={fact.label}><small>{fact.label}</small><strong>{fact.value}</strong></div>)}
                   </div>
 
+                  <div className="git-unlanded-panel">
+                    <h3 className="git-section-heading">Unlanded agent work</h3>
+                    {unlanded.length === 0 ? (
+                      <p className="git-unlanded-empty">Every conversation branch is landed.</p>
+                    ) : (
+                      unlanded.map((entry) => (
+                        <div key={entry.branch} className="git-unlanded-row">
+                          <div className="git-unlanded-meta">
+                            <strong>{entry.branch}</strong>
+                            <small>
+                              {entry.aheadCount} commit{entry.aheadCount === 1 ? '' : 's'} ahead
+                              {' · '}{entry.changedFiles} file{entry.changedFiles === 1 ? '' : 's'}
+                              {entry.lastCommittedAt ? ` · ${new Date(entry.lastCommittedAt).toLocaleDateString()}` : ''}
+                              {entry.lastSubject ? ` · ${entry.lastSubject}` : ''}
+                            </small>
+                          </div>
+                          <button
+                            type="button"
+                            className="button button--ghost"
+                            disabled={busy !== null}
+                            onClick={() => void landBranch(entry.branch)}
+                          >
+                            {busy === 'land' ? 'Landing…' : 'Land'}
+                          </button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+
                   <div className="git-connection-panel">
                     <div className="git-section-heading"><CloudCog size={20} /><div><strong>Git remote connection</strong><p>Verification contacts the selected remote with non-interactive Git, using only credentials already configured on this computer.</p></div></div>
                     <div className="git-inline-controls">
@@ -255,7 +318,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
               )}
 
               {busy === 'status' && !status && <div className="git-loading"><LoaderCircle className="spin" size={18} /> Reading real repository state…</div>}
-              {notice && <div className="git-success"><Check size={16} /><span><strong>Push completed</strong><small>{notice}</small></span></div>}
+              {notice && <div className="git-success"><Check size={16} /><span><strong>{noticeHeading}</strong><small>{notice}</small></span></div>}
               {error && <GitError message={error} />}
             </section>
           )}

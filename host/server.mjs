@@ -341,6 +341,18 @@ export function createEnsyncHost(options = {}) {
         return sendJson(response, 200, result, origin)
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/git/unlanded') {
+        const body = await readJsonBody(request)
+        const unlanded = await git.unlanded(body.projectPath)
+        return sendJson(response, 200, { unlanded }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/git/land') {
+        const body = await readJsonBody(request)
+        const result = await git.land(body)
+        return sendJson(response, 200, result, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/chat/run') {
         const cancellation = requestCancellation(request, response)
         try {
@@ -782,6 +794,14 @@ export function startEnsyncHost(options = {}) {
     const address = server.address()
     const resolvedPort = typeof address === 'object' && address ? address.port : port
     console.log(`Ensync Host listening on http://${host}:${resolvedPort}`)
+    const isolation = server.ensyncServices?.projectIsolation
+    isolation?.recoverStrandedWorktrees?.().then((summary) => {
+      if (summary.recovered.length > 0) {
+        console.log(`Ensync recovered uncommitted agent work in ${summary.recovered.length} worktree(s).`)
+      }
+    }).catch((error) => {
+      console.error('Ensync stranded-work recovery failed:', error instanceof Error ? error.message : error)
+    })
   })
   return server
 }
