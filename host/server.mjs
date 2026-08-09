@@ -25,6 +25,7 @@ import { SupportService, SupportValidationError } from './support.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
 import { TelegramChatRouter } from './telegram-router.mjs'
 import { displayCommand, launchTerminalCommand } from './terminal.mjs'
+import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { VirtualBoxError, VirtualBoxService } from './virtualbox.mjs'
 
 const DEFAULT_PORT = 43_121
@@ -747,6 +748,65 @@ export function createEnsyncHost(options = {}) {
           message: launch.started
             ? 'Update opened in a terminal. Let it finish, then check again so Ensync can read the installed version.'
             : 'Automatic launch was unavailable. Run the shown official self-update command in a terminal.',
+        }, origin)
+      }
+
+      const installMatch = url.pathname.match(/^\/api\/providers\/([^/]+)\/install$/)
+      if (request.method === 'POST' && installMatch) {
+        const id = decodeURIComponent(installMatch[1])
+        const definition = getProviderDefinition(id)
+        if (!definition) {
+          return sendJson(response, 404, { error: 'Unknown provider.' }, origin)
+        }
+        if (!hasInstallCommand(id)) {
+          return sendJson(response, 409, {
+            error: `${definition.name} does not have a verified curl install command.`,
+            code: 'provider_install_unavailable',
+          }, origin)
+        }
+        const body = await readJsonBody(request)
+        if (body.launch !== true && body.launch !== false) {
+          return sendJson(response, 400, {
+            error: 'Provider install requests require an explicit launch boolean.',
+            code: 'invalid_provider_install_request',
+          }, origin)
+        }
+        const installInfo = getInstallCommand(id)
+        const command = {
+          command: installInfo.command,
+          source: installInfo.source,
+        }
+        if (body.launch === false) {
+          return sendJson(response, 200, {
+            started: false,
+            launchMode: 'manual',
+            command,
+            message: 'Run this install command in a terminal, then refresh provider status.',
+          }, origin)
+        }
+        if (chatJobs.hasRunningJobs() || chats.hasRunningRuns?.()) {
+          return sendJson(response, 409, {
+            error: 'Wait for active agent runs to finish before installing a CLI.',
+            code: 'provider_install_busy',
+          }, origin)
+        }
+        // Launch the curl install command in a terminal. The terminal launcher
+        // runs the command through the OS shell (osascript on macOS, PowerShell
+        // on Windows), so we pass the full curl pipeline as a single shell
+        // command string rather than splitting it into executable + args.
+        const platform = process.platform
+        const shellExecutable = platform === 'win32' ? 'powershell.exe' : '/bin/sh'
+        const shellArgs = platform === 'win32'
+          ? ['-NoProfile', '-Command', installInfo.command]
+          : ['-c', installInfo.command]
+        const launch = await terminalLauncher(shellExecutable, shellArgs)
+        if (launch.started) statuses.invalidate()
+        return sendJson(response, 200, {
+          ...launch,
+          command,
+          message: launch.started
+            ? 'Install opened in a terminal. Let it finish, then refresh so Ensync can detect the CLI.'
+            : 'Automatic launch was unavailable. Run the shown install command in a terminal.',
         }, origin)
       }
 
