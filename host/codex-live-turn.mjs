@@ -3,10 +3,10 @@ import { createInterface } from 'node:readline'
 import { extname } from 'node:path'
 import { commandInvocation } from './command.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
+import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
 const MAX_STDERR_CHARACTERS = 256 * 1024
 
 export class CodexLiveTurnError extends Error {
@@ -75,6 +75,7 @@ class CodexLiveSession {
   #turnStarted = false
   #settled = false
   #agentMessages = []
+  #agentMessagePhases = new Map()
   #model = null
   #usage = null
   #stderr = ''
@@ -87,6 +88,7 @@ class CodexLiveSession {
   #rejectReady
   #done
   #ready
+  #eventRepair = new JsonEventRepairTracker()
 
   constructor(input, options = {}) {
     this.id = input.id
@@ -95,7 +97,7 @@ class CodexLiveSession {
     this.signal = options.signal
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.hardTimeoutMs = options.hardTimeoutMs ?? null
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
@@ -163,13 +165,15 @@ class CodexLiveSession {
     })
 
     this.#touch()
-    this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
-      'run_timed_out',
-      "Codex reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.",
-      504,
-      false,
-    )), this.hardTimeoutMs)
-    this.#hardTimer.unref?.()
+    if (Number.isFinite(this.hardTimeoutMs) && this.hardTimeoutMs > 0) {
+      this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
+        'run_timed_out',
+        "Codex reached Ensync Host's explicit run limit and was stopped. Partial work may exist; review the project before retrying.",
+        504,
+        false,
+      )), this.hardTimeoutMs)
+      this.#hardTimer.unref?.()
+    }
     this.signal?.addEventListener('abort', this.#abort, { once: true })
     if (this.signal?.aborted) this.#abort()
 
@@ -247,6 +251,7 @@ class CodexLiveSession {
         requestedModel: this.input.model ?? null,
         requestedEffort: this.input.effort ?? null,
         usage: this.#usage,
+        outputRecovery: this.#eventRepair.recovery,
         durationMs: Date.now() - startedAt,
         completedAt: new Date().toISOString(),
       }
@@ -360,16 +365,17 @@ class CodexLiveSession {
     this.#touch()
     let message
     try {
-      message = JSON.parse(line)
+      message = this.#eventRepair.decode(line, { allowRepair: true })
     } catch {
       this.#fail(new CodexLiveTurnError(
         'invalid_cli_output',
-        'Codex app-server returned a malformed protocol message.',
+        'Ensync Host tried a bounded repair of Codex app-server output but could not recover a verifiable protocol stream.',
         502,
-        !this.#turnStarted,
+        false,
       ))
       return
     }
+    if (!message) return
 
     if (message.id != null && !message.method) {
       const pending = this.#requests.get(message.id)
@@ -406,7 +412,20 @@ class CodexLiveSession {
       this.#turnId = params.turn.id
       this.#turnStarted = true
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
-      if (typeof params.item.text === 'string' && params.item.text.trim()) this.#agentMessages.push(params.item)
+      const phase = params.item.phase ?? this.#agentMessagePhases.get(params.item.id) ?? null
+      this.#agentMessagePhases.delete(params.item.id)
+      if (typeof params.item.text === 'string' && params.item.text.trim()) {
+        this.#agentMessages.push(params.item)
+        if (phase === 'commentary') {
+          this.onEvent?.({
+            type: 'note',
+            provider: 'codex',
+            text: params.item.text.trim(),
+            redacted: false,
+            at: new Date().toISOString(),
+          })
+        }
+      }
     } else if (message.method === 'thread/tokenUsage/updated') {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
@@ -422,14 +441,18 @@ class CodexLiveSession {
         redacted: false,
         at: new Date().toISOString(),
       })
-    } else if (message.method === 'item/started' && params?.item?.type === 'commandExecution') {
-      this.onEvent?.({
-        type: 'output',
-        stream: 'stdout',
-        text: `\n> ${params.item.command}\n`,
-        redacted: false,
-        at: new Date().toISOString(),
-      })
+    } else if (message.method === 'item/started') {
+      if (params?.item?.type === 'agentMessage' && typeof params.item.id === 'string') {
+        this.#agentMessagePhases.set(params.item.id, params.item.phase ?? null)
+      } else if (params?.item?.type === 'commandExecution') {
+        this.onEvent?.({
+          type: 'output',
+          stream: 'stdout',
+          text: `\n> ${params.item.command}\n`,
+          redacted: false,
+          at: new Date().toISOString(),
+        })
+      }
     }
   }
 
@@ -456,7 +479,7 @@ class CodexLiveSession {
   }
 
   #finishProcess() {
-    clearTimeout(this.#hardTimer)
+    if (this.#hardTimer) clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.signal?.removeEventListener('abort', this.#abort)
     if (!this.#child) return

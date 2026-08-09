@@ -149,7 +149,9 @@ export async function findExecutable(command, options = {}) {
 export function runProcess(executable, args, options = {}) {
   const legacyTimeoutMs = options.timeoutMs ?? 8_000
   const inactivityTimeoutMs = options.inactivityTimeoutMs ?? null
-  const hardTimeoutMs = options.hardTimeoutMs ?? legacyTimeoutMs
+  const hardTimeoutMs = Object.hasOwn(options, 'hardTimeoutMs')
+    ? options.hardTimeoutMs
+    : legacyTimeoutMs
   const terminationGraceMs = options.terminationGraceMs ?? 2_000
   const env = options.env ?? subscriptionEnvironment()
   const maxCaptureBytes = options.maxCaptureBytes ?? MAX_CAPTURE_BYTES
@@ -165,6 +167,7 @@ export function runProcess(executable, args, options = {}) {
     let aborted = options.signal?.aborted === true
     let forceKillTimer = null
     let inactivityTimer = null
+    let hardTimer = null
 
     const child = spawn(invocation.executable, invocation.args, {
       cwd: options.cwd,
@@ -249,13 +252,15 @@ export function runProcess(executable, args, options = {}) {
 
     child.once('spawn', refreshInactivityWatchdog)
     refreshInactivityWatchdog()
-    const hardTimer = setTimeout(() => timeout('hard_limit'), hardTimeoutMs)
-    hardTimer.unref?.()
+    if (Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0) {
+      hardTimer = setTimeout(() => timeout('hard_limit'), hardTimeoutMs)
+      hardTimer.unref?.()
+    }
 
     const finish = (result) => {
       if (settled) return
       settled = true
-      clearTimeout(hardTimer)
+      if (hardTimer) clearTimeout(hardTimer)
       if (inactivityTimer) clearTimeout(inactivityTimer)
       if (forceKillTimer) clearTimeout(forceKillTimer)
       options.signal?.removeEventListener('abort', onAbort)

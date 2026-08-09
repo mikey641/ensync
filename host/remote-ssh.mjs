@@ -14,7 +14,6 @@ import {
 
 const DEFAULT_SSH_TIMEOUT_MS = 30_000
 const DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_CHAT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
 const CHAT_TRANSPORT_TIMEOUT_GRACE_MS = 30_000
 const MAX_CHAT_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
@@ -216,6 +215,9 @@ export class RemoteSshProcessAdapter {
       )
     }
     const timeoutMs = options.timeoutMs ?? DEFAULT_SSH_TIMEOUT_MS
+    const hardTimeoutMs = Object.hasOwn(options, 'hardTimeoutMs')
+      ? options.hardTimeoutMs
+      : timeoutMs
     const result = await this.#processRunner(
       sshExecutable,
       buildSshArguments(connection),
@@ -226,7 +228,7 @@ export class RemoteSshProcessAdapter {
         ...(options.inactivityTimeoutMs == null
           ? {}
           : { inactivityTimeoutMs: options.inactivityTimeoutMs }),
-        ...(options.hardTimeoutMs == null ? {} : { hardTimeoutMs: options.hardTimeoutMs }),
+        hardTimeoutMs,
         maxCaptureBytes: MAX_BRIDGE_CAPTURE_BYTES,
         signal: options.signal,
       },
@@ -244,7 +246,7 @@ export class RemoteSshProcessAdapter {
       const message = result.timeoutReason === 'inactivity'
         ? 'The SSH transport produced no verified bridge progress before its inactivity limit and was stopped. The remote project may contain partial work; review it before retrying.'
         : result.timeoutReason === 'hard_limit'
-          ? 'The SSH transport reached its hard run limit and was stopped. The remote project may contain partial work; review it before retrying.'
+          ? 'The SSH transport reached an explicit run limit and was stopped. The remote project may contain partial work; review it before retrying.'
           : 'The SSH operation reached a run limit and was stopped. The remote project may contain partial work; review it before retrying.'
       throw new RemoteSshError('ssh_timed_out', message, 504)
     }
@@ -271,6 +273,13 @@ function bridgeFailure(envelope) {
     provider_not_authenticated: 'The requested provider is not authenticated on the remote machine.',
     subscription_auth_required: 'The remote provider is not using a verified subscription login.',
     unsupported_provider: 'Remote chat supports Codex and Claude Code only.',
+    project_isolation_required: 'Remote agent execution requires a verified Git working tree and directly runnable Git installation.',
+    project_baseline_unavailable: 'Create an initial remote Git commit before starting an isolated Ensync workspace.',
+    shared_checkout_snapshot_failed: 'Git could not safely copy the remote shared checkout into a protected Ensync workspace. The shared checkout was left unchanged.',
+    managed_worktree_missing: 'The protected remote Ensync worktree is missing or inaccessible.',
+    managed_worktree_mismatch: 'The protected remote Ensync worktree no longer matches its registered branch or repository.',
+    managed_worktree_create_failed: 'Git could not create the protected remote Ensync worktree.',
+    managed_project_missing: 'The selected project directory is missing from its protected remote worktree.',
   }
   return new RemoteSshError(
     code,
@@ -333,6 +342,17 @@ function validateRemoteChatRequest(request) {
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
     throw new RemoteSshError('invalid_prompt', 'Enter a message before running remote chat.')
   }
+  if (
+    typeof request.workspaceKey !== 'string'
+    || !request.workspaceKey.trim()
+    || request.workspaceKey.length > 512
+    || CONTROL_CHARACTER_PATTERN.test(request.workspaceKey)
+  ) {
+    throw new RemoteSshError(
+      'invalid_workspace_key',
+      'A stable Ensync conversation workspace key is required for remote agent execution.',
+    )
+  }
   if (request.prompt.length > MAX_PROMPT_LENGTH) {
     throw new RemoteSshError(
       'invalid_prompt',
@@ -375,7 +395,7 @@ export class RemoteSshService {
   constructor(options = {}) {
     this.#adapter = options.adapter ?? new RemoteSshProcessAdapter(options)
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_CHAT_HARD_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? null
   }
 
   async probe(input) {
@@ -444,7 +464,12 @@ export class RemoteSshService {
       throw new RemoteSshError('run_cancelled', 'Run stopped by user.', 499, false)
     }
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
-    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const inactivityTimeoutMs = hardTimeoutMs == null
+      ? this.#inactivityTimeoutMs
+      : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const transportHardTimeoutMs = hardTimeoutMs == null
+      ? null
+      : hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS
     const startedAt = Date.now()
     const execution = await this.#adapter.execute(
       connection,
@@ -452,6 +477,7 @@ export class RemoteSshService {
         operation: 'chat',
         provider: request.provider,
         projectPath: connection.projectPath,
+        workspaceKey: request.workspaceKey,
         prompt: request.prompt,
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
@@ -460,9 +486,9 @@ export class RemoteSshService {
         hardTimeoutMs,
       },
       {
-        timeoutMs: hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
+        timeoutMs: transportHardTimeoutMs ?? DEFAULT_SSH_TIMEOUT_MS,
         inactivityTimeoutMs: inactivityTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
-        hardTimeoutMs: hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
+        hardTimeoutMs: transportHardTimeoutMs,
         signal: options.signal,
       },
     )
@@ -488,6 +514,23 @@ export class RemoteSshService {
     }
     if (!execution.envelope.ok) throw bridgeFailure(execution.envelope)
     const result = execution.envelope.result
+    const workspace = result?.workspace
+    if (
+      !workspace
+      || typeof workspace.path !== 'string'
+      || typeof workspace.repositoryPath !== 'string'
+      || typeof workspace.branch !== 'string'
+      || !workspace.gitBefore
+    ) {
+      throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned no verified protected workspace.', 502)
+    }
+    options.onEvent?.({
+      type: 'notice',
+      code: 'project_workspace_ready',
+      message: `Remote protected workspace used on ${workspace.branch} at ${workspace.path}. The shared checkout was not the provider working directory.`,
+      workspace: { path: workspace.path, branch: workspace.branch },
+      at: new Date().toISOString(),
+    })
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)
@@ -496,7 +539,7 @@ export class RemoteSshService {
       const message = processResult.timeoutReason === 'inactivity'
         ? 'The remote provider produced no CLI output or lifecycle progress before Ensync Host\'s inactivity limit and was stopped. Partial work may exist; review the remote project before retrying.'
         : processResult.timeoutReason === 'hard_limit'
-          ? 'The remote provider reached Ensync Host\'s hard run limit and was stopped. Partial work may exist; review the remote project before retrying.'
+          ? 'The remote provider reached an explicit Ensync Host run limit and was stopped. Partial work may exist; review the remote project before retrying.'
           : 'The remote provider reached an Ensync Host run limit and was stopped. Partial work may exist; review the remote project before retrying.'
       throw new RemoteSshError('run_timed_out', message, 504)
     }
@@ -540,12 +583,14 @@ export class RemoteSshService {
     return {
       provider: request.provider,
       projectPath: result.projectPath,
+      workspace,
       response: parsed.response,
       sessionId: parsed.sessionId ?? request.sessionId ?? null,
       model: parsed.model,
       requestedModel: request.model ?? null,
       requestedEffort: request.effort ?? null,
       usage: parsed.usage,
+      outputRecovery: parsed.outputRecovery,
       durationMs: Date.now() - startedAt,
       completedAt: result.completedAt,
       remote: {
