@@ -7,8 +7,10 @@ import test from 'node:test'
 import {
   createNativeWorkspaceIdentity,
   createNativeWorkspaceStore,
+  createWorkspaceFocusHandler,
   createWorkspaceIdentityHandler,
   createWorkspaceIdentityIpcManager,
+  createWorkspaceOpenProjectHandler,
   isNativeWorkspaceIdentity,
   nativeWorkspaceRestorationOrder,
   shouldRetainNativeWorkspaceOnClose,
@@ -110,8 +112,43 @@ test('workspace identity IPC returns only an authorized registered identity', as
     identityForWebContents: (webContents) => webContents === sender ? identity : null,
     retainedIdentities: () => [identity],
   })
-  assert.deepEqual(await handler({ sender }), { ...identity, retainedWorkspaceIds: [identity.id] })
+  assert.deepEqual(await handler({ sender }), {
+    ...identity,
+    retainedWorkspaceIds: [identity.id],
+    retainedWorkspaces: [identity],
+  })
   assert.equal(await handler({ sender: {} }), null)
+})
+
+test('workspace identity IPC carries only a shell-issued project-window launch', async () => {
+  const source = { id: IDS[0], kind: 'canonical' }
+  const target = { id: IDS[1], kind: 'isolated' }
+  const sender = {}
+  const projectLaunch = {
+    projectId: 'project-nadlan',
+    projectPath: '/Users/example/nadlan-desk',
+    sourceWorkspace: source,
+  }
+  const handler = createWorkspaceIdentityHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => target,
+    retainedIdentities: () => [source, target],
+    projectLaunchForIdentity: (identity) => identity.id === target.id ? projectLaunch : null,
+  })
+  assert.deepEqual(await handler({ sender }), {
+    ...target,
+    retainedWorkspaceIds: [source.id, target.id],
+    retainedWorkspaces: [source, target],
+    projectLaunch,
+  })
+
+  const invalid = createWorkspaceIdentityHandler({
+    isAuthorized: () => true,
+    identityForWebContents: () => target,
+    retainedIdentities: () => [target],
+    projectLaunchForIdentity: () => ({ ...projectLaunch, sourceWorkspace: target }),
+  })
+  assert.equal('projectLaunch' in await invalid({ sender }), false)
 })
 
 test('workspace identity IPC manager registers once and remains installed while windows exist', async () => {
@@ -147,6 +184,7 @@ test('workspace identity IPC manager registers once and remains installed while 
   assert.deepEqual(await handler({ sender: ownedSender }), {
     ...identity,
     retainedWorkspaceIds: [identity.id],
+    retainedWorkspaces: [identity],
   })
   assert.equal(await handler({ sender: {} }), null)
 
@@ -161,4 +199,53 @@ test('workspace identity IPC manager registers once and remains installed while 
   assert.equal(removeCalls, 1)
   assert.equal(manager.registered, false)
   assert.equal(manager.dispose(), false)
+})
+
+test('workspace focus routes only authorized project requests to a different retained window', async () => {
+  const source = { id: IDS[0], kind: 'isolated' }
+  const target = { id: IDS[1], kind: 'canonical' }
+  const sender = {}
+  const targetWindow = {}
+  const actions = []
+  const handler = createWorkspaceFocusHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: (webContents) => webContents === sender ? source : null,
+    retainedIdentities: () => [source, target],
+    windowForWorkspace: (id) => id === target.id ? targetWindow : null,
+    focusWindow: (window) => { actions.push(['focus', window]); return true },
+    notifyProjectFocus: (window, project) => { actions.push(['notify', window, project]) },
+  })
+  const request = {
+    workspaceId: target.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+  }
+  assert.equal(await handler({ sender }, request), true)
+  assert.deepEqual(actions, [
+    ['focus', targetWindow],
+    ['notify', targetWindow, { projectId: 'project-relay', projectPath: '/Users/example/relay' }],
+  ])
+  assert.equal(await handler({ sender: {} }, request), false)
+  assert.equal(await handler({ sender }, { ...request, workspaceId: source.id }), false)
+  assert.equal(await handler({ sender }, { ...request, projectPath: 'relative/path' }), false)
+})
+
+test('opening a project workspace is authorized and keeps the source identity', async () => {
+  const source = { id: IDS[0], kind: 'canonical' }
+  const sender = {}
+  const calls = []
+  const handler = createWorkspaceOpenProjectHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: (webContents) => webContents === sender ? source : null,
+    openProjectWindow: (project, sourceWorkspace) => {
+      calls.push({ project, sourceWorkspace })
+      return true
+    },
+  })
+  const project = { projectId: 'project-nadlan', projectPath: '/Users/example/nadlan-desk' }
+  assert.equal(await handler({ sender }, project), true)
+  assert.deepEqual(calls, [{ project, sourceWorkspace: source }])
+  assert.equal(await handler({ sender: {} }, project), false)
+  assert.equal(await handler({ sender }, { ...project, projectPath: 'relative/path' }), false)
+  assert.equal(calls.length, 1)
 })

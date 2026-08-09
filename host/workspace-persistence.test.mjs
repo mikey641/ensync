@@ -8,6 +8,7 @@ import {
   commitWorkspaceSnapshot,
   compactWorkspaceSnapshot,
   createWorkspaceSnapshotKeys,
+  INTERRUPTION_MESSAGE,
   readWorkspaceSnapshot,
   reconcileInterruptedWorkspaceState,
 } from '../src/lib/workspacePersistence.mjs'
@@ -289,4 +290,53 @@ test('renderer recovery preserves only runs backed by a reconnectable Host job',
   assert.equal(restored.state.chats[1].messages[0].deliveryStatus, 'interrupted')
   assert.equal(restored.state.chatSessions['chat-job'].sessionId, 'job-session')
   assert.equal(restored.state.chatSessions['chat-legacy'], undefined)
+})
+
+test('legacy PTY-truncated execution streams restore as interrupted, not malformed', () => {
+  const state = {
+    chats: [{
+      id: 'chat-a', provider: 'codex', subtitle: 'Run failed',
+      messages: [{
+        id: 'u1', role: 'user', turnId: 'turn-1', deliveryStatus: 'failed', content: 'Continue',
+      }],
+    }],
+    chatSessions: { 'chat-a': { provider: 'codex', sessionId: 'unsafe-to-resume' } },
+    chatErrors: { 'chat-a': 'Ensync Host returned a malformed execution event.' },
+    chatExecutionEvents: { 'chat-a': [{
+      type: 'started', provider: 'codex', cwd: '/project', command: 'codex app-server',
+      at: '2026-08-07T10:00:00.000Z',
+    }] },
+    inFlightRuns: {},
+  }
+
+  const restored = reconcileInterruptedWorkspaceState(state, {
+    now: () => '2026-08-07T10:02:00.000Z',
+    preserveHostJobs: true,
+  })
+
+  assert.deepEqual(restored.interruptedChatIds, ['chat-a'])
+  assert.equal(restored.state.chats[0].subtitle, 'Interrupted by restart')
+  assert.equal(restored.state.chats[0].messages[0].deliveryStatus, 'interrupted')
+  assert.equal(restored.state.chats[0].continuation.status, 'reconciliation_required')
+  assert.equal(restored.state.chats[0].continuation.termination, 'interrupted')
+  assert.equal(restored.state.chatSessions['chat-a'], undefined)
+  assert.equal(restored.state.chatErrors['chat-a'], INTERRUPTION_MESSAGE)
+  assert.equal(restored.state.chatExecutionEvents['chat-a'].at(-1).code, 'run_interrupted')
+})
+
+test('a verified malformed provider-output failure is not rewritten as a transport interruption', () => {
+  const state = {
+    chats: [{
+      id: 'chat-a', provider: 'codex', subtitle: 'Run failed',
+      messages: [{ id: 'u1', role: 'user', turnId: 'turn-1', deliveryStatus: 'failed', content: 'Continue' }],
+    }],
+    chatErrors: { 'chat-a': 'Codex returned output Ensync Host could not verify as JSON events.' },
+    inFlightRuns: {},
+  }
+
+  const restored = reconcileInterruptedWorkspaceState(state, { preserveHostJobs: true })
+
+  assert.deepEqual(restored.interruptedChatIds, [])
+  assert.strictEqual(restored.state.chats[0], state.chats[0])
+  assert.equal(restored.state.chatErrors['chat-a'], state.chatErrors['chat-a'])
 })
