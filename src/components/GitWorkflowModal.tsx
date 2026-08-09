@@ -17,6 +17,7 @@ import {
   type GitConnection,
   type GitPushMode,
   type GitStatus,
+  type GitUnlandedBranch,
   type ProjectInspection,
 } from '../lib/relayHost'
 import './GitWorkflowModal.css'
@@ -66,12 +67,13 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const [repositoryUrl, setRepositoryUrl] = useState('')
   const [destinationPath, setDestinationPath] = useState('')
   const [status, setStatus] = useState<GitStatus | null>(null)
+  const [unlanded, setUnlanded] = useState<GitUnlandedBranch[]>([])
   const [remote, setRemote] = useState('')
   const [connection, setConnection] = useState<GitConnection | null>(null)
   const [pushMode, setPushMode] = useState<GitPushMode>('current_branch')
   const [productionBranch, setProductionBranch] = useState(() => project?.path ? readProductionBranch(project.path) : '')
   const [confirmation, setConfirmation] = useState('')
-  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | null>(null)
+  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'land' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
 
@@ -95,6 +97,13 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         : response.git.preferredRemote ?? response.git.remotes[0]?.name ?? ''
       setRemote(nextRemote)
       setProductionBranch((current) => current || response.git.productionBranch || '')
+      try {
+        const unlandedResponse = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(unlandedResponse.unlanded.branches)
+      } catch (unlandedError) {
+        setUnlanded([])
+        setError(unlandedError instanceof Error ? unlandedError.message : 'Ensync Host could not inspect unlanded work.')
+      }
     } catch (statusError) {
       setStatus(null)
       setError(statusError instanceof Error ? statusError.message : 'Ensync Host could not inspect Git status.')
@@ -170,6 +179,28 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
     }
   }
 
+  const landBranch = async (branch: string) => {
+    if (!project) return
+    setBusy('land')
+    setError(null)
+    setNotice(null)
+    try {
+      const result = await ensyncHost.landGitBranch({ projectPath: project.path, branch })
+      setStatus(result.git)
+      setNotice(`Landed ${branch} into ${result.land.mergedInto}.`)
+      try {
+        const refreshed = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(refreshed.unlanded.branches)
+      } catch {
+        // The land succeeded; a stale unlanded list self-corrects on the next refresh.
+      }
+    } catch (landError) {
+      setError(landError instanceof Error ? landError.message : 'Landing failed.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const statusFacts = useMemo(() => status ? [
     { label: 'Branch', value: status.branch ?? 'Detached HEAD' },
     { label: 'Working tree', value: status.dirty ? `${status.changedFiles} changed` : 'Clean' },
@@ -224,6 +255,34 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
                 <>
                   <div className="git-status-grid">
                     {statusFacts.map((fact) => <div key={fact.label}><small>{fact.label}</small><strong>{fact.value}</strong></div>)}
+                  </div>
+
+                  <div className="git-unlanded-panel">
+                    <h3 className="git-section-heading">Unlanded agent work</h3>
+                    {unlanded.length === 0 ? (
+                      <p className="git-unlanded-empty">Every conversation branch is landed.</p>
+                    ) : (
+                      unlanded.map((entry) => (
+                        <div key={entry.branch} className="git-unlanded-row">
+                          <div className="git-unlanded-meta">
+                            <strong>{entry.branch}</strong>
+                            <small>
+                              {entry.aheadCount} commit{entry.aheadCount === 1 ? '' : 's'} ahead
+                              {' · '}{entry.changedFiles} file{entry.changedFiles === 1 ? '' : 's'}
+                              {entry.lastSubject ? ` · ${entry.lastSubject}` : ''}
+                            </small>
+                          </div>
+                          <button
+                            type="button"
+                            className="button button--ghost"
+                            disabled={busy !== null}
+                            onClick={() => void landBranch(entry.branch)}
+                          >
+                            {busy === 'land' ? 'Landing…' : 'Land'}
+                          </button>
+                        </div>
+                      ))
+                    )}
                   </div>
 
                   <div className="git-connection-panel">
