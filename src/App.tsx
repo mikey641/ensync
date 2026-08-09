@@ -115,6 +115,7 @@ import {
 } from './lib/hostJobRecovery.mjs'
 import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
+import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
@@ -3486,9 +3487,7 @@ function ConversationPane({
     draft: draft || (attachments.length > 0 ? 'attached files' : ''),
     canRun: canRunChat,
   })
-  const providerNotes = executionEvents
-    .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
-    .slice(-6)
+  const providerNotes = transcriptProviderNotes(executionEvents, sending)
   const scrollContentRevision = useMemo(() => chatAutoScrollContentRevision({
     messages: chat.messages,
     executionEvents,
