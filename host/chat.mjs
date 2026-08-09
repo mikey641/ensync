@@ -29,6 +29,7 @@ const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const QUOTA_PATTERN = /(?:usage|spending|rate)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
+const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
   /\b(?:sk-(?:proj-|live-)?|ghp_|github_pat_|glpat-|xox[baprs]-)[a-zA-Z0-9_-]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._~+\/-]{12,}/gi,
@@ -132,33 +133,71 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function providerNoteFromEvent(provider, event) {
-  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
-
-  if (
-    provider === 'codex'
-    && event.type === 'item.completed'
-    && event.item?.type === 'agent_message'
-    && event.item.phase === 'commentary'
-    && typeof event.item.text === 'string'
-    && event.item.text.trim()
-  ) {
-    return event.item.text.trim()
-  }
-
-  if (provider !== 'claude' || event.type !== 'assistant') return null
-  const content = event.message?.content ?? event.content
-  if (!Array.isArray(content)) return null
-  // Claude has no commentary/final phase marker. Only surface assistant text
-  // when the same message also starts provider work; a text-only assistant
-  // message is the final response and should not briefly appear as a note.
-  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
-  const text = content
+function assistantTextBlocks(content) {
+  return content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-  return text || null
+}
+
+/**
+ * Claude has no commentary/final phase marker. Only surface assistant text when
+ * the same message also starts provider work; a text-only assistant message is
+ * the final response and must not briefly appear as a note.
+ *
+ * Claude Code streams one assistant event per content block, so that message's
+ * text and its tool call arrive as separate events sharing `message.id`. Text is
+ * therefore held until the same message ID starts tool work, and dropped when it
+ * never does. Older combined-content events still resolve within one event.
+ */
+function claudeNoteExtractor() {
+  const pending = new Map()
+
+  const remember = (id, text) => {
+    const held = pending.get(id) ?? { text: '', toolStarted: false }
+    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
+    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
+    pending.set(id, held)
+    // Blocks of one message stream contiguously; a small bound keeps interleaved
+    // subagent messages working without retaining a whole run's commentary.
+    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
+    return held
+  }
+
+  return (event) => {
+    if (event.type !== 'assistant') return null
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return null
+    const text = assistantTextBlocks(content)
+    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
+    if (!id) return startsToolWork ? text || null : null
+
+    const held = remember(id, text)
+    if (!startsToolWork && !held.toolStarted) return null
+    held.toolStarted = true
+    const note = held.text
+    held.text = ''
+    return note || null
+  }
+}
+
+function providerNoteExtractor(provider) {
+  if (provider === 'claude') return claudeNoteExtractor()
+  return (event) => {
+    if (
+      provider === 'codex'
+      && event.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && event.item.phase === 'commentary'
+      && typeof event.item.text === 'string'
+      && event.item.text.trim()
+    ) {
+      return event.item.text.trim()
+    }
+    return null
+  }
 }
 
 function outputForwarder(onEvent, provider) {
@@ -166,6 +205,7 @@ function outputForwarder(onEvent, provider) {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
+  const noteFromEvent = providerNoteExtractor(provider)
   const emit = (stream, text) => {
     if (!text) return
     const safe = redactTerminalText(text)
@@ -183,7 +223,8 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = providerNoteFromEvent(provider, structured)
+    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
+    const note = noteFromEvent(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({

@@ -407,7 +407,9 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    if (message.method === 'turn/started' && params?.turn?.id) {
+    if (message.method === 'turn/started'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id) {
       this.#turnId = params.turn.id
       this.#turnStarted = true
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
