@@ -52,8 +52,39 @@ test('a conversation receives a stable worktree without changing the shared chec
   assert.equal(resumed.workspace.reused, true)
   assert.equal(resumed.workspace.projectPath, first.workspace.projectPath)
   assert.equal(await readFile(join(resumed.workspace.projectPath, 'agent-change.txt'), 'utf8'), 'preserved\n')
-  assert.equal(resumed.workspace.gitBefore.changedFiles, 1)
+  assert.equal(resumed.workspace.gitBefore.changedFiles, 0)
+  assert.equal(await git(resumed.workspace.repositoryPath, ['log', '-1', '--format=%s']), 'Ensync agent work (recovered)')
   await resumed.release()
+})
+
+test('acquire commits crash leftovers in a reused worktree as recovered work', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-recover')
+  await writeFile(join(first.workspace.projectPath, 'crash-leftover.txt'), 'left behind\n')
+  await first.release()
+
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-recover')
+  context.after(() => resumed.release())
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+  const subject = await git(resumed.workspace.repositoryPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'Ensync agent work (recovered)')
+  // The recovered content is durable on the branch.
+  const shown = await git(resumed.workspace.repositoryPath, ['show', 'HEAD:crash-leftover.txt'])
+  assert.equal(shown, 'left behind')
+})
+
+test('a first-time seeded conversation still exposes inherited shared-checkout state as uncommitted work', async (context) => {
+  const fixture = await repositoryFixture(context)
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'user edit\n')
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-seeded')
+  context.after(() => lease.release())
+  assert.equal(lease.workspace.seededFromSharedCheckout, true)
+  assert.equal(lease.workspace.gitBefore.dirty, true)
+  const subject = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'baseline')
 })
 
 test('a dirty shared checkout seeds a protected workspace without changing the shared checkout', async (context) => {

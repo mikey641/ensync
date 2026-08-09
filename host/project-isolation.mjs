@@ -446,6 +446,7 @@ export class ProjectIsolationService {
     let worktreePath
     let reused = false
     let seededFromSharedCheckout = false
+    let branchExistedBeforeAcquire = false
 
     if (registered) {
       if (registered.prunable) {
@@ -460,12 +461,14 @@ export class ProjectIsolationService {
         `The protected Ensync worktree for ${branch} is missing or inaccessible.`,
       )
       reused = true
+      branchExistedBeforeAcquire = true
     } else {
       const branchCheck = await this.#git(['show-ref', '--verify', '--quiet', branchRef], {
         cwd: repository.repositoryPath,
         allowFailure: true,
       })
       const branchExists = branchCheck.exitCode === 0
+      branchExistedBeforeAcquire = branchExists
       let startingPoint = repository.head
       if (!branchExists) {
         const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
@@ -503,6 +506,14 @@ export class ProjectIsolationService {
           code: 'managed_worktree_create_failed',
           message: `Git could not expose the shared-checkout snapshot in ${branch}.`,
         })
+      }
+    }
+
+    const createdThisAcquire = !registered && !branchExistedBeforeAcquire
+    if (!createdThisAcquire) {
+      const leftovers = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
+      if (leftovers.stdout.split('\0').filter(Boolean).length > 0) {
+        await this.#commitWorktree(worktreePath, branch, { outcome: 'recovered' })
       }
     }
 
