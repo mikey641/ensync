@@ -1,7 +1,9 @@
 import type {
   ChatModelEffort,
+  ChatOutputRecovery,
   ChatProviderId,
   ChatRunUsage,
+  ChatRunWorkspace,
   CliProviderId,
 } from './relayHost'
 
@@ -72,6 +74,7 @@ export type RemoteSshProbe = {
 
 export type RemoteSshChatRequest = {
   connection: RemoteSshConnectionInput
+  workspaceKey: string
   provider: ChatProviderId
   prompt: string
   sessionId?: string | null
@@ -83,12 +86,14 @@ export type RemoteSshChatRequest = {
 export type RemoteSshChatResponse = {
   provider: ChatProviderId
   projectPath: string
+  workspace?: ChatRunWorkspace | null
   response: string
   sessionId: string | null
   model: string | null
   requestedModel: string | null
   requestedEffort: ChatModelEffort | null
   usage: ChatRunUsage | null
+  outputRecovery?: ChatOutputRecovery | null
   durationMs: number
   completedAt: string
   remote: {
