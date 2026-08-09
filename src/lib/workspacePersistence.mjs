@@ -152,14 +152,17 @@ function eventSize(event) {
 
 /**
  * Keeps terminal history from consuming the synchronous storage budget needed
- * by chats, tabs, drafts, and layout. Every chat retains its newest events and
- * receives an explicit notice when older output was omitted from persistence.
+ * by chats, tabs, drafts, and layout, and removes device-wide preferences from
+ * new workspace commits. Every chat retains its newest events and receives an
+ * explicit notice when older output was omitted from persistence.
  */
 export function compactWorkspaceSnapshot(state, options = {}) {
-  const eventsByChat = state.chatExecutionEvents
-  if (!eventsByChat || typeof eventsByChat !== 'object') return state
+  const workspaceState = { ...state }
+  delete workspaceState.fallbackProviderOrder
+  const eventsByChat = workspaceState.chatExecutionEvents
+  if (!eventsByChat || typeof eventsByChat !== 'object') return workspaceState
   const entries = Object.entries(eventsByChat)
-  if (entries.length === 0) return state
+  if (entries.length === 0) return workspaceState
 
   const totalLimit = options.maxExecutionEventCharacters ?? 384 * 1024
   const perChatLimit = Math.max(0, Math.floor(totalLimit / entries.length))
@@ -186,7 +189,7 @@ export function compactWorkspaceSnapshot(state, options = {}) {
     }
     compacted[chatId] = retained
   }
-  return { ...state, chatExecutionEvents: compacted }
+  return { ...workspaceState, chatExecutionEvents: compacted }
 }
 
 export const INTERRUPTION_MESSAGE = 'This run was interrupted before Ensync received a final result. Project activity may be partial; reconcile the project before continuing.'

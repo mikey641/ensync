@@ -95,6 +95,11 @@ import {
   selectAutomaticProvider,
   selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
+import {
+  resolveFallbackProviderOrder,
+  subscribeStoredFallbackProviderOrder,
+  writeStoredFallbackProviderOrder,
+} from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
 import {
@@ -725,7 +730,7 @@ function App() {
   const [autoFallback, setAutoFallback] = useState(hydrated?.autoFallback ?? true)
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
-    normalizeFallbackProviderOrder(hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
+    resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
   const [search, setSearch] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>(hydrated?.drafts ?? {})
@@ -839,7 +844,6 @@ function App() {
     conversationLayout,
     autoFallback,
     autoContextSkill,
-    fallbackProviderOrder,
     readCompletionByChat,
     executionPanelOpenByChat,
     drafts,
@@ -1251,6 +1255,16 @@ function App() {
     return () => window.removeEventListener('storage', synchronizePreferences)
   }, [])
 
+  useEffect(() => subscribeStoredFallbackProviderOrder(
+    window,
+    window.localStorage,
+    setFallbackProviderOrder,
+  ), [])
+
+  const changeFallbackProviderOrder = useCallback((value: ProviderId[]) => {
+    setFallbackProviderOrder(writeStoredFallbackProviderOrder(window.localStorage, value))
+  }, [])
+
   useEffect(() => {
     if (agentUpdatePreferences.mode !== 'automatic'
       || !hostOnline
@@ -1346,7 +1360,7 @@ function App() {
 
   useLayoutEffect(() => {
     commitWorkspace()
-  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, fallbackProviderOrder, inFlightRuns, modelTelemetry, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
 
   useEffect(() => {
     const flush = () => commitWorkspace()
@@ -3332,7 +3346,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={changeFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
       {gitWorkflowMode && <GitWorkflowModal mode={gitWorkflowMode} project={activeProject.verified ? activeProject : null} onImported={(project) => { focusProject(verifiedProject(project)); setGitWorkflowMode(null) }} onClose={() => setGitWorkflowMode(null)} />}

@@ -11,6 +11,12 @@ export function writeStoredFallbackProviderOrder(
   order: unknown,
 ): ProviderId[]
 
+export function subscribeStoredFallbackProviderOrder(
+  target: Pick<Window, 'addEventListener' | 'removeEventListener'> | null | undefined,
+  storage: Pick<Storage, 'getItem'> | null | undefined,
+  onChange: (order: ProviderId[]) => void,
+): () => void
+
 export function resolveFallbackProviderOrder(
   storage: Pick<Storage, 'getItem' | 'setItem'> | null | undefined,
   workspaceOrder: unknown,
