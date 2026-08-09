@@ -503,6 +503,75 @@ test('a chat run auto-commits agent work at run end, on success and on failure',
   }
 })
 
+test('a chat run skips auto-commit when the workspace write lease is lost', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const headBefore = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await writeFile(join(fixture.repository, 'agent-in-worktree.txt'), 'work left behind by another owner\n')
+
+  const leaseController = new AbortController()
+  leaseController.abort(new Error('Ensync Host lost the protected workspace write lease: lease stolen by another Host.'))
+  let commitCalls = 0
+  const fakeIsolation = {
+    async acquire() {
+      return {
+        workspace: {
+          projectPath: fixture.repository,
+          repositoryPath: fixture.repository,
+          branch: 'ensync/chat-lease-lost',
+          reused: false,
+          gitBefore: { branch: 'ensync/chat-lease-lost', head: headBefore, changedFiles: 0, dirty: false },
+        },
+        signal: leaseController.signal,
+        assertHeld() {
+          if (leaseController.signal.aborted) throw leaseController.signal.reason
+        },
+        release: async () => {},
+      }
+    },
+    async commitAgentWork() {
+      commitCalls += 1
+      return { committed: true, changedFiles: 1, head: 'deadbeef' }
+    },
+  }
+
+  const events = []
+  const chats = new ChatRunService({
+    projectIsolation: fakeIsolation,
+    statusService: {
+      async get() {
+        return {
+          id: 'codex',
+          name: 'Codex',
+          installed: true,
+          executable: '/test/bin/codex',
+          authentication: { state: 'authenticated', method: 'chatgpt' },
+        }
+      },
+      invalidate() {},
+    },
+    processRunner: async () => ({
+      exitCode: 0,
+      stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}\n',
+      stderr: '',
+      aborted: false,
+      timedOut: false,
+      error: null,
+    }),
+  })
+
+  await assert.rejects(
+    chats.run(
+      { provider: 'codex', prompt: 'do work', projectPath: fixture.repository, workspaceKey: 'window-a:chat-lease-lost' },
+      { onEvent: (event) => events.push(event) },
+    ),
+    (error) => error.code === 'workspace_write_lock_lost',
+  )
+
+  assert.equal(commitCalls, 0)
+  assert.equal(events.some((event) => event.code === 'agent_work_committed'), false)
+  assert.equal(events.some((event) => event.code === 'agent_work_commit_failed'), false)
+})
+
 test('commitAgentWork on a clean worktree commits nothing', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })

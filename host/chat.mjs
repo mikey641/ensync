@@ -854,12 +854,12 @@ export class ChatRunService {
       throw error
     } finally {
       combinedSignal.dispose()
-      if (workspace && this.#projectIsolation) {
+      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
         try {
           const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
             outcome: runOutcome,
             provider: request.provider,
-            jobId: typeof options.jobId === 'string' ? options.jobId : null,
+            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
           })
           if (workCommit.committed) {
             options.onEvent?.({
@@ -869,11 +869,11 @@ export class ChatRunService {
               at: new Date().toISOString(),
             })
           }
-        } catch (error) {
+        } catch (commitError) {
           options.onEvent?.({
             type: 'notice',
             code: 'agent_work_commit_failed',
-            message: `Ensync could not save this run's work to ${workspace.branch}: ${error instanceof Error ? error.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
             at: new Date().toISOString(),
           })
         }
