@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ensync — logo design exploration</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --paper: #f7f7f3;
+      --paper-raised: #ffffff;
+      --ink: #202123;
+      --muted: #696b68;
+      --line: #d9dad5;
+      --accent: #19c69a;
+      --dark: #202123;
+      --mint: #7ee2bc;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body::before {
+      position: fixed;
+      inset: 0;
+      z-index: 10;
+      opacity: .14;
+      pointer-events: none;
+      content: "";
+      background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 180 180' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='.045'/%3E%3C/svg%3E");
+    }
+
+    main { width: min(1180px, calc(100% - 40px)); margin: 0 auto; padding: 88px 0 72px; }
+    header { max-width: 760px; margin: 0 auto 74px; text-align: center; }
+    h1 { margin: 0; font-size: clamp(54px, 8vw, 92px); font-weight: 550; letter-spacing: -.065em; }
+    .eyebrow { margin: 18px 0 0; color: var(--accent); font: 600 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .11em; text-transform: uppercase; }
+    .lede { margin: 24px auto 0; max-width: 640px; color: var(--muted); font-size: 17px; line-height: 1.7; }
+
+    .grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
+    .card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 20px; background: color-mix(in srgb, var(--paper-raised) 90%, transparent); transition: transform 260ms ease, box-shadow 260ms ease, border-color 260ms ease; }
+    .card:hover { transform: translateY(-5px); border-color: color-mix(in srgb, var(--accent) 48%, var(--line)); box-shadow: 0 22px 55px rgb(32 33 35 / .09); }
+    .canvas { min-height: 248px; display: grid; place-items: center; background: var(--paper-raised); }
+    .canvas img { width: 132px; height: 132px; transition: transform 420ms cubic-bezier(.16, 1, .3, 1); }
+    .card:hover .canvas img { transform: scale(1.08) rotate(-1deg); }
+    .copy { padding: 22px 22px 24px; border-top: 1px solid var(--line); }
+    .index { color: var(--accent); font: 600 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; }
+    h2 { margin: 9px 0 5px; font-size: 19px; letter-spacing: -.025em; }
+    .type { color: var(--muted); font: 500 10px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-transform: uppercase; }
+    .copy p { margin: 15px 0 0; color: var(--muted); font-size: 13px; line-height: 1.65; }
+
+    .selected { margin-top: 90px; padding: clamp(28px, 6vw, 72px); border-radius: 28px; background: var(--dark); color: #f7f7f3; }
+    .selected-head { display: flex; align-items: end; justify-content: space-between; gap: 24px; margin-bottom: 42px; }
+    .selected h2 { margin: 8px 0 0; font-size: clamp(36px, 5vw, 62px); font-weight: 550; letter-spacing: -.055em; }
+    .selected p { max-width: 520px; margin: 0; color: #b9bbb5; line-height: 1.7; }
+    .applications { display: grid; grid-template-columns: 1.25fr .75fr .75fr; gap: 12px; }
+    .application { min-height: 220px; display: grid; place-items: center; border: 1px solid #424440; border-radius: 18px; background: #292b29; }
+    .application.light { background: #f7f7f3; }
+    .application.accent { background: var(--accent); }
+    .application img { width: min(76%, 300px); max-height: 128px; }
+    .application:not(.light):not(.accent) img { filter: invert(89%) sepia(24%) saturate(766%) hue-rotate(101deg) brightness(95%) contrast(88%); }
+    .application.accent img { filter: brightness(0) saturate(100%) invert(10%) sepia(7%) saturate(457%) hue-rotate(71deg) brightness(98%) contrast(88%); }
+
+    footer { margin-top: 52px; color: var(--muted); font: 500 10px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .08em; text-align: center; text-transform: uppercase; }
+    footer a { color: inherit; }
+
+    @media (max-width: 900px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .selected-head { align-items: start; flex-direction: column; }
+      .applications { grid-template-columns: 1fr 1fr; }
+      .applications .application:first-child { grid-column: 1 / -1; }
+    }
+
+    @media (max-width: 600px) {
+      main { width: min(100% - 24px, 1180px); padding-top: 56px; }
+      header { margin-bottom: 46px; }
+      .grid, .applications { grid-template-columns: 1fr; }
+      .applications .application:first-child { grid-column: auto; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>ensync</h1>
+      <p class="eyebrow">One task. Any provider. Still in context.</p>
+      <p class="lede">Six feature-led SVG directions for a conversation-first AI workspace. Each concept stays minimal, scalable, and grounded in Ensync’s actual product behavior.</p>
+    </header>
+
+    <section class="grid" aria-label="Logo concepts">
+      <article class="card">
+        <div class="canvas"><img src="concepts/01-continuity-loop.svg" alt="Two interlocking rounded loops"></div>
+        <div class="copy"><span class="index">01 / PRIMARY</span><h2>Continuity Loop</h2><span class="type">Pure geometric</span><p>Two provider sessions interlock around one shared center. The diagonal movement suggests a handoff without breaking the task.</p></div>
+      </article>
+      <article class="card">
+        <div class="canvas"><img src="concepts/02-routed-signal.svg" alt="A flowing route made from capsules"></div>
+        <div class="copy"><span class="index">02</span><h2>Routed Signal</h2><span class="type">Dot matrix</span><p>An ordered route moves through rounded checkpoints, reflecting explicit provider ranking and safe pre-mutation fallback.</p></div>
+      </article>
+      <article class="card">
+        <div class="canvas"><img src="concepts/03-context-weave.svg" alt="Two continuous curved paths weaving together"></div>
+        <div class="copy"><span class="index">03</span><h2>Context Weave</h2><span class="type">Line system</span><p>Distinct provider paths cross through one retained context while remaining individually legible.</p></div>
+      </article>
+      <article class="card">
+        <div class="canvas"><img src="concepts/04-project-keep.svg" alt="A protected rounded square containing a connected task path"></div>
+        <div class="copy"><span class="index">04</span><h2>Project Keep</h2><span class="type">Dots + geometry</span><p>The bounded workspace is the hard project perimeter; the task thread remains safely inside it.</p></div>
+      </article>
+      <article class="card">
+        <div class="canvas"><img src="concepts/05-durable-tabs.svg" alt="Two offset conversation panes with message lines"></div>
+        <div class="copy"><span class="index">05</span><h2>Durable Tabs</h2><span class="type">Lines + geometry</span><p>Layered panes express recoverable conversations, tabs, split view, and a conversation-first interface outside an editor.</p></div>
+      </article>
+      <article class="card">
+        <div class="canvas"><img src="concepts/06-local-remote-pair.svg" alt="Equal endpoints connected through a protected center"></div>
+        <div class="copy"><span class="index">06</span><h2>Local / Remote Pair</h2><span class="type">Node network</span><p>Equal endpoints connect through one task identity, reflecting the same guarded workflow on the local Host or an SSH worker.</p></div>
+      </article>
+    </section>
+
+    <section class="selected" aria-labelledby="selected-title">
+      <div class="selected-head">
+        <div><span class="index">SELECTED DIRECTION</span><h2 id="selected-title">Continuity Loop</h2></div>
+        <p>It preserves Ensync’s established linked-loop equity while making the idea explicit: two bounded provider sessions, one continuous task. It is distinctive at app-icon scale and works in one color.</p>
+      </div>
+      <div class="applications">
+        <div class="application"><img src="ensync-logo.svg" alt="Ensync logo on charcoal"></div>
+        <div class="application light"><img src="ensync-mark.svg" alt="Ensync mark on paper"></div>
+        <div class="application accent"><img src="ensync-mark.svg" alt="Ensync mark on teal"></div>
+      </div>
+    </section>
+
+    <footer>Editable SVG exploration · no API-generated showcase imagery · 2026</footer>
+  </main>
+</body>
+</html>

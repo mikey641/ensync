@@ -2,10 +2,13 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  getNativeWorkspaceIdentity,
   getRetainedNativeWorkspaceIds,
+  getRetainedNativeWorkspaces,
   initializeNativeWorkspaceIdentity,
   isCanonicalWorkspace,
   isMissingWorkspaceIdentityHandlerError,
+  refreshRetainedNativeWorkspaces,
   removeAbandonedNativeWorkspaceStorage,
   workspaceStorageKey,
 } from '../src/lib/nativeWorkspaceIdentity.mjs'
@@ -22,13 +25,26 @@ function storageFrom(entries) {
 
 test('renderer accepts only a verified shell-issued workspace identity', async () => {
   const id = '11111111-1111-4111-8111-111111111111'
+  const canonicalId = '22222222-2222-4222-8222-222222222222'
   const storage = storageFrom([])
   const identity = await initializeNativeWorkspaceIdentity({
     localStorage: storage,
-    ensyncDesktop: { getWorkspaceIdentity: async () => ({ id, kind: 'isolated', retainedWorkspaceIds: [id] }) },
+    ensyncDesktop: { getWorkspaceIdentity: async () => ({
+      id,
+      kind: 'isolated',
+      retainedWorkspaceIds: [canonicalId, id],
+      retainedWorkspaces: [
+        { id: canonicalId, kind: 'canonical' },
+        { id, kind: 'isolated' },
+      ],
+    }) },
   })
   assert.deepEqual(identity, { id, kind: 'isolated' })
-  assert.deepEqual(getRetainedNativeWorkspaceIds(), [id])
+  assert.deepEqual(getRetainedNativeWorkspaceIds(), [canonicalId, id])
+  assert.deepEqual(getRetainedNativeWorkspaces(), [
+    { id: canonicalId, kind: 'canonical' },
+    { id, kind: 'isolated' },
+  ])
   assert.equal(workspaceStorageKey('ensync-workspace-snapshot-v3', identity), `ensync-native-workspace:${id}:ensync-workspace-snapshot-v3`)
   await assert.rejects(() => initializeNativeWorkspaceIdentity({
     localStorage: storage,
@@ -40,7 +56,65 @@ test('browser mode alone uses canonical unsuffixed storage', async () => {
   const identity = await initializeNativeWorkspaceIdentity({})
   assert.equal(isCanonicalWorkspace(identity), true)
   assert.deepEqual(getRetainedNativeWorkspaceIds(), [])
+  assert.deepEqual(getRetainedNativeWorkspaces(), [])
   assert.equal(workspaceStorageKey('ensync-workspace-snapshot-v3', identity), 'ensync-workspace-snapshot-v3')
+})
+
+test('renderer refreshes retained workspaces created after its initial bootstrap', async () => {
+  const canonicalId = '11111111-1111-4111-8111-111111111111'
+  const isolatedId = '22222222-2222-4222-8222-222222222222'
+  let includeIsolated = false
+  const target = {
+    ensyncDesktop: {
+      getWorkspaceIdentity: async () => ({
+        id: canonicalId,
+        kind: 'canonical',
+        retainedWorkspaceIds: includeIsolated ? [canonicalId, isolatedId] : [canonicalId],
+        retainedWorkspaces: includeIsolated
+          ? [
+              { id: canonicalId, kind: 'canonical' },
+              { id: isolatedId, kind: 'isolated' },
+            ]
+          : [{ id: canonicalId, kind: 'canonical' }],
+      }),
+    },
+  }
+  await initializeNativeWorkspaceIdentity(target)
+  assert.deepEqual(getRetainedNativeWorkspaces(), [{ id: canonicalId, kind: 'canonical' }])
+
+  includeIsolated = true
+  assert.deepEqual(await refreshRetainedNativeWorkspaces(target), [
+    { id: canonicalId, kind: 'canonical' },
+    { id: isolatedId, kind: 'isolated' },
+  ])
+  assert.deepEqual(getRetainedNativeWorkspaceIds(), [canonicalId, isolatedId])
+})
+
+test('retained-workspace refresh cannot change a hydrated renderer identity', async () => {
+  const canonicalId = '11111111-1111-4111-8111-111111111111'
+  const isolatedId = '22222222-2222-4222-8222-222222222222'
+  await initializeNativeWorkspaceIdentity({
+    ensyncDesktop: { getWorkspaceIdentity: async () => ({
+      id: canonicalId,
+      kind: 'canonical',
+      retainedWorkspaceIds: [canonicalId],
+      retainedWorkspaces: [{ id: canonicalId, kind: 'canonical' }],
+    }) },
+  })
+
+  await assert.rejects(() => refreshRetainedNativeWorkspaces({
+    ensyncDesktop: { getWorkspaceIdentity: async () => ({
+      id: isolatedId,
+      kind: 'isolated',
+      retainedWorkspaceIds: [canonicalId, isolatedId],
+      retainedWorkspaces: [
+        { id: canonicalId, kind: 'canonical' },
+        { id: isolatedId, kind: 'isolated' },
+      ],
+    }) },
+  }), /identity changed unexpectedly/)
+  assert.deepEqual(getNativeWorkspaceIdentity(), { id: canonicalId, kind: 'canonical' })
+  assert.deepEqual(getRetainedNativeWorkspaces(), [{ id: canonicalId, kind: 'canonical' }])
 })
 
 test('mixed-version native renderer fails closed instead of sharing canonical storage', async () => {
