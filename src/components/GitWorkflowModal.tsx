@@ -97,8 +97,13 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         : response.git.preferredRemote ?? response.git.remotes[0]?.name ?? ''
       setRemote(nextRemote)
       setProductionBranch((current) => current || response.git.productionBranch || '')
-      const unlandedResponse = await ensyncHost.gitUnlanded(project.path)
-      setUnlanded(unlandedResponse.unlanded.branches)
+      try {
+        const unlandedResponse = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(unlandedResponse.unlanded.branches)
+      } catch (unlandedError) {
+        setUnlanded([])
+        setError(unlandedError instanceof Error ? unlandedError.message : 'Ensync Host could not inspect unlanded work.')
+      }
     } catch (statusError) {
       setStatus(null)
       setError(statusError instanceof Error ? statusError.message : 'Ensync Host could not inspect Git status.')
@@ -183,8 +188,12 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
       const result = await ensyncHost.landGitBranch({ projectPath: project.path, branch })
       setStatus(result.git)
       setNotice(`Landed ${branch} into ${result.land.mergedInto}.`)
-      const refreshed = await ensyncHost.gitUnlanded(project.path)
-      setUnlanded(refreshed.unlanded.branches)
+      try {
+        const refreshed = await ensyncHost.gitUnlanded(project.path)
+        setUnlanded(refreshed.unlanded.branches)
+      } catch {
+        // The land succeeded; a stale unlanded list self-corrects on the next refresh.
+      }
     } catch (landError) {
       setError(landError instanceof Error ? landError.message : 'Landing failed.')
     } finally {
@@ -265,6 +274,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
                           </div>
                           <button
                             type="button"
+                            className="button button--ghost"
                             disabled={busy !== null}
                             onClick={() => void landBranch(entry.branch)}
                           >

@@ -299,22 +299,8 @@
   white-space: nowrap;
 }
 
-.git-unlanded-row > button {
-  height: 33px;
-  padding: 0 13px;
-  border: 1px solid #303530;
-  border-radius: 6px;
+.git-unlanded-row > .button {
   flex: 0 0 auto;
-  background: transparent;
-  color: #9ca39a;
-  font-size: 9px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.git-unlanded-row > button:hover:not(:disabled) {
-  background: #212521;
-  color: #dfe3dd;
 }
 
 .git-inline-controls {
