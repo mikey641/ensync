@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
+  conversationProviderId,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
   selectAutomaticProvider,
@@ -73,4 +74,72 @@ test('safe fallback uses the same priority and never repeats an attempted provid
   assert.equal(first.id, 'codex')
   assert.equal(fallback?.id, 'claude')
   assert.equal(selectAutomaticProvider(providers, ['codex', 'claude'], ['codex', 'claude']), null)
+})
+
+test('an executing run owns the displayed provider while usage moves under it', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: { provider: 'codex' },
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
+})
+
+test('an idle automatic conversation keeps the provider that verifiably ran its last turn', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
+})
+
+test('an automatic conversation that has never run shows the current automatic selection', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto' },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto' },
+    activeRun: undefined,
+    providers: [provider('codex', { usage: 100 }), provider('claude', { usage: 100 })],
+    priorityOrder: ['codex', 'claude'],
+  }), null)
+})
+
+test('a fixed conversation shows its preference, and the real provider during a safe one-turn fallback', () => {
+  const providers = [provider('codex'), provider('claude')]
+  const chat = { provider: 'codex', providerMode: 'fixed', continuation: { provider: 'claude' } }
+  assert.equal(conversationProviderId({
+    chat,
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
+  assert.equal(conversationProviderId({
+    chat,
+    activeRun: { provider: 'claude' },
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+})
+
+test('provider ids the current execution target does not expose never pin the display', () => {
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: { provider: 'codex' },
+    providers: [provider('claude', { usage: 5 })],
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'copilot' } },
+    activeRun: { provider: 'copilot' },
+    providers: [provider('codex', { usage: 5 }), provider('claude', { usage: 5 })],
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
 })

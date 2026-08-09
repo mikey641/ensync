@@ -12,3 +12,5 @@ vite.config.js
 vite.config.d.ts
 playwright-report/
 test-results/
+.ensync-sync-data.json
+.ensync-sync-data.json.staging

@@ -55,3 +55,25 @@ export function selectAutomaticProvider(providers, priorityOrder, attemptedProvi
   if (verifiedAvailable) return verifiedAvailable
   return candidates.find((provider) => exactUsedPercent(provider) === null) ?? null
 }
+
+/**
+ * The provider a conversation displays must be a fact whenever one exists, never
+ * a forecast re-derived on every render. An executing run owns the current turn,
+ * and once it ends the last Host-verified turn still owns the conversation's
+ * resumable session. Only a fixed preference or a conversation that has never run
+ * falls back to the live automatic selection.
+ *
+ * Re-resolving automatic routing on each render is what let a mid-run usage
+ * refresh rename a streaming Codex turn to Claude Code in the header.
+ *
+ * Returns null when nothing is resolvable so callers keep their own last resort.
+ */
+export function conversationProviderId({ chat, activeRun, providers, priorityOrder }) {
+  const available = new Set((providers ?? []).map((provider) => provider.id))
+  const running = activeRun?.provider
+  if (typeof running === 'string' && available.has(running)) return running
+  if (chat?.providerMode === 'fixed') return typeof chat.provider === 'string' ? chat.provider : null
+  const lastVerified = chat?.continuation?.provider
+  if (typeof lastVerified === 'string' && available.has(lastVerified)) return lastVerified
+  return selectAutomaticProvider(providers ?? [], priorityOrder)?.id ?? null
+}

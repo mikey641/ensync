@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { readNdjsonStream } from '../src/lib/ndjsonStream.mjs'
+import {
+  MalformedNdjsonEventError,
+  readNdjsonStream,
+  TruncatedNdjsonStreamError,
+} from '../src/lib/ndjsonStream.mjs'
 
 function bodyFromChunks(chunks) {
   const encoder = new TextEncoder()
@@ -24,11 +28,18 @@ test('browser NDJSON parser preserves values across arbitrary transport chunk bo
   ])
 })
 
-test('browser NDJSON parser rejects malformed and oversized events', async () => {
+test('browser NDJSON parser distinguishes malformed framed events from an interrupted final event', async () => {
   await assert.rejects(
     readNdjsonStream(bodyFromChunks(['{"broken"\n']), () => {}),
-    (error) => error instanceof SyntaxError,
+    (error) => error instanceof MalformedNdjsonEventError,
   )
+  await assert.rejects(
+    readNdjsonStream(bodyFromChunks(['{"type":"out']), () => {}),
+    (error) => error instanceof TruncatedNdjsonStreamError,
+  )
+})
+
+test('browser NDJSON parser rejects oversized events', async () => {
   await assert.rejects(
     readNdjsonStream(bodyFromChunks(['{"text":"too long"}']), () => {}, { maxLineLength: 8 }),
     (error) => error instanceof RangeError,
