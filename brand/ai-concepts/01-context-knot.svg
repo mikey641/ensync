@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Context Knot</title>
+  <desc id="description">Four rounded paths interlock around a protected central task.</desc>
+  <defs>
+    <path id="context-arm" d="M50 18H61C73 18 82 27 82 39V50H67"/>
+  </defs>
+  <g fill="none" stroke="currentColor" stroke-width="8" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#context-arm"/>
+    <use href="#context-arm" transform="rotate(90 50 50)"/>
+    <use href="#context-arm" transform="rotate(180 50 50)"/>
+    <use href="#context-arm" transform="rotate(270 50 50)"/>
+  </g>
+</svg>

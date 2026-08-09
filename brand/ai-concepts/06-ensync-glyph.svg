@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Glyph</title>
+  <desc id="description">A compact continuous e-like path represents Ensync as a conversation in motion.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M77 35C72 24 62 18 50 18C32 18 18 32 18 50S32 82 50 82C63 82 74 75 80 65"/>
+    <path d="M22 50H70"/>
+  </g>
+</svg>

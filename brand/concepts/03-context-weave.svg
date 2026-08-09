@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync context weave concept</title>
+  <desc id="description">Two provider paths weave through a shared center while retaining one continuous context.</desc>
+  <g fill="none" stroke="currentColor" stroke-linecap="round">
+    <path d="M18 28C38 28 39 72 58 72S74 28 82 28" stroke-width="4"/>
+    <path d="M18 72C38 72 39 28 58 28S74 72 82 72" stroke-width="4" opacity=".42"/>
+  </g>
+</svg>

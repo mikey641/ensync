@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Ensync — AI emblem exploration</title>
+  <style>
+    :root { color-scheme: light; --paper:#f7f7f3; --card:#fff; --ink:#202123; --muted:#6c6e69; --line:#dbdcd7; --mint:#19c69a; }
+    * { box-sizing: border-box; }
+    body { margin:0; background:var(--paper); color:var(--ink); font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+    main { width:min(1160px,calc(100% - 36px)); margin:0 auto; padding:78px 0 70px; }
+    header { max-width:760px; margin:0 auto 62px; text-align:center; }
+    h1 { margin:0; font-size:clamp(52px,8vw,88px); font-weight:580; letter-spacing:-.065em; }
+    .eyebrow { margin:17px 0 0; color:var(--mint); font:650 10px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.12em; text-transform:uppercase; }
+    .lede { max-width:650px; margin:22px auto 0; color:var(--muted); font-size:16px; line-height:1.7; }
+    .grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:16px; }
+    .card { overflow:hidden; border:1px solid var(--line); border-radius:20px; background:var(--card); transition:transform 220ms ease,border-color 220ms ease,box-shadow 220ms ease; }
+    .card:hover { transform:translateY(-5px); border-color:color-mix(in srgb,var(--mint) 48%,var(--line)); box-shadow:0 20px 46px rgb(32 33 35/.08); }
+    .canvas { min-height:250px; display:grid; place-items:center; }
+    .canvas img { width:140px; height:140px; transition:transform 350ms cubic-bezier(.16,1,.3,1); }
+    .card:hover .canvas img { transform:scale(1.08); }
+    .copy { min-height:170px; padding:20px 22px 24px; border-top:1px solid var(--line); }
+    .index { color:var(--mint); font:650 10px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.08em; }
+    h2 { margin:8px 0 4px; font-size:19px; letter-spacing:-.025em; }
+    .kind { color:var(--muted); font:550 9px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.09em; text-transform:uppercase; }
+    .copy p { margin:14px 0 0; color:var(--muted); font-size:13px; line-height:1.6; }
+    .selected { margin-top:76px; padding:clamp(30px,6vw,68px); border-radius:28px; background:#202123; color:#f7f7f3; }
+    .selected-top { display:grid; grid-template-columns:.8fr 1.2fr; gap:44px; align-items:end; }
+    .selected h2 { margin:8px 0 0; font-size:clamp(36px,5vw,60px); font-weight:560; letter-spacing:-.055em; }
+    .selected p { margin:0; color:#bbbdb7; line-height:1.7; }
+    .applications { margin-top:40px; display:grid; grid-template-columns:1.3fr .7fr .7fr; gap:12px; }
+    .application { min-height:220px; display:grid; place-items:center; border:1px solid #41433f; border-radius:18px; background:#292b29; }
+    .application.paper { background:#f7f7f3; }
+    .application.mint { background:#7ee2bc; }
+    .application img { width:min(76%,320px); max-height:132px; }
+    .application.dark img { filter:invert(1); }
+    .application.mint img { filter:brightness(0) saturate(100%) invert(10%) sepia(7%) saturate(457%) hue-rotate(71deg) brightness(98%) contrast(88%); }
+    footer { margin-top:44px; color:var(--muted); font:550 9px ui-monospace,SFMono-Regular,Menlo,monospace; letter-spacing:.1em; text-align:center; text-transform:uppercase; }
+    @media(max-width:860px){ .grid{grid-template-columns:repeat(2,minmax(0,1fr))} .selected-top{grid-template-columns:1fr} .applications{grid-template-columns:1fr 1fr}.applications .application:first-child{grid-column:1/-1} }
+    @media(max-width:560px){ main{width:min(100% - 24px,1160px);padding-top:52px}.grid,.applications{grid-template-columns:1fr}.applications .application:first-child{grid-column:auto} }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>ensync</h1>
+      <p class="eyebrow">Original AI emblem exploration</p>
+      <p class="lede">A bolder, monochrome-first identity with the compact confidence of leading AI brands—built around Ensync’s own continuity loop, without reproducing anyone else’s geometry.</p>
+    </header>
+    <section class="grid" aria-label="AI emblem concepts">
+      <article class="card"><div class="canvas"><img src="ai-concepts/07-continuity-loop.svg" alt="Two compact linked continuity loops"></div><div class="copy"><span class="index">01 / PRIMARY</span><h2>Continuity Loop</h2><span class="kind">Linked geometric</span><p>One task stays continuous across two provider sessions. A heavier, tighter evolution of Ensync’s original linked mark.</p></div></article>
+      <article class="card"><div class="canvas"><img src="ai-concepts/02-radial-core.svg" alt="Eight rounded radial signals around a central void"></div><div class="copy"><span class="index">02</span><h2>Radial Core</h2><span class="kind">Signal system</span><p>Multiple providers radiate around a quiet center while keeping the task itself visually protected.</p></div></article>
+      <article class="card"><div class="canvas"><img src="ai-concepts/03-trinity-weave.svg" alt="Three crossing rounded loops"></div><div class="copy"><span class="index">03</span><h2>Trinity Weave</h2><span class="kind">Loop system</span><p>Conversation, project context, and execution overlap into one provider-neutral workspace.</p></div></article>
+      <article class="card"><div class="canvas"><img src="ai-concepts/04-orbit-bridge.svg" alt="Two circular paths connected through a central task"></div><div class="copy"><span class="index">04</span><h2>Orbit Bridge</h2><span class="kind">Geometry + line</span><p>Two execution paths meet through one verified task core without implying unsafe replay.</p></div></article>
+      <article class="card"><div class="canvas"><img src="ai-concepts/05-dialogue-bloom.svg" alt="Four rounded conversation petals"></div><div class="copy"><span class="index">05</span><h2>Dialogue Bloom</h2><span class="kind">Organic geometric</span><p>Conversation is the product surface; four dialogue forms converge around shared context.</p></div></article>
+      <article class="card"><div class="canvas"><img src="ai-concepts/06-ensync-glyph.svg" alt="An abstract continuous e glyph"></div><div class="copy"><span class="index">06</span><h2>Ensync Glyph</h2><span class="kind">Abstract monogram</span><p>A compact continuous “e” turns the brand name into a recognizable motion and sync symbol.</p></div></article>
+    </section>
+    <section class="selected">
+      <div class="selected-top"><div><span class="index">SELECTED DIRECTION</span><h2>Continuity Loop</h2></div><p>The refined Continuity Loop keeps the strongest part of Ensync’s identity: one task moving safely between provider sessions without losing context. The compact silhouette and monochrome-first treatment give it the presence of a modern AI emblem while staying recognizably Ensync.</p></div>
+      <div class="applications">
+        <div class="application dark"><img src="ensync-logo-v2.svg" alt="Ensync v2 logo on charcoal"></div>
+        <div class="application paper"><img src="ensync-mark-v2.svg" alt="Ensync v2 mark on paper"></div>
+        <div class="application mint"><img src="ensync-mark-v2.svg" alt="Ensync v2 mark on mint"></div>
+      </div>
+    </section>
+    <footer>Editable SVG identity study · no derivative geometry · 2026</footer>
+  </main>
+</body>
+</html>
