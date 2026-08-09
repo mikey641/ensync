@@ -3,11 +3,15 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, w
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { runGit } from './git.mjs'
+import { runGit, validateRepositoryLocation } from './git.mjs'
 
 const DEFAULT_LOCK_POLL_MS = 250
 const DEFAULT_LOCK_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 5_000
+const DEFAULT_BASE_FETCH_TTL_MS = 60_000
+const DEFAULT_FETCH_TIMEOUT_MS = 120_000
+const PREFERRED_CANONICAL_REMOTE = 'origin'
+const CANONICAL_BRANCH_FALLBACKS = ['main', 'master']
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
@@ -27,6 +31,17 @@ function agentCommitMessage(details, branch) {
   return lines.join('\n')
 }
 
+function baseRefreshIdentity(nowMs) {
+  const stamp = new Date(nowMs).toISOString()
+  return {
+    GIT_AUTHOR_NAME: 'Ensync Workspace Base Refresh',
+    GIT_AUTHOR_EMAIL: 'workspace-base@ensync.local',
+    GIT_AUTHOR_DATE: stamp,
+    GIT_COMMITTER_NAME: 'Ensync Workspace Base Refresh',
+    GIT_COMMITTER_EMAIL: 'workspace-base@ensync.local',
+    GIT_COMMITTER_DATE: stamp,
+  }
+}
 
 function digest(value, length = 24) {
   return createHash('sha256').update(value).digest('hex').slice(0, length)
@@ -166,6 +181,9 @@ export class ProjectIsolationService {
   #lockPollMs
   #lockStaleMs
   #heartbeatMs
+  #baseRefresh
+  #baseFetchTtlMs
+  #fetchTimeoutMs
   #now
   #uuid
 
@@ -180,6 +198,9 @@ export class ProjectIsolationService {
     this.#lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS
     this.#lockStaleMs = options.lockStaleMs ?? DEFAULT_LOCK_STALE_MS
     this.#heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
+    this.#baseRefresh = options.baseRefresh !== false
+    this.#baseFetchTtlMs = options.baseFetchTtlMs ?? DEFAULT_BASE_FETCH_TTL_MS
+    this.#fetchTimeoutMs = options.fetchTimeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS
     this.#now = options.now ?? Date.now
     this.#uuid = options.randomUUID ?? randomUUID
   }
@@ -197,7 +218,9 @@ export class ProjectIsolationService {
 
     try {
       throwIfCancelled(options.signal)
-      const workspace = await this.#ensureWorkspace(repository, canonicalProjectPath, key)
+      const base = await this.#canonicalBase(repository, options)
+      throwIfCancelled(options.signal)
+      const workspace = await this.#ensureWorkspace(repository, canonicalProjectPath, key, base)
       lease.assertHeld()
       return {
         ...lease,
@@ -409,8 +432,10 @@ export class ProjectIsolationService {
   }
 
   async #acquireWorkspaceLease(commonGitDirectory, key, options) {
-    const workspaceHash = digest(key)
-    const lockParent = join(commonGitDirectory, 'ensync', 'workspace-write-locks')
+    return this.#acquireLease(join(commonGitDirectory, 'ensync', 'workspace-write-locks'), digest(key), options)
+  }
+
+  async #acquireLease(lockParent, workspaceHash, options) {
     const lockPath = join(lockParent, `${workspaceHash}.lock`)
     const ownerPath = join(lockPath, 'owner.json')
     await mkdir(lockParent, { recursive: true, mode: 0o700 })
@@ -544,7 +569,266 @@ export class ProjectIsolationService {
     }
   }
 
-  async #ensureWorkspace(repository, canonicalProjectPath, key) {
+  async #canonicalRemote(repository) {
+    const remotes = await this.#git(['remote'], { cwd: repository.repositoryPath, allowFailure: true })
+    if (remotes.exitCode !== 0) return null
+    const names = String(remotes.stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+    if (names.includes(PREFERRED_CANONICAL_REMOTE)) return PREFERRED_CANONICAL_REMOTE
+    return names.length === 1 ? names[0] : null
+  }
+
+  async #canonicalBranch(repository, remote) {
+    const symbolic = await this.#git(['symbolic-ref', '--quiet', '--short', `refs/remotes/${remote}/HEAD`], {
+      cwd: repository.repositoryPath,
+      allowFailure: true,
+    })
+    if (symbolic.exitCode === 0) {
+      const value = firstLine(symbolic.stdout)
+      const prefix = `${remote}/`
+      if (value.startsWith(prefix) && value.length > prefix.length) return value.slice(prefix.length)
+    }
+    for (const candidate of CANONICAL_BRANCH_FALLBACKS) {
+      const found = await this.#git(['show-ref', '--verify', '--quiet', `refs/remotes/${remote}/${candidate}`], {
+        cwd: repository.repositoryPath,
+        allowFailure: true,
+      })
+      if (found.exitCode === 0) return candidate
+    }
+    return null
+  }
+
+  async #isAncestor(cwd, ancestor, descendant) {
+    const result = await this.#git(['merge-base', '--is-ancestor', ancestor, descendant], { cwd, allowFailure: true })
+    return result.exitCode === 0
+  }
+
+  async #canonicalFetchIsFresh(markerPath, remote) {
+    if (this.#baseFetchTtlMs <= 0) return false
+    try {
+      const marker = JSON.parse(await readFile(markerPath, 'utf8'))
+      if (marker?.remote !== remote) return false
+      const fetchedAt = Date.parse(marker?.fetchedAt ?? '')
+      if (!Number.isFinite(fetchedAt)) return false
+      const age = this.#now() - fetchedAt
+      return age >= 0 && age <= this.#baseFetchTtlMs
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Updates this repository's remote-tracking refs under one repository-scoped
+   * lock so simultaneous conversations in the same checkout share a single real
+   * fetch. A fetch failure is reported, never fatal: an offline computer still
+   * starts its workspace from the last fetched reference.
+   */
+  async #refreshCanonicalRefs(repository, remote, options) {
+    const markerPath = join(repository.commonGitDirectory, 'ensync', 'canonical-base.json')
+    if (await this.#canonicalFetchIsFresh(markerPath, remote)) return { fetched: false, reason: null }
+
+    const lease = await this.#acquireLease(
+      join(repository.commonGitDirectory, 'ensync', 'canonical-fetch-locks'),
+      digest(`${repository.commonGitDirectory} ${remote}`),
+      { signal: options.signal },
+    )
+    try {
+      if (await this.#canonicalFetchIsFresh(markerPath, remote)) return { fetched: false, reason: null }
+      let result
+      try {
+        result = await this.#git(['fetch', '--no-tags', '--quiet', remote], {
+          cwd: repository.repositoryPath,
+          allowFailure: true,
+          timeoutMs: this.#fetchTimeoutMs,
+        })
+      } catch (error) {
+        return { fetched: false, reason: error instanceof Error ? error.message : 'Git could not fetch the canonical remote.' }
+      }
+      if (result.exitCode !== 0) {
+        return { fetched: false, reason: firstLine(result.stderr) || 'Git could not fetch the canonical remote.' }
+      }
+      await writeFile(
+        markerPath,
+        JSON.stringify({ version: 1, remote, fetchedAt: new Date(this.#now()).toISOString() }),
+        { encoding: 'utf8', mode: 0o600 },
+      )
+      return { fetched: true, reason: null }
+    } finally {
+      await lease.release()
+    }
+  }
+
+  /**
+   * Resolves the commit a protected workspace should be built on. Ensync only
+   * advances past the shared checkout's own commit when that commit is already
+   * contained by the fetched canonical branch, so a feature checkout, a local
+   * checkout that is ahead, and divergent history all keep their own base and
+   * report exactly why instead of being silently rewritten.
+   */
+  async #canonicalBase(repository, options) {
+    const base = {
+      sha: repository.head,
+      canonicalSha: null,
+      source: 'local_head',
+      reason: null,
+      remote: null,
+      branch: null,
+    }
+    if (!this.#baseRefresh) {
+      base.reason = 'Canonical base refresh is disabled for this Ensync Host.'
+      return base
+    }
+
+    const remote = await this.#canonicalRemote(repository)
+    if (!remote) {
+      base.reason = 'This repository has no single configured canonical Git remote, so the shared checkout commit stays the base.'
+      return base
+    }
+    base.remote = remote
+
+    try {
+      const configured = await this.#git(['remote', 'get-url', '--all', remote], {
+        cwd: repository.repositoryPath,
+        allowFailure: true,
+      })
+      const urls = String(configured.stdout).split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+      if (configured.exitCode !== 0 || urls.length === 0) throw new Error('no configured URL')
+      for (const url of urls) validateRepositoryLocation(url)
+    } catch {
+      base.source = 'unsafe_remote'
+      base.reason = `Git remote ${remote} has a missing or unsupported URL, so Ensync never fetched it. External remote helpers and relative paths stay blocked.`
+      return base
+    }
+
+    const fetched = await this.#refreshCanonicalRefs(repository, remote, options)
+    const branch = await this.#canonicalBranch(repository, remote)
+    if (!branch) {
+      base.source = 'stale_remote_ref'
+      base.reason = fetched.reason
+        ? `Ensync could not fetch ${remote} (${fetched.reason}) and has no fetched default branch for it.`
+        : `Ensync could not discover a default branch on ${remote}.`
+      return base
+    }
+    base.branch = branch
+
+    const canonical = await this.#git(['rev-parse', '--verify', `refs/remotes/${remote}/${branch}`], {
+      cwd: repository.repositoryPath,
+      allowFailure: true,
+    })
+    if (canonical.exitCode !== 0) {
+      base.source = 'stale_remote_ref'
+      base.reason = fetched.reason
+        ? `Ensync could not fetch ${remote}: ${fetched.reason}`
+        : `Ensync has no fetched ${remote}/${branch} commit for this repository.`
+      return base
+    }
+    base.canonicalSha = firstLine(canonical.stdout)
+
+    if (base.canonicalSha === repository.head) {
+      base.source = 'already_canonical'
+    } else if (await this.#isAncestor(repository.repositoryPath, repository.head, base.canonicalSha)) {
+      base.sha = base.canonicalSha
+      base.source = 'remote_default_branch'
+    } else if (await this.#isAncestor(repository.repositoryPath, base.canonicalSha, repository.head)) {
+      base.source = 'local_head_ahead'
+      base.reason = `The shared checkout is ahead of ${remote}/${branch}, so its own commit stays the base.`
+    } else {
+      base.source = 'divergent_local_history'
+      base.reason = `The shared checkout and ${remote}/${branch} have diverged, so Ensync kept the shared checkout commit instead of choosing a base for you. Reconcile them to let new workspaces start from ${remote}/${branch}.`
+    }
+
+    if (fetched.reason) {
+      base.source = 'stale_remote_ref'
+      base.reason = `Ensync could not fetch ${remote}, so this base comes from the last fetched ${remote}/${branch} reference: ${fetched.reason}${base.reason ? ` ${base.reason}` : ''}`
+    }
+    return base
+  }
+
+  /**
+   * Brings an already-created conversation worktree onto the current canonical
+   * base. This merges rather than rebases so committed agent work is never
+   * rewritten, and it refuses instead of forcing whenever Git reports a
+   * conflict or an unfinished operation. It runs after the baseline sync with
+   * the shared checkout commit, so a canonical-only conflict defers softly
+   * while a shared-checkout conflict keeps main's hard workspace_baseline_conflict.
+   */
+  async #refreshReusedWorkspace(worktreePath, branch, base) {
+    if (base.source !== 'remote_default_branch') return { refreshed: false, reason: base.reason }
+    if (await this.#isAncestor(worktreePath, base.sha, 'HEAD')) return { refreshed: false, reason: null }
+
+    for (const marker of ['MERGE_HEAD', 'CHERRY_PICK_HEAD', 'REBASE_HEAD', 'REVERT_HEAD']) {
+      const found = await this.#git(['rev-parse', '--verify', '--quiet', marker], { cwd: worktreePath, allowFailure: true })
+      if (found.exitCode === 0) {
+        return {
+          refreshed: false,
+          reason: `The protected worktree has an unfinished Git ${marker} operation, so Ensync left ${branch} on its existing base.`,
+        }
+      }
+    }
+
+    const merged = await this.#git(['-c', 'commit.gpgsign=false', 'merge', '--no-edit', '--no-verify', base.sha], {
+      cwd: worktreePath,
+      allowFailure: true,
+      env: baseRefreshIdentity(this.#now()),
+    })
+    if (merged.exitCode !== 0) {
+      await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
+      return {
+        refreshed: false,
+        reason: firstLine(merged.stderr)
+          || firstLine(merged.stdout)
+          || `Ensync could not bring ${base.remote}/${base.branch} into ${branch}; resolve it in the protected worktree.`,
+      }
+    }
+    return { refreshed: true, reason: null }
+  }
+
+  /**
+   * Applies the shared checkout's uncommitted work as a patch on top of the
+   * canonical base. A tree-level copy would present everything the base already
+   * contains as an agent deletion, so the snapshot is replayed against its own
+   * parent instead.
+   */
+  async #replaySharedCheckout(worktreePath, snapshot, baseSha) {
+    const applied = await this.#git([...BYTE_PRESERVING_GIT_CONFIG, 'cherry-pick', '--no-commit', snapshot], {
+      cwd: worktreePath,
+      allowFailure: true,
+    })
+    if (applied.exitCode !== 0) {
+      const reason = firstLine(applied.stderr)
+        || firstLine(applied.stdout)
+        || 'Git could not replay the shared checkout onto the canonical base.'
+      await this.#git(['cherry-pick', '--quit'], { cwd: worktreePath, allowFailure: true })
+      return { ok: false, reason }
+    }
+    await this.#git(['reset', '--mixed', baseSha], {
+      cwd: worktreePath,
+      code: 'managed_worktree_create_failed',
+      message: 'Git could not expose the replayed shared-checkout snapshot as uncommitted work.',
+    })
+    return { ok: true, reason: null }
+  }
+
+  /**
+   * Reports whether this conversation's committed work is already contained by
+   * the canonical branch. Ensync never merges it automatically, so stranded work
+   * stays visible instead of silently disappearing from the next workspace.
+   */
+  async #integrationState(worktreePath, canonicalSha) {
+    if (!canonicalSha) return { canonicalSha: null, integrated: null, unintegratedCommits: null }
+    const integrated = await this.#isAncestor(worktreePath, 'HEAD', canonicalSha)
+    const counted = await this.#git(['rev-list', '--count', `${canonicalSha}..HEAD`], {
+      cwd: worktreePath,
+      allowFailure: true,
+    })
+    const unintegratedCommits = counted.exitCode === 0 ? Number.parseInt(firstLine(counted.stdout), 10) : Number.NaN
+    return {
+      canonicalSha,
+      integrated,
+      unintegratedCommits: Number.isInteger(unintegratedCommits) ? unintegratedCommits : null,
+    }
+  }
+
+  async #ensureWorkspace(repository, canonicalProjectPath, key, base) {
     const workspaceHash = digest(key)
     const repositoryHash = digest(repository.commonGitDirectory)
     const branch = `ensync/chat-${workspaceHash}`
@@ -556,6 +840,7 @@ export class ProjectIsolationService {
     let reused = false
     let seededFromSharedCheckout = false
     let branchExistedBeforeAcquire
+    let baseRefresh
 
     if (registered) {
       if (registered.prunable) {
@@ -578,38 +863,71 @@ export class ProjectIsolationService {
       })
       const branchExists = branchCheck.exitCode === 0
       branchExistedBeforeAcquire = branchExists
-      let startingPoint = repository.head
+      let snapshot = null
       if (!branchExists) {
         const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
           cwd: repository.repositoryPath,
         })
         const changedFiles = status.stdout.split('\0').filter(Boolean).length
         if (changedFiles > 0) {
-          startingPoint = await this.#snapshotSharedCheckout(repository)
+          snapshot = await this.#snapshotSharedCheckout(repository)
           seededFromSharedCheckout = true
         }
       }
+      // The snapshot commit is only a transport for uncommitted work. When the
+      // canonical base is the shared checkout's own commit it can be checked out
+      // directly; when the base moved ahead the snapshot must be replayed as a
+      // patch so already-integrated work is not presented as an agent deletion.
+      const replayOntoBase = Boolean(snapshot) && base.sha !== repository.head
+      const startingPoint = snapshot && !replayOntoBase ? snapshot : base.sha
+      const createWorktree = async (revision) => {
+        await mkdir(resolve(configuredPath, '..'), { recursive: true, mode: 0o700 })
+        const worktreeArgs = branchExists
+          ? ['worktree', 'add', configuredPath, branch]
+          : ['worktree', 'add', '-b', branch, configuredPath, revision]
+        await this.#git(
+          seededFromSharedCheckout
+            ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
+            : worktreeArgs,
+          {
+            cwd: repository.repositoryPath,
+            code: 'managed_worktree_create_failed',
+            message: `Git could not create the protected Ensync worktree for ${branch}.`,
+          },
+        )
+        return canonicalDirectory(
+          configuredPath,
+          'managed_worktree_create_failed',
+          `The protected Ensync worktree for ${branch} was not created correctly.`,
+        )
+      }
 
-      await mkdir(resolve(configuredPath, '..'), { recursive: true, mode: 0o700 })
-      const worktreeArgs = branchExists
-        ? ['worktree', 'add', configuredPath, branch]
-        : ['worktree', 'add', '-b', branch, configuredPath, startingPoint]
-      await this.#git(
-        seededFromSharedCheckout
-          ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
-          : worktreeArgs,
-        {
-          cwd: repository.repositoryPath,
-          code: 'managed_worktree_create_failed',
-          message: `Git could not create the protected Ensync worktree for ${branch}.`,
-        },
-      )
-      worktreePath = await canonicalDirectory(
-        configuredPath,
-        'managed_worktree_create_failed',
-        `The protected Ensync worktree for ${branch} was not created correctly.`,
-      )
-      if (seededFromSharedCheckout) {
+      worktreePath = await createWorktree(startingPoint)
+      if (!branchExists) baseRefresh = { refreshed: base.source === 'remote_default_branch', reason: base.reason }
+
+      if (replayOntoBase) {
+        const replayed = await this.#replaySharedCheckout(worktreePath, snapshot, base.sha)
+        if (!replayed.ok) {
+          // The shared checkout's uncommitted work conflicts with the canonical
+          // base. Keep that work exactly as the user left it on the local commit
+          // and report the conflict instead of resolving it for them.
+          await this.#git(['worktree', 'remove', '--force', configuredPath], {
+            cwd: repository.repositoryPath,
+            allowFailure: true,
+          })
+          await this.#git(['branch', '-D', branch], { cwd: repository.repositoryPath, allowFailure: true })
+          worktreePath = await createWorktree(snapshot)
+          await this.#git(['reset', '--mixed', repository.head], {
+            cwd: worktreePath,
+            code: 'managed_worktree_create_failed',
+            message: `Git could not expose the shared-checkout snapshot in ${branch}.`,
+          })
+          base.sha = repository.head
+          base.source = 'local_changes_conflict'
+          base.reason = `Uncommitted shared-checkout work conflicts with ${base.remote}/${base.branch}, so this workspace kept the local commit as its base: ${replayed.reason}`
+          baseRefresh = { refreshed: false, reason: base.reason }
+        }
+      } else if (seededFromSharedCheckout) {
         // Keep the copied shared-checkout state visible as uncommitted work.
         // The temporary snapshot commit is only a transport mechanism and is
         // removed from the protected branch before provider execution.
@@ -663,6 +981,10 @@ export class ProjectIsolationService {
           )
         }
       }
+    }
+
+    if (!createdThisAcquire) {
+      baseRefresh = await this.#refreshReusedWorkspace(worktreePath, branch, base)
     }
 
     const isolatedCommon = await this.#git(['rev-parse', '--git-common-dir'], { cwd: worktreePath })
@@ -722,6 +1044,15 @@ export class ProjectIsolationService {
       statusEntries: sharedStatus.stdout.split('\0').filter(Boolean),
     }
 
+    if (!baseRefresh.refreshed && baseRefresh.reason && base.source === 'remote_default_branch') {
+      // Ensync could not bring this existing worktree onto the canonical commit,
+      // so it still stands on its own base. Report that rather than the commit
+      // Ensync wanted it to have.
+      base.source = 'base_refresh_deferred'
+      base.sha = firstLine(head.stdout)
+      base.reason = baseRefresh.reason
+    }
+
     return {
       canonicalProjectPath,
       repositoryPath: worktreePath,
@@ -730,6 +1061,16 @@ export class ProjectIsolationService {
       reused,
       seededFromSharedCheckout,
       shared,
+      base: {
+        sha: base.sha,
+        canonicalSha: base.canonicalSha,
+        source: base.source,
+        reason: baseRefresh.reason ?? base.reason,
+        remote: base.remote,
+        branch: base.branch,
+        refreshed: baseRefresh.refreshed,
+      },
+      integration: await this.#integrationState(worktreePath, base.canonicalSha),
       gitBefore: {
         branch,
         head: firstLine(head.stdout),
