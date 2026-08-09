@@ -708,6 +708,7 @@ export class ChatRunService {
       gitBefore: workspace.gitBefore,
     } : null
 
+    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
@@ -731,6 +732,7 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -831,6 +833,7 @@ export class ChatRunService {
 
     const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
+    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -845,8 +848,54 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } catch (error) {
+      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
+      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
+      throw error
     } finally {
       combinedSignal.dispose()
+      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
+        try {
+          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
+            outcome: runOutcome,
+            provider: request.provider,
+            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
+          })
+          if (workCommit.committed) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'agent_work_committed',
+              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch (commitError) {
+          options.onEvent?.({
+            type: 'notice',
+            code: 'agent_work_commit_failed',
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            at: new Date().toISOString(),
+          })
+        }
+        try {
+          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+          if (sharedCheck.available && sharedCheck.changed) {
+            const message = sharedCheck.destructive
+              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+              : sharedCheck.landed
+                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
+                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
+            options.onEvent?.({
+              type: 'notice',
+              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+              message,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch {
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+        }
+      }
       await workspaceLease?.release()
     }
   }

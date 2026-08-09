@@ -514,6 +514,152 @@ export async function pushGit(input, options = {}) {
   }
 }
 
+const AGENT_BRANCH_PATTERN = /^ensync\/chat-[a-f0-9]{24}$/
+const LAND_MESSAGE_PREFIX = 'Ensync land: '
+
+async function baselineBranch(repositoryPath, options) {
+  const symbolic = await checkedGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    allowFailure: true,
+  })
+  return symbolic.exitCode === 0 ? symbolic.stdout.trim() : null
+}
+
+export async function listUnlandedAgentWork(projectPath, options = {}) {
+  const repositoryPath = await gitRepositoryRoot(projectPath, options)
+  const head = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    code: 'git_baseline_unavailable',
+    failureMessage: 'The repository needs an initial commit before unlanded agent work can be listed.',
+  })
+  const branch = await baselineBranch(repositoryPath, options)
+  const refs = await checkedGit(
+    ['for-each-ref', 'refs/heads/ensync/chat-*', '--format=%(refname:short)%00%(objectname)%00%(committerdate:iso8601-strict)%00%(contents:subject)'],
+    { cwd: repositoryPath, gitExecutable: options.gitExecutable },
+  )
+  const branches = []
+  for (const line of refs.stdout.split(/\r?\n/).filter(Boolean)) {
+    const [name, objectName, committedAt, subject] = line.split('\0')
+    const ahead = await checkedGit(['rev-list', '--count', `HEAD..${name}`], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    })
+    const aheadCount = Number.parseInt(ahead.stdout.trim(), 10) || 0
+    if (aheadCount === 0) continue
+    const diff = await checkedGit(['diff', '--name-only', `HEAD...${name}`], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    })
+    branches.push({
+      branch: name,
+      head: objectName,
+      aheadCount,
+      changedFiles: diff.stdout.split(/\r?\n/).filter(Boolean).length,
+      lastCommittedAt: committedAt || null,
+      lastSubject: subject || null,
+    })
+  }
+  return {
+    repositoryPath,
+    baseline: { branch, head: head.stdout.trim() },
+    branches,
+    checkedAt: new Date().toISOString(),
+  }
+}
+
+export async function landAgentBranch(input, options = {}) {
+  const branch = typeof input?.branch === 'string' ? input.branch : ''
+  if (!AGENT_BRANCH_PATTERN.test(branch)) {
+    throw new GitWorkflowError('Only Ensync agent conversation branches (ensync/chat-…) can be landed.', {
+      code: 'invalid_agent_branch',
+      status: 400,
+    })
+  }
+  const repositoryPath = await gitRepositoryRoot(input.projectPath, options)
+  await checkedGit(['show-ref', '--verify', `refs/heads/${branch}`], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    code: 'invalid_agent_branch',
+    status: 400,
+    failureMessage: `The agent branch ${branch} does not exist in this repository.`,
+  })
+  const mergedInto = await baselineBranch(repositoryPath, options)
+  if (!mergedInto) {
+    throw new GitWorkflowError('The shared checkout is on a detached HEAD; check out a branch before landing agent work.', {
+      code: 'git_detached_head',
+      status: 409,
+    })
+  }
+  const status = await checkedGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+  })
+  const dirtyCount = status.stdout.split('\0').filter(Boolean).length
+  if (dirtyCount > 0) {
+    throw new GitWorkflowError(
+      `The shared checkout has ${dirtyCount} uncommitted change${dirtyCount === 1 ? '' : 's'}. Commit or stash your work before landing agent changes.`,
+      { code: 'shared_checkout_dirty', status: 409 },
+    )
+  }
+  const ahead = await checkedGit(['rev-list', '--count', `HEAD..${branch}`], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+  })
+  if ((Number.parseInt(ahead.stdout.trim(), 10) || 0) === 0) {
+    throw new GitWorkflowError(`${branch} has no commits that are not already on ${mergedInto}.`, {
+      code: 'agent_branch_already_landed',
+      status: 409,
+    })
+  }
+  const check = await checkedGit(['merge-tree', '--write-tree', '--name-only', 'HEAD', branch], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    allowFailure: true,
+  })
+  if (check.exitCode !== 0 && check.exitCode !== 1) {
+    throw new GitWorkflowError(
+      'This Git version does not support conflict pre-checks (git 2.38+ is required for landing).',
+      { code: 'git_merge_tree_unsupported', status: 409 },
+    )
+  }
+  if (check.exitCode === 1) {
+    // Conflicted output: <tree-oid>\n<conflicted files…>\n\n<informational messages>
+    const rawLines = check.stdout.split(/\r?\n/)
+    const blankIndex = rawLines.indexOf('', 1)
+    const files = rawLines.slice(1, blankIndex === -1 ? undefined : blankIndex).filter(Boolean)
+    throw new GitWorkflowError(
+      `Landing ${branch} would conflict in: ${files.join(', ') || 'unknown files'}. Continue that conversation so it syncs with ${mergedInto} and resolves the conflict in its own worktree, then land.`,
+      { code: 'agent_branch_conflicts', status: 409 },
+    )
+  }
+  const merge = await checkedGit(
+    ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', `${LAND_MESSAGE_PREFIX}${branch}`, branch],
+    { cwd: repositoryPath, gitExecutable: options.gitExecutable, allowFailure: true },
+  )
+  if (merge.exitCode !== 0) {
+    await checkedGit(['merge', '--abort'], { cwd: repositoryPath, gitExecutable: options.gitExecutable, allowFailure: true })
+    throw new GitWorkflowError(gitFailureMessage(merge.stderr, `Git could not land ${branch}.`), {
+      code: 'agent_branch_land_failed',
+      status: 409,
+    })
+  }
+  const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+  })
+  return {
+    land: {
+      branch,
+      mergedInto,
+      mergeHead: mergeHead.stdout.trim(),
+      completedAt: new Date().toISOString(),
+    },
+    git: await getGitStatus(input.projectPath, options),
+  }
+}
+
 export class GitWorkflowService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
@@ -538,5 +684,13 @@ export class GitWorkflowService {
 
   push(input) {
     return pushGit(input, this.options())
+  }
+
+  unlanded(projectPath) {
+    return listUnlandedAgentWork(projectPath, this.options())
+  }
+
+  land(input) {
+    return landAgentBranch(input, this.options())
   }
 }
