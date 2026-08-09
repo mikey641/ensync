@@ -20,7 +20,7 @@ test('runtime conversation text uses automatic isolated direction without changi
   ])
 
   assert.equal(app.match(/<MessageContent content=\{message\.content\} \/>/g)?.length, 2)
-  assert.match(messageContent, /<p key=\{index\} dir="auto">\{block\.text\}<\/p>/)
+  assert.match(messageContent, /<p dir="auto">/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
   assert.match(app, /<textarea[\s\S]*?data-chat-composer=\{chat\.id\}[\s\S]*?dir="auto"/)
   assert.match(app, /<pre className="execution-panel__output"[^>]*dir="auto">/)

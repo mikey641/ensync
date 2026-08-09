@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { parseMessageContent } from '../lib/messageContent.mjs'
+import { parseMessageContent, parseMessageText } from '../lib/messageContent.mjs'
 
 function CodeBlock({ code, language }: { code: string; language: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -29,6 +29,20 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   )
 }
 
+function Prose({ text }: { text: string }) {
+  return (
+    <p dir="auto">
+      {parseMessageText(text).map((part, index) => part.type === 'link'
+        ? (
+            <a key={index} href={part.href} target="_blank" rel="noopener noreferrer">
+              {part.text}
+            </a>
+          )
+        : part.text)}
+    </p>
+  )
+}
+
 export function MessageContent({ content }: { content: string }) {
   const blocks = parseMessageContent(content)
 
@@ -36,7 +50,7 @@ export function MessageContent({ content }: { content: string }) {
     <div className="message-content">
       {blocks.map((block, index) => block.type === 'code'
         ? <CodeBlock key={index} code={block.code} language={block.language} />
-        : <p key={index} dir="auto">{block.text}</p>)}
+        : <Prose key={index} text={block.text} />)}
     </div>
   )
 }
