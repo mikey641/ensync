@@ -10,6 +10,11 @@ const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
 // with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
 const CHAT_PROVIDER_CONTAINMENT = {
   codex: { level: 'os_sandbox' },
+  // permission_config gap (verified via `claude --help`): in `-p`/`--print` mode, settings
+  // files that fail validation are silently ignored (no error dialog is shown) — a malformed
+  // --settings payload fails open rather than blocking the run. Also, Bash is governed by
+  // command-prefix rules, not the file-pattern rules our deny list uses, so Write(...)/Edit(...)
+  // deny rules do not constrain shell commands run through the Bash tool.
   claude: { level: 'permission_config' },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
@@ -593,12 +598,20 @@ function codexImagePaths(attachmentPaths = []) {
 // possible value; `-c` accepts dotted-path TOML overrides, and `sandbox_workspace_write.writable_roots`
 // is a documented config key ("Additional writable roots when sandbox_mode = \"workspace-write\"").
 // Host, not the renderer, chooses these flags — they are not user- or renderer-selectable.
-function codexContainmentArguments(containment) {
+//
+// `codex exec resume` does NOT accept `--sandbox` — verified against the installed binary:
+// `codex exec resume --sandbox workspace-write ...` -> `error: unexpected argument '--sandbox'
+// found` (exit 2, argv parse failure, before any session lookup). On resume the sandbox must be
+// expressed purely as `-c` config overrides instead; verified this parses and passes
+// `--strict-config` (the invocation proceeds to a real `thread/resume` session lookup rather
+// than an argv error).
+function codexContainmentArguments(containment, { resume = false } = {}) {
   if (!containment) return []
-  return [
-    '--sandbox', 'workspace-write',
-    '-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(containment.worktreePath)}]`,
-  ]
+  const writableRootsArgs = ['-c', `sandbox_workspace_write.writable_roots=[${JSON.stringify(containment.worktreePath)}]`]
+  if (resume) {
+    return ['-c', 'sandbox_mode="workspace-write"', ...writableRootsArgs]
+  }
+  return ['--sandbox', 'workspace-write', ...writableRootsArgs]
 }
 
 function codexArguments(request, attachmentPaths = [], containment = null) {
@@ -606,18 +619,21 @@ function codexArguments(request, attachmentPaths = [], containment = null) {
   const effortArgs = request.effort ? ['-c', `model_reasoning_effort="${request.effort}"`] : []
   const imagePaths = codexImagePaths(attachmentPaths)
   const imageArgs = imagePaths.length > 0 ? ['--image', ...imagePaths] : []
-  const containmentArgs = codexContainmentArguments(containment)
   if (request.sessionId) {
+    const containmentArgs = codexContainmentArguments(containment, { resume: true })
     return ['exec', 'resume', ...imageArgs, ...containmentArgs, '--json', '--skip-git-repo-check', ...modelArgs, ...effortArgs, request.sessionId, '-']
   }
+  const containmentArgs = codexContainmentArguments(containment)
   return ['exec', ...imageArgs, ...containmentArgs, '--json', '--color', 'never', '--skip-git-repo-check', ...modelArgs, ...effortArgs, '-']
 }
 
 // Pinned per Step 0 verification against the installed Claude Code CLI (2.1.226): `claude --help`
 // documents `--settings <file-or-json>`; the bundled settings schema documents `permissions.deny`
 // as a string array, and the CLI's own permission-rule validator documents `Tool(specifier)` glob
-// syntax with examples including `Edit(docs/**)`, with "Write" and "Edit" both in its
-// `filePatternTools` list. Host, not the renderer, chooses these flags.
+// syntax with examples including `Edit(docs/**)`, with "Write", "Edit", and "NotebookEdit" all in
+// its `filePatternTools` list. Host, not the renderer, chooses these flags. This is a fail-open
+// gap, not a sandbox: see the CHAT_PROVIDER_CONTAINMENT claude record for the `-p` mode
+// silent-validation-failure and Bash-is-unconstrained caveats.
 function claudeContainmentArguments(containment) {
   if (!containment) return []
   const settings = {
@@ -625,6 +641,7 @@ function claudeContainmentArguments(containment) {
       deny: [
         `Write(${containment.canonicalRepositoryPath}/**)`,
         `Edit(${containment.canonicalRepositoryPath}/**)`,
+        `NotebookEdit(${containment.canonicalRepositoryPath}/**)`,
       ],
     },
   }

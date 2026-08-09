@@ -999,6 +999,26 @@ test('codex arguments pin the OS sandbox to the protected worktree', () => {
   assert.match(args[configIndex], /\/tmp\/worktree/)
 })
 
+test('codex resume arguments pin the sandbox via config overrides, not --sandbox (rejected by exec resume)', () => {
+  // `codex exec resume --sandbox workspace-write ...` is rejected by the installed CLI with
+  // `error: unexpected argument '--sandbox' found` (exit 2). On resume, the sandbox must be
+  // expressed purely through `-c` config overrides.
+  const containment = { worktreePath: '/tmp/worktree', canonicalRepositoryPath: '/tmp/shared' }
+  const args = argumentsFor(
+    { provider: 'codex', prompt: 'p', projectPath: '/tmp/shared', sessionId: '123e4567-e89b-12d3-a456-426614174000' },
+    [],
+    containment,
+  )
+  assert.equal(args.includes('--sandbox'), false, '--sandbox is not accepted by exec resume and must not appear')
+  const sandboxModeIndex = args.indexOf('sandbox_mode="workspace-write"')
+  assert.ok(sandboxModeIndex > 0, 'expected sandbox_mode config override')
+  assert.equal(args[sandboxModeIndex - 1], '-c')
+  const writableRootsIndex = args.findIndex((value) => typeof value === 'string' && value.includes('writable_roots'))
+  assert.ok(writableRootsIndex > 0, 'expected writable_roots override')
+  assert.equal(args[writableRootsIndex - 1], '-c')
+  assert.match(args[writableRootsIndex], /\/tmp\/worktree/)
+})
+
 test('claude arguments pin deny rules for the canonical checkout', () => {
   const containment = { worktreePath: '/tmp/worktree', canonicalRepositoryPath: '/tmp/shared' }
   const args = argumentsFor(
@@ -1012,6 +1032,7 @@ test('claude arguments pin deny rules for the canonical checkout', () => {
   assert.deepEqual(settings.permissions.deny, [
     'Write(/tmp/shared/**)',
     'Edit(/tmp/shared/**)',
+    'NotebookEdit(/tmp/shared/**)',
   ])
 })
 
