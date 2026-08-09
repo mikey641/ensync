@@ -190,6 +190,7 @@ export function compactWorkspaceSnapshot(state, options = {}) {
 }
 
 export const INTERRUPTION_MESSAGE = 'This run was interrupted before Ensync received a final result. Project activity may be partial; reconcile the project before continuing.'
+export const LEGACY_TRUNCATED_STREAM_MESSAGE = 'Ensync Host returned a malformed execution event.'
 
 const HOST_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/
 
@@ -213,11 +214,21 @@ export function reconcileInterruptedWorkspaceState(state, options = {}) {
     ? Object.fromEntries(Object.entries(inFlightRuns).filter(([, run]) => recoverableHostJob(run)))
     : {}
   const retainedChatIds = new Set(Object.keys(retainedInFlightRuns))
+  const legacyStreamChatIds = new Set()
   const interruptedChatIds = new Set(
     Object.keys(inFlightRuns).filter((chatId) => !retainedChatIds.has(chatId)),
   )
 
   for (const chat of Array.isArray(state.chats) ? state.chats : []) {
+    if (!retainedChatIds.has(chat.id)
+      && state.chatErrors?.[chat.id] === LEGACY_TRUNCATED_STREAM_MESSAGE) {
+      // Older renderer-owned streams could not distinguish a PTY/app shutdown
+      // from malformed JSON. The Host serializer always framed these events;
+      // preserve the ambiguous run as interrupted instead of claiming corrupt
+      // provider output or replaying a possibly mutating turn.
+      legacyStreamChatIds.add(chat.id)
+      interruptedChatIds.add(chat.id)
+    }
     if (Array.isArray(chat.messages)
       && !retainedChatIds.has(chat.id)
       && chat.messages.some((message) => message?.role === 'user' && message.deliveryStatus === 'pending')) {
@@ -236,7 +247,10 @@ export function reconcileInterruptedWorkspaceState(state, options = {}) {
     const pending = Array.isArray(chat.messages)
       ? [...chat.messages].reverse().find((message) => message?.role === 'user' && message.deliveryStatus === 'pending')
       : null
-    const turnId = run.turnId ?? pending?.turnId ?? `interrupted-${chat.id}`
+    const legacyFailed = legacyStreamChatIds.has(chat.id) && Array.isArray(chat.messages)
+      ? [...chat.messages].reverse().find((message) => message?.role === 'user' && message.deliveryStatus === 'failed')
+      : null
+    const turnId = run.turnId ?? pending?.turnId ?? legacyFailed?.turnId ?? `interrupted-${chat.id}`
     const provider = run.provider ?? chat.provider
     const attemptedProviders = Array.isArray(run.attemptedProviders) && run.attemptedProviders.length > 0
       ? run.attemptedProviders
@@ -246,7 +260,11 @@ export function reconcileInterruptedWorkspaceState(state, options = {}) {
       ...chat,
       subtitle: 'Interrupted by restart',
       messages: (Array.isArray(chat.messages) ? chat.messages : []).map((message) =>
-        message?.role === 'user' && message.deliveryStatus === 'pending'
+        message?.role === 'user'
+          && (message.deliveryStatus === 'pending'
+            || (legacyStreamChatIds.has(chat.id)
+              && message.turnId === turnId
+              && message.deliveryStatus === 'failed'))
           ? { ...message, deliveryStatus: 'interrupted' }
           : message),
       continuation: {
@@ -277,14 +295,17 @@ export function reconcileInterruptedWorkspaceState(state, options = {}) {
     delete chatSessions[chatId]
     chatErrors[chatId] = INTERRUPTION_MESSAGE
     const events = Array.isArray(chatExecutionEvents[chatId]) ? chatExecutionEvents[chatId] : []
-    chatExecutionEvents[chatId] = [...events, {
-      type: 'finished',
-      outcome: 'interrupted',
-      message: INTERRUPTION_MESSAGE,
-      code: 'run_interrupted',
-      safeToRetry: false,
-      at: interruptedAt,
-    }]
+    chatExecutionEvents[chatId] = events.at(-1)?.type === 'finished'
+      && events.at(-1)?.code === 'run_interrupted'
+      ? events
+      : [...events, {
+          type: 'finished',
+          outcome: 'interrupted',
+          message: INTERRUPTION_MESSAGE,
+          code: 'run_interrupted',
+          safeToRetry: false,
+          at: interruptedAt,
+        }]
   }
 
   return {

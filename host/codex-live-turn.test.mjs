@@ -17,7 +17,7 @@ function waitFor(predicate, timeoutMs = 1_000) {
   })
 }
 
-function fakeCodexAppServer() {
+function fakeCodexAppServer(options = {}) {
   const child = new EventEmitter()
   child.stdin = new PassThrough()
   child.stdout = new PassThrough()
@@ -47,6 +47,22 @@ function fakeCodexAppServer() {
       } else if (message.method === 'turn/steer') {
         send({ id: message.id, result: { turnId: '01900000-0000-7000-8000-000000000002' } })
         send({
+          method: 'item/started',
+          params: {
+            threadId: '01900000-0000-7000-8000-000000000001',
+            turnId: '01900000-0000-7000-8000-000000000002',
+            item: { type: 'agentMessage', id: 'note-1', text: '', phase: 'commentary' },
+          },
+        })
+        send({
+          method: 'item/completed',
+          params: {
+            threadId: '01900000-0000-7000-8000-000000000001',
+            turnId: '01900000-0000-7000-8000-000000000002',
+            item: { type: 'agentMessage', id: 'note-1', text: 'Checking the compact layout.', phase: null },
+          },
+        })
+        send({
           method: 'thread/tokenUsage/updated',
           params: {
             threadId: '01900000-0000-7000-8000-000000000001',
@@ -59,9 +75,27 @@ function fakeCodexAppServer() {
           params: {
             threadId: '01900000-0000-7000-8000-000000000001',
             turnId: '01900000-0000-7000-8000-000000000002',
-            item: { type: 'agentMessage', id: 'agent-1', text: 'Applied the correction.' },
+            item: { type: 'agentMessage', id: 'agent-1', text: 'Applied the correction.', phase: 'final_answer' },
           },
         })
+        if (options.emitChildNotificationsDuringSteer) {
+          send({
+            method: 'item/completed',
+            params: {
+              threadId: '01900000-0000-7000-8000-000000000003',
+              turnId: '01900000-0000-7000-8000-000000000004',
+              item: { type: 'agentMessage', id: 'child-final', text: 'Child-only final answer.', phase: 'final_answer' },
+            },
+          })
+          send({
+            method: 'thread/tokenUsage/updated',
+            params: {
+              threadId: '01900000-0000-7000-8000-000000000003',
+              turnId: '01900000-0000-7000-8000-000000000004',
+              tokenUsage: { last: { inputTokens: 900, outputTokens: 800, cachedInputTokens: 700 } },
+            },
+          })
+        }
         send({
           method: 'turn/completed',
           params: {
@@ -87,7 +121,7 @@ function fakeCodexAppServer() {
     return true
   }
   queueMicrotask(() => child.emit('spawn'))
-  return { child, requests }
+  return { child, requests, send }
 }
 
 test('Codex live turns accept a steering instruction before one verified completion', async () => {
@@ -110,6 +144,8 @@ test('Codex live turns accept a steering instruction before one verified complet
     env: { PATH: '/usr/bin' },
   }, { onEvent: (event) => events.push(event) })
 
+  fake.child.stdout.write('Codex app-server startup diagnostic\n')
+
   await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
   const delivery = await runner.steer('job_1111111111111111', 'Use the compact layout', [])
   const result = await run
@@ -121,11 +157,140 @@ test('Codex live turns accept a steering instruction before one verified complet
   assert.deepEqual(result.usage, {
     source: 'cli', inputTokens: 12, outputTokens: 4, cachedInputTokens: 3,
   })
+  assert.deepEqual(result.outputRecovery, {
+    applied: true, normalizedLineCount: 0, discardedLineCount: 1,
+  })
   assert.equal(
     fake.requests.find((request) => request.method === 'turn/steer').params.input[0].text,
     'Use the compact layout',
   )
   assert.ok(events.some((event) => event.type === 'notice' && event.message.includes('delivered')))
+  assert.deepEqual(
+    events.find((event) => event.type === 'note'),
+    {
+      type: 'note',
+      provider: 'codex',
+      text: 'Checking the compact layout.',
+      redacted: false,
+      at: events.find((event) => event.type === 'note').at,
+    },
+  )
+})
+
+test('Codex live turns isolate root state from child-thread notifications', async () => {
+  const fake = fakeCodexAppServer({ emitChildNotificationsDuringSteer: true })
+  const events = []
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+  })
+  const run = runner.run({
+    id: 'job_4444444444444444',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: 'high',
+    env: { PATH: '/usr/bin' },
+  }, { onEvent: (event) => events.push(event) })
+
+  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  fake.send({
+    method: 'turn/started',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000003',
+      turn: { id: '01900000-0000-7000-8000-000000000004', items: [], status: 'inProgress' },
+    },
+  })
+  fake.send({
+    method: 'item/started',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000003',
+      turnId: '01900000-0000-7000-8000-000000000004',
+      item: { type: 'agentMessage', id: 'child-note', text: '', phase: 'commentary' },
+    },
+  })
+  fake.send({
+    method: 'item/completed',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000003',
+      turnId: '01900000-0000-7000-8000-000000000004',
+      item: { type: 'agentMessage', id: 'child-note', text: 'Child-only progress.', phase: null },
+    },
+  })
+  fake.send({
+    method: 'item/commandExecution/outputDelta',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000003',
+      turnId: '01900000-0000-7000-8000-000000000004',
+      itemId: 'child-command',
+      delta: 'Child-only command output.',
+    },
+  })
+  fake.send({
+    method: 'thread/tokenUsage/updated',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000003',
+      turnId: '01900000-0000-7000-8000-000000000004',
+      tokenUsage: { last: { inputTokens: 600, outputTokens: 500, cachedInputTokens: 400 } },
+    },
+  })
+
+  const [delivery, result] = await Promise.all([
+    runner.steer('job_4444444444444444', 'Use the compact layout', []),
+    run,
+  ])
+  const steerRequest = fake.requests.find((request) => request.method === 'turn/steer')
+
+  assert.equal(steerRequest.params.expectedTurnId, '01900000-0000-7000-8000-000000000002')
+  assert.equal(delivery.turnId, '01900000-0000-7000-8000-000000000002')
+  assert.equal(result.response, 'Applied the correction.')
+  assert.deepEqual(result.usage, {
+    source: 'cli', inputTokens: 12, outputTokens: 4, cachedInputTokens: 3,
+  })
+  assert.equal(events.some((event) => JSON.stringify(event).includes('Child-only')), false)
+  assert.ok(events.some((event) => event.type === 'note' && event.text === 'Checking the compact layout.'))
+})
+
+test('Codex live turns keep the turn/start identity after a later root notification', async () => {
+  const fake = fakeCodexAppServer()
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+  })
+  const run = runner.run({
+    id: 'job_5555555555555555',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  })
+
+  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  fake.send({
+    method: 'turn/started',
+    params: {
+      threadId: '01900000-0000-7000-8000-000000000001',
+      turn: { id: '01900000-0000-7000-8000-000000000005', items: [], status: 'inProgress' },
+    },
+  })
+
+  const [delivery] = await Promise.all([
+    runner.steer('job_5555555555555555', 'Use the compact layout', []),
+    run,
+  ])
+  const steerRequest = fake.requests.find((request) => request.method === 'turn/steer')
+
+  assert.equal(steerRequest.params.expectedTurnId, '01900000-0000-7000-8000-000000000002')
+  assert.equal(delivery.turnId, '01900000-0000-7000-8000-000000000002')
 })
 
 test('steering a missing live turn is explicitly safe to fall back to FIFO', async () => {
@@ -133,5 +298,35 @@ test('steering a missing live turn is explicitly safe to fall back to FIFO', asy
   await assert.rejects(
     runner.steer('job_2222222222222222', 'Follow up', []),
     (error) => error.code === 'live_steer_unavailable' && error.safeToRetry === true,
+  )
+})
+
+test('an app-server stream beyond the repair bound is never replayable', async () => {
+  const fake = fakeCodexAppServer()
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+  })
+  const run = runner.run({
+    id: 'job_3333333333333333',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  })
+
+  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  for (let index = 0; index < 33; index += 1) {
+    fake.child.stdout.write(`unverified diagnostic ${index}\n`)
+  }
+
+  await assert.rejects(
+    run,
+    (error) => error.code === 'invalid_cli_output' && error.safeToRetry === false,
   )
 })
