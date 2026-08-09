@@ -286,6 +286,41 @@ test('Telegram route errors preserve bounded host error codes', async (context) 
   })
 })
 
+test('git unlanded and land routes delegate to the git workflow service', async (context) => {
+  const calls = []
+  const fakeGit = {
+    unlanded: async (projectPath) => {
+      calls.push(['unlanded', projectPath])
+      return { repositoryPath: projectPath, baseline: { branch: 'main', head: 'abc' }, branches: [], checkedAt: 'now' }
+    },
+    land: async (input) => {
+      calls.push(['land', input])
+      return { land: { branch: input.branch, mergedInto: 'main', mergeHead: 'def', completedAt: 'now' }, git: {} }
+    },
+  }
+  const baseUrl = await withHost(context, { gitService: fakeGit })
+
+  const unlandedResponse = await fetch(`${baseUrl}/api/git/unlanded`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: '/tmp/project' }),
+  })
+  assert.equal(unlandedResponse.status, 200)
+  const unlandedBody = await unlandedResponse.json()
+  assert.equal(unlandedBody.unlanded.baseline.branch, 'main')
+
+  const landResponse = await fetch(`${baseUrl}/api/git/land`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: '/tmp/project', branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' }),
+  })
+  assert.equal(landResponse.status, 200)
+  const landBody = await landResponse.json()
+  assert.equal(landBody.land.mergedInto, 'main')
+
+  assert.deepEqual(calls.map(([name]) => name), ['unlanded', 'land'])
+})
+
 test('VirtualBox routes expose real service results and partial recovery errors', async (context) => {
   const virtualBoxService = {
     status: async () => ({ installed: false, executable: null, version: null }),
