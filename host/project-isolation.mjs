@@ -542,7 +542,7 @@ export class ProjectIsolationService {
     let worktreePath
     let reused = false
     let seededFromSharedCheckout = false
-    let branchExistedBeforeAcquire = false
+    let branchExistedBeforeAcquire
 
     if (registered) {
       if (registered.prunable) {

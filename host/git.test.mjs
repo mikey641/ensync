@@ -263,7 +263,6 @@ test('landAgentBranch rejects landing when HEAD is detached', async (context) =>
   const fixture = await agentBranchFixture(context)
   if (!fixture) return
 
-  const currentHead = (await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim()
   await git(['checkout', '--detach'], { cwd: fixture.seed })
 
   await assert.rejects(
