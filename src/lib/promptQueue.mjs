@@ -47,6 +47,26 @@ export function removePromptFromQueue(queues, chatId, entryId) {
   return next
 }
 
+/**
+ * Consume only the FIFO head after Host-confirmed live delivery. The next
+ * queued prompt, if any, now follows the active logical turn instead of the
+ * consumed prompt's former standalone turn.
+ */
+export function promoteQueuedPromptToActiveTurn(queues, chatId, entryId, activeTurnId) {
+  const entries = queues[chatId] ?? []
+  const promoted = entries[0]
+  if (!promoted || promoted.id !== entryId || !nonEmptyString(activeTurnId)) return queues
+
+  const retained = entries.slice(1)
+  if (retained[0]?.predecessorTurnId === promoted.turnId) {
+    retained[0] = { ...retained[0], predecessorTurnId: activeTurnId.trim() }
+  }
+  const next = { ...queues }
+  if (retained.length > 0) next[chatId] = retained
+  else delete next[chatId]
+  return next
+}
+
 export function approveNextQueuedPrompt(queues, chatId, approvedAt) {
   const entries = queues[chatId] ?? []
   if (entries.length === 0) return queues
@@ -99,6 +119,50 @@ export function queuedPromptGate(chat, entry) {
   }
 }
 
+/** Plain-language queue copy for the conversation pane's compact status card. */
+export function promptQueueStatusPresentation(gate, count, delivery) {
+  const queueCount = Number.isSafeInteger(count) && count > 0 ? count : 0
+  const messageLabel = queueCount === 1 ? 'message' : 'messages'
+  const headline = `${queueCount} ${messageLabel} ${gate?.state === 'paused' ? 'paused' : 'queued'}`
+
+  if (gate?.state === 'paused') {
+    return {
+      headline,
+      detail: `${gate.reason ?? 'The previous turn did not finish successfully.'} Review possible partial project changes before continuing. Running the next message will not retry the previous turn.`,
+      actionLabel: 'Run next message anyway',
+    }
+  }
+  if (gate?.state === 'waiting') {
+    // Live mid-turn delivery is Codex-only, so on every other provider the push
+    // action is absent by design. Name that limit rather than leaving the user
+    // to guess why a queued message cannot be promoted.
+    const waitingDetail = 'It will run automatically after the current turn finishes successfully.'
+    if (delivery && delivery.liveDeliverySupported === false) {
+      const subject = typeof delivery.activeProviderName === 'string' && delivery.activeProviderName.trim()
+        ? delivery.activeProviderName.trim()
+        : 'This provider'
+      return {
+        headline,
+        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.`,
+        actionLabel: null,
+      }
+    }
+    return {
+      headline,
+      detail: waitingDetail,
+      actionLabel: null,
+    }
+  }
+  if (gate?.state === 'ready') {
+    return {
+      headline,
+      detail: 'Starting the next message.',
+      actionLabel: null,
+    }
+  }
+  return { headline, detail: '', actionLabel: null }
+}
+
 /** Only prior messages belong in the prompt/session cursor for this turn. */
 export function transcriptMessagesBeforeTurn(messages, turnId) {
   const index = messages.findIndex((message) => message.role === 'user' && message.turnId === turnId)
@@ -114,6 +178,33 @@ export function insertAgentReplyBeforeLaterQueued(messages, turnId, reply) {
     index > userIndex && message.role === 'user' && message.deliveryStatus === 'queued')
   if (insertionIndex < 0) return [...messages, reply]
   return [...messages.slice(0, insertionIndex), reply, ...messages.slice(insertionIndex)]
+}
+
+/** Move a Host-confirmed queued message into the active logical turn. */
+export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurnId) {
+  const messageIndex = messages.findIndex((message) =>
+    message?.id === messageId && message.role === 'user' && message.deliveryStatus === 'queued')
+  if (messageIndex < 0 || !nonEmptyString(activeTurnId)) return messages
+
+  const replyVisible = messages.some((message) =>
+    message.role === 'agent' && message.turnId === activeTurnId)
+  const promoted = {
+    ...messages[messageIndex],
+    turnId: activeTurnId.trim(),
+    deliveryStatus: replyVisible ? 'completed' : 'pending',
+  }
+  if (!replyVisible) {
+    return messages.map((message, index) => index === messageIndex ? promoted : message)
+  }
+
+  const retained = messages.filter((_, index) => index !== messageIndex)
+  const replyIndex = retained.findIndex((message) =>
+    message.role === 'agent' && message.turnId === activeTurnId)
+  return [
+    ...retained.slice(0, replyIndex),
+    promoted,
+    ...retained.slice(replyIndex),
+  ]
 }
 
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {

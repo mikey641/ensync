@@ -1,3 +1,19 @@
+export class MalformedNdjsonEventError extends SyntaxError {
+  constructor() {
+    super('The NDJSON stream contained malformed JSON.')
+    this.name = 'MalformedNdjsonEventError'
+    this.code = 'malformed_ndjson_event'
+  }
+}
+
+export class TruncatedNdjsonStreamError extends SyntaxError {
+  constructor() {
+    super('The NDJSON stream ended during an event.')
+    this.name = 'TruncatedNdjsonStreamError'
+    this.code = 'truncated_ndjson_stream'
+  }
+}
+
 export async function readNdjsonStream(body, onValue, options = {}) {
   if (!body || typeof body.getReader !== 'function') throw new TypeError('A readable response body is required.')
   if (typeof onValue !== 'function') throw new TypeError('An NDJSON value observer is required.')
@@ -6,13 +22,15 @@ export async function readNdjsonStream(body, onValue, options = {}) {
   const decoder = new TextDecoder()
   let buffer = ''
 
-  const readLine = (line) => {
+  const readLine = (line, finalUnterminated = false) => {
     if (!line.trim()) return
     let value
     try {
       value = JSON.parse(line)
     } catch {
-      throw new SyntaxError('The NDJSON stream contained malformed JSON.')
+      throw finalUnterminated
+        ? new TruncatedNdjsonStreamError()
+        : new MalformedNdjsonEventError()
     }
     onValue(value)
   }
@@ -29,7 +47,7 @@ export async function readNdjsonStream(body, onValue, options = {}) {
       for (const line of lines) readLine(line)
       if (done) break
     }
-    if (buffer.trim()) readLine(buffer)
+    if (buffer.trim()) readLine(buffer, true)
   } catch (error) {
     try {
       await reader.cancel(error)
