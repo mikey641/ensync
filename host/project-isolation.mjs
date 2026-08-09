@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -445,27 +445,28 @@ export class ProjectIsolationService {
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
         })
+        // Replace the record atomically so no reader — this heartbeat, release,
+        // or another Host's staleness probe — can observe a file between
+        // truncate and write.
         const writeOwner = async () => {
-          await writeFile(ownerPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
-          try { await chmod(ownerPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+          const pendingPath = `${ownerPath}.${this.#uuid()}.tmp`
+          await writeFile(pendingPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
+          try { await chmod(pendingPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+          await rename(pendingPath, ownerPath)
         }
         await writeOwner()
 
-        const refreshOwner = async () => {
-          const current = JSON.parse(await readFile(ownerPath, 'utf8'))
-          if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
-          const heartbeatAt = new Date(this.#now())
-          // Keep the owner record immutable after acquisition. Replacing an
-          // existing file can fail on Windows while another Host is reading it,
-          // whereas updating timestamps preserves atomic metadata reads and is
-          // already the conservative freshness source used by stale detection.
-          await utimes(ownerPath, heartbeatAt, heartbeatAt)
-        }
-
+        // Ticks are serialized: a write delayed by fs load must not race the
+        // next tick's read into a false lease loss.
+        let heartbeatTicking = false
         const heartbeat = setInterval(() => {
+          if (heartbeatTicking) return
+          heartbeatTicking = true
           void (async () => {
             try {
-              await refreshOwner()
+              const current = JSON.parse(await readFile(ownerPath, 'utf8'))
+              if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
+              await writeOwner()
             } catch (error) {
               failure = new ProjectIsolationError(
                 'workspace_write_lock_lost',
@@ -476,6 +477,8 @@ export class ProjectIsolationService {
               )
               controller.abort(failure)
               clearInterval(heartbeat)
+            } finally {
+              heartbeatTicking = false
             }
           })()
         }, this.#heartbeatMs)

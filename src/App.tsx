@@ -93,6 +93,7 @@ import {
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
   selectAutomaticProvider,
+  selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
@@ -199,10 +200,10 @@ import {
 } from './lib/nativeRecentProjects.mjs'
 import {
   appendFileAttachments,
-  droppedFileAttachments,
   fileDragContainsFiles,
   messageTextWithAttachments,
   normalizeFileAttachments,
+  resolveDroppedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
 
@@ -1150,10 +1151,12 @@ function App() {
     const refresh = (async () => {
       try {
         const response = await ensyncHost.providers(force)
-        setProviders((current) => current.map((provider) => {
+        const nextProviders = providersRef.current.map((provider) => {
           const status = response.providers.find((item) => item.id === provider.id)
           return status ? providerFromStatus(status, provider) : provider
-        }))
+        })
+        providersRef.current = nextProviders
+        setProviders(nextProviders)
         const firstRunnable = response.providers.find((status) =>
           status.chatExecution === 'supported' && status.connectionState === 'ready')
         if (firstRunnable && executionTarget.kind === 'local') {
@@ -1172,11 +1175,13 @@ function App() {
         const message = error instanceof Error ? error.message : 'Ensync Host is unavailable.'
         setHostOnline(false)
         setHostError(message)
-        setProviders(defaultProviders.map((provider) => ({
+        const unavailableProviders = defaultProviders.map((provider) => ({
           ...provider,
           status: `Ensync Host unavailable: ${message}`,
           usageReason: 'Ensync is reconnecting to the local Host. Verified CLI values will return automatically.',
-        })))
+        }))
+        providersRef.current = unavailableProviders
+        setProviders(unavailableProviders)
         return false
       }
     })()
@@ -2184,7 +2189,7 @@ function App() {
       messages: transcriptMessagesBeforeTurn(chatToSendCurrent.messages, turnId),
     } : chatToSendCurrent
     const runTargetKey = targetKey(runTarget)
-    const runExecutionProviders = providersForTarget(providersRef.current, runTarget)
+    let runExecutionProviders = providersForTarget(providersRef.current, runTarget)
     const runFallbackOrder = queuedPrompt?.preferences.fallbackProviderOrder ?? fallbackProviderOrder
     const runAutoFallback = queuedPrompt?.preferences.automaticFallback ?? autoFallback
     const runAutoContext = queuedPrompt?.preferences.autoContextSkill ?? autoContextSkill
@@ -2223,7 +2228,24 @@ function App() {
     const agentWorkspaceKey = resolveConversationWorkspaceKey(chatToSend)
     const automaticMode = runPreferences.automaticProvider
     const enqueueBehindActiveRun = !queuedPrompt && chatRunRegistryRef.current.has(chatId)
-    const selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
+    let selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
+    if (
+      automaticMode
+      && !selectedAutomaticProvider
+      && !enqueueBehindActiveRun
+      && runTarget.kind === 'local'
+    ) {
+      selectedAutomaticProvider = await selectAutomaticProviderAfterRefresh(
+        runExecutionProviders,
+        runFallbackOrder,
+        async () => {
+          const online = await refreshProviders(true)
+          if (!online) return null
+          runExecutionProviders = providersForTarget(providersRef.current, runTarget)
+          return runExecutionProviders
+        },
+      )
+    }
     if (automaticMode && !selectedAutomaticProvider && !enqueueBehindActiveRun) {
       setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex or Claude Code.' }))
       return
@@ -3543,7 +3565,7 @@ function ConversationPane({
     if (fileDragDepthRef.current === 0) setFileDragActive(false)
   }
 
-  const attachDroppedFiles = (event: React.DragEvent<HTMLDivElement>) => {
+  const attachDroppedFiles = async (event: React.DragEvent<HTMLDivElement>) => {
     if (!fileDragContainsFiles(event.dataTransfer.types)) return
     event.preventDefault()
     event.stopPropagation()
@@ -3553,7 +3575,13 @@ function ConversationPane({
       setAttachmentError('These files are on this computer. Switch the chat to the local Ensync Host before attaching them.')
       return
     }
-    const dropped = droppedFileAttachments(event.dataTransfer.files, window.ensyncDesktop?.getPathForFile)
+    // Snapshot synchronously: the DataTransfer list is gone once the drop
+    // handler yields, and OS-protected drops are only copyable right now.
+    const files = Array.from(event.dataTransfer.files)
+    const dropped = await resolveDroppedAttachments(files, window.ensyncDesktop?.getPathForFile, {
+      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
+      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
+    })
     if (dropped.attachments.length > 0) {
       onAttachmentsAdd(dropped.attachments)
       setAttachmentError(null)
@@ -3561,7 +3589,7 @@ function ConversationPane({
     }
     if (dropped.unavailable.length > 0) {
       setAttachmentError(window.ensyncDesktop?.getPathForFile
-        ? `Ensync could not read the local path for ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
+        ? `Ensync could not attach ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
         : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.')
     }
   }

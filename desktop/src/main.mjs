@@ -75,6 +75,7 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
+const HOST_CHAT_ATTACHMENTS_DIRECTORY = 'chat-attachments-v1'
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -342,6 +343,7 @@ async function ensureRuntime() {
       env: {
         ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
         ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
+        ENSYNC_HOST_CHAT_ATTACHMENTS_ROOT: join(app.getPath('userData'), HOST_CHAT_ATTACHMENTS_DIRECTORY),
       },
       stateFilePath: join(app.getPath('userData'), HOST_DAEMON_STATE_FILENAME),
       journalFilePath: join(app.getPath('userData'), HOST_JOB_JOURNAL_FILENAME),

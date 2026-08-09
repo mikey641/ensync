@@ -1,6 +1,6 @@
-import { realpath, stat } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, relative } from 'node:path'
-import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { open, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
+import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
@@ -18,7 +18,7 @@ const CHAT_PROVIDER_CONTAINMENT = {
   claude: { level: 'permission_config' },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -29,6 +29,7 @@ const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const QUOTA_PATTERN = /(?:usage|spending|rate)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
+const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
   /\b(?:sk-(?:proj-|live-)?|ghp_|github_pat_|glpat-|xox[baprs]-)[a-zA-Z0-9_-]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._~+\/-]{12,}/gi,
@@ -132,33 +133,59 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function providerNoteFromEvent(provider, event) {
-  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
-
-  if (
-    provider === 'codex'
-    && event.type === 'item.completed'
-    && event.item?.type === 'agent_message'
-    && event.item.phase === 'commentary'
-    && typeof event.item.text === 'string'
-    && event.item.text.trim()
-  ) {
-    return event.item.text.trim()
-  }
-
-  if (provider !== 'claude' || event.type !== 'assistant') return null
-  const content = event.message?.content ?? event.content
-  if (!Array.isArray(content)) return null
-  // Claude has no commentary/final phase marker. Only surface assistant text
-  // when the same message also starts provider work; a text-only assistant
-  // message is the final response and should not briefly appear as a note.
-  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
-  const text = content
+function assistantTextBlocks(content) {
+  return content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-  return text || null
+}
+
+function claudeNoteExtractor() {
+  const pending = new Map()
+
+  const remember = (id, text) => {
+    const held = pending.get(id) ?? { text: '', toolStarted: false }
+    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
+    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
+    pending.set(id, held)
+    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
+    return held
+  }
+
+  return (event) => {
+    if (event.type !== 'assistant') return null
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return null
+    const text = assistantTextBlocks(content)
+    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
+    if (!id) return startsToolWork ? text || null : null
+
+    const held = remember(id, text)
+    if (!startsToolWork && !held.toolStarted) return null
+    held.toolStarted = true
+    const note = held.text
+    held.text = ''
+    return note || null
+  }
+}
+
+function providerNoteExtractor(provider) {
+  if (provider === 'claude') return claudeNoteExtractor()
+  return (event) => {
+    if (
+      provider === 'codex'
+      && event.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && event.item.phase === 'commentary'
+      && typeof event.item.text === 'string'
+      && event.item.text.trim()
+    ) {
+      return event.item.text.trim()
+    }
+    return null
+  }
 }
 
 function outputForwarder(onEvent, provider) {
@@ -166,6 +193,7 @@ function outputForwarder(onEvent, provider) {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
+  const noteFromEvent = providerNoteExtractor(provider)
   const emit = (stream, text) => {
     if (!text) return
     const safe = redactTerminalText(text)
@@ -183,7 +211,8 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = providerNoteFromEvent(provider, structured)
+    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
+    const note = noteFromEvent(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
@@ -291,6 +320,17 @@ export async function validateAttachmentPaths(value) {
         error,
         'invalid_attachment',
         'An attached file no longer exists or cannot be accessed.',
+      )
+    }
+    // stat() alone passes on OS-protected files (macOS screenshot drag temp
+    // dirs) that the agent CLI still cannot open, so probe with a real open.
+    try {
+      const handle = await open(resolvedPath, 'r')
+      await handle.close()
+    } catch {
+      throw new ChatRunError(
+        'unreadable_attachment',
+        `The operating system prevents Ensync from opening "${basename(resolvedPath)}". Remove it from the message and re-attach it so Ensync can store a readable copy.`,
       )
     }
     if (!seen.has(resolvedPath)) {
@@ -426,6 +466,19 @@ function claudeEventsProveNoActivity(events) {
       !block
       || typeof block !== 'object'
       || !['text', 'thinking', 'redacted_thinking'].includes(block.type))
+  })
+}
+
+function claudeStartupFailureIsSafe(stdout, stderr, outputTruncated) {
+  if (outputTruncated === true || (typeof stderr === 'string' && stderr.trim())) return false
+  const events = structuredEvents(stdout)
+  if (!events) return false
+  return events.every((event) => {
+    if (event.type !== 'system') return false
+    if (event.subtype === 'init') return true
+    if (!['hook_started', 'hook_response'].includes(event.subtype)) return false
+    return event.hook_event === 'SessionStart'
+      || (typeof event.hook_name === 'string' && event.hook_name.startsWith('SessionStart:'))
   })
 }
 
@@ -685,7 +738,8 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs
+      ?? configuredHardTimeoutMs(this.#environment, DEFAULT_HARD_TIMEOUT_MS)
     this.#projectIsolation = options.projectIsolation ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
@@ -898,6 +952,21 @@ export class ChatRunService {
     if (processResult.exitCode !== 0) {
       if (quotaFailureIsSafe(request.provider, processResult.stdout, processResult.stderr)) {
         throw quotaError(request.provider, true)
+      }
+      if (
+        request.provider === 'claude'
+        && claudeStartupFailureIsSafe(
+          processResult.stdout,
+          processResult.stderr,
+          processResult.outputTruncated,
+        )
+      ) {
+        throw new ChatRunError(
+          'provider_startup_failed',
+          'Claude Code stopped during startup before any assistant or tool activity. Ensync can continue safely with the next connected provider.',
+          502,
+          true,
+        )
       }
       const output = processResult.stderr || processResult.stdout
       const reason = output ? ` ${redactTerminalText(output.slice(0, 500)).text}` : ''
