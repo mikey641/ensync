@@ -114,3 +114,55 @@ test('Auto does not refresh when the current provider snapshot is runnable', asy
   assert.equal(refreshes, 0)
   assert.equal(selected?.id, 'codex')
 })
+
+test('safe runtime fallback refreshes stale destination status before giving up', async () => {
+  const routing = await import('../src/lib/automaticRouting.mjs')
+  assert.equal(typeof routing.selectAutomaticFallbackProviderAfterRefresh, 'function')
+  let refreshes = 0
+  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
+    [
+      provider('claude', { connected: true, usage: 99 }),
+      provider('codex', { connected: false, usage: null }),
+    ],
+    ['claude', 'codex'],
+    ['claude'],
+    async () => {
+      refreshes += 1
+      return [
+        provider('claude', { connected: true, usage: 100 }),
+        provider('codex', { connected: true, usage: 94 }),
+      ]
+    },
+  )
+
+  assert.equal(refreshes, 1)
+  assert.equal(selected?.id, 'codex')
+})
+
+test('safe runtime fallback never retries an attempted provider after refresh', async () => {
+  const routing = await import('../src/lib/automaticRouting.mjs')
+  assert.equal(typeof routing.selectAutomaticFallbackProviderAfterRefresh, 'function')
+  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
+    [provider('claude', { connected: true, usage: 99 })],
+    ['claude', 'codex'],
+    ['claude'],
+    async () => [provider('claude', { connected: true, usage: 10 })],
+  )
+
+  assert.equal(selected, null)
+})
+
+test('safe runtime fallback retains the verified snapshot when refresh rejects', async () => {
+  const routing = await import('../src/lib/automaticRouting.mjs')
+  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
+    [
+      provider('claude', { connected: true, usage: 100 }),
+      provider('codex', { connected: true, usage: 94 }),
+    ],
+    ['claude', 'codex'],
+    ['claude'],
+    async () => { throw new Error('Host refresh failed') },
+  )
+
+  assert.equal(selected?.id, 'codex')
+})
