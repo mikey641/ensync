@@ -14,6 +14,7 @@ import {
 } from '../src/lib/workspacePersistence.mjs'
 import { workspaceStorageKey } from '../src/lib/nativeWorkspaceIdentity.mjs'
 import {
+  largestPaneScrollLeft,
   selectSplitLayoutSource,
   splitPaneDisplayWeights,
 } from '../src/lib/splitLayoutPersistence.mjs'
@@ -48,6 +49,102 @@ test('temporary largest-pane sizing keeps every visible pane in the layout', () 
     storedSizes,
   )
   assert.deepEqual(storedSizes, { 'tab-a': 2, 'tab-b': 0.5, 'tab-c': 2 })
+})
+
+test('the largest pane scrolls fully into view instead of hanging past the right window edge', () => {
+  // Five 300px siblings push the enlarged pane past a 2528px viewport.
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 0,
+      paneLeft: 1530,
+      paneWidth: 1685,
+      viewportWidth: 2528,
+      scrollWidth: 3215,
+    }),
+    687,
+  )
+})
+
+test('an already fully visible largest pane keeps the user\'s scroll position', () => {
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 687,
+      paneLeft: 1530,
+      paneWidth: 1685,
+      viewportWidth: 2528,
+      scrollWidth: 3215,
+    }),
+    687,
+  )
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 100,
+      paneLeft: 150,
+      paneWidth: 900,
+      viewportWidth: 1200,
+      scrollWidth: 1600,
+    }),
+    100,
+  )
+})
+
+test('a largest pane scrolled off to the left realigns to its own left edge', () => {
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 900,
+      paneLeft: 300,
+      paneWidth: 800,
+      viewportWidth: 1200,
+      scrollWidth: 2400,
+    }),
+    300,
+  )
+})
+
+test('largest-pane scroll targets clamp to the scrollable range', () => {
+  // A pane wider than the viewport shows its left edge.
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 0,
+      paneLeft: 600,
+      paneWidth: 1500,
+      viewportWidth: 1200,
+      scrollWidth: 2100,
+    }),
+    600,
+  )
+  // Targets never exceed the real scrollable range or go negative.
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 0,
+      paneLeft: 1200,
+      paneWidth: 1500,
+      viewportWidth: 1200,
+      scrollWidth: 2100,
+    }),
+    900,
+  )
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 40,
+      paneLeft: 0,
+      paneWidth: 600,
+      viewportWidth: 1200,
+      scrollWidth: 1200,
+    }),
+    0,
+  )
+  // Non-finite measurements leave the scroll position alone.
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 25,
+      paneLeft: Number.NaN,
+      paneWidth: 800,
+      viewportWidth: 1200,
+      scrollWidth: 2400,
+    }),
+    25,
+  )
 })
 
 test('workspace snapshots commit atomically with a previous-version fallback', () => {
