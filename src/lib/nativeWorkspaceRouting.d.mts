@@ -1,0 +1,18 @@
+import type { NativeWorkspaceIdentity } from './nativeWorkspaceIdentity.mjs'
+
+type StorageReader = Pick<Storage, 'getItem'>
+
+export function nativeProjectPathKey(value: unknown): string
+export function workspaceProjectHistoryScore(state: unknown, project: { id?: string; path?: string }): number
+export function findRetainedWorkspaceForProject(storage: StorageReader, options: {
+  currentWorkspace: NativeWorkspaceIdentity
+  retainedWorkspaces: NativeWorkspaceIdentity[]
+  project: { id?: string; path?: string }
+}): {
+  workspace: { id: string; kind: NativeWorkspaceIdentity['kind'] }
+  projectId: string
+  projectPath: string
+  score: number
+  revision: number
+  committedAt: string
+} | null
