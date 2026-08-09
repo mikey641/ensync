@@ -54,6 +54,17 @@ function isPaidProviderOverride(key) {
 
 const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g
 const MAX_CAPTURE_BYTES = 256 * 1024
+const MIN_CONFIGURED_HARD_TIMEOUT_MS = 1_000
+
+// The hard run ceiling is a runaway backstop, not the hang detector (that is the
+// inactivity watchdog), so an explicit operator override may raise or lower it.
+export function configuredHardTimeoutMs(environment, fallbackMs) {
+  const raw = environment?.ENSYNC_CHAT_HARD_TIMEOUT_MS
+  if (typeof raw !== 'string' || raw.trim() === '') return fallbackMs
+  const parsed = Number(raw.trim())
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_CONFIGURED_HARD_TIMEOUT_MS) return fallbackMs
+  return parsed
+}
 
 export function subscriptionEnvironment(source = process.env) {
   const clean = {}

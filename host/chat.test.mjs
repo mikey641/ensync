@@ -161,9 +161,46 @@ test('Codex provider default omits the model argument', async (context) => {
   assert.equal(capturedArgs.includes('--model'), false)
   assert.equal(capturedArgs.includes('-c'), false)
   assert.equal(capturedOptions.inactivityTimeoutMs, 15 * 60 * 1_000)
-  assert.equal(capturedOptions.hardTimeoutMs, 2 * 60 * 60 * 1_000)
+  assert.equal(capturedOptions.hardTimeoutMs, 24 * 60 * 60 * 1_000)
   assert.equal(result.requestedModel, null)
   assert.equal(result.requestedEffort, null)
+})
+
+test('the hard run ceiling honors ENSYNC_CHAT_HARD_TIMEOUT_MS and ignores invalid values', async (context) => {
+  const projectPath = await projectFixture(context)
+  const runWith = async (environment) => {
+    let capturedOptions
+    const service = new ChatRunService({
+      statusService: statusService(readyProvider('codex')),
+      environment,
+      processRunner: async (_executable, _args, options) => {
+        capturedOptions = options
+        return {
+          exitCode: 0,
+          error: null,
+          timedOut: false,
+          stderr: '',
+          stdout: [
+            JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Configured ceiling response' } }),
+            JSON.stringify({ type: 'turn.completed' }),
+          ].join('\n'),
+        }
+      },
+    })
+    await service.run({ provider: 'codex', projectPath, prompt: 'Check the ceiling' })
+    return capturedOptions
+  }
+
+  const configured = await runWith({ ENSYNC_CHAT_HARD_TIMEOUT_MS: `${8 * 60 * 60 * 1_000}` })
+  assert.equal(configured.hardTimeoutMs, 8 * 60 * 60 * 1_000)
+  assert.equal(configured.inactivityTimeoutMs, 15 * 60 * 1_000)
+
+  const lowered = await runWith({ ENSYNC_CHAT_HARD_TIMEOUT_MS: '600000' })
+  assert.equal(lowered.hardTimeoutMs, 600_000)
+  assert.equal(lowered.inactivityTimeoutMs, 600_000)
+
+  const invalid = await runWith({ ENSYNC_CHAT_HARD_TIMEOUT_MS: 'unlimited' })
+  assert.equal(invalid.hardTimeoutMs, 24 * 60 * 60 * 1_000)
 })
 
 test('retained Codex jobs use the live runner and validate steering through the same Host service', async (context) => {

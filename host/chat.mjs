@@ -1,6 +1,6 @@
 import { realpath, stat } from 'node:fs/promises'
 import { dirname, extname, isAbsolute, relative } from 'node:path'
-import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
@@ -18,7 +18,7 @@ const CHAT_PROVIDER_CONTAINMENT = {
   claude: { level: 'permission_config' },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -685,7 +685,8 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs
+      ?? configuredHardTimeoutMs(this.#environment, DEFAULT_HARD_TIMEOUT_MS)
     this.#projectIsolation = options.projectIsolation ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
