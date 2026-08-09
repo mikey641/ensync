@@ -6,9 +6,12 @@ import test from 'node:test'
 import {
   CLOSE_WINDOW_ACCELERATOR,
   createNativeIpcAuthorizer,
+  createNativeTitleBarAppearanceHandler,
   createNativeWindowMenuTemplate,
   createNativeWindowRegistry,
   FORCE_RELOAD_ACCELERATOR,
+  nativeTitleBarOverlayOptions,
+  nativeWindowFrameOptions,
   NEW_WINDOW_ACCELERATOR,
   RELOAD_ACCELERATOR,
 } from '../src/native-windows.mjs'
@@ -25,6 +28,62 @@ function fakeWindow(name) {
     isDestroyed() { return this.destroyed },
   }
 }
+
+test('native windows integrate system controls into the app title bar on macOS and Windows', () => {
+  assert.deepEqual(nativeWindowFrameOptions('darwin'), {
+    titleBarStyle: 'hiddenInset',
+  })
+  assert.deepEqual(nativeWindowFrameOptions('win32'), {
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#191919',
+      symbolColor: '#ececec',
+      height: 46,
+    },
+  })
+})
+
+test('native title-bar appearance accepts only authorized resolved themes', () => {
+  const sender = { name: 'renderer' }
+  const overlays = []
+  const window = fakeWindow('themed')
+  window.setTitleBarOverlay = (options) => overlays.push(options)
+  const handler = createNativeTitleBarAppearanceHandler({
+    isAuthorized: (event) => event?.sender === sender,
+    platform: 'win32',
+    windowForWebContents: (webContents) => webContents === sender ? window : null,
+  })
+
+  assert.equal(handler({ sender }, 'light'), true)
+  assert.deepEqual(overlays, [nativeTitleBarOverlayOptions('light')])
+  assert.equal(handler({ sender }, 'system'), false)
+  assert.equal(handler({ sender: {} }, 'dark'), false)
+  assert.equal(overlays.length, 1)
+})
+
+test('macOS title-bar appearance keeps native traffic lights without an overlay mutation', () => {
+  let lookedUp = false
+  const handler = createNativeTitleBarAppearanceHandler({
+    isAuthorized: () => true,
+    platform: 'darwin',
+    windowForWebContents: () => { lookedUp = true; return null },
+  })
+
+  assert.equal(handler({ sender: {} }, 'dark'), true)
+  assert.equal(lookedUp, false)
+})
+
+test('the native renderer suppresses decorative controls and reserves the Windows overlay area', async () => {
+  const [mainSource, appSource, cssSource] = await Promise.all([
+    readFile(resolve(import.meta.dirname, '../src/main.mjs'), 'utf8'),
+    readFile(resolve(import.meta.dirname, '../../src/App.tsx'), 'utf8'),
+    readFile(resolve(import.meta.dirname, '../../src/index.css'), 'utf8'),
+  ])
+
+  assert.match(mainSource, /\.\.\.nativeWindowFrameOptions\(process\.platform\)/)
+  assert.match(appSource, /!window\.ensyncDesktop && <div className="traffic-lights"/)
+  assert.match(cssSource, /env\(titlebar-area-width, 100vw\)/)
+})
 
 test('macOS and Windows expose only Cmd/Ctrl+N as the native New Window shortcut', () => {
   for (const platform of ['darwin', 'win32']) {

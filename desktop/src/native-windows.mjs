@@ -2,6 +2,48 @@ export const NEW_WINDOW_ACCELERATOR = 'CmdOrCtrl+N'
 export const CLOSE_WINDOW_ACCELERATOR = 'CmdOrCtrl+Shift+W'
 export const RELOAD_ACCELERATOR = 'CmdOrCtrl+R'
 export const FORCE_RELOAD_ACCELERATOR = 'CmdOrCtrl+Shift+R'
+export const TITLEBAR_APPEARANCE_CHANNEL = 'ensync:window:set-titlebar-appearance'
+
+const TITLEBAR_HEIGHT = 46
+
+function isResolvedTheme(value) {
+  return value === 'dark' || value === 'light'
+}
+
+export function nativeTitleBarOverlayOptions(theme = 'dark') {
+  if (!isResolvedTheme(theme)) throw new TypeError('A resolved light or dark title-bar theme is required.')
+  return theme === 'light'
+    ? { color: '#ffffff', symbolColor: '#202123', height: TITLEBAR_HEIGHT }
+    : { color: '#191919', symbolColor: '#ececec', height: TITLEBAR_HEIGHT }
+}
+
+export function nativeWindowFrameOptions(platform = process.platform) {
+  if (platform === 'darwin') return { titleBarStyle: 'hiddenInset' }
+  return {
+    titleBarStyle: 'hidden',
+    titleBarOverlay: nativeTitleBarOverlayOptions('dark'),
+  }
+}
+
+export function createNativeTitleBarAppearanceHandler(options) {
+  const {
+    isAuthorized,
+    platform = process.platform,
+    windowForWebContents,
+  } = options ?? {}
+  if (typeof isAuthorized !== 'function' || typeof windowForWebContents !== 'function') {
+    throw new TypeError('Native title-bar authorization and window lookup are required.')
+  }
+
+  return (event, theme) => {
+    if (!isAuthorized(event) || !isResolvedTheme(theme)) return false
+    if (platform === 'darwin') return true
+    const window = windowForWebContents(event?.sender)
+    if (!usable(window) || typeof window.setTitleBarOverlay !== 'function') return false
+    window.setTitleBarOverlay(nativeTitleBarOverlayOptions(theme))
+    return true
+  }
+}
 
 function assertCallback(value, name) {
   if (typeof value !== 'function') throw new TypeError(`${name} must be a function.`)

@@ -76,6 +76,14 @@ npm --prefix desktop run package:win
 
 The macOS command creates a universal DMG and ZIP. The Windows command creates an x64 NSIS installer and ZIP. Outputs and a build attestation are written under `desktop/release/`. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
 
+For an explicit local macOS build that keeps one stable Dock target, quit any installed Ensync and run:
+
+```sh
+npm --prefix desktop run package:mac:local
+```
+
+This runs the full macOS package verification, validates the packaged bundle identifier, stages it beside `/Applications/Ensync.app`, and swaps it into that stable path. It refuses to overwrite a different app or a running installed Ensync. The release workflow never invokes this developer-only install command, and native updates remain review-first rather than silently installing or restarting the app.
+
 ## Signing and notarization secrets
 
 Unsigned local builds work for testing, but their generated site manifest remains unavailable. Signing is activated only when these secrets are supplied to the release workflow:

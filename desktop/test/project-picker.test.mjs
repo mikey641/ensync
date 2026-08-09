@@ -93,6 +93,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   const listeners = new Map()
   const context = vm.createContext({
     Object,
+    process: { platform: 'darwin' },
     require: (specifier) => {
       assert.equal(specifier, 'electron')
       return {
@@ -123,13 +124,20 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   assert.equal(exposed.length, 1)
   assert.equal(exposed[0].name, 'ensyncDesktop')
   assert.deepEqual(Object.keys(exposed[0].value), [
+    'nativePlatform',
     'getPathForFile',
     'getWorkspaceIdentity',
+    'focusWorkspace',
+    'openProjectWorkspace',
+    'onWorkspaceProjectFocus',
     'getWorkspaceRecoveryCandidate',
     'getCodexConversationImport',
     'getRecentProjects',
     'migrateRecentProjects',
     'rememberRecentProject',
+    'getDevicePreferences',
+    'setCompletionNotificationPreferences',
+    'setTitleBarAppearance',
     'onRecentProjectsChanged',
     'chooseProjectFolder',
     'getUpdateState',
@@ -137,26 +145,52 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'downloadUpdate',
     'cancelUpdateDownload',
     'openUpdateInstaller',
+    'setUpdateChannel',
     'onUpdateState',
   ])
   assert.equal(Object.isFrozen(exposed[0].value), true)
+  assert.equal(exposed[0].value.nativePlatform, 'darwin')
   const droppedFile = { name: 'dropped.png' }
   assert.equal(exposed[0].value.getPathForFile(droppedFile), '/Users/example/dropped.png')
   assert.deepEqual(pathLookups, [droppedFile])
   await exposed[0].value.getWorkspaceIdentity()
+  await exposed[0].value.focusWorkspace({
+    workspaceId: '11111111-1111-4111-8111-111111111111',
+    projectId: 'relay',
+    projectPath: '/work/relay',
+  })
+  await exposed[0].value.openProjectWorkspace({
+    projectId: 'nadlan-desk',
+    projectPath: '/work/nadlan-desk',
+  })
   await exposed[0].value.getWorkspaceRecoveryCandidate()
   await exposed[0].value.getCodexConversationImport()
   await exposed[0].value.getRecentProjects()
   await exposed[0].value.migrateRecentProjects([{ name: 'Relay', path: '/work/relay', host: 'local' }])
   await exposed[0].value.rememberRecentProject({ name: 'Relay', path: '/work/relay', host: 'local' })
+  await exposed[0].value.getDevicePreferences()
+  await exposed[0].value.setCompletionNotificationPreferences({ mode: 'speech', speechText: 'Done.', voiceId: null })
+  await exposed[0].value.setTitleBarAppearance('light')
   await exposed[0].value.chooseProjectFolder()
   assert.deepEqual(invocations, [
     ['ensync:workspace:get-identity'],
+    ['ensync:workspace:focus', {
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      projectId: 'relay',
+      projectPath: '/work/relay',
+    }],
+    ['ensync:workspace:open-project', {
+      projectId: 'nadlan-desk',
+      projectPath: '/work/nadlan-desk',
+    }],
     ['ensync:workspace:get-recovery-candidate'],
     ['ensync:workspace:get-codex-conversation-import'],
     ['ensync:recent-projects:get'],
     ['ensync:recent-projects:migrate', [{ name: 'Relay', path: '/work/relay', host: 'local' }]],
     ['ensync:recent-projects:remember', { name: 'Relay', path: '/work/relay', host: 'local' }],
+    ['ensync:device-preferences:get'],
+    ['ensync:device-preferences:set-completion-notifications', { mode: 'speech', speechText: 'Done.', voiceId: null }],
+    ['ensync:window:set-titlebar-appearance', 'light'],
     [PROJECT_FOLDER_PICKER_CHANNEL],
   ])
   await exposed[0].value.getUpdateState()
@@ -164,12 +198,14 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.downloadUpdate()
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
-  assert.deepEqual(invocations.slice(7), [
+  await exposed[0].value.setUpdateChannel('beta')
+  assert.deepEqual(invocations.slice(12), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
     ['ensync:updates:cancel'],
     ['ensync:updates:open-installer'],
+    ['ensync:updates:set-channel', 'beta'],
   ])
   const states = []
   const unsubscribe = exposed[0].value.onUpdateState((state) => states.push(state))
@@ -183,6 +219,12 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   assert.deepEqual(recentStates, [{ projects: [] }])
   unsubscribeRecent()
   assert.equal(listeners.has('ensync:recent-projects:changed'), false)
+  const focusedProjects = []
+  const unsubscribeFocus = exposed[0].value.onWorkspaceProjectFocus((request) => focusedProjects.push(request))
+  listeners.get('ensync:workspace:focus-project')({}, { projectId: 'relay', projectPath: '/work/relay' })
+  assert.deepEqual(focusedProjects, [{ projectId: 'relay', projectPath: '/work/relay' }])
+  unsubscribeFocus()
+  assert.equal(listeners.has('ensync:workspace:focus-project'), false)
 })
 
 test('desktop package explicitly includes the preload and picker modules', async () => {
@@ -191,4 +233,5 @@ test('desktop package explicitly includes the preload and picker modules', async
   assert.ok(manifest.build.files.includes('src/preload.cjs'))
   assert.ok(manifest.build.files.includes('src/project-picker.mjs'))
   assert.ok(manifest.build.files.includes('src/recent-projects.mjs'))
+  assert.ok(manifest.build.files.includes('src/device-preferences.mjs'))
 })

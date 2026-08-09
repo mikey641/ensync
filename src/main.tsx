@@ -6,14 +6,18 @@ import { initializeNativeWorkspaceIdentity } from './lib/nativeWorkspaceIdentity
 import { initializeNativeWorkspaceRecovery } from './lib/nativeWorkspaceRecovery.mjs'
 import { initializeNativeConversationImport } from './lib/nativeConversationImport.mjs'
 import { initializeNativeRecentProjects } from './lib/nativeRecentProjects.mjs'
+import { initializeCompletionNotificationPreferences } from './lib/completionNotificationPreferences.mjs'
 import './index.css'
 import './theme.css'
 
 async function startRenderer() {
+  const nativePlatform = window.ensyncDesktop?.nativePlatform
+  if (nativePlatform) document.documentElement.dataset.nativePlatform = nativePlatform
   await initializeNativeWorkspaceIdentity(globalThis)
   await initializeNativeWorkspaceRecovery(globalThis)
   await initializeNativeConversationImport(globalThis)
   await initializeNativeRecentProjects(globalThis)
+  await initializeCompletionNotificationPreferences(globalThis)
   const { default: App } = await import('./App')
   createRoot(document.getElementById('root')!).render(
     <StrictMode>

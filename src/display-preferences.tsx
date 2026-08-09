@@ -102,7 +102,8 @@ export function DisplayPreferencesProvider({ children }: { children: ReactNode }
   const resolvedTheme = preferences.theme === 'system' ? systemTheme : preferences.theme
 
   useLayoutEffect(() => {
-    applyDisplayPreferences(preferences, systemTheme)
+    const appliedTheme = applyDisplayPreferences(preferences, systemTheme)
+    void window.ensyncDesktop?.setTitleBarAppearance?.(appliedTheme).catch(() => {})
     window.localStorage.setItem(DISPLAY_PREFERENCES_STORAGE_KEY, JSON.stringify(preferences))
   }, [preferences, systemTheme])
 
