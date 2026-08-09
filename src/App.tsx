@@ -567,7 +567,7 @@ function verifiedProject(project: ProjectInspection): RelayProject {
 }
 
 function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
-  return provider.chatExecution === 'supported' && (provider.id === 'codex' || provider.id === 'claude')
+  return provider.chatExecution === 'supported'
 }
 
 function automaticProvider(providers: Provider[], priorityOrder: readonly ProviderId[], preferredId?: ProviderId) {

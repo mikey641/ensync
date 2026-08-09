@@ -34,14 +34,16 @@ function statusService(provider) {
 }
 
 function readyProvider(id) {
+  const labels = { codex: 'Codex', claude: 'Claude Code', droid: 'Factory Droid' }
+  const methods = { codex: 'ChatGPT login', claude: 'claude.ai OAuth', droid: 'Factory browser login' }
   return {
     id,
-    name: id === 'codex' ? 'Codex' : 'Claude Code',
+    name: labels[id] ?? id,
     installed: true,
     executable: `/test/bin/${id}`,
     authentication: {
       state: 'authenticated',
-      method: id === 'codex' ? 'ChatGPT login' : 'claude.ai OAuth',
+      method: methods[id] ?? 'login',
       reason: `${id} is logged in.`,
     },
   }
@@ -733,6 +735,39 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     (error) => error instanceof ChatRunError && error.code === 'invalid_effort',
   )
   assert.equal(processCalls, 0)
+})
+
+test('a supported droid run reaches the exec runner and returns its result', async (context) => {
+  const projectPath = await projectFixture(context)
+  let droidRuns = 0
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('droid')),
+    processRunner: async () => {
+      throw new Error('process must not run')
+    },
+    droidExecRunner: {
+      run: async () => {
+        droidRuns += 1
+        return {
+          provider: 'droid',
+          response: 'pong',
+          sessionId: '05fff43e-686d-4c7c-9932-705556882455',
+          model: 'claude-opus-5',
+          requestedModel: null,
+          requestedEffort: null,
+          usage: null,
+          outputRecovery: null,
+          durationMs: 100,
+          completedAt: '2026-08-09T00:00:00.000Z',
+        }
+      },
+    },
+  })
+
+  const result = await service.run({ provider: 'droid', projectPath, prompt: 'Hello' })
+  assert.equal(droidRuns, 1)
+  assert.equal(result.provider, 'droid')
+  assert.equal(result.response, 'pong')
 })
 
 test('chat timeout and malformed CLI output are explicit failures', async (context) => {
