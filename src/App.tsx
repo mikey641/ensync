@@ -567,7 +567,7 @@ function verifiedProject(project: ProjectInspection): RelayProject {
 }
 
 function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
-  return provider.chatExecution === 'supported' && (provider.id === 'codex' || provider.id === 'claude')
+  return provider.chatExecution === 'supported'
 }
 
 function automaticProvider(providers: Provider[], priorityOrder: readonly ProviderId[], preferredId?: ProviderId) {
@@ -2254,7 +2254,7 @@ function App() {
     const provider = automaticMode
       ? selectedAutomaticProvider ?? providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
       : providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
-    if (provider.id !== 'codex' && provider.id !== 'claude' && !enqueueBehindActiveRun) {
+    if (!supportsChat(provider) && !enqueueBehindActiveRun) {
       setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex or Claude Code.` }))
       return
     }
@@ -2494,7 +2494,7 @@ function App() {
     setDraftAttachments(draftAttachmentsRef.current)
 
     const run = async (target: Provider, prompt: string) => {
-      if (target.id !== 'codex' && target.id !== 'claude') throw new Error(`${target.name} chat execution is not supported.`)
+      if (!supportsChat(target)) throw new Error(`${target.name} chat execution is not supported.`)
       const targetProviderId: ChatProviderId = target.id
       if (!attemptedProviders.includes(targetProviderId)) attemptedProviders.push(targetProviderId)
       const session = chatSessionsRef.current[chatId]

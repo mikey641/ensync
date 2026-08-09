@@ -218,7 +218,7 @@ export interface GitLandResult {
   git: GitStatus
 }
 
-export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude'>
+export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid'>
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
 export type ChatRunRequest = {

@@ -3,10 +3,17 @@ import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
 import { autoLandWorkspace } from './auto-land.mjs'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
+import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 
-const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
+const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
+// Providers whose Ensync Host runner is implemented and containment-recorded but
+// whose catalog entry is still `discovery_only`. They are refused at validation
+// with their exact outstanding requirement instead of a generic message, so the
+// runner cannot be reached by Auto routing, a fixed selection, or fallback until
+// the catalog is promoted.
+const GATED_CHAT_PROVIDERS = new Map([])
 // Verified containment levels per the catalog capability contract. A provider
 // with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
 const CHAT_PROVIDER_CONTAINMENT = {
@@ -17,6 +24,15 @@ const CHAT_PROVIDER_CONTAINMENT = {
   // command-prefix rules, not the file-pattern rules our deny list uses, so Write(...)/Edit(...)
   // deny rules do not constrain shell commands run through the Bash tool.
   claude: { level: 'permission_config' },
+  // permission_config gap (verified against droid 0.190.0 over stream-jsonrpc):
+  // Droid's containment is a risk-tiered autonomy level pinned per session, not a
+  // path-scoped rule, so `medium` still permits ordinary local build, test, and git
+  // operations anywhere the process can reach rather than confining writes to the
+  // protected worktree. Its session settings schema also declares autonomyLevel as
+  // `.optional().catch(void 0)`, so an unrecognised value is silently discarded
+  // instead of rejected; the runner therefore refuses to send the prompt unless the
+  // CLI echoes the pinned level back in its effective settings.
+  droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
@@ -37,6 +53,18 @@ const SECRET_PATTERNS = [
   /\b[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\.[a-zA-Z0-9_-]{20,}\b/g,
   /\b(api[_-]?key|access[_-]?token|auth[_-]?token|password|secret|authorization)\b(\s*[:=]\s*["']?)([^\s"',}]{8,})/gi,
 ]
+
+// A Map keeps a request-supplied provider string from resolving to an inherited
+// Object property before the allowlist check runs.
+const PROVIDER_LABELS = new Map([
+  ['codex', 'Codex'],
+  ['claude', 'Claude Code'],
+  ['droid', 'Factory Droid'],
+])
+
+function providerLabel(providerId) {
+  return PROVIDER_LABELS.get(providerId) ?? providerId
+}
 
 export class ChatRunError extends Error {
   constructor(code, message, status = 400, safeToRetry = false) {
@@ -379,9 +407,12 @@ function validateRequest(request) {
     throw new ChatRunError('invalid_provider', 'A provider is required.')
   }
   if (!SUPPORTED_CHAT_PROVIDERS.has(request.provider)) {
+    const gatedReason = GATED_CHAT_PROVIDERS.get(request.provider)
     throw new ChatRunError(
-      'unsupported_provider',
-      `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex or Claude Code.`,
+      gatedReason ? 'provider_execution_gated' : 'unsupported_provider',
+      gatedReason
+        ? `${providerLabel(request.provider)} chat execution is not enabled yet. ${gatedReason}`
+        : `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex or Claude Code.`,
       422,
     )
   }
@@ -432,6 +463,11 @@ function subscriptionAuthenticationAllowed(provider) {
   if (provider.id === 'claude') {
     return ['claude.ai', 'oauth', 'subscription'].some((signal) => method.includes(signal))
   }
+  // Factory Droid's browser login is the only subscription-eligible credential:
+  // `subscriptionEnvironment` already removes `FACTORY_API_KEY`, and the runner
+  // maps a `model_authentication_failed` turn back to `provider_not_authenticated`.
+  // The probe reports the stored login as 'Factory browser login'.
+  if (provider.id === 'droid') return method.includes('browser login')
   return false
 }
 
@@ -758,6 +794,7 @@ export class ChatRunService {
   #inactivityTimeoutMs
   #hardTimeoutMs
   #codexLiveTurns
+  #droidExecRuns
   #projectIsolation
   #autoLand
   #gitExecutable
@@ -779,6 +816,10 @@ export class ChatRunService {
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
+    this.#droidExecRuns = options.droidExecRunner ?? new DroidExecRunner({
+      inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      hardTimeoutMs: this.#hardTimeoutMs,
+    })
   }
 
   async run(request, options = {}) {
@@ -796,7 +837,7 @@ export class ChatRunService {
     if (!provider?.installed || !provider.executable) {
       throw new ChatRunError(
         'provider_unavailable',
-        `${request.provider === 'codex' ? 'Codex' : 'Claude Code'} is not installed or is not available on PATH.`,
+        `${providerLabel(request.provider)} is not installed or is not available on PATH.`,
         409,
         true,
       )
@@ -918,6 +959,52 @@ export class ChatRunService {
           )
         }
         if (error instanceof CodexLiveTurnError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+
+    if (request.provider === 'droid') {
+      this.#activeRuns += 1
+      try {
+        // Droid has no argv containment flags: `cwd` plus the pinned per-session
+        // autonomy level is the whole enforcement surface, and the runner verifies
+        // the CLI echoed that level back before it sends the prompt.
+        const result = await this.#droidExecRuns.run({
+          executable: provider.executable,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
+          attachmentPaths,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: combinedSignal.signal,
+          onEvent: (event) => {
+            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
+            const safe = redactTerminalText(event.text)
+            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
+          },
+        })
+        workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
+        return { ...result, projectPath, workspace: publicWorkspace }
+      } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
+        if (error instanceof DroidExecError) {
           throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
         }
         throw error

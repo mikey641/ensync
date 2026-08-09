@@ -18,8 +18,8 @@ function provider(id, options = {}) {
 }
 
 test('fallback priority is normalized independently from catalog order', () => {
-  assert.deepEqual(DEFAULT_FALLBACK_PROVIDER_ORDER, ['codex', 'claude'])
-  assert.deepEqual(normalizeFallbackProviderOrder(['claude', 'claude', 'copilot']), ['claude', 'codex'])
+  assert.deepEqual(DEFAULT_FALLBACK_PROVIDER_ORDER, ['codex', 'claude', 'droid'])
+  assert.deepEqual(normalizeFallbackProviderOrder(['claude', 'claude', 'copilot']), ['claude', 'codex', 'droid'])
   assert.deepEqual(
     orderedAutomaticProviders([provider('claude'), provider('codex')], ['codex', 'claude']).map(({ id }) => id),
     ['codex', 'claude'],
