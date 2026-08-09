@@ -54,6 +54,120 @@ function isPaidProviderOverride(key) {
 
 const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g
 const MAX_CAPTURE_BYTES = 256 * 1024
+const CAPTURE_HEAD_RATIO = 0.25
+
+/**
+ * Bounded process-output capture that discards only whole lines from the middle
+ * of a stream. Provider protocols put session identity in their first events and
+ * terminal completion plus the final response in their last, so a blind
+ * head-slice at the capture limit destroys the proof that a finished run
+ * succeeded and leaves a partial event line behind. Keeping a head and a rolling
+ * tail preserves both ends, keeps every retained line machine-readable, and
+ * reports exactly how much was dropped so callers can refuse to treat an
+ * incomplete stream as evidence.
+ */
+export class BoundedOutputCapture {
+  #maxCharacters
+  #headBudget
+  #head = []
+  #headCharacters = 0
+  #tail = []
+  #tailStart = 0
+  #tailCharacters = 0
+  #pending = ''
+  #pendingDroppedCharacters = 0
+  #droppedLineCount = 0
+  #droppedCharacterCount = 0
+
+  constructor(maxCharacters, options = {}) {
+    this.#maxCharacters = Math.max(0, Math.trunc(maxCharacters))
+    this.#headBudget = Math.trunc(this.#maxCharacters * (options.headRatio ?? CAPTURE_HEAD_RATIO))
+  }
+
+  #retainedCharacters() {
+    return this.#headCharacters + this.#tailCharacters + this.#pending.length
+  }
+
+  #tailLineCount() {
+    return this.#tail.length - this.#tailStart
+  }
+
+  #evictTail() {
+    while (this.#retainedCharacters() > this.#maxCharacters && this.#tailLineCount() > 0) {
+      const line = this.#tail[this.#tailStart]
+      this.#tail[this.#tailStart] = ''
+      this.#tailStart += 1
+      this.#tailCharacters -= line.length
+      this.#droppedLineCount += 1
+      this.#droppedCharacterCount += line.length
+      if (this.#tailStart > 1_024 && this.#tailStart * 2 > this.#tail.length) {
+        this.#tail = this.#tail.slice(this.#tailStart)
+        this.#tailStart = 0
+      }
+    }
+  }
+
+  #growPending(part) {
+    this.#pending += part
+    this.#evictTail()
+    const room = Math.max(0, this.#maxCharacters - this.#headCharacters - this.#tailCharacters)
+    if (this.#pending.length <= room) return
+    // Only the in-progress line can still exceed the budget. Clip it now and
+    // keep counting so the completed line can be discarded in full.
+    const overflow = this.#pending.length - room
+    this.#pending = this.#pending.slice(0, room)
+    this.#pendingDroppedCharacters += overflow
+    this.#droppedCharacterCount += overflow
+  }
+
+  #completePendingLine() {
+    const line = this.#pending
+    this.#pending = ''
+    if (this.#pendingDroppedCharacters > 0) {
+      // A line that cannot fit the whole budget is dropped entirely rather than
+      // retained as a fragment that no protocol parser could verify.
+      this.#pendingDroppedCharacters = 0
+      this.#droppedLineCount += 1
+      this.#droppedCharacterCount += line.length
+      return
+    }
+    if (this.#tailLineCount() === 0 && this.#headCharacters + line.length <= this.#headBudget) {
+      this.#head.push(line)
+      this.#headCharacters += line.length
+    } else {
+      this.#tail.push(line)
+      this.#tailCharacters += line.length
+    }
+    this.#evictTail()
+  }
+
+  append(text) {
+    if (typeof text !== 'string' || !text) return
+    let start = 0
+    while (start < text.length) {
+      const newlineIndex = text.indexOf('\n', start)
+      if (newlineIndex === -1) {
+        this.#growPending(text.slice(start))
+        return
+      }
+      this.#growPending(text.slice(start, newlineIndex + 1))
+      this.#completePendingLine()
+      start = newlineIndex + 1
+    }
+  }
+
+  get text() {
+    return `${this.#head.join('')}${this.#tail.slice(this.#tailStart).join('')}${this.#pending}`
+  }
+
+  get truncation() {
+    if (this.#droppedLineCount === 0 && this.#droppedCharacterCount === 0) return null
+    return {
+      droppedLineCount: this.#droppedLineCount,
+      droppedCharacterCount: this.#droppedCharacterCount,
+    }
+  }
+}
 
 export function subscriptionEnvironment(source = process.env) {
   const clean = {}
@@ -157,8 +271,8 @@ export function runProcess(executable, args, options = {}) {
   const invocation = commandInvocation(executable, args, env)
 
   return new Promise((resolve) => {
-    let stdout = ''
-    let stderr = ''
+    const stdoutCapture = new BoundedOutputCapture(maxCaptureBytes)
+    const stderrCapture = new BoundedOutputCapture(maxCaptureBytes)
     let settled = false
     let timedOut = false
     let timeoutReason = null
@@ -201,11 +315,6 @@ export function runProcess(executable, args, options = {}) {
     options.signal?.addEventListener('abort', onAbort, { once: true })
     if (aborted) onAbort()
 
-    const append = (current, chunk) => {
-      if (current.length >= maxCaptureBytes) return current
-      return `${current}${chunk.toString('utf8')}`.slice(0, maxCaptureBytes)
-    }
-
     const timeout = (reason) => {
       if (settled || timedOut || aborted) return
       timedOut = true
@@ -223,18 +332,20 @@ export function runProcess(executable, args, options = {}) {
 
     child.stdout.on('data', (chunk) => {
       refreshInactivityWatchdog()
-      stdout = append(stdout, chunk)
+      const text = chunk.toString('utf8')
+      stdoutCapture.append(text)
       try {
-        options.onStdout?.(chunk.toString('utf8'))
+        options.onStdout?.(text)
       } catch {
         // Observers must never be able to change the child-process result.
       }
     })
     child.stderr.on('data', (chunk) => {
       refreshInactivityWatchdog()
-      stderr = append(stderr, chunk)
+      const text = chunk.toString('utf8')
+      stderrCapture.append(text)
       try {
-        options.onStderr?.(chunk.toString('utf8'))
+        options.onStderr?.(text)
       } catch {
         // Observers must never be able to change the child-process result.
       }
@@ -261,8 +372,12 @@ export function runProcess(executable, args, options = {}) {
       options.signal?.removeEventListener('abort', onAbort)
       resolve({
         ...result,
-        stdout: cleanOutput(stdout),
-        stderr: cleanOutput(stderr),
+        stdout: cleanOutput(stdoutCapture.text),
+        stderr: cleanOutput(stderrCapture.text),
+        truncation: {
+          stdout: stdoutCapture.truncation,
+          stderr: stderrCapture.truncation,
+        },
         timedOut,
         timeoutReason,
         aborted,

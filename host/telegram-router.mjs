@@ -100,7 +100,13 @@ export class TelegramChatRouter {
         sessionId,
       })
     }
-    return this.#chatService.run({ provider, projectPath: request.projectPath, prompt, sessionId })
+    return this.#chatService.run({
+      provider,
+      projectPath: request.projectPath,
+      workspaceKey: `telegram:${request.connectionId}:${request.conversationId}`,
+      prompt,
+      sessionId,
+    })
   }
 
   async run(request) {

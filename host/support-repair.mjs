@@ -111,6 +111,7 @@ function validateRequest(request) {
 
   const projectId = requiredText(request.projectId, 'Verified project ID', 128)
   const projectPath = requiredText(request.projectPath, 'Verified project path', 8_192)
+  const workspaceKey = requiredText(request.workspaceKey, 'Repair workspace key', 512)
   const prompt = requiredText(request.prompt, 'User repair request', MAX_PROMPT_LENGTH)
   if (!request.diagnostics || typeof request.diagnostics !== 'object' || Array.isArray(request.diagnostics)) {
     throw preflightError(
@@ -133,6 +134,7 @@ function validateRequest(request) {
     provider: request.provider,
     projectId,
     projectPath,
+    workspaceKey,
     prompt,
     diagnostics: {
       summary: diagnosticSummary,
@@ -290,6 +292,7 @@ export class SupportRepairService {
       runResult = await this.#chatService.run({
         provider: request.provider,
         projectPath: project.path,
+        workspaceKey: request.workspaceKey,
         prompt: compileSupportRepairPrompt(request, project),
         sessionId: request.sessionId,
         model: request.model,

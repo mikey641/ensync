@@ -3,6 +3,7 @@ import { dirname, extname, isAbsolute, relative } from 'node:path'
 import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
+import { decodeJsonEventStream } from './json-event-repair.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
@@ -45,6 +46,35 @@ function cancelledRunError() {
 
 function throwIfCancelled(signal) {
   if (signal?.aborted) throw cancelledRunError()
+}
+
+function combinedAbortSignal(...signals) {
+  const active = signals.filter(Boolean)
+  if (active.length === 0) return { signal: undefined, dispose() {} }
+  if (active.length === 1) return { signal: active[0], dispose() {} }
+  const controller = new AbortController()
+  const abort = (event) => controller.abort(event?.target?.reason)
+  for (const signal of active) {
+    if (signal.aborted) controller.abort(signal.reason)
+    else signal.addEventListener('abort', abort, { once: true })
+  }
+  return {
+    signal: controller.signal,
+    dispose() {
+      for (const signal of active) signal.removeEventListener('abort', abort)
+    },
+  }
+}
+
+function isolatedPrompt(prompt, workspace) {
+  if (!workspace) return prompt
+  return `[ENSYNC HOST WORKSPACE ISOLATION]
+This run is bound to the protected Git worktree that is the current working directory.
+Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
+Protected branch: ${workspace.branch}
+Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
+
+${prompt}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -91,7 +121,36 @@ function visibleArguments(request, attachmentPaths) {
   })
 }
 
-function outputForwarder(onEvent) {
+function providerNoteFromEvent(provider, event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
+
+  if (
+    provider === 'codex'
+    && event.type === 'item.completed'
+    && event.item?.type === 'agent_message'
+    && event.item.phase === 'commentary'
+    && typeof event.item.text === 'string'
+    && event.item.text.trim()
+  ) {
+    return event.item.text.trim()
+  }
+
+  if (provider !== 'claude' || event.type !== 'assistant') return null
+  const content = event.message?.content ?? event.content
+  if (!Array.isArray(content)) return null
+  // Claude has no commentary/final phase marker. Only surface assistant text
+  // when the same message also starts provider work; a text-only assistant
+  // message is the final response and should not briefly appear as a note.
+  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
+  const text = content
+    .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+    .map((block) => block.text.trim())
+    .filter(Boolean)
+    .join('\n\n')
+  return text || null
+}
+
+function outputForwarder(onEvent, provider) {
   if (typeof onEvent !== 'function') {
     return { stdout() {}, stderr() {}, flush() {} }
   }
@@ -104,6 +163,23 @@ function outputForwarder(onEvent) {
       stream,
       text: safe.text,
       redacted: safe.redacted,
+      at: new Date().toISOString(),
+    })
+    if (stream !== 'stdout') return
+    let structured
+    try {
+      structured = JSON.parse(text)
+    } catch {
+      return
+    }
+    const note = providerNoteFromEvent(provider, structured)
+    if (!note) return
+    const safeNote = redactTerminalText(note)
+    onEvent({
+      type: 'note',
+      provider,
+      text: safeNote.text,
+      redacted: safeNote.redacted,
       at: new Date().toISOString(),
     })
   }
@@ -293,28 +369,10 @@ function usageFrom(value) {
   }
 }
 
-function parseJsonLines(value) {
-  const events = []
-  for (const line of value.split('\n')) {
-    if (!line.trim()) continue
-    try {
-      const parsed = JSON.parse(line)
-      if (parsed && typeof parsed === 'object') events.push(parsed)
-    } catch {
-      throw new ChatRunError(
-        'invalid_cli_output',
-        'Codex returned output Ensync Host could not verify as JSON events.',
-        502,
-      )
-    }
-  }
-  return events
-}
-
 function structuredEvents(value) {
   if (typeof value !== 'string' || !value.trim()) return null
   try {
-    const events = parseJsonLines(value)
+    const { events } = decodeJsonEventStream(value)
     return events.length ? events : null
   } catch {
     return null
@@ -352,13 +410,24 @@ function claudeEventsProveNoActivity(events) {
   })
 }
 
-export function quotaFailureIsSafe(provider, stdout, stderr = '') {
+export function quotaFailureIsSafe(provider, stdout, stderr = '', options = {}) {
+  // A capture that dropped provider output cannot prove the run performed no
+  // work, so it can never authorize an automatic replay on another provider.
+  if (options.outputTruncated) return false
   if (!QUOTA_PATTERN.test(`${stdout}\n${stderr}`)) return false
   const events = structuredEvents(stdout)
   if (!events) return false
   return provider === 'codex'
     ? codexEventsProveNoActivity(events)
     : provider === 'claude' && claudeEventsProveNoActivity(events)
+}
+
+function truncatedOutputError(providerName) {
+  return new ChatRunError(
+    'invalid_cli_output',
+    `${providerName} produced more output than Ensync Host's verified run output limit, and the retained stream no longer proves a completed turn. The task was not replayed because partial work may exist.`,
+    502,
+  )
 }
 
 function quotaError(provider, safeToRetry) {
@@ -371,8 +440,28 @@ function quotaError(provider, safeToRetry) {
   )
 }
 
-export function parseCodexChatResult(stdout) {
-  const events = parseJsonLines(stdout)
+export function parseCodexChatResult(stdout, options = {}) {
+  const truncation = options.outputTruncated ?? null
+  let decoded
+  try {
+    decoded = decodeJsonEventStream(stdout, { allowRepair: true })
+  } catch {
+    if (truncation) throw truncatedOutputError('Codex')
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Ensync Host tried a bounded repair of Codex output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
+      502,
+    )
+  }
+  const { events, recovery } = decoded
+  if (events.length === 0) {
+    if (truncation) throw truncatedOutputError('Codex')
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Ensync Host tried a bounded repair of Codex output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
+      502,
+    )
+  }
   const agentMessages = []
   let sessionId = null
   let usage = null
@@ -401,13 +490,18 @@ export function parseCodexChatResult(stdout) {
   }
 
   if (failed) {
-    if (quotaFailureIsSafe('codex', stdout)) throw quotaError('codex', true)
+    if (quotaFailureIsSafe('codex', stdout, '', { outputTruncated: truncation })) {
+      throw quotaError('codex', true)
+    }
     throw new ChatRunError('cli_failed', 'Codex reported that the run failed.', 502)
   }
   if (!completed) {
+    if (truncation) throw truncatedOutputError('Codex')
     throw new ChatRunError(
       'invalid_cli_output',
-      'Codex returned no verified terminal completion event.',
+      recovery
+        ? 'Ensync Host repaired part of Codex output, but no verified terminal completion event remained. The task was not replayed because partial work may exist.'
+        : 'Codex returned no verified terminal completion event.',
       502,
     )
   }
@@ -419,27 +513,43 @@ export function parseCodexChatResult(stdout) {
       502,
     )
   }
-  return { response, sessionId, model, usage }
+  return { response, sessionId, model, usage, outputRecovery: recovery, outputTruncation: truncation }
 }
 
-export function parseClaudeChatResult(stdout) {
-  const events = structuredEvents(stdout)
-  if (!events) {
+export function parseClaudeChatResult(stdout, options = {}) {
+  const truncation = options.outputTruncated ?? null
+  let decoded
+  try {
+    decoded = decodeJsonEventStream(stdout, { allowRepair: true })
+  } catch {
+    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
-      'Claude Code returned output Ensync Host could not verify as JSON.',
+      'Ensync Host tried a bounded repair of Claude Code output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
+      502,
+    )
+  }
+  const { events, recovery } = decoded
+  if (events.length === 0) {
+    if (truncation) throw truncatedOutputError('Claude Code')
+    throw new ChatRunError(
+      'invalid_cli_output',
+      'Ensync Host tried a bounded repair of Claude Code output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
       502,
     )
   }
 
   const result = [...events].reverse().find((event) => event.type === 'result')
-    ?? (events.length === 1 ? events[0] : null)
+    ?? (events.length === 1 && !truncation ? events[0] : null)
 
   if (!result || typeof result !== 'object' || Array.isArray(result)) {
+    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError('invalid_cli_output', 'Claude Code returned an invalid result.', 502)
   }
   if (result.is_error === true) {
-    if (quotaFailureIsSafe('claude', stdout)) throw quotaError('claude', true)
+    if (quotaFailureIsSafe('claude', stdout, '', { outputTruncated: truncation })) {
+      throw quotaError('claude', true)
+    }
     throw new ChatRunError(
       'cli_failed',
       typeof result.result === 'string' && result.result.trim()
@@ -479,6 +589,8 @@ export function parseClaudeChatResult(stdout) {
     sessionId: typeof result.session_id === 'string' ? result.session_id : initSessionId ?? null,
     model: modelUsage.length === 1 ? modelUsage[0] : initModel ?? null,
     usage: usageFrom(result.usage),
+    outputRecovery: recovery,
+    outputTruncation: truncation,
   }
 }
 
@@ -509,8 +621,10 @@ function argumentsFor(request, attachmentPaths = []) {
   return request.provider === 'codex' ? codexArguments(request, attachmentPaths) : claudeArguments(request)
 }
 
-function parseResult(provider, stdout) {
-  return provider === 'codex' ? parseCodexChatResult(stdout) : parseClaudeChatResult(stdout)
+function parseResult(provider, stdout, options = {}) {
+  return provider === 'codex'
+    ? parseCodexChatResult(stdout, options)
+    : parseClaudeChatResult(stdout, options)
 }
 
 export class ChatRunService {
@@ -521,6 +635,8 @@ export class ChatRunService {
   #inactivityTimeoutMs
   #hardTimeoutMs
   #codexLiveTurns
+  #projectIsolation
+  #activeRuns = 0
 
   constructor(options = {}) {
     if (!options.statusService) throw new TypeError('ChatRunService requires a provider status service.')
@@ -530,6 +646,7 @@ export class ChatRunService {
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
     this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.#projectIsolation = options.projectIsolation ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -574,32 +691,89 @@ export class ChatRunService {
       )
     }
 
-    if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
+    let workspaceLease = null
+    let workspace = null
+    let combinedSignal = { signal: options.signal, dispose() {} }
+    if (this.#projectIsolation) {
       try {
-        return await this.#codexLiveTurns.run({
+        workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
+          signal: options.signal,
+          onWait: () => options.onEvent?.({
+            type: 'notice',
+            code: 'workspace_write_lock_waiting',
+            message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
+            at: new Date().toISOString(),
+          }),
+        })
+        workspace = workspaceLease.workspace
+        combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
+        options.onEvent?.({
+          type: 'notice',
+          code: 'project_workspace_ready',
+          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.`,
+          workspace: { path: workspace.projectPath, branch: workspace.branch },
+          at: new Date().toISOString(),
+        })
+      } catch (error) {
+        if (error instanceof ChatRunError) throw error
+        throw new ChatRunError(
+          typeof error?.code === 'string' ? error.code : 'project_isolation_failed',
+          error instanceof Error ? error.message : 'Ensync Host could not prepare a protected project workspace.',
+          Number.isInteger(error?.status) ? error.status : 409,
+          false,
+        )
+      }
+    }
+    const executionProjectPath = workspace?.projectPath ?? projectPath
+    const executionRequest = workspace ? { ...request, prompt: isolatedPrompt(request.prompt, workspace) } : request
+    const publicWorkspace = workspace ? {
+      path: workspace.projectPath,
+      repositoryPath: workspace.repositoryPath,
+      branch: workspace.branch,
+      reused: workspace.reused,
+      gitBefore: workspace.gitBefore,
+    } : null
+
+    try {
+    if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
+      this.#activeRuns += 1
+      try {
+        const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
-          projectPath,
-          prompt: request.prompt,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
           attachmentPaths,
           sessionId: request.sessionId ?? null,
           model: request.model ?? null,
           effort: request.effort ?? null,
           env: subscriptionEnvironment(this.#environment),
         }, {
-          signal: options.signal,
+          signal: combinedSignal.signal,
           onEvent: (event) => {
-            if (event?.type !== 'output') return options.onEvent?.(event)
+            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
             const safe = redactTerminalText(event.text)
             options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
           },
         })
+        workspaceLease?.assertHeld()
+        return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
         if (error instanceof CodexLiveTurnError) {
           throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
         }
         throw error
       } finally {
+        this.#activeRuns -= 1
         this.#statusService.invalidate?.()
       }
     }
@@ -607,33 +781,35 @@ export class ChatRunService {
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
     const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(request, attachmentPaths)
-    const forwarder = outputForwarder(options.onEvent)
-    options.onEvent?.({
-      type: 'started',
-      provider: request.provider,
-      cwd: projectPath,
-      command: [provider.executable, ...visibleArguments(request, attachmentPaths)].map(quoteTerminalArgument).join(' '),
-      at: new Date(startedAt).toISOString(),
-    })
+    const args = argumentsFor(executionRequest, attachmentPaths)
+    const forwarder = outputForwarder(options.onEvent, request.provider)
+    this.#activeRuns += 1
     let processResult
     try {
+      options.onEvent?.({
+        type: 'started',
+        provider: request.provider,
+        cwd: executionProjectPath,
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+        at: new Date(startedAt).toISOString(),
+      })
       processResult = await this.#processRunner(
         provider.executable,
         args,
         {
-          cwd: projectPath,
+          cwd: executionProjectPath,
           env: subscriptionEnvironment(this.#environment),
-          input: request.prompt,
+          input: executionRequest.prompt,
           inactivityTimeoutMs,
           hardTimeoutMs,
           maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
           onStdout: forwarder.stdout,
           onStderr: forwarder.stderr,
-          signal: options.signal,
+          signal: combinedSignal.signal,
         },
       )
     } finally {
+      this.#activeRuns -= 1
       forwarder.flush()
       // A completed, failed, or cancelled CLI process may have changed the account's real
       // usage window. Drop the shared Host cache so every renderer's next non-forced read
@@ -641,6 +817,15 @@ export class ChatRunService {
       this.#statusService.invalidate?.()
     }
 
+    if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+      const reason = workspaceLease.signal.reason
+      throw new ChatRunError(
+        'workspace_write_lock_lost',
+        reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+        409,
+        false,
+      )
+    }
     if (processResult.aborted || options.signal?.aborted) throw cancelledRunError()
     if (processResult.timedOut) {
       throw new ChatRunError(
@@ -657,8 +842,14 @@ export class ChatRunService {
         true,
       )
     }
+    const outputTruncated = processResult.truncation?.stdout ?? null
     if (processResult.exitCode !== 0) {
-      if (quotaFailureIsSafe(request.provider, processResult.stdout, processResult.stderr)) {
+      if (quotaFailureIsSafe(
+        request.provider,
+        processResult.stdout,
+        processResult.stderr,
+        { outputTruncated },
+      )) {
         throw quotaError(request.provider, true)
       }
       const output = processResult.stderr || processResult.stdout
@@ -670,19 +861,31 @@ export class ChatRunService {
       )
     }
 
-    const parsed = parseResult(request.provider, processResult.stdout)
+    const parsed = parseResult(request.provider, processResult.stdout, { outputTruncated })
+    workspaceLease?.assertHeld()
     return {
       provider: request.provider,
       projectPath,
+      workspace: publicWorkspace,
       response: parsed.response,
       sessionId: parsed.sessionId ?? request.sessionId ?? null,
       model: parsed.model,
       requestedModel: request.model ?? null,
       requestedEffort: request.effort ?? null,
       usage: parsed.usage,
+      outputRecovery: parsed.outputRecovery,
+      outputTruncation: parsed.outputTruncation ?? null,
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } finally {
+      combinedSignal.dispose()
+      await workspaceLease?.release()
+    }
+  }
+
+  hasRunningRuns() {
+    return this.#activeRuns > 0
   }
 
   async steer(liveTurnId, input) {

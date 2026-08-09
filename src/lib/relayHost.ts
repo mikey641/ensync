@@ -1,4 +1,12 @@
-import { readNdjsonStream } from './ndjsonStream.mjs'
+import {
+  MalformedNdjsonEventError,
+  readNdjsonStream,
+  TruncatedNdjsonStreamError,
+} from './ndjsonStream.mjs'
+import {
+  InvalidJsonResponseError,
+  readJsonResponse,
+} from './jsonResponse.mjs'
 
 export type CliProviderId =
   | 'claude'
@@ -81,6 +89,7 @@ export type CliProviderStatus = {
   canConnect: boolean
   connectReason: string | null
   canUpdate: boolean
+  updateStrategy: 'ensync_command' | 'provider_automatic' | 'official_guide'
   updateReason: string
   routeKind: 'subscription' | 'local'
   chatExecution: 'supported' | 'discovery_only'
@@ -119,6 +128,7 @@ export type ConnectResponse = {
 
 export type ProviderUpdateResponse = ConnectResponse & {
   previousVersion: string | null
+  deduplicated?: boolean
 }
 
 export type ProjectInstructionAdapter = {
@@ -193,6 +203,8 @@ export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 export type ChatRunRequest = {
   provider: ChatProviderId
   projectPath: string
+  /** Stable conversation identity used to reuse one protected Git worktree. */
+  workspaceKey: string
   prompt: string
   /** Absolute local file paths explicitly attached by the user. */
   attachments?: string[]
@@ -209,9 +221,37 @@ export type ChatRunUsage = {
   cachedInputTokens: number | null
 }
 
+export type ChatOutputRecovery = {
+  applied: true
+  normalizedLineCount: number
+  discardedLineCount: number
+}
+
+export type ChatOutputTruncation = {
+  droppedLineCount: number
+  droppedCharacterCount: number
+}
+
+export type ChatRunWorkspace = {
+  path: string
+  repositoryPath: string
+  branch: string
+  reused: boolean
+  gitBefore: {
+    branch: string
+    head: string
+    dirty: boolean
+    changedFiles: number
+    checkedAt: string
+  }
+}
+
 export type ChatRunResponse = {
   provider: ChatProviderId
+  /** Canonical user-selected project path; provider execution uses workspace.path. */
   projectPath: string
+  /** Protected local Git worktree, or null for execution targets without local isolation. */
+  workspace?: ChatRunWorkspace | null
   response: string
   sessionId: string | null
   /** Exact model reported by the CLI, or null when the CLI does not report one. */
@@ -222,6 +262,10 @@ export type ChatRunResponse = {
   requestedEffort: ChatModelEffort | null
   /** Exact per-run token counts reported by the CLI, or null. Never estimated. */
   usage: ChatRunUsage | null
+  /** Bounded Host repair of provider protocol framing; never a replay of the task. */
+  outputRecovery?: ChatOutputRecovery | null
+  /** Whole intermediate output lines the Host dropped to stay inside its capture limit. */
+  outputTruncation?: ChatOutputTruncation | null
   durationMs: number
   completedAt: string
 }
@@ -230,8 +274,22 @@ export type ChatExecutionEvent =
   | {
       type: 'notice'
       message: string
+      code?: 'project_write_lock_waiting' | 'workspace_write_lock_waiting' | 'project_workspace_ready' | string
+      workspace?: {
+        path: string
+        branch: string
+      }
       at: string
       /** Monotonic Host job sequence used to resume a detached stream without duplication. */
+      sequence?: number
+    }
+  | {
+      /** Provider-authored, CLI-visible progress text; never hidden reasoning. */
+      type: 'note'
+      provider: ChatProviderId
+      text: string
+      redacted: boolean
+      at: string
       sequence?: number
     }
   | {
@@ -338,6 +396,19 @@ export class EnsyncHostClient {
     this.baseUrl = baseUrl.replace(/\/$/, '')
   }
 
+  private async jsonPayload(response: Response): Promise<unknown> {
+    try {
+      return await readJsonResponse(response)
+    } catch (error) {
+      if (!(error instanceof InvalidJsonResponseError)) throw error
+      throw new EnsyncHostError(
+        'Ensync Host returned a non-JSON response. The operation was not retried because its completion state is unknown.',
+        response.ok ? 502 : response.status,
+        { code: 'invalid_host_response', safeToRetry: false },
+      )
+    }
+  }
+
   private async request<T>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetch(`${this.baseUrl}${path}`, {
       ...init,
@@ -347,7 +418,7 @@ export class EnsyncHostClient {
         ...init?.headers,
       },
     })
-    const payload: unknown = await response.json()
+    const payload = await this.jsonPayload(response)
     if (!response.ok) {
       const errorPayload =
         typeof payload === 'object' && payload !== null ? (payload as ErrorPayload) : null
@@ -380,10 +451,10 @@ export class EnsyncHostClient {
     })
   }
 
-  updateProvider(id: CliProviderId, launch = true) {
+  updateProvider(id: CliProviderId, launch = true, trigger: 'manual' | 'automatic' = 'manual') {
     return this.request<ProviderUpdateResponse>(`/providers/${id}/update`, {
       method: 'POST',
-      body: JSON.stringify({ launch }),
+      body: JSON.stringify({ launch, trigger }),
     })
   }
 
@@ -511,7 +582,7 @@ export class EnsyncHostClient {
         },
       )
       if (!response.ok) {
-        const payload: unknown = await response.json()
+        const payload = await this.jsonPayload(response)
         const message = typeof payload === 'object' && payload !== null && typeof (payload as ErrorPayload).error === 'string'
           ? (payload as ErrorPayload).error!
           : `Ensync Host request failed (${response.status}).`
@@ -524,7 +595,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid retained job event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output' || event.type === 'notice') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result
@@ -571,12 +642,21 @@ export class EnsyncHostClient {
         throw cancelledError()
       }
       if (error instanceof EnsyncHostError) throw error
+      if (error instanceof RangeError || error instanceof MalformedNdjsonEventError) {
+        throw new EnsyncHostError(
+          error instanceof RangeError
+            ? 'Ensync Host returned an oversized retained job event.'
+            : 'Ensync Host returned a malformed retained job event.',
+          502,
+          { code: 'invalid_chat_job_stream', safeToRetry: false },
+        )
+      }
       throw new EnsyncHostError(
-        error instanceof RangeError
-          ? 'Ensync Host returned an oversized retained job event.'
-          : 'Ensync Host returned a malformed retained job event.',
+        error instanceof TruncatedNdjsonStreamError
+          ? 'The retained Ensync Host job stream ended during an event.'
+          : 'The retained Ensync Host job stream disconnected.',
         502,
-        { code: 'invalid_chat_job_stream', safeToRetry: false },
+        { code: 'chat_job_stream_disconnected', safeToRetry: false },
       )
     } finally {
       signal?.removeEventListener('abort', requestCancellation)
@@ -602,7 +682,6 @@ export class EnsyncHostClient {
         if (signal?.aborted) throw error
         const reconnectable = !(error instanceof EnsyncHostError)
           || error.code === 'chat_job_stream_disconnected'
-          || error.code === 'invalid_chat_job_stream'
           || (error.code === null && error.status >= 500)
         if (!reconnectable) throw error
         await new Promise<void>((resolve) => setTimeout(resolve, 750))
@@ -645,7 +724,7 @@ export class EnsyncHostClient {
         signal,
       })
       if (!response.ok) {
-        const payload: unknown = await response.json()
+        const payload = await this.jsonPayload(response)
         const message = typeof payload === 'object' && payload !== null && typeof (payload as ErrorPayload).error === 'string'
           ? (payload as ErrorPayload).error!
           : `Ensync Host request failed (${response.status}).`
@@ -659,7 +738,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid execution event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result
@@ -697,12 +776,21 @@ export class EnsyncHostClient {
         throw cancelledError()
       }
       if (error instanceof EnsyncHostError) throw error
+      if (error instanceof RangeError || error instanceof MalformedNdjsonEventError) {
+        throw new EnsyncHostError(
+          error instanceof RangeError
+            ? 'Ensync Host returned an oversized execution event.'
+            : 'Ensync Host returned a malformed execution event.',
+          502,
+          { code: 'invalid_execution_stream', safeToRetry: false },
+        )
+      }
       throw new EnsyncHostError(
-        error instanceof RangeError
-          ? 'Ensync Host returned an oversized execution event.'
-          : 'Ensync Host returned a malformed execution event.',
+        error instanceof TruncatedNdjsonStreamError
+          ? 'The Ensync Host execution stream ended during an event.'
+          : 'The Ensync Host execution stream disconnected before a final result.',
         502,
-        {},
+        { code: 'execution_stream_disconnected', safeToRetry: false },
       )
     }
   }
