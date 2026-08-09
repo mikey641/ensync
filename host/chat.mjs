@@ -1,5 +1,5 @@
-import { realpath, stat } from 'node:fs/promises'
-import { dirname, extname, isAbsolute, relative } from 'node:path'
+import { open, realpath, stat } from 'node:fs/promises'
+import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
 import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
@@ -291,6 +291,17 @@ export async function validateAttachmentPaths(value) {
         error,
         'invalid_attachment',
         'An attached file no longer exists or cannot be accessed.',
+      )
+    }
+    // stat() alone passes on OS-protected files (macOS screenshot drag temp
+    // dirs) that the agent CLI still cannot open, so probe with a real open.
+    try {
+      const handle = await open(resolvedPath, 'r')
+      await handle.close()
+    } catch {
+      throw new ChatRunError(
+        'unreadable_attachment',
+        `The operating system prevents Ensync from opening "${basename(resolvedPath)}". Remove it from the message and re-attach it so Ensync can store a readable copy.`,
       )
     }
     if (!seen.has(resolvedPath)) {

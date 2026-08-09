@@ -2,6 +2,11 @@ import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
+import {
+  ChatAttachmentStore,
+  MAX_STORED_ATTACHMENT_BYTES,
+  probeAttachmentPaths,
+} from './chat-attachments.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
@@ -135,6 +140,28 @@ function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
   })
 }
 
+function readBinaryBody(request, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let received = 0
+    request.on('data', (chunk) => {
+      received += chunk.length
+      if (received > maxBytes) {
+        reject(new ChatRunError(
+          'invalid_attachment',
+          `Attachment uploads must stay under ${Math.floor(maxBytes / (1024 * 1024))} MB.`,
+          413,
+        ))
+        request.destroy()
+        return
+      }
+      chunks.push(chunk)
+    })
+    request.on('end', () => resolve(Buffer.concat(chunks)))
+    request.on('error', reject)
+  })
+}
+
 function refreshRequested(url) {
   return ['1', 'true'].includes(url.searchParams.get('refresh')?.toLowerCase())
 }
@@ -154,6 +181,9 @@ export function createEnsyncHost(options = {}) {
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
+  })
+  const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
+    rootPath: options.chatAttachmentsRoot,
   })
   const projects = options.projectService ?? new ProjectInspectionService({
     allowedRoots: options.allowedProjectRoots,
@@ -351,6 +381,17 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const result = await git.land(body)
         return sendJson(response, 200, result, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/chat/attachments/probe') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await probeAttachmentPaths(body.paths), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/chat/attachments') {
+        const bytes = await readBinaryBody(request, MAX_STORED_ATTACHMENT_BYTES)
+        const attachment = await chatAttachments.store({ name: url.searchParams.get('name'), bytes })
+        return sendJson(response, 201, { attachment }, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/chat/run') {
