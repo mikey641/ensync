@@ -34,6 +34,42 @@ function workspaceLockPath(repository, commonDirectory, key) {
   return join(repository, commonDirectory, 'ensync', 'workspace-write-locks', `${workspaceHash}.lock`)
 }
 
+async function remoteRepositoryFixture(context) {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-canonical-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const remote = join(root, 'remote.git')
+  await git(root, ['init', '--bare', '--initial-branch=main', remote])
+
+  const publisher = join(root, 'publisher')
+  await git(root, ['clone', remote, publisher])
+  await git(publisher, ['config', 'user.name', 'Ensync Test'])
+  await git(publisher, ['config', 'user.email', 'ensync@example.test'])
+  await writeFile(join(publisher, 'tracked.txt'), 'baseline\n')
+  await git(publisher, ['add', 'tracked.txt'])
+  await git(publisher, ['commit', '-m', 'baseline'])
+  await git(publisher, ['push', '-u', 'origin', 'main'])
+
+  const repository = join(root, 'repository')
+  await git(root, ['clone', remote, repository])
+  await git(repository, ['config', 'user.name', 'Ensync Test'])
+  await git(repository, ['config', 'user.email', 'ensync@example.test'])
+
+  return {
+    root,
+    remote,
+    publisher,
+    repository,
+    workspaceRoot: join(root, 'workspaces'),
+    async publish(name, contents, message) {
+      await writeFile(join(publisher, name), contents)
+      await git(publisher, ['add', name])
+      await git(publisher, ['commit', '-m', message])
+      await git(publisher, ['push', 'origin', 'main'])
+      return git(publisher, ['rev-parse', 'HEAD'])
+    },
+  }
+}
+
 test('a conversation receives a stable worktree without changing the shared checkout', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
@@ -766,4 +802,305 @@ test('recoverStrandedWorktrees commits dirty stranded worktrees and skips active
   assert.equal(subject, 'Ensync agent work (recovered)')
   // The active worktree was not touched.
   assert.match(await git(active.workspace.repositoryPath, ['status', '--porcelain']), /active\.txt/)
+})
+
+test('a new conversation workspace is seeded from the fetched canonical remote base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const staleHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  assert.notEqual(canonical, staleHead)
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.gitBefore.head, canonical)
+  assert.equal(acquired.workspace.base.sha, canonical)
+  assert.equal(acquired.workspace.base.source, 'remote_default_branch')
+  assert.equal(acquired.workspace.base.remote, 'origin')
+  assert.equal(acquired.workspace.base.branch, 'main')
+  assert.equal(
+    await readFile(join(acquired.workspace.projectPath, 'combined-offer.txt'), 'utf8'),
+    'rent and sale\n',
+  )
+  assert.equal(await git(fixture.repository, ['rev-parse', 'HEAD']), staleHead)
+  await acquired.release()
+})
+
+test('uncommitted shared-checkout work is replayed on top of the refreshed canonical base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'user edit\n')
+  await writeFile(join(fixture.repository, 'untracked.txt'), 'user note\n')
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.gitBefore.head, canonical)
+  assert.equal(acquired.workspace.seededFromSharedCheckout, true)
+  assert.equal(acquired.workspace.gitBefore.dirty, true)
+  const workspacePath = acquired.workspace.projectPath
+  assert.equal(await readFile(join(workspacePath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(workspacePath, 'tracked.txt'), 'utf8'), 'user edit\n')
+  assert.equal(await readFile(join(workspacePath, 'untracked.txt'), 'utf8'), 'user note\n')
+  const changed = (await git(workspacePath, ['status', '--porcelain'])).split('\n').filter(Boolean)
+  assert.equal(changed.length, 2)
+  assert.equal(await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'), 'user edit\n')
+  await acquired.release()
+})
+
+test('a resumed conversation worktree receives newly integrated canonical work', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  await writeFile(join(first.workspace.projectPath, 'agent-work.txt'), 'in progress\n')
+  await first.release()
+
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.reused, true)
+  assert.equal(resumed.workspace.base.sha, canonical)
+  assert.equal(resumed.workspace.base.refreshed, true)
+  assert.equal(
+    await readFile(join(resumed.workspace.projectPath, 'combined-offer.txt'), 'utf8'),
+    'rent and sale\n',
+  )
+  assert.equal(await readFile(join(resumed.workspace.projectPath, 'agent-work.txt'), 'utf8'), 'in progress\n')
+  await resumed.release()
+})
+
+test('uncommitted work that conflicts with the canonical base is preserved on the local commit', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await fixture.publish('tracked.txt', 'canonical edit\n', 'canonical edit')
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'conflicting user edit\n')
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'local_changes_conflict')
+  assert.equal(acquired.workspace.base.sha, localHead)
+  assert.equal(acquired.workspace.base.refreshed, false)
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.equal(
+    await readFile(join(acquired.workspace.projectPath, 'tracked.txt'), 'utf8'),
+    'conflicting user edit\n',
+  )
+  assert.equal(await git(acquired.workspace.repositoryPath, ['status', '--porcelain']), 'M tracked.txt')
+  assert.equal(await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'), 'conflicting user edit\n')
+  await acquired.release()
+})
+
+test('a resumed conversation keeps its own commits when the canonical base advances', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  const worktree = first.workspace.repositoryPath
+  await writeFile(join(worktree, 'agent-work.txt'), 'agent commit\n')
+  await git(worktree, ['add', 'agent-work.txt'])
+  await git(worktree, ['commit', '-m', 'agent work'])
+  await first.release()
+
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.base.refreshed, true)
+  assert.equal(await readFile(join(worktree, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(worktree, 'agent-work.txt'), 'utf8'), 'agent commit\n')
+  await git(worktree, ['merge-base', '--is-ancestor', canonical, 'HEAD'])
+  assert.equal(resumed.workspace.integration.integrated, false)
+  assert.equal(resumed.workspace.integration.unintegratedCommits > 0, true)
+  await resumed.release()
+})
+
+test('a resumed conversation that conflicts with the canonical base is left untouched and reported', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  const worktree = first.workspace.repositoryPath
+  await writeFile(join(worktree, 'tracked.txt'), 'agent version\n')
+  await git(worktree, ['add', 'tracked.txt'])
+  await git(worktree, ['commit', '-m', 'agent edit'])
+  const agentHead = await git(worktree, ['rev-parse', 'HEAD'])
+  await first.release()
+
+  await fixture.publish('tracked.txt', 'canonical version\n', 'canonical edit')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.base.refreshed, false)
+  assert.equal(resumed.workspace.base.source, 'base_refresh_deferred')
+  assert.equal(resumed.workspace.base.sha, agentHead)
+  assert.ok(resumed.workspace.base.reason)
+  assert.equal(resumed.workspace.gitBefore.head, agentHead)
+  assert.equal(await readFile(join(worktree, 'tracked.txt'), 'utf8'), 'agent version\n')
+  assert.equal(await git(worktree, ['status', '--porcelain']), '')
+  await resumed.release()
+})
+
+test('a divergent local history keeps the local base and reports the exact reason', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  await writeFile(join(fixture.repository, 'local-only.txt'), 'local work\n')
+  await git(fixture.repository, ['add', 'local-only.txt'])
+  await git(fixture.repository, ['commit', '-m', 'local only'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'divergent_local_history')
+  assert.equal(acquired.workspace.base.sha, localHead)
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.match(acquired.workspace.base.reason, /diverged/i)
+  await assert.rejects(readFile(join(acquired.workspace.projectPath, 'combined-offer.txt')), { code: 'ENOENT' })
+  await acquired.release()
+})
+
+test('a local checkout ahead of the canonical branch keeps its own head', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await writeFile(join(fixture.repository, 'local-only.txt'), 'local work\n')
+  await git(fixture.repository, ['add', 'local-only.txt'])
+  await git(fixture.repository, ['commit', '-m', 'local only'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'local_head_ahead')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  await acquired.release()
+})
+
+test('an unsafe configured remote never runs Git fetch and never blocks the run', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await git(fixture.repository, ['remote', 'set-url', 'origin', 'ext::sh -c whoami'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  const attempted = []
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    gitRunner: (args, options) => {
+      attempted.push(args[0])
+      return runGit(args, options)
+    },
+  })
+
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(attempted.includes('fetch'), false)
+  assert.equal(acquired.workspace.base.source, 'unsafe_remote')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.match(acquired.workspace.base.reason, /unsupported/i)
+  await acquired.release()
+})
+
+test('an unreachable canonical remote reports the failure and still starts the workspace', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await rm(fixture.remote, { recursive: true, force: true })
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'stale_remote_ref')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.ok(acquired.workspace.base.reason)
+  await acquired.release()
+})
+
+test('concurrent conversations in one repository share a single canonical fetch', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  let fetches = 0
+  const gitRunner = (args, options) => {
+    if (args[0] === 'fetch') fetches += 1
+    return runGit(args, options)
+  }
+  const first = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), gitRunner, lockPollMs: 10 })
+  const second = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), gitRunner, lockPollMs: 10 })
+
+  const [a, b] = await Promise.all([
+    first.acquire(fixture.repository, 'window-a:chat-a'),
+    second.acquire(fixture.repository, 'window-b:chat-b'),
+  ])
+
+  assert.equal(fetches, 1)
+  assert.equal(a.workspace.base.sha, b.workspace.base.sha)
+  assert.equal(await readFile(join(a.workspace.projectPath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(b.workspace.projectPath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  await a.release()
+  await b.release()
+})
+
+test('a chat branch reports how much of its work is not yet contained in the canonical base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  assert.equal(first.workspace.integration.integrated, true)
+  assert.equal(first.workspace.integration.unintegratedCommits, 0)
+  const workspacePath = first.workspace.repositoryPath
+  await writeFile(join(workspacePath, 'agent-work.txt'), 'finished\n')
+  await git(workspacePath, ['add', 'agent-work.txt'])
+  await git(workspacePath, ['commit', '-m', 'agent work'])
+  await first.release()
+
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  assert.equal(resumed.workspace.integration.integrated, false)
+  assert.equal(resumed.workspace.integration.unintegratedCommits, 1)
+  await resumed.release()
+})
+
+test('ChatRunService reports the canonical base to the user and the provider', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const events = []
+  let providerPrompt
+  const service = new ChatRunService({
+    projectIsolation: isolation,
+    statusService: {
+      async get() {
+        return {
+          id: 'claude',
+          name: 'Claude Code',
+          installed: true,
+          executable: '/test/bin/claude',
+          authentication: { state: 'authenticated', method: 'claude.ai OAuth' },
+        }
+      },
+      invalidate() {},
+    },
+    processRunner: async (_executable, _args, options) => {
+      providerPrompt = options.input
+      return {
+        exitCode: 0,
+        error: null,
+        timedOut: false,
+        aborted: false,
+        stderr: '',
+        stdout: JSON.stringify({
+          type: 'result',
+          is_error: false,
+          result: 'completed safely',
+          session_id: null,
+          usage: {},
+        }),
+      }
+    },
+  })
+
+  const result = await service.run({
+    provider: 'claude',
+    projectPath: fixture.repository,
+    workspaceKey: 'window-a:chat-a',
+    prompt: 'Continue the combined offer work',
+  }, { onEvent: (event) => events.push(event) })
+
+  const ready = events.find((event) => event.code === 'project_workspace_ready')
+  assert.equal(ready.workspace.base.sha, canonical)
+  assert.equal(ready.workspace.base.source, 'remote_default_branch')
+  assert.match(ready.message, /origin\/main/)
+  assert.equal(result.workspace.base.sha, canonical)
+  assert.match(providerPrompt, new RegExp(`Base: origin/main at ${canonical}`))
 })
