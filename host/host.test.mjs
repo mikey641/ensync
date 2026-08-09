@@ -13,6 +13,7 @@ import {
   parseCursorAuthentication,
   parseKiroAuthentication,
 } from './providers.mjs'
+import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 import { createRelayHost } from './server.mjs'
 
 test('subscription environment removes model API keys without removing PATH', () => {
@@ -131,12 +132,41 @@ test('catalog login definitions stay provider-specific', () => {
   assert.equal(getProviderDefinition('aider'), null)
 })
 
-test('catalog update definitions stay limited to verified provider-owned commands', () => {
-  assert.deepEqual(getProviderDefinition('codex').updateArgs, ['update'])
-  assert.deepEqual(getProviderDefinition('claude').updateArgs, ['update'])
+test('catalog update definitions cover every verified provider-owned command', () => {
+  const commands = {
+    codex: ['update'],
+    claude: ['update'],
+    copilot: ['update'],
+    cursor: ['update'],
+    kimi: ['upgrade'],
+    droid: ['update'],
+    amp: ['update'],
+    auggie: ['upgrade'],
+    qoder: ['update'],
+    codebuddy: ['update'],
+  }
+  for (const [providerId, args] of Object.entries(commands)) {
+    assert.deepEqual(getProviderDefinition(providerId).updateArgs, args)
+  }
   for (const provider of getProviderCatalog()) {
-    if (provider.id === 'codex' || provider.id === 'claude') continue
+    if (provider.id in commands) continue
     assert.equal(getProviderDefinition(provider.id).updateArgs, undefined)
+  }
+  for (const providerId of ['antigravity', 'kiro', 'junie']) {
+    assert.equal(getProviderDefinition(providerId).updateStrategy, 'provider_automatic')
+  }
+})
+
+test('every catalog provider inherits the bundled Ensync Superpowers policy', () => {
+  const catalog = getProviderCatalog()
+
+  assert.equal(catalog.length, 17)
+  for (const provider of catalog) {
+    assert.deepEqual(provider.agentCoordination, {
+      policy: ENSYNC_SUPERPOWERS_POLICY,
+      delivery: 'ensync_prompt',
+      nativePlugin: 'optional',
+    })
   }
 })
 
@@ -203,7 +233,13 @@ test('host returns real provider states and never invents usage numbers', async 
     assert.ok(Array.isArray(provider.availableModels))
     assert.ok(['subscription', 'local'].includes(provider.routeKind))
     assert.ok(['supported', 'discovery_only'].includes(provider.chatExecution))
-    assert.equal(provider.canUpdate, provider.installed && ['codex', 'claude'].includes(provider.id))
+    assert.deepEqual(provider.agentCoordination, {
+      policy: ENSYNC_SUPERPOWERS_POLICY,
+      delivery: 'ensync_prompt',
+      nativePlugin: 'optional',
+    })
+    assert.equal(provider.canUpdate, provider.installed && Array.isArray(getProviderDefinition(provider.id)?.updateArgs))
+    assert.ok(['ensync_command', 'provider_automatic', 'official_guide'].includes(provider.updateStrategy))
     assert.equal(typeof provider.updateReason, 'string')
   }
 

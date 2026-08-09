@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { chmod, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import {
   buildSshArguments,
@@ -23,6 +23,9 @@ import {
 } from './remote-ssh-bridge.mjs'
 import { runProcess } from './command.mjs'
 import { createEnsyncHost } from './server.mjs'
+import { runGit } from './git.mjs'
+
+const WORKSPACE_KEY = 'canonical-window:remote-chat-1'
 
 function connection(overrides = {}) {
   return {
@@ -44,6 +47,22 @@ function processResult(overrides = {}) {
     stdout: '',
     stderr: '',
     ...overrides,
+  }
+}
+
+function remoteWorkspace() {
+  return {
+    path: '/home/developer/.ensync/agent-workspaces-v1/repository/conversation',
+    repositoryPath: '/home/developer/.ensync/agent-workspaces-v1/repository/conversation',
+    branch: 'ensync/chat-0123456789abcdef01234567',
+    reused: false,
+    gitBefore: {
+      branch: 'ensync/chat-0123456789abcdef01234567',
+      head: '0123456789abcdef0123456789abcdef01234567',
+      dirty: false,
+      changedFiles: 0,
+      checkedAt: '2026-08-06T10:04:00.000Z',
+    },
   }
 }
 
@@ -133,6 +152,20 @@ test('SSH connection validation accepts only strict host, user, port, key-path, 
   )
 })
 
+test('a stale renderer without a remote conversation key gets an actionable restart error', async () => {
+  const service = new RemoteSshService({
+    sshFinder: async () => '/fake/bin/ssh',
+    processRunner: async () => processResult(),
+  })
+
+  await assert.rejects(
+    service.runChat({ connection: connection(), provider: 'codex', prompt: 'Continue' }),
+    (error) => error instanceof RemoteSshError
+      && error.code === 'client_upgrade_required'
+      && error.message.includes('Quit Ensync completely'),
+  )
+})
+
 test('OpenSSH arguments are fixed, strict-known-host, forwarding-free, and contain no project or prompt data', () => {
   const args = buildSshArguments(connection({ identityFile: '/keys/id_ed25519' }))
   assert.deepEqual(args.slice(-3), ['worker.example.com', 'node', '-'])
@@ -215,8 +248,9 @@ test('SSH transport failures do not claim a connection and return bounded diagno
 })
 
 test('remote Codex chat keeps prompt out of argv and returns only parsed structured output publicly', async () => {
-  const prompt = 'Continue the remote implementation without copying context.'
+  const prompt = 'Continue the remote implementation and explain [ENSYNC SAFE MULTI-AGENT v1].'
   const cliStdout = [
+    'Remote Codex startup diagnostic.',
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
     JSON.stringify({
       type: 'item.completed',
@@ -229,6 +263,7 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
     }),
   ].join('\n')
   let captured
+  const events = []
   const service = new RemoteSshService({
     sshFinder: async () => '/fake/bin/ssh',
     processRunner: async (...args) => {
@@ -240,6 +275,7 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
             operation: 'chat',
             provider: 'codex',
             projectPath: '/srv/projects/ensync',
+            workspace: remoteWorkspace(),
             executable: '/usr/local/bin/codex',
             authentication: { state: 'authenticated', method: 'ChatGPT login' },
             process: processResult({ stdout: cliStdout, stderr: 'exact remote diagnostic' }),
@@ -260,11 +296,12 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   const result = await service.runChat({
     connection: connection(),
     provider: 'codex',
+    workspaceKey: WORKSPACE_KEY,
     prompt,
     model: 'gpt-5.4',
     effort: 'high',
     timeoutMs: 2_000,
-  })
+  }, { onEvent: (event) => events.push(event) })
 
   assert.equal(captured[1].includes(prompt), false)
   assert.equal(captured[2].input.includes(prompt), false)
@@ -273,12 +310,28 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   const payloadMarker = captured[2].input.lastIndexOf(')("')
   const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
   const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
+  assert.match(remotePayload.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(remotePayload.prompt, /bundled Superpowers contract applies to every Ensync provider runner/)
+  assert.match(remotePayload.prompt, /Continue the remote implementation and explain \[ENSYNC SAFE MULTI-AGENT v1\]\.$/)
+  assert.equal(remotePayload.prompt.split('[ENSYNC SAFE MULTI-AGENT v1]').length - 1, 2)
   assert.equal(remotePayload.inactivityTimeoutMs, 2_000)
   assert.equal(remotePayload.hardTimeoutMs, 2_000)
   assert.equal(result.response, 'Remote Codex response')
   assert.equal(result.sessionId, '123e4567-e89b-12d3-a456-426614174000')
   assert.equal(result.model, 'gpt-5.4')
   assert.equal(result.requestedEffort, 'high')
+  assert.deepEqual(events, [{
+    type: 'notice',
+    code: 'project_workspace_ready',
+    message: `Remote protected workspace used on ${remoteWorkspace().branch} at ${remoteWorkspace().path}. The shared checkout was not the provider working directory.`,
+    workspace: { path: remoteWorkspace().path, branch: remoteWorkspace().branch },
+    at: events[0].at,
+  }])
+  assert.deepEqual(result.outputRecovery, {
+    applied: true,
+    normalizedLineCount: 0,
+    discardedLineCount: 1,
+  })
   assert.deepEqual(result.usage, {
     source: 'cli',
     inputTokens: 18,
@@ -302,6 +355,7 @@ test('a signal-terminated remote provider never reports a null exit code', async
           operation: 'chat',
           provider: 'codex',
           projectPath: '/srv/projects/ensync',
+          workspace: remoteWorkspace(),
           process: processResult({ exitCode: null, signal: 'SIGTERM' }),
         },
       }),
@@ -309,7 +363,7 @@ test('a signal-terminated remote provider never reports a null exit code', async
   })
 
   await assert.rejects(
-    service.runChat({ connection: connection(), provider: 'codex', prompt: 'Continue safely' }),
+    service.runChat({ connection: connection(), provider: 'codex', workspaceKey: WORKSPACE_KEY, prompt: 'Continue safely' }),
     (error) =>
       error instanceof RemoteSshError
       && error.code === 'cli_failed'
@@ -324,7 +378,23 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
   const directory = await mkdtemp(join(tmpdir(), 'ensync-ssh-progress-'))
   const projectPath = join(directory, 'project')
   const executable = join(directory, 'codex')
-  await import('node:fs/promises').then(({ mkdir }) => mkdir(projectPath))
+  await mkdir(projectPath)
+  for (const args of [
+    ['init', '--initial-branch=main'],
+    ['config', 'user.name', 'Ensync Test'],
+    ['config', 'user.email', 'ensync@example.test'],
+  ]) {
+    const result = await runGit(args, { cwd: projectPath })
+    assert.equal(result.exitCode, 0, result.stderr)
+  }
+  await writeFile(join(projectPath, 'tracked.txt'), 'baseline\n')
+  for (const args of [['add', 'tracked.txt'], ['commit', '-m', 'baseline']]) {
+    const result = await runGit(args, { cwd: projectPath })
+    assert.equal(result.exitCode, 0, result.stderr)
+  }
+  const baseline = (await runGit(['rev-parse', 'HEAD'], { cwd: projectPath })).stdout.trim()
+  await writeFile(join(projectPath, 'tracked.txt'), 'unique shared-checkout change\n')
+  await writeFile(join(projectPath, 'untracked.txt'), 'unique untracked change\n')
   await writeFile(executable, `#!${process.execPath}\n${[
     "const args = process.argv.slice(2)",
     "if (args[0] === 'login') { console.log('Logged in with ChatGPT'); process.exit(0) }",
@@ -348,6 +418,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
       operation: 'chat',
       provider: 'codex',
       projectPath,
+      workspaceKey: WORKSPACE_KEY,
       prompt: 'Keep working while progress is emitted.',
       sessionId: null,
       model: null,
@@ -355,7 +426,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
       inactivityTimeoutMs: 400,
       hardTimeoutMs: 5_000,
     }),
-    env: { ...process.env, PATH: directory },
+    env: { ...process.env, HOME: directory, PATH: `${directory}${delimiter}${process.env.PATH ?? ''}` },
     inactivityTimeoutMs: 1_250,
     hardTimeoutMs: 6_000,
     maxCaptureBytes: 12 * 1024 * 1024,
@@ -366,10 +437,21 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
   assert.match(bridge.stderr, /ENSYNC_SSH_PROGRESS_V1:(?:spawn|stdout)/)
   const envelope = decodeRemoteBridgeEnvelope(bridge.stdout)
   assert.equal(envelope?.ok, true)
+  assert.equal(envelope.result.projectPath, await realpath(projectPath))
+  assert.notEqual(envelope.result.workspace.path, envelope.result.projectPath)
+  assert.match(envelope.result.workspace.branch, /^ensync\/chat-[a-f0-9]{24}$/)
+  assert.equal(envelope.result.workspace.seededFromSharedCheckout, true)
+  assert.equal(envelope.result.workspace.gitBefore.head, baseline)
+  assert.equal(envelope.result.workspace.gitBefore.changedFiles, 2)
+  assert.equal(await readFile(join(envelope.result.workspace.path, 'tracked.txt'), 'utf8'), 'unique shared-checkout change\n')
+  assert.equal(await readFile(join(envelope.result.workspace.path, 'untracked.txt'), 'utf8'), 'unique untracked change\n')
+  assert.equal(await readFile(join(projectPath, 'tracked.txt'), 'utf8'), 'unique shared-checkout change\n')
+  assert.equal(await readFile(join(projectPath, 'untracked.txt'), 'utf8'), 'unique untracked change\n')
   assert.equal(envelope.result.process.timedOut, false)
   assert.equal(envelope.result.process.stdout.includes('Remote progress completed'), true)
   assert.equal(envelope.result.process.stdout.includes('ENSYNC_SSH_PROGRESS_V1'), false)
   assert.equal(envelope.result.process.stderr.includes('ENSYNC_SSH_PROGRESS_V1'), false)
+  assert.equal((await runGit(['status', '--porcelain'], { cwd: projectPath })).stdout.trim().split('\n').length, 2)
 })
 
 test('process adapter retains exact provider streams internally while the service handles safe remote preflight errors', async () => {
@@ -403,6 +485,7 @@ test('process adapter retains exact provider streams internally while the servic
     unavailable.runChat({
       connection: connection(),
       provider: 'claude',
+      workspaceKey: WORKSPACE_KEY,
       prompt: 'Hello',
     }),
     (error) =>
@@ -415,6 +498,7 @@ test('process adapter retains exact provider streams internally while the servic
     unavailable.runChat({
       connection: connection(),
       provider: 'claude',
+      workspaceKey: WORKSPACE_KEY,
       prompt: 'Hello',
       effort: 'ultra',
     }),
@@ -424,6 +508,7 @@ test('process adapter retains exact provider streams internally while the servic
     unavailable.runChat({
       connection: connection(),
       provider: 'claude',
+      workspaceKey: WORKSPACE_KEY,
       prompt: 'Hello',
       attachments: ['/Users/example/local.png'],
     }),
@@ -439,13 +524,14 @@ test('SSH timeout errors distinguish bridge inactivity from the transport hard c
         ok: true,
         result: {
           projectPath: '/srv/projects/ensync',
+          workspace: remoteWorkspace(),
           process: processResult({ timedOut: true, timeoutReason: 'inactivity' }),
         },
       }),
     }),
   })
   await assert.rejects(
-    remoteIdle.runChat({ connection: connection(), provider: 'codex', prompt: 'Continue' }),
+    remoteIdle.runChat({ connection: connection(), provider: 'codex', workspaceKey: WORKSPACE_KEY, prompt: 'Continue' }),
     (error) =>
       error instanceof RemoteSshError
       && error.code === 'run_timed_out'
@@ -536,7 +622,7 @@ test('SSH host route preserves bounded retry safety without leaking remote detai
   const response = await fetch(`http://127.0.0.1:${address.port}/api/remote/ssh/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ connection: connection(), provider: 'codex', prompt: 'Hello' }),
+    body: JSON.stringify({ connection: connection(), provider: 'codex', workspaceKey: WORKSPACE_KEY, prompt: 'Hello' }),
   })
   assert.equal(response.status, 409)
   assert.deepEqual(await response.json(), {
@@ -561,6 +647,7 @@ test('remote chat cancellation reaches the exact OpenSSH process and is never re
   const run = service.runChat({
     connection: connection(),
     provider: 'codex',
+    workspaceKey: WORKSPACE_KEY,
     prompt: 'Continue remotely',
   }, { signal: controller.signal })
   setTimeout(() => controller.abort(), 10)

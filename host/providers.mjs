@@ -3,6 +3,7 @@ import { parseCodexAppServerProbe, probeCodexAppServer } from './codex-app-serve
 import { probeClaudeUsage } from './claude-usage.mjs'
 import { probeCopilotAuthentication } from './copilot-auth.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
+import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 
 // Product-navigation heuristic: broadly recognized subscription coding agents
 // appear first, followed by progressively more specialist discovery candidates.
@@ -58,6 +59,7 @@ const providerDefinitions = [
     command: 'kimi',
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateArgs: ['upgrade'],
     authentication: unsupportedAuthentication(
       'Kimi Code documents OAuth subscription login, but not a non-interactive account authentication-status command. Ensync will not inspect its credential files.',
     ),
@@ -71,6 +73,7 @@ const providerDefinitions = [
     command: 'agy',
     versionArgs: ['--version'],
     loginArgs: [],
+    updateStrategy: 'provider_automatic',
     authentication: unsupportedAuthentication(
       'Antigravity uses Google browser sign-in on first launch, but does not document a non-interactive authentication-status command.',
     ),
@@ -97,6 +100,7 @@ const providerDefinitions = [
     command: 'copilot',
     versionArgs: ['version'],
     loginArgs: [],
+    updateArgs: ['update'],
     authentication: probeCopilotAuthentication,
     usageKind: 'unavailable',
     usageReason:
@@ -109,6 +113,7 @@ const providerDefinitions = [
     commandAliases: ['cursor-agent'],
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateArgs: ['update'],
     authentication: probeCursorAuthentication,
     usageKind: 'unavailable',
     usageReason:
@@ -120,6 +125,7 @@ const providerDefinitions = [
     command: 'kiro-cli',
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateStrategy: 'provider_automatic',
     authentication: probeKiroAuthentication,
     usageKind: 'unavailable',
     usageReason:
@@ -131,6 +137,7 @@ const providerDefinitions = [
     command: 'qodercli',
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateArgs: ['update'],
     authentication: unsupportedAuthentication(
       'Qoder documents browser account login, but not a non-interactive authentication-status command.',
     ),
@@ -145,6 +152,7 @@ const providerDefinitions = [
     commandAliases: ['cbc'],
     versionArgs: ['--version'],
     loginArgs: [],
+    updateArgs: ['update'],
     authentication: unsupportedAuthentication(
       'CodeBuddy uses browser account sign-in during first-run onboarding, but does not document a non-interactive authentication-status command.',
     ),
@@ -158,6 +166,7 @@ const providerDefinitions = [
     command: 'droid',
     versionArgs: ['--version'],
     loginArgs: [],
+    updateArgs: ['update'],
     authentication: unsupportedAuthentication(
       'Factory Droid uses browser account sign-in during first-run onboarding, but does not document a non-interactive subscription authentication-status command.',
     ),
@@ -171,6 +180,7 @@ const providerDefinitions = [
     command: 'auggie',
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateArgs: ['upgrade'],
     authentication: unsupportedAuthentication(
       'Auggie documents account login and account status, but Ensync has not yet tested a stable machine-readable authentication parser.',
     ),
@@ -184,6 +194,7 @@ const providerDefinitions = [
     command: 'amp',
     versionArgs: ['--version'],
     loginArgs: ['login'],
+    updateArgs: ['update'],
     authentication: unsupportedAuthentication(
       'Amp documents browser account login, but not a separate non-interactive authentication-status command.',
     ),
@@ -223,6 +234,7 @@ const providerDefinitions = [
     command: 'junie',
     versionArgs: ['--version'],
     loginArgs: [],
+    updateStrategy: 'provider_automatic',
     authentication: unsupportedAuthentication(
       'Junie documents JetBrains Account sign-in inside its interactive welcome screen, but no non-interactive account status command.',
     ),
@@ -374,6 +386,18 @@ const providerCatalog = {
 }
 
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
+const universalAgentCoordination = Object.freeze({
+  policy: ENSYNC_SUPERPOWERS_POLICY,
+  delivery: 'ensync_prompt',
+  nativePlugin: 'optional',
+})
+
+function providerCatalogEntry(id) {
+  return {
+    ...providerCatalog[id],
+    agentCoordination: universalAgentCoordination,
+  }
+}
 
 function now() {
   return new Date().toISOString()
@@ -413,6 +437,28 @@ async function localRuntimeAuthentication(_executable, checkedAt) {
 
 function combinedOutput(result) {
   return [result.stdout, result.stderr].filter(Boolean).join('\n')
+}
+
+function providerUpdateStrategy(provider) {
+  if (Array.isArray(provider.updateArgs)) return 'ensync_command'
+  return provider.updateStrategy ?? 'official_guide'
+}
+
+function providerUpdateReason(provider, installed) {
+  const strategy = providerUpdateStrategy(provider)
+  if (strategy === 'ensync_command') {
+    return installed
+      ? `${provider.name} provides a verified self-update command. The CLI remains authoritative for its install method, release channel, and result.`
+      : `Install ${provider.name} before running its official self-update command.`
+  }
+  if (strategy === 'provider_automatic') {
+    return installed
+      ? `${provider.name} checks for and applies CLI updates through its own automatic updater. Ensync includes it in update reviews without starting an agent session.`
+      : `Install ${provider.name} to use its provider-managed automatic updater.`
+  }
+  return installed
+    ? `${provider.name} updates depend on its installation method or operating system. Use the official installation and update guide.`
+    : `Install ${provider.name} from its official installation and update guide.`
 }
 
 function extractJsonObject(value) {
@@ -624,7 +670,7 @@ async function inspectProvider(provider) {
       break
     }
   }
-  const catalog = providerCatalog[provider.id]
+  const catalog = providerCatalogEntry(provider.id)
 
   if (!executable) {
     const authentication = unavailableAuthentication(
@@ -645,9 +691,8 @@ async function inspectProvider(provider) {
       canConnect: false,
       connectReason: `Install ${provider.name} and make ${commandCandidates.join(' or ')} available on PATH.`,
       canUpdate: false,
-      updateReason: Array.isArray(provider.updateArgs)
-        ? `Install ${provider.name} before running its official self-update command.`
-        : `Ensync has not verified a provider-owned cross-platform update command for ${provider.name}. Use the official installation and update guide.`,
+      updateStrategy: providerUpdateStrategy(provider),
+      updateReason: providerUpdateReason(provider, false),
       ...catalog,
       checkedAt,
     }
@@ -690,9 +735,8 @@ async function inspectProvider(provider) {
         ? `${provider.name} does not require an account login.`
         : `${provider.name} does not provide a provider-neutral subscription login command.`,
     canUpdate: Array.isArray(provider.updateArgs),
-    updateReason: Array.isArray(provider.updateArgs)
-      ? `${provider.name} provides a verified self-update command. The CLI remains authoritative for its install method, release channel, and result.`
-      : `Ensync has not verified a provider-owned cross-platform update command for ${provider.name}. Use the official installation and update guide.`,
+    updateStrategy: providerUpdateStrategy(provider),
+    updateReason: providerUpdateReason(provider, true),
     ...catalog,
     checkedAt,
   }
@@ -710,7 +754,7 @@ export function getProviderCatalog() {
   return providerDefinitions.map((provider) => ({
     id: provider.id,
     name: provider.name,
-    ...providerCatalog[provider.id],
+    ...providerCatalogEntry(provider.id),
   }))
 }
 

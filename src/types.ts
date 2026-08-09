@@ -17,6 +17,12 @@ export type ProviderId =
   | 'junie'
   | 'ollama'
 
+export type AgentCoordinationPolicy = {
+  policy: 'ensync_superpowers_v1'
+  delivery: 'ensync_prompt'
+  nativePlugin: 'optional'
+}
+
 export type Provider = {
   id: ProviderId
   name: string
@@ -46,12 +52,16 @@ export type Provider = {
   canConnect: boolean
   /** True only when Ensync has a fixed, verified provider-owned self-update command. */
   canUpdate?: boolean
+  /** How this installed provider receives updates without inferring its install method. */
+  updateStrategy?: 'ensync_command' | 'provider_automatic' | 'official_guide'
   updateReason?: string | null
   routeKind: 'subscription' | 'local'
   chatExecution: 'supported' | 'discovery_only'
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
+  /** Universal Ensync behavior; provider-native Superpowers installation is optional. */
+  agentCoordination: AgentCoordinationPolicy
   checkedAt: string | null
 }
 
@@ -99,10 +109,17 @@ export type ContinuationState = {
   gitReason: string | null
   /** Provider-authored handoff retained for future agents, never rendered as message text. */
   semanticSummary?: string | null
+  /** Host-managed local Git worktree used for this conversation. */
+  workspace?: {
+    path: string
+    branch: string
+  } | null
 }
 
 export type Chat = {
   id: string
+  /** Local provider-neutral key for this conversation's protected agent worktree. */
+  agentWorkspaceKey?: string
   projectId: string
   title: string
   subtitle: string
@@ -115,6 +132,11 @@ export type Chat = {
   /** Friendly effort tier over the provider's default model; null/undefined omits the effort flag. */
   sizeTier?: ModelSizeTier | null
   messages: Message[]
+  /** Stable Host-managed worktree used by this conversation's local agent runs. */
+  workspace?: {
+    path: string
+    branch: string
+  } | null
   /** Non-secret identity used to update one explicitly imported external conversation without duplication. */
   importSource?: {
     kind: 'codex_session'
