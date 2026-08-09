@@ -76,6 +76,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'land' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [noticeHeading, setNoticeHeading] = useState<string>('Completed')
 
   const exactConfirmation = productionBranch ? `PUSH TO ${productionBranch}` : ''
   const selectedRemote = status?.remotes.find((item) => item.name === remote)
@@ -171,6 +172,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
       setStatus(result.git)
       if (pushMode === 'production') storeProductionBranch(project.path, productionBranch)
       setConfirmation('')
+      setNoticeHeading('Push completed')
       setNotice(`Pushed ${result.push.sourceBranch} to ${result.push.remote}/${result.push.targetBranch}.`)
     } catch (pushError) {
       setError(pushError instanceof Error ? pushError.message : 'Git could not push this branch.')
@@ -187,6 +189,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
     try {
       const result = await ensyncHost.landGitBranch({ projectPath: project.path, branch })
       setStatus(result.git)
+      setNoticeHeading('Landed')
       setNotice(`Landed ${branch} into ${result.land.mergedInto}.`)
       try {
         const refreshed = await ensyncHost.gitUnlanded(project.path)
@@ -269,6 +272,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
                             <small>
                               {entry.aheadCount} commit{entry.aheadCount === 1 ? '' : 's'} ahead
                               {' · '}{entry.changedFiles} file{entry.changedFiles === 1 ? '' : 's'}
+                              {entry.lastCommittedAt ? ` · ${new Date(entry.lastCommittedAt).toLocaleDateString()}` : ''}
                               {entry.lastSubject ? ` · ${entry.lastSubject}` : ''}
                             </small>
                           </div>
@@ -314,7 +318,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
               )}
 
               {busy === 'status' && !status && <div className="git-loading"><LoaderCircle className="spin" size={18} /> Reading real repository state…</div>}
-              {notice && <div className="git-success"><Check size={16} /><span><strong>Push completed</strong><small>{notice}</small></span></div>}
+              {notice && <div className="git-success"><Check size={16} /><span><strong>{noticeHeading}</strong><small>{notice}</small></span></div>}
               {error && <GitError message={error} />}
             </section>
           )}

@@ -148,8 +148,9 @@ chooses or edits containment arguments.
 Runnable today: Codex is pinned to its OS sandbox in workspace-write mode
 with the worktree as the writable root, after first-party re-verification
 against the existing exec/resume/steer flows. Claude Code is pinned to
-per-run permission settings denying file mutation outside the worktree and
-recorded as `permission_config` with its headless-shell gap stated honestly.
+per-run permission settings denying file mutation of the canonical checkout
+(Write/Edit/NotebookEdit), with Bash unconstrained by file rules, recorded
+as `permission_config` with its headless-shell gap stated honestly.
 
 **Layer 3 — Host-owned generic OS sandbox (roadmap, platform-dependent).** A
 Host-applied OS-level wrapper (macOS Seatbelt first) that confines any local
