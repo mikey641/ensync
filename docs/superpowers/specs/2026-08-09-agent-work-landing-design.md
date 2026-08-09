@@ -32,6 +32,9 @@ not a hardcoded branch name.
    explicit Land action, and never mix agent merges into uncommitted user
    changes.
 6. Existing stranded worktree work is recovered, not abandoned.
+7. Worktree containment works with any catalog provider — Codex, Claude Code,
+   Kimi Code, or a future runner — as a declared, verified per-provider
+   capability, never a single-vendor special case.
 
 ## Design
 
@@ -88,7 +91,40 @@ not a hardcoded branch name.
 - All recovered branches appear in Unlanded work for review. Nothing is merged
   automatically.
 
-### 5. Unchanged behavior
+### 5. Worktree containment (provider-neutral)
+
+The landing/sync mechanisms above need no provider cooperation: they are
+Host-owned Git operations that run before the provider process spawns and after
+it exits. The only place agent obedience matters is staying inside the
+protected worktree, which today rests on `cwd` plus one prompt instruction.
+Containment therefore becomes a required entry in the existing catalog-wide
+provider capability contract, alongside discovery, authentication, billing,
+sessions, and cancellation:
+
+- Every catalog provider records exactly one verified containment level:
+  - `os_sandbox` — the CLI offers OS-enforced write restriction the Host can
+    pin per run to the protected worktree.
+  - `permission_config` — the CLI offers machine-configurable permission rules
+    the Host can pin per run, with any residual gaps stated factually.
+  - `prompt_only` — `cwd` plus the isolation instruction is all the CLI
+    supports; recorded as a fact, never implied to be enforcement.
+- The Host always applies the strongest verified mechanism as fixed,
+  allowlisted arguments scoped to the protected worktree. The renderer never
+  chooses or edits containment arguments.
+- Runnable today: Codex is pinned to its OS sandbox in workspace-write mode
+  with the worktree as the writable root, after first-party re-verification
+  against the existing exec/resume/steer flows. Claude Code is pinned to
+  per-run permission settings denying file mutation outside the worktree and
+  recorded as `permission_config` with its headless-shell gap stated honestly.
+- Kimi Code, Copilot, Cursor, and every other discovery-only provider cannot
+  become runnable until the enablement audit records its containment level;
+  no provider is silently omitted.
+- Provider-independent net: the Host records the canonical shared checkout's
+  status before and after each run. If it changed during the run, the
+  execution panel states that fact without attributing it (the user may have
+  edited concurrently), so drift is visible instead of silent.
+
+### 6. Unchanged behavior
 
 - Same conversation on any provider reuses the same worktree, branch, and write
   lease (existing behavior; isolation was never the bug).
@@ -119,13 +155,22 @@ Host tests with temporary local repositories and bare remotes only:
 - Land: clean merge commits to `main`; refused on dirty shared checkout;
   refused (not offered) on conflict; never force, never remote.
 - Migration commits every stranded dirty worktree and surfaces it as unlanded.
+- Containment: Codex launch arguments include the pinned sandbox scoped to the
+  worktree on new, resumed, and steered runs; Claude launch includes the pinned
+  per-run permission settings; fixed arguments are not renderer-editable; a
+  provider without a recorded containment level is refused as runnable.
+- Shared-checkout before/after status is recorded per run and surfaced without
+  attribution when it changed.
 
 ## Documentation updates
 
 `.relay/features/git-workflows.md` and `.relay/architecture.md` currently state
 that worktree changes remain uncommitted and that managed worktrees are only
 reconciled manually; both must be revised to describe run-end auto-commit,
-run-start auto-sync, and the Land flow.
+run-start auto-sync, and the Land flow. `.relay/features/agent-routing.md`'s
+provider capability contract gains containment as a required audited
+capability, and the dated provider research must record each provider's
+containment mechanism before its runner is enabled.
 
 ## Out of scope
 
