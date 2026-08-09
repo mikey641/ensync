@@ -13,6 +13,7 @@ const requiredFiles = [
   'styles.css',
   'release-manifest.mjs',
   'releases.json',
+  'releases-beta.json',
   'site-config.json',
   'provider-catalog.json',
   'docs/index.html',
@@ -76,20 +77,26 @@ try {
   errors.push(`Invalid provider-catalog.json: ${error.message}`);
 }
 
-try {
-  const manifest = JSON.parse(fileContents.get('releases.json'));
-  for (const platform of ['macos', 'windows']) {
-    const result = resolveDownload(manifest, platform);
-    const declaredAvailable = manifest.platforms?.[platform]?.status === 'available';
-    if (declaredAvailable && !result.available) {
-      errors.push(`${platform} is declared available but cannot be safely resolved: ${result.reason}`);
+for (const [file, channel] of [['releases.json', 'stable'], ['releases-beta.json', 'beta']]) {
+  try {
+    const manifest = JSON.parse(fileContents.get(file));
+    const manifestChannel = manifest.channel ?? 'stable';
+    if (manifestChannel !== channel) {
+      errors.push(`${file} declares ${manifestChannel} instead of ${channel}.`);
     }
-    if (!declaredAvailable && result.available) {
-      errors.push(`${platform} resolved as available without an available manifest status.`);
+    for (const platform of ['macos', 'windows']) {
+      const result = resolveDownload(manifest, platform, channel);
+      const declaredAvailable = manifest.platforms?.[platform]?.status === 'available';
+      if (declaredAvailable && !result.available) {
+        errors.push(`${file} ${platform} is declared available but cannot be safely resolved: ${result.reason}`);
+      }
+      if (!declaredAvailable && result.available) {
+        errors.push(`${file} ${platform} resolved as available without an available manifest status.`);
+      }
     }
+  } catch (error) {
+    errors.push(`Invalid ${file}: ${error.message}`);
   }
-} catch (error) {
-  errors.push(`Invalid releases.json: ${error.message}`);
 }
 
 try {
@@ -113,5 +120,5 @@ if (errors.length) {
   console.error(errors.map((error) => `- ${error}`).join('\n'));
   process.exitCode = 1;
 } else {
-  console.log(`Validated ${requiredFiles.length + requiredBinaryFiles.length} public files and manifest-gated macOS/Windows downloads.`);
+  console.log(`Validated ${requiredFiles.length + requiredBinaryFiles.length} public files and separate manifest-gated stable/beta downloads.`);
 }

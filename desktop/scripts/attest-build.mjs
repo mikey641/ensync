@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process'
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { readBuildInfoFile } from '../src/build-info.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const releaseRoot = resolve(desktopRoot, 'release')
@@ -14,6 +15,10 @@ if (!['macos', 'windows'].includes(platform)) {
 
 const packageJson = JSON.parse(await readFile(resolve(desktopRoot, 'package.json'), 'utf8'))
 const version = packageJson.version
+const buildInfo = readBuildInfoFile(resolve(desktopRoot, 'build', 'generated', 'build-info.json'), {
+  expectedVersion: version,
+})
+if (!buildInfo) throw new Error('The packaged build identity is missing or does not match the desktop version.')
 const entries = await readdir(releaseRoot, { withFileTypes: true })
 const expectedExtensions = platform === 'macos' ? ['.dmg', '.zip'] : ['.exe', '.zip']
 const platformMarker = platform === 'macos' ? '-mac-' : '-windows-'
@@ -77,6 +82,11 @@ const attestation = {
   schemaVersion: 1,
   platform,
   version,
+  buildId: buildInfo.buildId,
+  channel: buildInfo.channel,
+  sourceCommit: buildInfo.sourceCommit,
+  sourceDirty: buildInfo.sourceDirty,
+  builtAt: buildInfo.builtAt,
   createdAt: new Date().toISOString(),
   signed,
   notarized: platform === 'macos' ? notarized : null,

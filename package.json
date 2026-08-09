@@ -7,10 +7,12 @@
     "dev": "node host/dev.mjs",
     "dev:web": "vite",
     "host": "node host/server.mjs",
+    "sync-service": "node sync-service/server.mjs",
     "test:host": "node --test host/*.test.mjs",
+    "test:release-compatibility": "node --test host/workspace-persistence.test.mjs host/host-job-recovery.test.mjs host/chat-jobs.test.mjs desktop/test/device-preferences.test.mjs desktop/test/native-workspaces.test.mjs desktop/test/workspace-recovery.test.mjs desktop/test/crash-recovery.test.mjs desktop/test/recent-projects.test.mjs",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
     "lint": "eslint .",
-    "release:verify": "npm run lint && npm run test:host && npm --prefix desktop run verify && npm --prefix site test",
+    "release:verify": "npm run lint && npm run test:host && npm run test:release-compatibility && npm --prefix desktop run verify && npm --prefix site test",
     "preview": "vite preview"
   },
   "dependencies": {

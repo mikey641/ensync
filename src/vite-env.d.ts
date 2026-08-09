@@ -14,5 +14,23 @@ interface Window {
     migrateRecentProjects?: (projects: Array<{ name: string; path: string; host: 'local' }>) => Promise<{ projects: Array<{ name: string; path: string; host: 'local' }> } | null>
     rememberRecentProject?: (project: { name: string; path: string; host: 'local' }) => Promise<{ projects: Array<{ name: string; path: string; host: 'local' }> } | null>
     onRecentProjectsChanged?: (callback: (state: { projects: Array<{ name: string; path: string; host: 'local' }> }) => void) => () => void
+    getDevicePreferences?: () => Promise<{
+      completionNotifications: {
+        mode: 'off' | 'ringtone' | 'speech'
+        speechText: string
+        voiceId: string | null
+      } | null
+    } | null>
+    setCompletionNotificationPreferences?: (settings: {
+      mode: 'off' | 'ringtone' | 'speech'
+      speechText: string
+      voiceId: string | null
+    }) => Promise<{
+      completionNotifications: {
+        mode: 'off' | 'ringtone' | 'speech'
+        speechText: string
+        voiceId: string | null
+      }
+    } | null>
   }
 }

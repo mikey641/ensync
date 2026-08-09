@@ -48,6 +48,13 @@ import {
   RECENT_PROJECTS_REMEMBER_CHANNEL,
 } from './recent-projects.mjs'
 import {
+  COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
+  createDevicePreferencesHandlers,
+  createDevicePreferencesStore,
+  DEVICE_PREFERENCES_FILENAME,
+  DEVICE_PREFERENCES_GET_CHANNEL,
+} from './device-preferences.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -55,12 +62,15 @@ import {
   UPDATE_DOWNLOAD_CHANNEL,
   UPDATE_GET_STATE_CHANNEL,
   UPDATE_OPEN_INSTALLER_CHANNEL,
+  UPDATE_SET_CHANNEL_CHANNEL,
   UPDATE_STATE_CHANNEL,
 } from './native-updates.mjs'
+import { readBuildInfoFile } from './build-info.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
+const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -75,6 +85,7 @@ let nativeBridgeRegistered = false
 let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
+let devicePreferencesStore = null
 const nativeWindows = createNativeWindowRegistry()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
 const workspaceIdentityIpc = createWorkspaceIdentityIpcManager({
@@ -85,14 +96,24 @@ const workspaceIdentityIpc = createWorkspaceIdentityIpcManager({
   hasRegisteredWindows: () => nativeWindows.size > 0,
 })
 
-function configuredUpdateManifestUrl() {
+function configuredUpdateManifestUrls() {
   try {
     const manifest = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8'))
-    return typeof manifest.ensync?.updateManifestUrl === 'string'
-      ? manifest.ensync.updateManifestUrl
-      : null
+    const configured = manifest.ensync?.updateManifestUrls
+    if (configured && typeof configured === 'object') {
+      return {
+        stable: typeof configured.stable === 'string' ? configured.stable : null,
+        beta: typeof configured.beta === 'string' ? configured.beta : null,
+      }
+    }
+    return {
+      stable: typeof manifest.ensync?.updateManifestUrl === 'string'
+        ? manifest.ensync.updateManifestUrl
+        : null,
+      beta: null,
+    }
   } catch {
-    return null
+    return { stable: null, beta: null }
   }
 }
 
@@ -191,12 +212,22 @@ function registerNativeBridge() {
   ipcMain.handle(RECENT_PROJECTS_GET_CHANNEL, recentProjectHandlers.get)
   ipcMain.handle(RECENT_PROJECTS_MIGRATE_CHANNEL, recentProjectHandlers.migrate)
   ipcMain.handle(RECENT_PROJECTS_REMEMBER_CHANNEL, recentProjectHandlers.remember)
+  const devicePreferencesHandlers = createDevicePreferencesHandlers({
+    isAuthorized: isAuthorizedNativeEvent,
+    store: devicePreferencesStore,
+  })
+  ipcMain.handle(DEVICE_PREFERENCES_GET_CHANNEL, devicePreferencesHandlers.get)
+  ipcMain.handle(
+    COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
+    devicePreferencesHandlers.setCompletionNotifications,
+  )
   const updateActions = new Map([
     [UPDATE_GET_STATE_CHANNEL, () => updateManager.getState()],
     [UPDATE_CHECK_CHANNEL, () => updateManager.check()],
     [UPDATE_DOWNLOAD_CHANNEL, () => updateManager.download()],
     [UPDATE_CANCEL_CHANNEL, () => updateManager.cancel()],
     [UPDATE_OPEN_INSTALLER_CHANNEL, () => updateManager.openDownloadedInstaller()],
+    [UPDATE_SET_CHANNEL_CHANNEL, (channel) => updateManager.setChannel(channel)],
   ])
   for (const [channel, action] of updateActions) {
     ipcMain.handle(channel, createAuthorizedUpdateHandler({
@@ -219,11 +250,14 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(RECENT_PROJECTS_GET_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_MIGRATE_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_REMEMBER_CHANNEL)
+  ipcMain.removeHandler(DEVICE_PREFERENCES_GET_CHANNEL)
+  ipcMain.removeHandler(COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL)
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL)
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL)
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(UPDATE_CANCEL_CHANNEL)
   ipcMain.removeHandler(UPDATE_OPEN_INSTALLER_CHANNEL)
+  ipcMain.removeHandler(UPDATE_SET_CHANNEL_CHANNEL)
   nativeBridgeRegistered = false
   return true
 }
@@ -265,17 +299,19 @@ async function ensureRuntime() {
       cwd: app.getPath('home'),
       env: {
         ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
+        ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
       },
       stateFilePath: join(app.getPath('userData'), HOST_DAEMON_STATE_FILENAME),
       journalFilePath: join(app.getPath('userData'), HOST_JOB_JOURNAL_FILENAME),
     })
-    const host = await controller.start()
+    await controller.start()
     try {
       const handler = await createAppProtocolHandler({
         uiRoot: paths.uiRoot,
-        hostPort: host.port,
-        hostToken: controller.authToken,
-        ownerId: controller.ownerId,
+        // Resolve the endpoint for every API request. Healthy traffic reuses
+        // the cached lease; if the detached Host actually ended, the controller
+        // starts exactly one journal-aware replacement before proxying.
+        resolveHostConnection: () => controller.ensureConnected(),
       })
       protocol.handle(APP_SCHEME, handler)
       hostController = controller
@@ -446,14 +482,23 @@ if (!singleInstance) {
     recentProjectStore = createRecentProjectStore({
       filePath: join(app.getPath('userData'), RECENT_PROJECTS_FILENAME),
     })
+    devicePreferencesStore = createDevicePreferencesStore({
+      filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
+    })
+    const installedBuildInfo = app.isPackaged
+      ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
+      : null
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
+      installedBuildInfo,
       platform: process.platform,
       isPackaged: app.isPackaged,
       executablePath: process.execPath,
-      manifestUrl: configuredUpdateManifestUrl(),
+      manifestUrls: configuredUpdateManifestUrls(),
+      initialChannel: devicePreferencesStore.get().updateChannel,
       tempRoot: app.getPath('temp'),
       openInstaller: (path) => shell.openPath(path),
+      persistChannel: (channel) => devicePreferencesStore.setUpdateChannel(channel),
       onStateChange: broadcastUpdateState,
     })
     // Register native IPC before awaiting updater initialization. On macOS an
@@ -463,11 +508,20 @@ if (!singleInstance) {
     nativeWorkspaceStore.ensureCanonical()
     return updateManager.initialize()
   }).then(() => {
-    const identities = nativeWorkspaceRestorationOrder(nativeWorkspaceStore.list())
+    const retainedIdentities = nativeWorkspaceStore.list()
+    const startupFocusIdentity = retainedIdentities.at(-1)
+    const identities = nativeWorkspaceRestorationOrder(retainedIdentities)
     return identities.reduce(
       (previous, identity) => previous.then(() => createWindow(identity)),
       Promise.resolve(),
-    )
+    ).then(() => {
+      // Canonical must hydrate first, but the last-used retained workspace must
+      // be visible after restoration. Otherwise a clean secondary window can
+      // make the user's saved chats look as if they disappeared.
+      if (startupFocusIdentity) {
+        showWindow(nativeWindows.windowForWorkspace(startupFocusIdentity.id))
+      }
+    })
   }).catch(handleStartupFailure)
 }
 

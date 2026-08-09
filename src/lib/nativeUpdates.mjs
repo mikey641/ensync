@@ -1,5 +1,11 @@
 const BROWSER_UPDATE_STATE = Object.freeze({
   installedVersion: null,
+  installedBuildId: null,
+  installedBuildChannel: null,
+  installedSourceCommit: null,
+  installedSourceDirty: null,
+  installedBuiltAt: null,
+  channel: 'stable',
   phase: 'unavailable',
   message: 'Native updates are available only in a signed Ensync desktop installation.',
   availableVersion: null,
@@ -10,6 +16,7 @@ const BROWSER_UPDATE_STATE = Object.freeze({
   canDownload: false,
   canCancel: false,
   canInstall: false,
+  canChangeChannel: false,
   installActionLabel: null,
 })
 
@@ -21,6 +28,7 @@ function bridgeFor(target) {
     && typeof bridge.downloadUpdate === 'function'
     && typeof bridge.cancelUpdateDownload === 'function'
     && typeof bridge.openUpdateInstaller === 'function'
+    && typeof bridge.setUpdateChannel === 'function'
     && typeof bridge.onUpdateState === 'function'
     ? bridge
     : null
@@ -45,6 +53,19 @@ export const checkForNativeUpdates = (target = globalThis) => invoke(target, 'ch
 export const downloadNativeUpdate = (target = globalThis) => invoke(target, 'downloadUpdate')
 export const cancelNativeUpdateDownload = (target = globalThis) => invoke(target, 'cancelUpdateDownload')
 export const openNativeUpdateInstaller = (target = globalThis) => invoke(target, 'openUpdateInstaller')
+
+export async function setNativeUpdateChannel(channel, target = globalThis) {
+  const bridge = bridgeFor(target)
+  if (!bridge || (channel !== 'stable' && channel !== 'beta')) return BROWSER_UPDATE_STATE
+  try {
+    return await bridge.setUpdateChannel(channel)
+  } catch {
+    return {
+      ...BROWSER_UPDATE_STATE,
+      message: 'The native update service did not save the selected channel.',
+    }
+  }
+}
 
 export function subscribeToNativeUpdateState(callback, target = globalThis) {
   const bridge = bridgeFor(target)

@@ -7,18 +7,20 @@ The public product site is [ensync.vercel.app](https://ensync.vercel.app). Downl
 ## What works
 
 - Durable conversations, adjacent-or-end new-tab placement, resizable split panes, double-click maximize/restore, and hideable history and chrome.
+- Username/password account sync for encrypted cross-computer conversation history. Stable chat/message IDs merge concurrent additions; CLI credentials, provider sessions, queued or active work, terminal output, and local attachments never enter the account document.
 - Light, dark, and system themes with large default typography.
 - Verified local project focus with a native macOS Finder/Windows folder chooser in the desktop app, browser-safe absolute-path entry, plus Git clone/import, status, remote verification, guarded branch push, and explicitly confirmed production push.
 - Real Codex and Claude Code subscription chat runners with provider-neutral Auto selection and retry-safe quota fallback.
+- Host-enforced Git isolation for every coding run: each conversation receives a durable protected worktree/branch, and same-repository chats queue behind a cross-process write lease before any provider starts. Dirty local and SSH checkouts are preserved through a private-index transport snapshot and inherited as uncommitted protected-worktree state without changing the shared checkout.
 - Separate provider and Model size selectors in every conversation header. Provider default sends no effort override; Small, Medium, Large, and XL apply the verified low, medium, high, and max effort levels to the provider's own default model across local and SSH runs.
 - Opt-in Ensync Auto Context skill: preserves an Auto or fixed provider choice, provider-neutral Model size over each CLI's native default model, synchronized session resume, full project/conversation handoff on provider switches, same-target local/SSH execution, and verified continuation metadata.
 - Discovery, provider-specific account setup, exact installed versions, and official install links ordered as a mainstream-recognition navigation heuristic: Codex, Claude Code, GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Factory Droid, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code, and the separate local Ollama fallback. This order is not a measured market-share ranking.
-- Guarded agent updates for Codex and Claude Code through their official `update` subcommands. Ensync resolves the installed executable, ignores caller-supplied command data, refuses updates while Host-owned agent runs are active, and requires a manual status refresh afterward. Other agents stay guide-only until a provider-owned cross-platform updater is verified.
+- Guarded update maintenance for every installed catalog provider. Ensync can launch fixed native updaters for Codex, Claude Code, Copilot, Cursor, Kimi, Qoder, CodeBuddy, Droid, Auggie, and Amp; it recognizes Antigravity, Kiro, and Junie's provider-managed background updates; and it keeps Jules, GitLab Duo, Warp Oz, and Ollama in the weekly review with official guides because their update paths depend on installation method or platform. The policy defaults to a weekly reminder, with Manual only and opt-in Automatic weekly alternatives. Automatic cycles wait until the Host is idle, deduplicate native windows, ignore caller-supplied command data, and never claim unobserved completion.
 - Typed, non-fabricated usage telemetry: subscription quota for Codex and Claude when reported; session-only data for Copilot and Junie; local model inventory/load state for Ollama; explicit unavailable state for Cursor and Kiro account quota.
 - Verified SSH workers, guarded Oracle VirtualBox provisioning, and approval-gated Telegram operation through Ensync Host.
 - Local-first help desk with reviewable redacted diagnostics and an opt-in one-run bug repair through the connected Codex or Claude subscription. Results always require user review and never claim the bug is fixed automatically.
-- Electron packaging for universal macOS DMG/ZIP and Windows x64 NSIS/ZIP, with native CI, signature/notarization attestations, checksums, and fail-closed public release generation.
-- Manual native updates in Settings: the signed desktop app shows its installed version, checks the same production manifest as the download site only on request, downloads with real byte progress, verifies SHA-256 plus the installed publisher identity, and opens the verified DMG/installer only after a separate click. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable; Ensync never silently installs, quits, or restarts.
+- Electron packaging for universal macOS DMG/ZIP and Windows x64 NSIS/ZIP, with embedded build/source identity, native CI, signature/notarization attestations, checksums, separate beta/stable feeds, retained rollback metadata, and fail-closed public release generation.
+- Manual native updates in Settings: the signed desktop app shows its exact build identity and selected stable/beta channel, checks only that channel on request, downloads with real byte progress, verifies SHA-256 plus the installed publisher identity, and opens the verified DMG/installer only after a separate click. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable; Ensync never silently installs, quits, or restarts.
 
 Only Codex and Claude currently have tested structured chat runners and may enter automatic fallback. Every other account-backed provider remains discovery-only until its execution adapter has equivalent parsing, subscription-authentication proof, paid-overage guards, session handling, and safe-retry proof. Ollama remains a separate local fallback and never enters the subscription pool.
 
@@ -33,7 +35,9 @@ npm install
 npm run dev
 ```
 
-This starts the Vite interface and the Node Ensync Host on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results.
+This starts the Vite interface, the Node Ensync Host, and a development-only account-sync service on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results. Development sync data is stored in the ignored `.ensync-sync-data.json` file.
+
+For two computers, deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`, then set the same `ENSYNC_SYNC_SERVICE_URL` for Ensync Host on both devices. Plain HTTP is accepted only for an exact loopback address. The bundled service hashes account passwords with scrypt and stores only AES-256-GCM encrypted conversation documents. Host login state is currently memory-only, so restarting Ensync Host requires signing in again; uploaded conversations remain available.
 
 Run the native desktop shell:
 
@@ -66,7 +70,7 @@ npm --prefix desktop run package:win # on Windows
 cd site && npm test
 ```
 
-The tag-triggered release workflow refuses to create a public GitHub release unless Windows signing and macOS app/DMG signing plus app/DMG notarization are verified. It then deploys the exact generated manifest to the Vercel download/update feed; a failed Vercel deployment leaves the older fail-closed feed in place. Local unsigned artifacts stay private test builds. See `desktop/README.md` for certificate, notarization, and Vercel inputs and `site/README.md` for the manifest contract.
+The tag-triggered workflow is prepared for a private source repository and a separate public binary repository. It refuses release generation unless clean build provenance, Windows signing, and macOS app/DMG signing plus notarization are verified; it changes only the tag-selected beta or stable feed and preserves the other production feed. Nothing is activated until credentials and a tag are intentionally supplied. Local unsigned artifacts stay private test builds. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
 
 ## Project memory
 

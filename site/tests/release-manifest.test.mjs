@@ -5,6 +5,7 @@ import { releaseLabel, resolveDownload } from '../public/release-manifest.mjs';
 function manifest(overrides = {}) {
   return {
     schemaVersion: 1,
+    channel: 'stable',
     latest: { version: '1.2.3', publishedAt: '2026-08-06T00:00:00Z', notesUrl: null },
     platforms: {
       macos: {
@@ -57,4 +58,13 @@ test('rejects a platform build that does not match latest', () => {
 test('fails closed for an absent or unsupported manifest', () => {
   assert.equal(resolveDownload(null, 'windows').available, false);
   assert.equal(resolveDownload({ schemaVersion: 2 }, 'windows').available, false);
+});
+
+test('keeps stable and beta manifests isolated', () => {
+  assert.match(resolveDownload({ ...manifest(), channel: 'beta' }, 'macos', 'stable').reason, /selected channel/);
+  const beta = manifest({ version: '1.2.4-beta.1' });
+  beta.channel = 'beta';
+  beta.latest.version = '1.2.4-beta.1';
+  assert.equal(resolveDownload(beta, 'macos', 'beta').available, true);
+  assert.match(resolveDownload({ ...manifest(), channel: 'beta' }, 'macos', 'beta').reason, /prerelease/);
 });

@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "channel": "beta",
+  "feedUpdatedAt": null,
+  "latest": {
+    "version": null,
+    "publishedAt": null,
+    "notesUrl": null
+  },
+  "platforms": {
+    "macos": {
+      "status": "unavailable",
+      "reason": "No signed macOS beta build has been published yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": false,
+      "architectures": []
+    },
+    "windows": {
+      "status": "unavailable",
+      "reason": "No signed Windows beta build has been published yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": null,
+      "architectures": []
+    }
+  },
+  "history": []
+}

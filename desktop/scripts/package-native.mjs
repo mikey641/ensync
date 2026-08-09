@@ -3,6 +3,7 @@ import { unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveWindowsSigning } from './release-prerequisites.mjs'
+import { writeBuildInfo } from './write-build-info.mjs'
 
 const platformIndex = process.argv.indexOf('--platform')
 const platform = platformIndex >= 0 ? process.argv[platformIndex + 1] : null
@@ -39,6 +40,8 @@ if (!certificate && windowsSigning?.mode !== 'azure') {
 }
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
+const buildInfo = await writeBuildInfo()
+console.log(`Packaging build ${buildInfo.buildId} from ${buildInfo.sourceCommit} (${buildInfo.sourceDirty ? 'dirty' : 'clean'} ${buildInfo.channel}).`)
 await unlink(join(desktopRoot, 'release', `attestation-${platform}.json`)).catch((error) => {
   if (error?.code !== 'ENOENT') throw error
 })

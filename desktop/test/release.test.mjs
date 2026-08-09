@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const generator = resolve(desktopRoot, 'scripts/generate-release.mjs')
+const sourceCommit = '35642bfda02d82e007a1639dbd2c642b67c01b7d'
 
 async function fixture({ macSigned = true, macNotarized = true, windowsSigned = true } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-release-'))
@@ -38,6 +39,11 @@ async function fixture({ macSigned = true, macNotarized = true, windowsSigned = 
       schemaVersion: 1,
       platform: 'macos',
       version: '1.2.3',
+      buildId: 'a'.repeat(16),
+      channel: 'stable',
+      sourceCommit,
+      sourceDirty: false,
+      builtAt: '2026-08-07T10:00:00.000Z',
       signed: macSigned,
       notarized: macNotarized,
       architectures: ['universal'],
@@ -47,6 +53,11 @@ async function fixture({ macSigned = true, macNotarized = true, windowsSigned = 
       schemaVersion: 1,
       platform: 'windows',
       version: '1.2.3',
+      buildId: 'b'.repeat(16),
+      channel: 'stable',
+      sourceCommit,
+      sourceDirty: false,
+      builtAt: '2026-08-07T10:01:00.000Z',
       signed: windowsSigned,
       notarized: null,
       architectures: ['x64'],
@@ -68,7 +79,9 @@ function generate(input, output) {
     '--input', input,
     '--output', output,
     '--tag', 'v1.2.3',
-    '--repository', 'ensync/ensync',
+    '--repository', 'ensync/ensync-downloads',
+    '--channel', 'stable',
+    '--source-commit', sourceCommit,
   ], { encoding: 'utf8' })
 }
 
@@ -80,7 +93,10 @@ test('release generation produces download metadata only for signed native artif
   const manifest = JSON.parse(await readFile(join(output, 'releases.json'), 'utf8'))
   assert.equal(manifest.platforms.macos.status, 'available')
   assert.equal(manifest.platforms.windows.status, 'available')
-  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\//)
+  assert.equal(manifest.channel, 'stable')
+  assert.equal(manifest.sourceRevision, sourceCommit)
+  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\/ensync\/ensync-downloads\//)
+  assert.equal(manifest.platforms.macos.buildId, 'a'.repeat(16))
   assert.equal(manifest.platforms.macos.signed, true)
   assert.equal(manifest.platforms.macos.notarized, true)
   assert.equal(manifest.platforms.windows.notarized, null)
@@ -98,4 +114,27 @@ test('release generation refuses a signed but unnotarized macOS build', async ()
   const result = generate(input, output)
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /macOS artifacts are not notarized/)
+})
+
+test('release generation refuses dirty or channel-mismatched attestations', async () => {
+  const dirty = await fixture()
+  const path = join(dirty.input, 'attestation-windows.json')
+  const attestation = JSON.parse(await readFile(path, 'utf8'))
+  await writeFile(path, JSON.stringify({ ...attestation, sourceDirty: true }))
+  const dirtyResult = generate(dirty.input, dirty.output)
+  assert.notEqual(dirtyResult.status, 0)
+  assert.match(dirtyResult.stderr, /clean stable source build/)
+
+  const beta = await fixture()
+  const betaResult = spawnSync(process.execPath, [
+    generator,
+    '--input', beta.input,
+    '--output', beta.output,
+    '--tag', 'v1.2.3',
+    '--repository', 'ensync/ensync-downloads',
+    '--channel', 'beta',
+    '--source-commit', sourceCommit,
+  ], { encoding: 'utf8' })
+  assert.notEqual(betaResult.status, 0)
+  assert.match(betaResult.stderr, /prerelease tag/)
 })

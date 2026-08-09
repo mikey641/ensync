@@ -9,6 +9,7 @@ export const UPDATE_CHECK_CHANNEL = 'ensync:updates:check'
 export const UPDATE_DOWNLOAD_CHANNEL = 'ensync:updates:download'
 export const UPDATE_CANCEL_CHANNEL = 'ensync:updates:cancel'
 export const UPDATE_OPEN_INSTALLER_CHANNEL = 'ensync:updates:open-installer'
+export const UPDATE_SET_CHANNEL_CHANNEL = 'ensync:updates:set-channel'
 
 const MANIFEST_LIMIT_BYTES = 256 * 1024
 const INSTALLER_LIMIT_BYTES = 3 * 1024 * 1024 * 1024
@@ -19,6 +20,14 @@ const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z
 function frozenState(value) {
   return Object.freeze({
     installedVersion: value.installedVersion,
+    installedBuildId: value.installedBuildInfo?.buildId ?? value.installedBuildId ?? null,
+    installedBuildChannel: value.installedBuildInfo?.channel ?? value.installedBuildChannel ?? null,
+    installedSourceCommit: value.installedBuildInfo?.sourceCommit ?? value.installedSourceCommit ?? null,
+    installedSourceDirty: typeof value.installedBuildInfo?.sourceDirty === 'boolean'
+      ? value.installedBuildInfo.sourceDirty
+      : typeof value.installedSourceDirty === 'boolean' ? value.installedSourceDirty : null,
+    installedBuiltAt: value.installedBuildInfo?.builtAt ?? value.installedBuiltAt ?? null,
+    channel: value.channel === 'beta' ? 'beta' : 'stable',
     phase: value.phase,
     message: value.message,
     availableVersion: value.availableVersion ?? null,
@@ -29,6 +38,7 @@ function frozenState(value) {
     canDownload: value.canDownload === true,
     canCancel: value.canCancel === true,
     canInstall: value.canInstall === true,
+    canChangeChannel: value.canChangeChannel === true,
     installActionLabel: value.installActionLabel ?? null,
   })
 }
@@ -91,15 +101,23 @@ function unavailableCandidate(reason) {
   return { available: false, reason }
 }
 
-export function resolveUpdateCandidate(manifest, platform, installedVersion) {
+export function resolveUpdateCandidate(manifest, platform, installedVersion, expectedChannel = 'stable') {
   const target = supportedPlatform(platform)
   if (!target) return unavailableCandidate('Native updates are supported only on macOS and Windows.')
   if (!manifest || manifest.schemaVersion !== 1) {
-    return unavailableCandidate('The production release manifest is missing or unsupported.')
+    return unavailableCandidate('The release manifest is missing or unsupported.')
+  }
+  const manifestChannel = manifest.channel ?? 'stable'
+  if (!['stable', 'beta'].includes(expectedChannel) || manifestChannel !== expectedChannel) {
+    return unavailableCandidate('The release feed does not match the selected update channel.')
   }
   const latestVersion = manifest.latest?.version
-  if (!parseSemver(latestVersion)) {
-    return unavailableCandidate('No verified production release version is published.')
+  const parsedLatest = parseSemver(latestVersion)
+  if (!parsedLatest) {
+    return unavailableCandidate(`No verified ${expectedChannel} release version is published.`)
+  }
+  if (expectedChannel === 'stable' && parsedLatest.prerelease.length > 0) {
+    return unavailableCandidate('The stable feed cannot publish a prerelease version.')
   }
   const comparison = compareVersions(latestVersion, installedVersion)
   if (comparison === null) {
@@ -288,22 +306,33 @@ function safeInstallerName(url, platform, version) {
 
 export function createNativeUpdateManager({
   installedVersion,
+  installedBuildInfo = null,
   platform,
   isPackaged,
   executablePath,
   manifestUrl,
+  manifestUrls,
+  initialChannel = 'stable',
   tempRoot,
   fetchImpl = globalThis.fetch,
   verifyInstalledBuild = (input) => verifyInstalledNativeBuild(input),
   verifyInstaller = (input) => verifyDownloadedInstaller(input),
   openInstaller,
+  persistChannel = async () => {},
   now = Date.now,
   onStateChange = () => {},
 }) {
+  let channel = initialChannel === 'beta' ? 'beta' : 'stable'
+  const feeds = manifestUrls && typeof manifestUrls === 'object'
+    ? { stable: manifestUrls.stable ?? null, beta: manifestUrls.beta ?? null }
+    : { stable: manifestUrl ?? null, beta: null }
   let state = frozenState({
     installedVersion,
+    installedBuildInfo,
+    channel,
     phase: 'initializing',
     message: 'Checking whether this build can use signed updates.',
+    canChangeChannel: true,
   })
   let initialized = false
   let candidate = null
@@ -311,6 +340,7 @@ export function createNativeUpdateManager({
   let operation = null
   let downloadController = null
   let installedSignerIdentity = null
+  let updatesAllowed = false
 
   const publish = (next) => {
     state = frozenState({ ...state, ...next })
@@ -325,13 +355,18 @@ export function createNativeUpdateManager({
       return publish({
         phase: 'unavailable',
         message: 'Updates are unavailable in development builds. Install a signed Ensync release to use native updates.',
+        canChangeChannel: true,
       })
     }
     if (!supportedPlatform(platform)) {
       return publish({ phase: 'unavailable', message: 'Native updates are supported only on macOS and Windows.' })
     }
-    if (!secureUrl(manifestUrl)) {
-      return publish({ phase: 'unavailable', message: 'This build does not have a configured HTTPS update feed.' })
+    if (!secureUrl(feeds[channel])) {
+      return publish({
+        phase: 'unavailable',
+        message: `This build does not have a configured HTTPS ${channel} update feed.`,
+        canChangeChannel: true,
+      })
     }
     let signature = null
     try {
@@ -343,13 +378,16 @@ export function createNativeUpdateManager({
       return publish({
         phase: 'unavailable',
         message: 'This installed build is not verified as signed. Native updates are disabled.',
+        canChangeChannel: true,
       })
     }
     installedSignerIdentity = signature.signerIdentity.trim()
+    updatesAllowed = true
     return publish({
       phase: 'idle',
-      message: 'Updates have not been checked. Ensync checks only when you ask.',
+      message: `${channel === 'beta' ? 'Beta' : 'Stable'} updates have not been checked. Ensync checks only when you ask.`,
       canCheck: true,
+      canChangeChannel: true,
     })
   }
 
@@ -372,7 +410,7 @@ export function createNativeUpdateManager({
       installerPath = null
       publish({
         phase: 'checking',
-        message: 'Checking the signed production release feed…',
+        message: `Checking the signed ${channel} release feed…`,
         availableVersion: null,
         checkedAt: null,
         releaseNotesUrl: null,
@@ -381,15 +419,17 @@ export function createNativeUpdateManager({
         canDownload: false,
         canCancel: false,
         canInstall: false,
+        canChangeChannel: false,
         installActionLabel: null,
       })
       try {
-        const response = await fetchImpl(manifestUrl, {
+        const selectedManifestUrl = feeds[channel]
+        const response = await fetchImpl(selectedManifestUrl, {
           cache: 'no-store',
           headers: { Accept: 'application/json' },
           redirect: 'follow',
         })
-        if (!response.ok || !secureUrl(response.url || manifestUrl)) {
+        if (!response.ok || !secureUrl(response.url || selectedManifestUrl)) {
           throw new Error(`Release feed returned HTTP ${response.status}.`)
         }
         const declaredLength = responseLength(response)
@@ -399,7 +439,7 @@ export function createNativeUpdateManager({
         const bytes = new Uint8Array(await response.arrayBuffer())
         if (bytes.byteLength > MANIFEST_LIMIT_BYTES) throw new Error('Release feed is too large.')
         const manifest = JSON.parse(new TextDecoder().decode(bytes))
-        const resolvedCandidate = resolveUpdateCandidate(manifest, platform, installedVersion)
+        const resolvedCandidate = resolveUpdateCandidate(manifest, platform, installedVersion, channel)
         const checkedAt = checkedAtNow(now)
         if (!resolvedCandidate.available) {
           return publish({
@@ -409,27 +449,30 @@ export function createNativeUpdateManager({
             checkedAt,
             releaseNotesUrl: resolvedCandidate.notesUrl ?? null,
             canCheck: true,
+            canChangeChannel: true,
           })
         }
         candidate = resolvedCandidate
         return publish({
           phase: 'available',
-          message: `Ensync ${resolvedCandidate.version} is available as a verified signed release.`,
+          message: `Ensync ${resolvedCandidate.version} is available as a verified signed ${channel} release.`,
           availableVersion: resolvedCandidate.version,
           checkedAt,
           releaseNotesUrl: resolvedCandidate.notesUrl,
           canCheck: true,
           canDownload: true,
+          canChangeChannel: true,
           installActionLabel: resolvedCandidate.installActionLabel,
         })
       } catch (error) {
         return publish({
           phase: 'error',
           message: error instanceof SyntaxError
-            ? 'The production release feed returned invalid JSON. No update was offered.'
-            : 'The production release feed could not be verified. No update was offered.',
+            ? `The ${channel} release feed returned invalid JSON. No update was offered.`
+            : `The ${channel} release feed could not be verified. No update was offered.`,
           checkedAt: checkedAtNow(now),
           canCheck: true,
+          canChangeChannel: true,
         })
       }
     })
@@ -448,6 +491,7 @@ export function createNativeUpdateManager({
         canDownload: false,
         canCancel: true,
         canInstall: false,
+        canChangeChannel: false,
       })
       let outputPath = null
       try {
@@ -517,6 +561,7 @@ export function createNativeUpdateManager({
           canDownload: false,
           canCancel: false,
           canInstall: true,
+          canChangeChannel: true,
         })
       } catch (error) {
         if (outputPath) await unlink(outputPath).catch(() => {})
@@ -533,6 +578,7 @@ export function createNativeUpdateManager({
           canDownload: Boolean(candidate),
           canCancel: false,
           canInstall: false,
+          canChangeChannel: true,
         })
       } finally {
         downloadController = null
@@ -557,6 +603,7 @@ export function createNativeUpdateManager({
           message: 'The verified installer was opened. Complete it when ready; Ensync will not quit or restart itself.',
           canCheck: true,
           canInstall: true,
+          canChangeChannel: true,
         })
       } catch {
         return publish({
@@ -564,8 +611,47 @@ export function createNativeUpdateManager({
           message: 'Ensync could not open the verified installer. It was not installed.',
           canCheck: true,
           canInstall: true,
+          canChangeChannel: true,
         })
       }
+    })
+  }
+
+  async function setChannel(value) {
+    const nextChannel = value === 'stable' || value === 'beta' ? value : null
+    if (!nextChannel || nextChannel === channel || operation || state.canCancel) return state
+    return runExclusive(async () => {
+      try {
+        await persistChannel(nextChannel)
+      } catch {
+        return publish({
+          phase: 'error',
+          message: 'The update-channel preference could not be saved. The channel was not changed.',
+          canChangeChannel: true,
+        })
+      }
+      if (installerPath) await unlink(installerPath).catch(() => {})
+      installerPath = null
+      candidate = null
+      channel = nextChannel
+      const configured = secureUrl(feeds[channel])
+      return publish({
+        channel,
+        phase: updatesAllowed && configured ? 'idle' : 'unavailable',
+        message: updatesAllowed && configured
+          ? `${channel === 'beta' ? 'Beta' : 'Stable'} updates have not been checked. Ensync checks only when you ask.`
+          : `This build cannot use the configured ${channel} update feed.`,
+        availableVersion: null,
+        checkedAt: null,
+        releaseNotesUrl: null,
+        progress: null,
+        canCheck: updatesAllowed && Boolean(configured),
+        canDownload: false,
+        canCancel: false,
+        canInstall: false,
+        canChangeChannel: true,
+        installActionLabel: null,
+      })
     })
   }
 
@@ -576,14 +662,18 @@ export function createNativeUpdateManager({
     download,
     cancel,
     openDownloadedInstaller,
+    setChannel,
   })
 }
 
 export function unauthorizedUpdateState() {
   return frozenState({
     installedVersion: null,
+    installedBuildInfo: null,
+    channel: 'stable',
     phase: 'unavailable',
     message: 'Native update controls are available only to a registered Ensync app window.',
+    canChangeChannel: false,
   })
 }
 
@@ -591,5 +681,5 @@ export function createAuthorizedUpdateHandler({ isAuthorized, action }) {
   if (typeof isAuthorized !== 'function' || typeof action !== 'function') {
     throw new TypeError('Update IPC authorization and action are required.')
   }
-  return async (event) => isAuthorized(event) ? action() : unauthorizedUpdateState()
+  return async (event, ...args) => isAuthorized(event) ? action(...args) : unauthorizedUpdateState()
 }

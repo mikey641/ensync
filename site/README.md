@@ -18,7 +18,7 @@ Open `http://127.0.0.1:4174`. Set `ENSYNC_SITE_PORT` to use a different local po
 
 ## Truthful downloads
 
-The macOS and Windows buttons read `public/releases.json`. A platform download stays disabled unless all of these are true:
+The macOS and Windows website buttons read the stable `public/releases.json`. Opt-in desktop beta checks use the separate `public/releases-beta.json`; the website never silently switches to beta. A platform download stays disabled unless all of these are true:
 
 - `latest.version` is set;
 - the platform status is `available`;
@@ -28,7 +28,7 @@ The macOS and Windows buttons read `public/releases.json`. A platform download s
 - `url` is a real HTTPS artifact URL;
 - `sha256` is the artifact's real 64-character SHA-256 checksum.
 
-The repository intentionally starts with both platforms unavailable. Do not add placeholder files or mark a build signed before verification. After editing the manifest, run `npm test`; validation fails closed when an available entry is incomplete.
+The repository intentionally starts with both platforms unavailable in both channels. Do not add placeholder files or mark a build signed before verification. After editing either manifest, run `npm test`; validation fails closed when an available entry is incomplete or a feed declares the wrong channel/version type.
 
 Example shape for a real platform entry:
 
@@ -45,7 +45,7 @@ Example shape for a real platform entry:
 }
 ```
 
-Keep a platform `unavailable` if its signed artifact is not ready; macOS and Windows are resolved independently. The desktop app uses this exact production URL as its manual update feed, so download-site and in-app availability cannot intentionally diverge.
+Keep a platform `unavailable` if its signed artifact is not ready; macOS and Windows are resolved independently. Stable and beta deployments preserve one another. Each populated feed retains prior verified platform records so a reviewed rollback can repoint the channel without rebuilding artifacts or changing local user data.
 
 ## Support configuration
 

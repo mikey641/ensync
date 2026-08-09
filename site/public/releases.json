@@ -1,5 +1,7 @@
 {
   "schemaVersion": 1,
+  "channel": "stable",
+  "feedUpdatedAt": null,
   "latest": {
     "version": null,
     "publishedAt": null,
@@ -26,5 +28,6 @@
       "notarized": null,
       "architectures": []
     }
-  }
+  },
+  "history": []
 }

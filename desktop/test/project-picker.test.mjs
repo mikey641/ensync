@@ -130,6 +130,8 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'getRecentProjects',
     'migrateRecentProjects',
     'rememberRecentProject',
+    'getDevicePreferences',
+    'setCompletionNotificationPreferences',
     'onRecentProjectsChanged',
     'chooseProjectFolder',
     'getUpdateState',
@@ -137,6 +139,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'downloadUpdate',
     'cancelUpdateDownload',
     'openUpdateInstaller',
+    'setUpdateChannel',
     'onUpdateState',
   ])
   assert.equal(Object.isFrozen(exposed[0].value), true)
@@ -149,6 +152,8 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.getRecentProjects()
   await exposed[0].value.migrateRecentProjects([{ name: 'Relay', path: '/work/relay', host: 'local' }])
   await exposed[0].value.rememberRecentProject({ name: 'Relay', path: '/work/relay', host: 'local' })
+  await exposed[0].value.getDevicePreferences()
+  await exposed[0].value.setCompletionNotificationPreferences({ mode: 'speech', speechText: 'Done.', voiceId: null })
   await exposed[0].value.chooseProjectFolder()
   assert.deepEqual(invocations, [
     ['ensync:workspace:get-identity'],
@@ -157,6 +162,8 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     ['ensync:recent-projects:get'],
     ['ensync:recent-projects:migrate', [{ name: 'Relay', path: '/work/relay', host: 'local' }]],
     ['ensync:recent-projects:remember', { name: 'Relay', path: '/work/relay', host: 'local' }],
+    ['ensync:device-preferences:get'],
+    ['ensync:device-preferences:set-completion-notifications', { mode: 'speech', speechText: 'Done.', voiceId: null }],
     [PROJECT_FOLDER_PICKER_CHANNEL],
   ])
   await exposed[0].value.getUpdateState()
@@ -164,12 +171,14 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.downloadUpdate()
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
-  assert.deepEqual(invocations.slice(7), [
+  await exposed[0].value.setUpdateChannel('beta')
+  assert.deepEqual(invocations.slice(9), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
     ['ensync:updates:cancel'],
     ['ensync:updates:open-installer'],
+    ['ensync:updates:set-channel', 'beta'],
   ])
   const states = []
   const unsubscribe = exposed[0].value.onUpdateState((state) => states.push(state))
@@ -191,4 +200,5 @@ test('desktop package explicitly includes the preload and picker modules', async
   assert.ok(manifest.build.files.includes('src/preload.cjs'))
   assert.ok(manifest.build.files.includes('src/project-picker.mjs'))
   assert.ok(manifest.build.files.includes('src/recent-projects.mjs'))
+  assert.ok(manifest.build.files.includes('src/device-preferences.mjs'))
 })
