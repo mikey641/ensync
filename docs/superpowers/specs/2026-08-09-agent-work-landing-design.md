@@ -101,28 +101,64 @@ Containment therefore becomes a required entry in the existing catalog-wide
 provider capability contract, alongside discovery, authentication, billing,
 sessions, and cancellation:
 
-- Every catalog provider records exactly one verified containment level:
-  - `os_sandbox` — the CLI offers OS-enforced write restriction the Host can
-    pin per run to the protected worktree.
-  - `permission_config` — the CLI offers machine-configurable permission rules
-    the Host can pin per run, with any residual gaps stated factually.
-  - `prompt_only` — `cwd` plus the isolation instruction is all the CLI
-    supports; recorded as a fact, never implied to be enforcement.
-- The Host always applies the strongest verified mechanism as fixed,
-  allowlisted arguments scoped to the protected worktree. The renderer never
-  chooses or edits containment arguments.
-- Runnable today: Codex is pinned to its OS sandbox in workspace-write mode
-  with the worktree as the writable root, after first-party re-verification
-  against the existing exec/resume/steer flows. Claude Code is pinned to
-  per-run permission settings denying file mutation outside the worktree and
-  recorded as `permission_config` with its headless-shell gap stated honestly.
-- Kimi Code, Copilot, Cursor, and every other discovery-only provider cannot
-  become runnable until the enablement audit records its containment level;
-  no provider is silently omitted.
-- Provider-independent net: the Host records the canonical shared checkout's
-  status before and after each run. If it changed during the run, the
-  execution panel states that fact without attributing it (the user may have
-  edited concurrently), so drift is visible instead of silent.
+Prompt confinement (`cwd` plus the isolation instruction at `host/chat.mjs`
+and `host/remote-ssh-bridge.mjs`) is advisory. It is a strong nudge to a
+cooperative model, not a security boundary, and no Ensync surface may imply
+otherwise.
+
+**Layer 1 — universal detection (v1, every provider, local and SSH).** The
+Host snapshots the canonical shared checkout before and after every run:
+`HEAD` hash plus `git status --porcelain` output hash. For SSH runs the
+bridge takes the same snapshot on the remote canonical checkout. If the
+snapshot changed during the run and the change was not Ensync's own explicit
+Land operation, the run's persisted metadata records a
+`shared_checkout_changed` fact and the execution panel and conversation
+surface it prominently — without attribution, because the user may have
+edited or committed concurrently and Ensync never claims unobserved causes.
+One signature escalates to a stronger warning because it is near-certainly
+destructive: previously-dirty tracked files reverting to `HEAD` content with
+no new commit containing their changes (the `git checkout .` shape, which
+silently corrupts the seed future first-time conversations inherit).
+Deliberate deviation from reviewer feedback: detection does not
+auto-block later runs, because legitimate concurrent user edits and commits
+would constantly trip a block on an actively-used checkout and an
+unattributable fact must not lock the user out; visibility plus the
+escalated destructive-shape warning is v1 behavior.
+
+**Layer 2 — per-provider containment capability (fail closed).** Every
+catalog provider records exactly one verified containment level in the
+existing catalog-wide capability contract, alongside discovery,
+authentication, billing, sessions, and cancellation:
+
+- `os_sandbox` — the CLI offers OS-enforced write restriction the Host can
+  pin per run to the protected worktree.
+- `permission_config` — the CLI offers machine-configurable permission rules
+  the Host can pin per run, with any residual gaps stated factually.
+- `prompt_only` — `cwd` plus the isolation instruction is all the CLI
+  supports; recorded as a fact, never implied to be enforcement.
+
+A provider without a recorded containment level is refused as runnable —
+this is a design rule, not just a test expectation. Kimi Code, Copilot,
+Cursor, and every other discovery-only provider cannot become runnable until
+the enablement audit records its containment level; no provider is silently
+omitted. The Host always applies the strongest verified mechanism as fixed,
+allowlisted arguments scoped to the protected worktree. The renderer never
+chooses or edits containment arguments.
+
+Runnable today: Codex is pinned to its OS sandbox in workspace-write mode
+with the worktree as the writable root, after first-party re-verification
+against the existing exec/resume/steer flows. Claude Code is pinned to
+per-run permission settings denying file mutation outside the worktree and
+recorded as `permission_config` with its headless-shell gap stated honestly.
+
+**Layer 3 — Host-owned generic OS sandbox (roadmap, platform-dependent).** A
+Host-applied OS-level wrapper (macOS Seatbelt first) that confines any local
+provider process to the worktree regardless of native CLI support, making
+native sandboxes defense-in-depth rather than the mechanism. It is not the
+v1 primitive because it cannot be universal: Windows offers no comparable
+wrapper for arbitrary CLIs, and SSH runs execute on the remote machine where
+a local wrapper cannot reach — both facts recorded per-platform rather than
+papered over. Layer 1 is the guarantee that exists everywhere.
 
 ### 6. Unchanged behavior
 
@@ -159,8 +195,11 @@ Host tests with temporary local repositories and bare remotes only:
   worktree on new, resumed, and steered runs; Claude launch includes the pinned
   per-run permission settings; fixed arguments are not renderer-editable; a
   provider without a recorded containment level is refused as runnable.
-- Shared-checkout before/after status is recorded per run and surfaced without
-  attribution when it changed.
+- Detection: a change to the canonical checkout during a run is recorded and
+  surfaced without attribution; an Ensync Land during the run is excluded; the
+  destructive reversion shape (dirty files reverting with no commit containing
+  them) produces the escalated warning; the SSH bridge snapshot exercises the
+  same contract against a remote repository fixture.
 
 ## Documentation updates
 
