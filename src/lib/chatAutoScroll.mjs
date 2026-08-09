@@ -58,6 +58,7 @@ function hashText(value) {
 function executionEventSignature(event) {
   if (!event || typeof event !== 'object') return 'none'
   if (event.type === 'output') return `output:${event.at ?? ''}:${event.stream ?? ''}:${hashText(event.text)}`
+  if (event.type === 'note') return `note:${event.at ?? ''}:${event.provider ?? ''}:${hashText(event.text)}`
   if (event.type === 'started') return `started:${event.at ?? ''}:${hashText(event.command)}:${hashText(event.cwd)}`
   return `${event.type ?? 'event'}:${event.at ?? ''}:${event.outcome ?? ''}:${hashText(event.message)}`
 }
