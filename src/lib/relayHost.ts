@@ -197,6 +197,27 @@ export type GitPushResult = {
   git: GitStatus
 }
 
+export interface GitUnlandedBranch {
+  branch: string
+  head: string
+  aheadCount: number
+  changedFiles: number
+  lastCommittedAt: string | null
+  lastSubject: string | null
+}
+
+export interface GitUnlandedResult {
+  repositoryPath: string
+  baseline: { branch: string | null; head: string }
+  branches: GitUnlandedBranch[]
+  checkedAt: string
+}
+
+export interface GitLandResult {
+  land: { branch: string; mergedInto: string; mergeHead: string; completedAt: string }
+  git: GitStatus
+}
+
 export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude'>
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
@@ -492,6 +513,20 @@ export class EnsyncHostClient {
     confirmation?: string
   }) {
     return this.request<GitPushResult>('/git/push', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
+  gitUnlanded(projectPath: string) {
+    return this.request<{ unlanded: GitUnlandedResult }>('/git/unlanded', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath }),
+    })
+  }
+
+  landGitBranch(input: { projectPath: string; branch: string }) {
+    return this.request<GitLandResult>('/git/land', {
       method: 'POST',
       body: JSON.stringify(input),
     })
