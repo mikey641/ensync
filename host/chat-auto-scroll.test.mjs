@@ -93,6 +93,10 @@ test('semantic revision changes for messages, live CLI output, queue state, and 
   }), revision)
   assert.notEqual(chatAutoScrollContentRevision({
     ...baseline,
+    executionEvents: [{ type: 'note', provider: 'codex', text: 'Inspecting the run.', at: '2026-08-06T12:00:00.000Z' }],
+  }), revision)
+  assert.notEqual(chatAutoScrollContentRevision({
+    ...baseline,
     queuedPrompts: [{ id: 'q1', turnId: 't2' }],
   }), revision)
   assert.notEqual(chatAutoScrollContentRevision({ ...baseline, error: 'Provider stopped.' }), revision)

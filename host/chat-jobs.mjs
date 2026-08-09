@@ -50,6 +50,15 @@ function defaultErrorPayload(error) {
   }
 }
 
+function outputRecoveryNotice(result) {
+  const recovery = result?.outputRecovery
+  if (!recovery || recovery.applied !== true) return null
+  const repairedLines = (Number.isSafeInteger(recovery.normalizedLineCount) ? recovery.normalizedLineCount : 0)
+    + (Number.isSafeInteger(recovery.discardedLineCount) ? recovery.discardedLineCount : 0)
+  if (repairedLines < 1) return null
+  return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
+}
+
 function publicJob(job) {
   return {
     id: job.id,
@@ -90,6 +99,7 @@ export class ChatJobService {
   #maxEventCharacters
   #finishedTtlMs
   #journal
+  #persistTimer = null
 
   constructor(options = {}) {
     if (typeof options.runLocal !== 'function' || typeof options.runRemote !== 'function') {
@@ -188,14 +198,16 @@ export class ChatJobService {
 
   sweep() {
     const changed = this.#trimExpiredJobs()
-    if (changed) this.#persist()
+    if (changed) this.#flushPersist()
     return changed
   }
 
   async shutdown() {
+    this.#flushPersist()
     const running = [...this.#jobs.values()].filter((job) => job.state === 'running')
     for (const job of running) job.controller.abort()
     await Promise.allSettled(running.map((job) => job.completion).filter(Boolean))
+    this.#flushPersist()
   }
 
   async steer(jobId, input) {
@@ -271,10 +283,17 @@ export class ChatJobService {
           message: 'SSH execution is continuing in Ensync Host. Provider output remains buffered by the verified SSH bridge.',
           at: this.#now(),
         })
-        result = await this.#runRemote(job.request, { signal: job.controller.signal })
+        result = await this.#runRemote(job.request, {
+          signal: job.controller.signal,
+          onEvent: (event) => this.#record(job, event),
+        })
       }
       job.state = 'completed'
       job.finishedAt = this.#now()
+      const recoveryNotice = outputRecoveryNotice(result)
+      if (recoveryNotice) {
+        this.#record(job, { type: 'notice', message: recoveryNotice, at: job.finishedAt })
+      }
       this.#record(job, { type: 'completed', result, at: job.finishedAt })
     } catch (error) {
       const payload = this.#normalizeError(error)
@@ -316,7 +335,11 @@ export class ChatJobService {
       job.subscribers.clear()
     }
     try {
-      this.#persist()
+      if (['started', 'completed', 'error', 'cancelled'].includes(recorded.type)) {
+        this.#flushPersist()
+      } else {
+        this.#schedulePersist(job)
+      }
     } catch (error) {
       // The initial running record was already durable before execution. If a
       // later checkpoint cannot be written, keep the live result authoritative;
@@ -417,5 +440,25 @@ export class ChatJobService {
       events: job.events.map(journalSafe),
     }))
     this.#journal.save(jobs)
+  }
+
+  #schedulePersist(job) {
+    if (!this.#journal || this.#persistTimer) return
+    this.#persistTimer = setTimeout(() => {
+      this.#persistTimer = null
+      try {
+        this.#persist()
+      } catch (error) {
+        job.journalFailure = error instanceof Error ? error.message : 'Chat job journal write failed.'
+      }
+    }, 250)
+    this.#persistTimer.unref?.()
+  }
+
+  #flushPersist() {
+    if (!this.#journal) return
+    if (this.#persistTimer) clearTimeout(this.#persistTimer)
+    this.#persistTimer = null
+    this.#persist()
   }
 }
