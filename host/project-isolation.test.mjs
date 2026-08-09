@@ -356,8 +356,11 @@ test('ChatRunService binds provider cwd to the protected worktree and releases i
   const events = []
   let providerCwd
   let providerPrompt
+  // Automatic landing is off so the assertions observe pure isolation:
+  // nothing may reach the shared checkout, not even a guarded land merge.
   const service = new ChatRunService({
     projectIsolation: isolation,
+    autoLand: false,
     statusService: {
       async get() {
         return {
@@ -544,8 +547,12 @@ test('a chat run auto-commits agent work at run end, on success and on failure',
   ]) {
     const events = []
     let worktreeProjectPath = null
+    // Automatic landing is off so the second iteration's fresh worktree does not
+    // already contain the first iteration's landed file, which would make its
+    // identical agent write a no-op and suppress the auto-commit under test.
     const chats = new ChatRunService({
       projectIsolation: isolation,
+      autoLand: false,
       statusService: {
         async get() {
           return {

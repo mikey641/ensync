@@ -629,10 +629,12 @@ export async function landAgentBranch(input, options = {}) {
     const rawLines = check.stdout.split(/\r?\n/)
     const blankIndex = rawLines.indexOf('', 1)
     const files = rawLines.slice(1, blankIndex === -1 ? undefined : blankIndex).filter(Boolean)
-    throw new GitWorkflowError(
+    const conflictError = new GitWorkflowError(
       `Landing ${branch} would conflict in: ${files.join(', ') || 'unknown files'}. Continue that conversation so it syncs with ${mergedInto} and resolves the conflict in its own worktree, then land.`,
       { code: 'agent_branch_conflicts', status: 409 },
     )
+    conflictError.files = files
+    throw conflictError
   }
   const merge = await checkedGit(
     ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', `${LAND_MESSAGE_PREFIX}${branch}`, branch],

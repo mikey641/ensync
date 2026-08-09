@@ -181,6 +181,7 @@ export function createEnsyncHost(options = {}) {
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
+    autoLand: options.autoLandAgentWork ?? process.env.ENSYNC_AUTO_LAND !== '0',
   })
   const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
     rootPath: options.chatAttachmentsRoot,
