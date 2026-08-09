@@ -32,9 +32,30 @@ function appendTextBlock(blocks, text) {
   }
 }
 
+const MARKDOWN_IMAGE = /!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^()\s]+))(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?\s*\)/g
+
+function appendProseBlocks(blocks, text) {
+  if (!text) return
+  let cursor = 0
+  MARKDOWN_IMAGE.lastIndex = 0
+
+  for (const match of text.matchAll(MARKDOWN_IMAGE)) {
+    appendTextBlock(blocks, text.slice(cursor, match.index))
+    blocks.push({
+      type: 'image',
+      alt: match[1],
+      path: match[2] ?? match[3],
+      markdown: match[0],
+    })
+    cursor = match.index + match[0].length
+  }
+
+  appendTextBlock(blocks, text.slice(cursor))
+}
+
 /**
- * Splits message Markdown into ordered prose and fenced-code blocks. The text
- * itself is never interpreted as HTML, and non-fence Markdown remains exact.
+ * Splits message Markdown into ordered prose, fenced-code, and image blocks.
+ * The text is never interpreted as HTML, and other Markdown remains exact.
  */
 export function parseMessageContent(value) {
   const content = typeof value === 'string' ? value : String(value ?? '')
@@ -55,7 +76,7 @@ export function parseMessageContent(value) {
         continue
       }
 
-      appendTextBlock(blocks, text)
+      appendProseBlocks(blocks, text)
       text = ''
       code = ''
       fence = candidate
@@ -74,7 +95,7 @@ export function parseMessageContent(value) {
   if (fence) {
     blocks.push({ type: 'code', code, language: fence.language })
   } else {
-    appendTextBlock(blocks, text)
+    appendProseBlocks(blocks, text)
   }
 
   return blocks

@@ -39,3 +39,37 @@ test('message content leaves ordinary backticks and invalid fences as prose', ()
   const content = 'Use `inline()` here.\n``code``\n```bad`info\nnot code'
   assert.deepEqual(parseMessageContent(content), [{ type: 'text', text: content }])
 })
+
+test('message content extracts local Markdown images without interpreting fenced code', () => {
+  const logoPath = '/Users/example/Ensync workspace/brand/ensync-logo.png'
+  const content = [
+    'Here is the full logo:',
+    '',
+    `![Ensync logo](<${logoPath}>)`,
+    '',
+    '```md',
+    '![This remains code](./not-rendered.png)',
+    '```',
+    '',
+    'And the icon: ![App icon](brand/icon.png "Generated icon")',
+  ].join('\n')
+
+  assert.deepEqual(parseMessageContent(content), [
+    { type: 'text', text: 'Here is the full logo:\n\n' },
+    {
+      type: 'image',
+      alt: 'Ensync logo',
+      path: logoPath,
+      markdown: `![Ensync logo](<${logoPath}>)`,
+    },
+    { type: 'text', text: '\n\n' },
+    { type: 'code', code: '![This remains code](./not-rendered.png)\n', language: 'md' },
+    { type: 'text', text: '\nAnd the icon: ' },
+    {
+      type: 'image',
+      alt: 'App icon',
+      path: 'brand/icon.png',
+      markdown: '![App icon](brand/icon.png "Generated icon")',
+    },
+  ])
+})

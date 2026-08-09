@@ -1,12 +1,16 @@
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
+import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
+import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
+import { ProjectIsolationService } from './project-isolation.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
   SupportRepairError,
@@ -23,6 +27,8 @@ import { VirtualBoxError, VirtualBoxService } from './virtualbox.mjs'
 const DEFAULT_PORT = 43_121
 const LOOPBACK_HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 128 * 1024
+const MAX_SYNC_BODY_BYTES = 9 * 1024 * 1024
+const AUTOMATIC_UPDATE_DEDUPE_MS = 5 * 60 * 1_000
 
 function isAllowedOrigin(origin) {
   if (!origin) return true
@@ -59,6 +65,30 @@ function sendJson(response, statusCode, payload, origin) {
   if (response.destroyed || response.writableEnded) return
   response.writeHead(statusCode, responseHeaders(origin))
   response.end(JSON.stringify(payload))
+}
+
+function sendImage(response, image, origin) {
+  if (response.destroyed || response.writableEnded) return
+  const headers = {
+    'Cache-Control': 'no-store',
+    'Content-Length': String(image.size),
+    'Content-Type': image.contentType,
+    'X-Content-Type-Options': 'nosniff',
+  }
+  if (origin && isAllowedOrigin(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin
+    headers.Vary = 'Origin'
+  }
+  response.writeHead(200, headers)
+  const stream = createReadStream(image.path)
+  const stop = () => stream.destroy()
+  response.once('close', stop)
+  stream.once('error', () => {
+    response.removeListener('close', stop)
+    if (!response.destroyed) response.destroy()
+  })
+  stream.once('end', () => response.removeListener('close', stop))
+  stream.pipe(response)
 }
 
 function streamHeaders(origin) {
@@ -108,13 +138,13 @@ function requestCancellation(request, response) {
   }
 }
 
-function readJsonBody(request) {
+function readJsonBody(request, maxBytes = MAX_BODY_BYTES) {
   return new Promise((resolve, reject) => {
     let body = ''
     request.setEncoding('utf8')
     request.on('data', (chunk) => {
       body += chunk
-      if (body.length > MAX_BODY_BYTES) {
+      if (body.length > maxBytes) {
         reject(new Error('Request body is too large.'))
         request.destroy()
       }
@@ -136,11 +166,23 @@ function refreshRequested(url) {
 }
 
 export function createEnsyncHost(options = {}) {
+  const accountSync = options.accountSyncService ?? new AccountSyncService({
+    baseUrl: options.accountSyncServiceUrl ?? process.env.ENSYNC_SYNC_SERVICE_URL ?? null,
+  })
   const statuses = options.statusService ?? new ProviderStatusService()
   const terminalLauncher = options.terminalLauncher ?? launchTerminalCommand
+  const automaticUpdateLaunches = new Map()
+  const providerUpdateLaunches = new Map()
+  const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
+    rootPath: options.projectIsolationRoot,
+  })
+  const chatImages = options.chatImageService ?? new ChatImageService({
+    workspaceRoot: options.projectIsolationRoot,
+  })
   const chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
+    projectIsolation,
   })
   const projects = options.projectService ?? new ProjectInspectionService({
     allowedRoots: options.allowedProjectRoots,
@@ -162,7 +204,10 @@ export function createEnsyncHost(options = {}) {
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
   const chatJobJournal = options.chatJobJournal ?? (options.chatJobJournalPath
-    ? new ChatJobJournal({ filePath: options.chatJobJournalPath })
+    ? new ChatJobJournal({
+        filePath: options.chatJobJournalPath,
+        writer: options.instanceId ? { instanceId: options.instanceId, pid: process.pid } : null,
+      })
     : null)
   const chatJobs = options.chatJobService ?? new ChatJobService({
     runLocal: (request, runOptions) => chats.run(request, runOptions),
@@ -242,6 +287,35 @@ export function createEnsyncHost(options = {}) {
         }, origin)
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/status') {
+        return sendJson(response, 200, accountSync.status(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/register') {
+        const body = await readJsonBody(request)
+        const status = await accountSync.register({ username: body.username, password: body.password })
+        return sendJson(response, 201, status, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/login') {
+        const body = await readJsonBody(request)
+        const status = await accountSync.login({ username: body.username, password: body.password })
+        return sendJson(response, 200, status, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/logout') {
+        return sendJson(response, 200, await accountSync.logout(), origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/workspace') {
+        return sendJson(response, 200, await accountSync.pull(), origin)
+      }
+
+      if (request.method === 'PUT' && url.pathname === '/api/account-sync/workspace') {
+        const body = await readJsonBody(request, MAX_SYNC_BODY_BYTES)
+        return sendJson(response, 200, await accountSync.push(body.state, body.baseRevision), origin)
+      }
+
       if (request.method === 'GET' && url.pathname === '/api/providers') {
         const providers = await statuses.list({ refresh: refreshRequested(url) })
         return sendJson(response, 200, { providers, checkedAt: new Date().toISOString() }, origin)
@@ -305,6 +379,14 @@ export function createEnsyncHost(options = {}) {
         } finally {
           cancellation.dispose()
         }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/chat/image') {
+        const image = await chatImages.open({
+          workspacePath: url.searchParams.get('workspacePath'),
+          imagePath: url.searchParams.get('path'),
+        })
+        return sendImage(response, image, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/chat/jobs') {
@@ -562,6 +644,19 @@ export function createEnsyncHost(options = {}) {
         }
 
         const body = await readJsonBody(request)
+        if (body.launch !== true && body.launch !== false) {
+          return sendJson(response, 400, {
+            error: 'Provider update requests require an explicit launch boolean.',
+            code: 'invalid_provider_update_request',
+          }, origin)
+        }
+        const trigger = body.trigger ?? 'manual'
+        if (!['manual', 'automatic'].includes(trigger) || (trigger === 'automatic' && body.launch !== true)) {
+          return sendJson(response, 400, {
+            error: 'Provider update trigger must be manual, or automatic with launch enabled.',
+            code: 'invalid_provider_update_request',
+          }, origin)
+        }
         const provider = await statuses.get(id, { refresh: true })
         if (!provider?.installed || !provider.executable) {
           return sendJson(response, 409, {
@@ -590,7 +685,7 @@ export function createEnsyncHost(options = {}) {
             message: 'Run this official self-update command in a terminal, then refresh provider status.',
           }, origin)
         }
-        if (chatJobs.hasRunningJobs()) {
+        if (chatJobs.hasRunningJobs() || chats.hasRunningRuns?.()) {
           return sendJson(response, 409, {
             error: 'Wait for active agent runs to finish before updating an installed CLI.',
             code: 'provider_update_busy',
@@ -598,7 +693,36 @@ export function createEnsyncHost(options = {}) {
           }, origin)
         }
 
-        const launch = await terminalLauncher(provider.executable, definition.updateArgs)
+        const recentAutomaticLaunch = automaticUpdateLaunches.get(id)
+        if (trigger === 'automatic'
+          && Number.isFinite(recentAutomaticLaunch)
+          && Date.now() - recentAutomaticLaunch < AUTOMATIC_UPDATE_DEDUPE_MS) {
+          return sendJson(response, 200, {
+            started: false,
+            deduplicated: true,
+            launchMode: 'terminal',
+            command,
+            previousVersion: provider.version,
+            message: 'This automatic update was already opened by another Ensync window.',
+          }, origin)
+        }
+        if (providerUpdateLaunches.has(id)) {
+          return sendJson(response, 409, {
+            error: `${definition.name} already has an update launch in progress.`,
+            code: 'provider_update_in_progress',
+            provider,
+          }, origin)
+        }
+
+        const launchPromise = terminalLauncher(provider.executable, definition.updateArgs)
+        providerUpdateLaunches.set(id, launchPromise)
+        let launch
+        try {
+          launch = await launchPromise
+        } finally {
+          if (providerUpdateLaunches.get(id) === launchPromise) providerUpdateLaunches.delete(id)
+        }
+        if (launch.started && trigger === 'automatic') automaticUpdateLaunches.set(id, Date.now())
         if (launch.started) statuses.invalidate()
         return sendJson(response, 200, {
           ...launch,
@@ -619,6 +743,12 @@ export function createEnsyncHost(options = {}) {
           safeToRetry: error.safeToRetry,
         }, origin)
       }
+      if (error instanceof AccountSyncError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
       if (error instanceof ChatJobError) {
         return sendJson(response, error.status, {
           error: error.message,
@@ -627,6 +757,12 @@ export function createEnsyncHost(options = {}) {
         }, origin)
       }
       if (error instanceof DaemonLeaseError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
+      if (error instanceof ChatImageError) {
         return sendJson(response, error.status, {
           error: error.message,
           code: error.code,
@@ -674,7 +810,7 @@ export function createEnsyncHost(options = {}) {
   server.once('close', () => {
     void telegram.stopPolling?.()
   })
-  server.ensyncServices = { chatJobs, daemonLeases }
+  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
   return server
 }
 

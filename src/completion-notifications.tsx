@@ -5,18 +5,30 @@ import {
   useRef,
   useState,
 } from 'react'
+import {
+  COMPLETION_NOTIFICATIONS_STORAGE_KEY,
+  DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  normalizeCompletionNotificationSettings,
+  readCompletionNotificationSettings,
+  saveCompletionNotificationPreferences,
+  writeCompletionNotificationSettings,
+} from './lib/completionNotificationPreferences.mjs'
+import type {
+  CompletionNotificationMode,
+  CompletionNotificationSettings,
+} from './lib/completionNotificationPreferences.mjs'
 import './completion-notifications.css'
 
-export const COMPLETION_NOTIFICATIONS_STORAGE_KEY = 'ensync-completion-notifications-v1'
 const COMPLETION_NOTIFICATIONS_CHANGE_EVENT = 'ensync:completion-notifications-change'
 
-export type CompletionNotificationMode = 'off' | 'ringtone' | 'speech'
-
-export type CompletionNotificationSettings = {
-  mode: CompletionNotificationMode
-  speechText: string
-  voiceId: string | null
+export {
+  COMPLETION_NOTIFICATIONS_STORAGE_KEY,
+  DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  normalizeCompletionNotificationSettings,
+  readCompletionNotificationSettings,
+  writeCompletionNotificationSettings,
 }
+export type { CompletionNotificationMode, CompletionNotificationSettings }
 
 export type CompletionVoice = {
   id: string
@@ -32,61 +44,11 @@ export type CompletionNotificationResult = {
   message: string
 }
 
-export const DEFAULT_COMPLETION_NOTIFICATION_SETTINGS: CompletionNotificationSettings = {
-  mode: 'off',
-  speechText: 'Your Ensync task is finished.',
-  voiceId: null,
-}
-
-type StorageReader = Pick<Storage, 'getItem'>
-type StorageWriter = Pick<Storage, 'setItem'>
 type AudioContextWindow = Window & typeof globalThis & {
   webkitAudioContext?: typeof AudioContext
 }
 
 let preparedAudioContext: AudioContext | null = null
-
-function isMode(value: unknown): value is CompletionNotificationMode {
-  return value === 'off' || value === 'ringtone' || value === 'speech'
-}
-
-export function normalizeCompletionNotificationSettings(value: unknown): CompletionNotificationSettings {
-  const stored = value && typeof value === 'object'
-    ? value as Partial<Record<keyof CompletionNotificationSettings, unknown>>
-    : {}
-
-  return {
-    mode: isMode(stored.mode) ? stored.mode : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.mode,
-    speechText: typeof stored.speechText === 'string'
-      ? stored.speechText.slice(0, 240)
-      : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.speechText,
-    voiceId: typeof stored.voiceId === 'string' && stored.voiceId.length > 0 ? stored.voiceId : null,
-  }
-}
-
-export function readCompletionNotificationSettings(storage?: StorageReader): CompletionNotificationSettings {
-  if (typeof window === 'undefined' && !storage) return { ...DEFAULT_COMPLETION_NOTIFICATION_SETTINGS }
-
-  try {
-    const raw = (storage ?? window.localStorage).getItem(COMPLETION_NOTIFICATIONS_STORAGE_KEY)
-    return raw ? normalizeCompletionNotificationSettings(JSON.parse(raw)) : { ...DEFAULT_COMPLETION_NOTIFICATION_SETTINGS }
-  } catch {
-    return { ...DEFAULT_COMPLETION_NOTIFICATION_SETTINGS }
-  }
-}
-
-export function writeCompletionNotificationSettings(
-  settings: CompletionNotificationSettings,
-  storage?: StorageWriter,
-) {
-  const normalized = normalizeCompletionNotificationSettings(settings)
-  try {
-    ;(storage ?? window.localStorage).setItem(COMPLETION_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(normalized))
-  } catch {
-    // Preferences remain usable for this session when device storage is unavailable.
-  }
-  return normalized
-}
 
 function voiceId(voice: SpeechSynthesisVoice) {
   return JSON.stringify([voice.voiceURI, voice.name, voice.lang])
@@ -317,7 +279,7 @@ export function useCompletionNotifications() {
   const updateSettings = useCallback<UpdateCompletionNotificationSettings>((update) => {
     const current = settingsRef.current
     const candidate = typeof update === 'function' ? update(current) : { ...current, ...update }
-    const next = writeCompletionNotificationSettings(candidate)
+    const next = saveCompletionNotificationPreferences(candidate)
     if (next.mode !== 'speech') stopCompletionSpeech()
     settingsRef.current = next
     setSettings(next)
