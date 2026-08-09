@@ -8,7 +8,7 @@ export default defineConfig({
       ignored: ['**/desktop/release/**'],
     },
     proxy: {
-      '/api': 'http://127.0.0.1:43121',
+      '/api': `http://127.0.0.1:${process.env.ENSYNC_HOST_PORT ?? '43121'}`,
     },
   },
 })

@@ -8,16 +8,22 @@
   "type": "module",
   "main": "src/main.mjs",
   "ensync": {
-    "updateManifestUrl": "https://ensync.vercel.app/releases.json"
+    "updateManifestUrls": {
+      "stable": "https://ensync.vercel.app/releases.json",
+      "beta": "https://ensync.vercel.app/releases-beta.json"
+    }
   },
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "build:ui": "npm --prefix .. run build",
-    "start": "npm run build:ui && electron .",
+    "start": "npm run open",
+    "open": "npm run build:ui && node scripts/open.mjs",
+    "start:foreground": "npm run build:ui && electron .",
     "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:win-packaged": "node scripts/smoke-windows-package.mjs",
     "verify": "npm run build:ui && npm test && npm run smoke",
     "release:preflight": "node scripts/release-preflight.mjs",
     "package:mac": "npm run verify && node scripts/package-native.mjs --platform macos && node scripts/attest-build.mjs --platform macos",
@@ -46,6 +52,7 @@
       "src/native-windows.mjs",
       "src/native-workspaces.mjs",
       "src/recent-projects.mjs",
+      "src/device-preferences.mjs",
       "src/workspace-recovery.mjs",
       "src/codex-conversation-import.mjs",
       "src/native-updates.mjs",
