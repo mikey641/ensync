@@ -603,6 +603,56 @@ test('a chat run skips auto-commit when the workspace write lease is lost', asyn
   assert.equal(events.some((event) => event.code === 'agent_work_commit_failed'), false)
 })
 
+test('acquire merges new baseline commits into a reused conversation branch', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-sync')
+  await writeFile(join(first.workspace.projectPath, 'agent-work.txt'), 'agent side\n')
+  await first.release()
+
+  // Baseline advances (as if another chat landed work).
+  await writeFile(join(fixture.repository, 'landed.txt'), 'landed by another chat\n')
+  await git(fixture.repository, ['add', 'landed.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-other'])
+
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-sync')
+  context.after(() => resumed.release())
+  const landed = await git(resumed.workspace.repositoryPath, ['show', 'HEAD:landed.txt'])
+  assert.equal(landed, 'landed by another chat')
+  // Recovery-committed agent work survives the merge.
+  const agentSide = await git(resumed.workspace.repositoryPath, ['show', 'HEAD:agent-work.txt'])
+  assert.equal(agentSide, 'agent side')
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+})
+
+test('acquire fails closed with the conflicting files when baseline sync conflicts', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  await writeFile(join(first.workspace.projectPath, 'tracked.txt'), 'agent version\n')
+  await first.release()
+
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'baseline version\n')
+  await git(fixture.repository, ['add', 'tracked.txt'])
+  await git(fixture.repository, ['commit', '-m', 'baseline change'])
+
+  await assert.rejects(
+    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
+    (error) => error instanceof ProjectIsolationError
+      && error.code === 'workspace_baseline_conflict'
+      && /tracked\.txt/.test(error.message),
+  )
+
+  // The aborted merge leaves no merge in progress, so a retry fails the same
+  // clean way instead of erroring on a half-merged worktree.
+  await assert.rejects(
+    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
+    (error) => error instanceof ProjectIsolationError && error.code === 'workspace_baseline_conflict',
+  )
+})
+
 test('commitAgentWork on a clean worktree commits nothing', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })

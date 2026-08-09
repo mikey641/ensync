@@ -517,6 +517,42 @@ export class ProjectIsolationService {
       }
     }
 
+    if (!createdThisAcquire) {
+      const upToDate = await this.#git(['merge-base', '--is-ancestor', repository.head, 'HEAD'], {
+        cwd: worktreePath,
+        allowFailure: true,
+      })
+      if (upToDate.exitCode !== 0) {
+        const merge = await this.#git(
+          ['-c', 'commit.gpgsign=false', 'merge', '--no-edit', '--no-verify',
+            '-m', `Ensync baseline sync into ${branch}`, repository.head],
+          {
+            cwd: worktreePath,
+            env: {
+              GIT_AUTHOR_NAME: 'Ensync Agent',
+              GIT_AUTHOR_EMAIL: 'agent@ensync.local',
+              GIT_COMMITTER_NAME: 'Ensync Agent',
+              GIT_COMMITTER_EMAIL: 'agent@ensync.local',
+            },
+            allowFailure: true,
+          },
+        )
+        if (merge.exitCode !== 0) {
+          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const files = conflicted.stdout.split(/\r?\n/).filter(Boolean)
+          await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
+          throw new ProjectIsolationError(
+            'workspace_baseline_conflict',
+            `New baseline changes conflict with this conversation's work in: ${files.join(', ') || 'unknown files'}. Resolve the conflict in the protected worktree at ${worktreePath}, commit it, then run again.`,
+            409,
+          )
+        }
+      }
+    }
+
     const isolatedCommon = await this.#git(['rev-parse', '--git-common-dir'], { cwd: worktreePath })
     const isolatedCommonValue = firstLine(isolatedCommon.stdout)
     const isolatedCommonPath = await canonicalDirectory(
