@@ -7,6 +7,7 @@ import {
   downloadNativeUpdate,
   getNativeUpdateState,
   openNativeUpdateInstaller,
+  setNativeUpdateChannel,
   subscribeToNativeUpdateState,
   type NativeUpdateState,
 } from '../lib/nativeUpdates.mjs'
@@ -62,7 +63,10 @@ export function NativeUpdatePreferences({ className = '' }: { className?: string
       <div className="setting-title">
         <div>
           <h3>Ensync updates</h3>
-          <p>Installed version <strong>{state.installedVersion ?? 'Browser or unverified build'}</strong></p>
+          <p>
+            Installed version <strong>{state.installedVersion ?? 'Browser or unverified build'}</strong>
+            {state.installedBuildId && <> · build <strong>{state.installedBuildId}</strong></>}
+          </p>
         </div>
         <span className={`native-update-status native-update-status--${state.phase}`}>
           {active ? <RotateCw className="spin" size={13} /> : state.phase === 'error' ? <XCircle size={13} /> : <CheckCircle2 size={13} />}
@@ -71,6 +75,19 @@ export function NativeUpdatePreferences({ className = '' }: { className?: string
       </div>
 
       <div className="native-update-card">
+        <label className="native-update-channel">
+          <span>Update channel</span>
+          <select
+            value={state.channel}
+            disabled={!state.canChangeChannel}
+            onChange={(event) => void run(() => setNativeUpdateChannel(event.target.value as 'stable' | 'beta'))}
+          >
+            <option value="stable">Stable</option>
+            <option value="beta">Beta — early fixes</option>
+          </select>
+          <small>Beta is opt-in and may contain unfinished fixes. Changing channels clears any downloaded installer.</small>
+        </label>
+
         <div className="native-update-copy">
           <CloudDownload size={18} />
           <div>
