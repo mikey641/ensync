@@ -3,6 +3,7 @@ const SAFE_PREFLIGHT_CODES = new Set([
   'provider_not_authenticated',
   'subscription_auth_required',
   'run_start_failed',
+  'provider_startup_failed',
 ])
 
 const AMBIGUOUS_OR_UNSAFE_CODES = new Set([
