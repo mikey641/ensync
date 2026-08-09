@@ -258,3 +258,38 @@ test('landAgentBranch fails closed on dirty checkout, conflicts, and non-agent b
   const status = (await git(['status', '--porcelain'], { cwd: fixture.seed })).stdout.trim()
   assert.equal(status, '')
 })
+
+test('landAgentBranch rejects landing when HEAD is detached', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+
+  const currentHead = (await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim()
+  await git(['checkout', '--detach'], { cwd: fixture.seed })
+
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      { allowedRoots: [fixture.root] },
+    ),
+    (error) => error instanceof GitWorkflowError && error.code === 'git_detached_head',
+  )
+})
+
+test('landAgentBranch rejects landing an already-landed branch', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+
+  const firstLand = await landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    { allowedRoots: [fixture.root] },
+  )
+  assert.equal(firstLand.land.branch, 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      { allowedRoots: [fixture.root] },
+    ),
+    (error) => error instanceof GitWorkflowError && error.code === 'agent_branch_already_landed',
+  )
+})
