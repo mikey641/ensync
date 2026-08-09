@@ -9,6 +9,8 @@ import {
   cloneGitRepository,
   getGitStatus,
   GitWorkflowError,
+  landAgentBranch,
+  listUnlandedAgentWork,
   pushGit,
   verifyGitRemote,
 } from './git.mjs'
@@ -174,4 +176,85 @@ test('verify and push reject a configured external-helper remote before contacti
     }),
     (error) => error instanceof GitWorkflowError && error.code === 'unsafe_git_remote',
   )
+})
+
+async function agentBranchFixture(context) {
+  const fixture = await gitFixture(context)
+  if (!fixture) return null
+  await git(['branch', 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa'], { cwd: fixture.seed })
+  await git(['checkout', 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa'], { cwd: fixture.seed })
+  await writeFile(join(fixture.seed, 'agent-feature.txt'), 'built by a chat\n')
+  await git(['add', 'agent-feature.txt'], { cwd: fixture.seed })
+  await git(['commit', '-m', 'Ensync agent work (succeeded)'], { cwd: fixture.seed })
+  await git(['checkout', 'main'], { cwd: fixture.seed })
+  return fixture
+}
+
+test('listUnlandedAgentWork reports agent branches ahead of the baseline', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  const result = await listUnlandedAgentWork(fixture.seed, { allowedRoots: [fixture.root] })
+  assert.equal(result.baseline.branch, 'main')
+  assert.equal(result.branches.length, 1)
+  const [entry] = result.branches
+  assert.equal(entry.branch, 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+  assert.equal(entry.aheadCount, 1)
+  assert.equal(entry.changedFiles, 1)
+  assert.equal(entry.lastSubject, 'Ensync agent work (succeeded)')
+})
+
+test('landAgentBranch merges a clean agent branch into the baseline with a non-force merge commit', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  const result = await landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    { allowedRoots: [fixture.root] },
+  )
+  assert.equal(result.land.branch, 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+  assert.equal(result.land.mergedInto, 'main')
+  const subject = (await git(['log', '-1', '--format=%s'], { cwd: fixture.seed })).stdout.trim()
+  assert.equal(subject, 'Ensync land: ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+  const landedFile = (await git(['show', 'HEAD:agent-feature.txt'], { cwd: fixture.seed })).stdout
+  assert.equal(landedFile, 'built by a chat\n')
+  // Branch survives landing and is now fully merged.
+  await git(['show-ref', '--verify', 'refs/heads/ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa'], { cwd: fixture.seed })
+  const after = await listUnlandedAgentWork(fixture.seed, { allowedRoots: [fixture.root] })
+  assert.equal(after.branches.length, 0)
+})
+
+test('landAgentBranch fails closed on dirty checkout, conflicts, and non-agent branches', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+
+  await assert.rejects(
+    landAgentBranch({ projectPath: fixture.seed, branch: 'main' }, { allowedRoots: [fixture.root] }),
+    (error) => error instanceof GitWorkflowError && error.code === 'invalid_agent_branch',
+  )
+
+  await writeFile(join(fixture.seed, 'README.md'), '# dirty\n')
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      { allowedRoots: [fixture.root] },
+    ),
+    (error) => error instanceof GitWorkflowError && error.code === 'shared_checkout_dirty',
+  )
+  await git(['checkout', '--', 'README.md'], { cwd: fixture.seed })
+
+  // Create a conflict: baseline edits the same file the agent branch created.
+  await writeFile(join(fixture.seed, 'agent-feature.txt'), 'conflicting baseline version\n')
+  await git(['add', 'agent-feature.txt'], { cwd: fixture.seed })
+  await git(['commit', '-m', 'baseline conflict'], { cwd: fixture.seed })
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      { allowedRoots: [fixture.root] },
+    ),
+    (error) => error instanceof GitWorkflowError
+      && error.code === 'agent_branch_conflicts'
+      && /agent-feature\.txt/.test(error.message),
+  )
+  // No merge left in progress.
+  const status = (await git(['status', '--porcelain'], { cwd: fixture.seed })).stdout.trim()
+  assert.equal(status, '')
 })
