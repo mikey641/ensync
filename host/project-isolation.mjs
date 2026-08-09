@@ -11,6 +11,22 @@ const DEFAULT_HEARTBEAT_MS = 5_000
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 
+const AGENT_COMMIT_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Ensync Agent',
+  GIT_AUTHOR_EMAIL: 'agent@ensync.local',
+  GIT_COMMITTER_NAME: 'Ensync Agent',
+  GIT_COMMITTER_EMAIL: 'agent@ensync.local',
+}
+
+function agentCommitMessage(details, branch) {
+  const lines = [`Ensync agent work (${details.outcome})`, '']
+  if (details.provider) lines.push(`Provider: ${details.provider}`)
+  if (details.jobId) lines.push(`Job: ${details.jobId}`)
+  lines.push(`Workspace-Branch: ${branch}`)
+  return lines.join('\n')
+}
+
+
 function digest(value, length = 24) {
   return createHash('sha256').update(value).digest('hex').slice(0, length)
 }
@@ -190,6 +206,43 @@ export class ProjectIsolationService {
       await lease.release()
       throw error
     }
+  }
+
+  async commitAgentWork(workspace, details = {}) {
+    const outcome = details.outcome ?? 'failed'
+    return this.#commitWorktree(workspace.repositoryPath, workspace.branch, { ...details, outcome })
+  }
+
+  async #commitWorktree(worktreePath, branch, details) {
+    const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: worktreePath,
+      code: 'agent_work_commit_failed',
+      message: `Ensync could not inspect the protected worktree for ${branch}.`,
+    })
+    const changedFiles = status.stdout.split('\0').filter(Boolean).length
+    if (changedFiles === 0) {
+      const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
+      return { committed: false, changedFiles: 0, head: firstLine(head.stdout) }
+    }
+    const env = {
+      ...AGENT_COMMIT_IDENTITY,
+      GIT_AUTHOR_DATE: new Date(this.#now()).toISOString(),
+      GIT_COMMITTER_DATE: new Date(this.#now()).toISOString(),
+    }
+    await this.#git(['add', '-A', '--', '.'], {
+      cwd: worktreePath,
+      env,
+      code: 'agent_work_commit_failed',
+      message: `Ensync could not stage this run's changes on ${branch}.`,
+    })
+    await this.#git(['-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-m', agentCommitMessage(details, branch)], {
+      cwd: worktreePath,
+      env,
+      code: 'agent_work_commit_failed',
+      message: `Ensync could not commit this run's changes on ${branch}.`,
+    })
+    const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
+    return { committed: true, changedFiles, head: firstLine(head.stdout) }
   }
 
   async #git(args, options = {}) {

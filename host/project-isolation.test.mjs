@@ -416,3 +416,46 @@ test('ChatRunService runs different chats in the same repository concurrently', 
   assert.equal(maximumActiveProviders, 2)
   assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
 })
+
+test('commitAgentWork commits worktree changes to the conversation branch with the Ensync Agent identity', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-commit')
+  context.after(() => lease.release())
+
+  await writeFile(join(lease.workspace.projectPath, 'agent-file.txt'), 'work\n')
+  const result = await isolation.commitAgentWork(lease.workspace, {
+    outcome: 'succeeded',
+    provider: 'codex',
+    jobId: 'job-1',
+  })
+
+  assert.equal(result.committed, true)
+  assert.equal(result.changedFiles, 1)
+  assert.match(result.head, /^[a-f0-9]{40}$/)
+  const author = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%an <%ae>'])
+  assert.equal(author, 'Ensync Agent <agent@ensync.local>')
+  const committer = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%cn <%ce>'])
+  assert.equal(committer, 'Ensync Agent <agent@ensync.local>')
+  const subject = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'Ensync agent work (succeeded)')
+  const body = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%b'])
+  assert.match(body, /Provider: codex/)
+  assert.match(body, /Job: job-1/)
+  assert.equal(await git(lease.workspace.repositoryPath, ['status', '--porcelain']), '')
+  // Shared checkout untouched.
+  assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
+})
+
+test('commitAgentWork on a clean worktree commits nothing', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-clean')
+  context.after(() => lease.release())
+
+  const headBefore = await git(lease.workspace.repositoryPath, ['rev-parse', 'HEAD'])
+  const result = await isolation.commitAgentWork(lease.workspace, { outcome: 'failed' })
+  assert.equal(result.committed, false)
+  assert.equal(result.changedFiles, 0)
+  assert.equal(result.head, headBefore)
+})
