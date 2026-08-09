@@ -444,8 +444,9 @@ export class ProjectIsolationService {
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
         })
-        // Replace the record atomically so no heartbeat, release, or competing
-        // Host can observe a file between truncate and write.
+        // Replace the record atomically so no reader — this heartbeat, release,
+        // or another Host's staleness probe — can observe a file between
+        // truncate and write.
         const writeOwner = async () => {
           const pendingPath = `${ownerPath}.${this.#uuid()}.tmp`
           await writeFile(pendingPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
@@ -454,6 +455,8 @@ export class ProjectIsolationService {
         }
         await writeOwner()
 
+        // Ticks are serialized: a write delayed by fs load must not race the
+        // next tick's read into a false lease loss.
         let heartbeatTicking = false
         const heartbeat = setInterval(() => {
           if (heartbeatTicking) return
