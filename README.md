@@ -7,13 +7,16 @@ The public product site is [ensync.vercel.app](https://ensync.vercel.app). Downl
 ## What works
 
 - Durable conversations, adjacent-or-end new-tab placement, resizable split panes, double-click maximize/restore, and hideable history and chrome.
+- Username/password account sync for encrypted cross-computer conversation history. Stable chat/message IDs merge concurrent additions; CLI credentials, provider sessions, queued or active work, terminal output, and local attachments never enter the account document.
+- End-to-end encrypted remote execution through Ensync Sync. An explicitly paired iPhone or Android client can submit, follow, stop, and steer a job while the selected outbound-connected Ensync Host re-verifies the project and runs Codex or Claude Code through the existing protected-worktree and subscription-only controls. Sync routes ciphertext and minimal delivery metadata; it does not receive plaintext prompts, project paths, results, provider credentials, or decryption keys.
 - Light, dark, and system themes with large default typography.
 - Verified local project focus with a native macOS Finder/Windows folder chooser in the desktop app, browser-safe absolute-path entry, plus Git clone/import, status, remote verification, guarded branch push, and explicitly confirmed production push.
 - Real Codex and Claude Code subscription chat runners with provider-neutral Auto selection and retry-safe quota fallback.
+- Host-enforced Git isolation for every coding run: each conversation receives a durable protected worktree/branch and its own cross-process write lease, so different chats in the same repository run concurrently while duplicate runs against one chat serialize safely. Dirty local and SSH checkouts are preserved through a private-index transport snapshot and inherited as uncommitted protected-worktree state without changing the shared checkout.
 - Separate provider and Model size selectors in every conversation header. Provider default sends no effort override; Small, Medium, Large, and XL apply the verified low, medium, high, and max effort levels to the provider's own default model across local and SSH runs.
 - Opt-in Ensync Auto Context skill: preserves an Auto or fixed provider choice, provider-neutral Model size over each CLI's native default model, synchronized session resume, full project/conversation handoff on provider switches, same-target local/SSH execution, and verified continuation metadata.
 - Discovery, provider-specific account setup, exact installed versions, and official install links ordered as a mainstream-recognition navigation heuristic: Codex, Claude Code, GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Factory Droid, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code, and the separate local Ollama fallback. This order is not a measured market-share ranking.
-- Guarded agent updates for Codex and Claude Code through their official `update` subcommands. Ensync resolves the installed executable, ignores caller-supplied command data, refuses updates while Host-owned agent runs are active, and requires a manual status refresh afterward. Other agents stay guide-only until a provider-owned cross-platform updater is verified.
+- Guarded update maintenance for every installed catalog provider. Ensync can launch fixed native updaters for Codex, Claude Code, Copilot, Cursor, Kimi, Qoder, CodeBuddy, Droid, Auggie, and Amp; it recognizes Antigravity, Kiro, and Junie's provider-managed background updates; and it keeps Jules, GitLab Duo, Warp Oz, and Ollama in the weekly review with official guides because their update paths depend on installation method or platform. The policy defaults to a weekly reminder, with Manual only and opt-in Automatic weekly alternatives. Automatic cycles wait until the Host is idle, deduplicate native windows, ignore caller-supplied command data, and never claim unobserved completion.
 - Typed, non-fabricated usage telemetry: subscription quota for Codex and Claude when reported; session-only data for Copilot and Junie; local model inventory/load state for Ollama; explicit unavailable state for Cursor and Kiro account quota.
 - Verified SSH workers, guarded Oracle VirtualBox provisioning, and approval-gated Telegram operation through Ensync Host.
 - Local-first help desk with reviewable redacted diagnostics and an opt-in one-run bug repair through the connected Codex or Claude subscription. Results always require user review and never claim the bug is fixed automatically.
@@ -33,7 +36,9 @@ npm install
 npm run dev
 ```
 
-This starts the Vite interface and the Node Ensync Host on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results.
+This starts the Vite interface, the Node Ensync Host, and a development-only account-sync service on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results. Development sync data is stored in the ignored `.ensync-sync-data.json` file.
+
+For multiple computers or mobile clients, deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`, then set the same `ENSYNC_SYNC_SERVICE_URL` for Ensync Host. Plain HTTP is accepted only for an exact loopback address. The bundled service hashes account passwords with scrypt and stores AES-256-GCM encrypted conversation documents plus opaque encrypted broker jobs/events/commands and minimal routing metadata. Host login and broker device credentials are currently memory-only, so restarting Ensync Host requires signing in and enabling remote execution again; encrypted conversations, pairings, and retained broker state remain available.
 
 Run the native desktop shell:
 
@@ -43,6 +48,19 @@ npm --prefix desktop start
 ```
 
 In the native app, open the project switcher and choose **Choose folder** to use Finder on macOS or the system folder chooser on Windows. The selected absolute path is still inspected and canonicalized by Ensync Host before it becomes the focused project. Cancelling changes nothing. The browser build keeps manual absolute-path entry because websites cannot receive this narrow desktop bridge.
+
+## iPhone and Android
+
+The mobile client lives in `mobile/` and includes generated Capacitor iOS and Android projects. In desktop Settings, sign in to the same Ensync account, enable **Remote execution**, and create a one-time pairing code. On mobile, sign in, enter that code, choose Codex or Claude Code, enter the absolute project path on the paired Host, and start the encrypted run.
+
+```bash
+npm --prefix mobile install
+npm --prefix mobile run sync
+npm --prefix mobile run open:ios      # Xcode on macOS
+npm --prefix mobile run open:android  # Android Studio + Android SDK
+```
+
+The development app supports pairing, submission, encrypted event polling, cancellation, and steering. Host project discovery, attachments, secure OS credential persistence, background push wake-up, store signing, and App Store/Play Store publishing remain release work.
 
 ## Usage and fallback
 
@@ -79,6 +97,7 @@ The tag-triggered release workflow refuses to create a public GitHub release unl
 
 ```bash
 npm run build
+npm run build:mobile
 npm run test:host
 npm --prefix desktop test
 npm --prefix desktop run smoke

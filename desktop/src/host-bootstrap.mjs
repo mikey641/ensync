@@ -17,6 +17,7 @@ const HOST_READY_PREFIX = 'ENSYNC_HOST_READY:'
 const token = process.env.ENSYNC_HOST_AUTH_TOKEN
 const stateFile = process.env.ENSYNC_HOST_STATE_FILE
 const journalFile = process.env.ENSYNC_HOST_JOB_JOURNAL_FILE
+const projectIsolationRoot = process.env.ENSYNC_HOST_PROJECT_ISOLATION_ROOT
 const idleShutdownMs = Number(process.env.ENSYNC_HOST_IDLE_SHUTDOWN_MS || 60_000)
 const detachedMode = Boolean(token && stateFile && journalFile)
 
@@ -30,6 +31,9 @@ if ([token, stateFile, journalFile].some(Boolean) && !detachedMode) {
 if (detachedMode && token.length < 32) throw new Error('ENSYNC_HOST_AUTH_TOKEN is invalid.')
 if (detachedMode && !isAbsolute(stateFile)) throw new Error('ENSYNC_HOST_STATE_FILE must be absolute.')
 if (detachedMode && !isAbsolute(journalFile)) throw new Error('ENSYNC_HOST_JOB_JOURNAL_FILE must be absolute.')
+if (projectIsolationRoot && !isAbsolute(projectIsolationRoot)) {
+  throw new Error('ENSYNC_HOST_PROJECT_ISOLATION_ROOT must be absolute.')
+}
 await access(hostEntry)
 
 const [{ startEnsyncHost }, { DaemonLeaseService, shouldKeepDaemonAlive }] = await Promise.all([
@@ -50,11 +54,13 @@ const server = startEnsyncHost({
   authToken: detachedMode ? token : null,
   instanceId: detachedMode ? instanceId : null,
   chatJobJournalPath: detachedMode ? journalFile : null,
+  projectIsolationRoot: projectIsolationRoot || undefined,
   daemonLeaseService,
 })
 
 async function writeDescriptor(port) {
   const staging = `${stateFile}.${process.pid}.staging`
+  const backup = `${stateFile}.backup`
   await mkdir(dirname(stateFile), { recursive: true, mode: 0o700 })
   await writeFile(staging, JSON.stringify({
     version: 1,
@@ -66,8 +72,22 @@ async function writeDescriptor(port) {
     startedAt: new Date().toISOString(),
   }), { encoding: 'utf8', mode: 0o600 })
   try { await chmod(staging, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
-  await rm(stateFile, { force: true })
-  await rename(staging, stateFile)
+  try {
+    const current = await readFile(stateFile, 'utf8')
+    await writeFile(backup, current, { encoding: 'utf8', mode: 0o600 })
+    try { await chmod(backup, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+  } catch {
+    // First startup has no descriptor to preserve.
+  }
+  try {
+    // POSIX rename replaces atomically, so readers never observe a missing
+    // rendezvous file. Windows falls back while the backup remains usable.
+    await rename(staging, stateFile)
+  } catch (error) {
+    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error
+    await rm(stateFile, { force: true })
+    await rename(staging, stateFile)
+  }
 }
 
 async function removeOwnDescriptor() {
@@ -107,7 +127,8 @@ async function stop(exitCode = 0) {
 let idleSince = null
 const cleanupTimer = detachedMode ? setInterval(() => {
   server.ensyncServices.chatJobs.sweep()
-  const idle = !shouldKeepDaemonAlive(
+  const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
+  const idle = !brokerConnected && !shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )

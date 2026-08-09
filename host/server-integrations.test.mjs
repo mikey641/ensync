@@ -52,6 +52,106 @@ test('support repair route returns only the injected subscription repair result'
   assert.deepEqual(calls, [request])
 })
 
+test('account sync routes expose only status and encrypted-service workflow results', async (context) => {
+  const calls = []
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: false, username: null }),
+    register: async (input) => {
+      calls.push(['register', input])
+      return { configured: true, authenticated: true, username: input.username }
+    },
+    login: async (input) => {
+      calls.push(['login', input])
+      return { configured: true, authenticated: true, username: input.username }
+    },
+    logout: async () => ({ configured: true, authenticated: false, username: null }),
+    pull: async () => ({ state: { chats: [] }, revision: 4, updatedAt: '2026-08-07T10:00:00.000Z' }),
+    push: async (state, baseRevision) => {
+      calls.push(['push', state, baseRevision])
+      return { status: 'saved', revision: baseRevision + 1, updatedAt: '2026-08-07T10:01:00.000Z' }
+    },
+  }
+  const baseUrl = await withHost(context, { accountSyncService })
+
+  const status = await fetch(`${baseUrl}/api/account-sync/status`).then((response) => response.json())
+  assert.equal(status.authenticated, false)
+
+  const registerResponse = await fetch(`${baseUrl}/api/account-sync/register`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'account-user', password: 'not-returned' }),
+  })
+  assert.equal(registerResponse.status, 201)
+  assert.equal((await registerResponse.json()).username, 'account-user')
+
+  const pulled = await fetch(`${baseUrl}/api/account-sync/workspace`).then((response) => response.json())
+  assert.equal(pulled.revision, 4)
+  const pushed = await fetch(`${baseUrl}/api/account-sync/workspace`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ state: { chats: [{ id: 'chat-a' }] }, baseRevision: 4 }),
+  }).then((response) => response.json())
+  assert.equal(pushed.revision, 5)
+  assert.deepEqual(calls, [
+    ['register', { username: 'account-user', password: 'not-returned' }],
+    ['push', { chats: [{ id: 'chat-a' }] }, 4],
+  ])
+})
+
+test('account sync broker routes control only the outbound Host worker', async (context) => {
+  const calls = []
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: true, username: 'remote-user' }),
+    logout: async () => ({ configured: true, authenticated: false, username: null }),
+  }
+  const syncBrokerHostService = {
+    status: () => ({ state: 'disconnected', running: false, host: null, activeJobs: 0 }),
+    connect: async (input) => {
+      calls.push(['connect', input])
+      return { state: 'connected', running: true, host: { id: input.deviceId, label: input.label }, activeJobs: 0 }
+    },
+    createPairing: async () => {
+      calls.push(['pairing'])
+      return { pairing: { id: 'pair_000000000000001' }, code: 'ABCDEFGH' }
+    },
+    pollOnce: async () => ({ state: 'connected', running: true, activeJobs: 1 }),
+    disconnect: async (input) => {
+      calls.push(['disconnect', input])
+      return { state: 'disconnected', running: false, host: null, activeJobs: 0 }
+    },
+    stop: async () => {
+      calls.push(['stop'])
+    },
+  }
+  const baseUrl = await withHost(context, { accountSyncService, syncBrokerHostService })
+
+  const connected = await fetch(`${baseUrl}/api/account-sync/broker/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'host_device_00000001', label: 'This computer' }),
+  }).then((response) => response.json())
+  assert.equal(connected.running, true)
+
+  const pairing = await fetch(`${baseUrl}/api/account-sync/broker/pairing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }).then((response) => response.json())
+  assert.equal(pairing.code, 'ABCDEFGH')
+
+  const disconnected = await fetch(`${baseUrl}/api/account-sync/broker/disconnect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revoke: true }),
+  }).then((response) => response.json())
+  assert.equal(disconnected.running, false)
+  assert.deepEqual(calls.slice(0, 3), [
+    ['connect', { deviceId: 'host_device_00000001', label: 'This computer' }],
+    ['pairing'],
+    ['disconnect', { revoke: true }],
+  ])
+})
+
 test('support repair route preserves explicit non-automatic retry policy', async (context) => {
   const supportRepairService = {
     async run() {
