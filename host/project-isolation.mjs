@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -253,6 +253,62 @@ export class ProjectIsolationService {
     }
   }
 
+  async recoverStrandedWorktrees() {
+    const summary = { scanned: 0, recovered: [], skipped: [] }
+    let repositoryHashes
+    try {
+      repositoryHashes = await readdir(this.#rootPath)
+    } catch {
+      return summary
+    }
+    for (const repositoryHash of repositoryHashes) {
+      let workspaceHashes
+      try {
+        workspaceHashes = await readdir(join(this.#rootPath, repositoryHash))
+      } catch {
+        continue
+      }
+      for (const workspaceHash of workspaceHashes) {
+        let worktreePath = join(this.#rootPath, repositoryHash, workspaceHash)
+        summary.scanned += 1
+        try {
+          worktreePath = await realpath(worktreePath)
+          const branchResult = await this.#git(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const branch = firstLine(branchResult.stdout)
+          if (branchResult.exitCode !== 0 || !branch.startsWith('ensync/chat-')) {
+            summary.skipped.push({ worktreePath, reason: 'not_an_agent_worktree' })
+            continue
+          }
+          const commonResult = await this.#git(['rev-parse', '--git-common-dir'], { cwd: worktreePath })
+          const commonValue = firstLine(commonResult.stdout)
+          const commonDirectory = isAbsolute(commonValue) ? commonValue : resolve(worktreePath, commonValue)
+          const lockPath = join(commonDirectory, 'ensync', 'workspace-write-locks', `${workspaceHash}.lock`)
+          let leaseHeld = false
+          try {
+            await stat(lockPath)
+            leaseHeld = true
+          } catch { /* no active lease */ }
+          if (leaseHeld) {
+            summary.skipped.push({ worktreePath, reason: 'active_lease' })
+            continue
+          }
+          const result = await this.#commitWorktree(worktreePath, branch, { outcome: 'recovered' })
+          if (result.committed) {
+            summary.recovered.push({ worktreePath, branch, changedFiles: result.changedFiles, head: result.head })
+          } else {
+            summary.skipped.push({ worktreePath, reason: 'clean' })
+          }
+        } catch (error) {
+          summary.skipped.push({ worktreePath, reason: error instanceof Error ? error.message : 'unknown_error' })
+        }
+      }
+    }
+    return summary
+  }
+
   async #commitWorktree(worktreePath, branch, details) {
     const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       cwd: worktreePath,
@@ -486,7 +542,7 @@ export class ProjectIsolationService {
     let worktreePath
     let reused = false
     let seededFromSharedCheckout = false
-    let branchExistedBeforeAcquire = false
+    let branchExistedBeforeAcquire
 
     if (registered) {
       if (registered.prunable) {

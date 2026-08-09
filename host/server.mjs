@@ -794,6 +794,14 @@ export function startEnsyncHost(options = {}) {
     const address = server.address()
     const resolvedPort = typeof address === 'object' && address ? address.port : port
     console.log(`Ensync Host listening on http://${host}:${resolvedPort}`)
+    const isolation = server.ensyncServices?.projectIsolation
+    isolation?.recoverStrandedWorktrees?.().then((summary) => {
+      if (summary.recovered.length > 0) {
+        console.log(`Ensync recovered uncommitted agent work in ${summary.recovered.length} worktree(s).`)
+      }
+    }).catch((error) => {
+      console.error('Ensync stranded-work recovery failed:', error instanceof Error ? error.message : error)
+    })
   })
   return server
 }
