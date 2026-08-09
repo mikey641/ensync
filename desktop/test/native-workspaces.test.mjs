@@ -7,6 +7,7 @@ import test from 'node:test'
 import {
   createNativeWorkspaceIdentity,
   createNativeWorkspaceStore,
+  createWorkspaceFocusHandler,
   createWorkspaceIdentityHandler,
   createWorkspaceIdentityIpcManager,
   isNativeWorkspaceIdentity,
@@ -110,7 +111,11 @@ test('workspace identity IPC returns only an authorized registered identity', as
     identityForWebContents: (webContents) => webContents === sender ? identity : null,
     retainedIdentities: () => [identity],
   })
-  assert.deepEqual(await handler({ sender }), { ...identity, retainedWorkspaceIds: [identity.id] })
+  assert.deepEqual(await handler({ sender }), {
+    ...identity,
+    retainedWorkspaceIds: [identity.id],
+    retainedWorkspaces: [identity],
+  })
   assert.equal(await handler({ sender: {} }), null)
 })
 
@@ -147,6 +152,7 @@ test('workspace identity IPC manager registers once and remains installed while 
   assert.deepEqual(await handler({ sender: ownedSender }), {
     ...identity,
     retainedWorkspaceIds: [identity.id],
+    retainedWorkspaces: [identity],
   })
   assert.equal(await handler({ sender: {} }), null)
 
@@ -161,4 +167,33 @@ test('workspace identity IPC manager registers once and remains installed while 
   assert.equal(removeCalls, 1)
   assert.equal(manager.registered, false)
   assert.equal(manager.dispose(), false)
+})
+
+test('workspace focus routes only authorized project requests to a different retained window', async () => {
+  const source = { id: IDS[0], kind: 'isolated' }
+  const target = { id: IDS[1], kind: 'canonical' }
+  const sender = {}
+  const targetWindow = {}
+  const actions = []
+  const handler = createWorkspaceFocusHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: (webContents) => webContents === sender ? source : null,
+    retainedIdentities: () => [source, target],
+    windowForWorkspace: (id) => id === target.id ? targetWindow : null,
+    focusWindow: (window) => { actions.push(['focus', window]); return true },
+    notifyProjectFocus: (window, project) => { actions.push(['notify', window, project]) },
+  })
+  const request = {
+    workspaceId: target.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+  }
+  assert.equal(await handler({ sender }, request), true)
+  assert.deepEqual(actions, [
+    ['focus', targetWindow],
+    ['notify', targetWindow, { projectId: 'project-relay', projectPath: '/Users/example/relay' }],
+  ])
+  assert.equal(await handler({ sender: {} }, request), false)
+  assert.equal(await handler({ sender }, { ...request, workspaceId: source.id }), false)
+  assert.equal(await handler({ sender }, { ...request, projectPath: 'relative/path' }), false)
 })

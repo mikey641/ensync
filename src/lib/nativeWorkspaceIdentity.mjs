@@ -9,6 +9,7 @@ const MISSING_HANDLER_MESSAGES = new Set([
 ])
 let currentWorkspace = CANONICAL_WORKSPACE
 let retainedWorkspaceIds = Object.freeze([])
+let retainedWorkspaces = Object.freeze([])
 
 export function isNativeWorkspaceIdentity(value) {
   return Boolean(
@@ -25,6 +26,53 @@ function normalizeRetainedWorkspaceIds(value) {
   return result.every((id) => NATIVE_WORKSPACE_ID_PATTERN.test(id)) && new Set(result).size === result.length
     ? result
     : null
+}
+
+function normalizeRetainedWorkspaces(value) {
+  if (!Array.isArray(value) || value.length > 32) return null
+  const result = []
+  const ids = new Set()
+  let canonicalCount = 0
+  for (const candidate of value) {
+    if (!isNativeWorkspaceIdentity(candidate)) return null
+    const workspace = { id: candidate.id.toLowerCase(), kind: candidate.kind }
+    if (ids.has(workspace.id)) return null
+    ids.add(workspace.id)
+    if (workspace.kind === 'canonical') canonicalCount += 1
+    if (canonicalCount > 1) return null
+    result.push(Object.freeze(workspace))
+  }
+  return result
+}
+
+function normalizeWorkspaceIdentityResponse(identity) {
+  const retainedIds = normalizeRetainedWorkspaceIds(identity?.retainedWorkspaceIds)
+  if (!isNativeWorkspaceIdentity(identity) || !retainedIds || !retainedIds.includes(identity.id.toLowerCase())) {
+    throw new Error('Ensync could not verify this native window workspace.')
+  }
+  const normalizedWorkspaces = identity?.retainedWorkspaces === undefined
+    ? [{ id: identity.id.toLowerCase(), kind: identity.kind }]
+    : normalizeRetainedWorkspaces(identity.retainedWorkspaces)
+  if (!normalizedWorkspaces
+    || !normalizedWorkspaces.some((workspace) => workspace.id === identity.id.toLowerCase()
+      && workspace.kind === identity.kind)
+    || (identity?.retainedWorkspaces !== undefined
+      && (normalizedWorkspaces.length !== retainedIds.length
+        || normalizedWorkspaces.some((workspace) => !retainedIds.includes(workspace.id))))) {
+    throw new Error('Ensync could not verify the retained native workspaces.')
+  }
+  return {
+    current: { id: identity.id.toLowerCase(), kind: identity.kind },
+    retainedIds,
+    retainedWorkspaces: normalizedWorkspaces,
+  }
+}
+
+function applyWorkspaceIdentityResponse(normalized) {
+  currentWorkspace = Object.freeze({ ...normalized.current })
+  retainedWorkspaceIds = Object.freeze([...normalized.retainedIds])
+  retainedWorkspaces = Object.freeze([...normalized.retainedWorkspaces])
+  return currentWorkspace
 }
 
 export function removeAbandonedNativeWorkspaceStorage(storage, retainedIds) {
@@ -82,6 +130,7 @@ export async function initializeNativeWorkspaceIdentity(target = globalThis, com
     }
     currentWorkspace = CANONICAL_WORKSPACE
     retainedWorkspaceIds = Object.freeze([])
+    retainedWorkspaces = Object.freeze([])
     return currentWorkspace
   }
 
@@ -89,16 +138,31 @@ export async function initializeNativeWorkspaceIdentity(target = globalThis, com
   if (legacyMain) {
     throw new Error('This Ensync window could not obtain a native workspace identity. Quit Ensync completely and reopen it before continuing.')
   }
-  const retainedIds = normalizeRetainedWorkspaceIds(identity?.retainedWorkspaceIds)
-  if (!isNativeWorkspaceIdentity(identity) || !retainedIds || !retainedIds.includes(identity.id.toLowerCase())) {
-    throw new Error('Ensync could not verify this native window workspace.')
-  }
+  const normalized = normalizeWorkspaceIdentityResponse(identity)
   // Retired UUID namespaces remain untouched for recovery. A newly generated
   // isolated identity cannot read them, so clean-window behavior does not need
   // destructive renderer-side localStorage cleanup.
-  currentWorkspace = Object.freeze({ id: identity.id.toLowerCase(), kind: identity.kind })
-  retainedWorkspaceIds = Object.freeze([...retainedIds])
-  return currentWorkspace
+  return applyWorkspaceIdentityResponse(normalized)
+}
+
+/**
+ * Refreshes the shell-owned retained-window roster without permitting this
+ * renderer's own storage identity to change after hydration.
+ */
+export async function refreshRetainedNativeWorkspaces(target = globalThis) {
+  const bridge = target?.ensyncDesktop
+  if (!bridge || typeof bridge.getWorkspaceIdentity !== 'function') {
+    return getRetainedNativeWorkspaces()
+  }
+  const normalized = normalizeWorkspaceIdentityResponse(await bridge.getWorkspaceIdentity())
+  if (!isNativeWorkspaceIdentity(currentWorkspace)
+    || normalized.current.id !== currentWorkspace.id
+    || normalized.current.kind !== currentWorkspace.kind) {
+    throw new Error('Ensync native window identity changed unexpectedly.')
+  }
+  retainedWorkspaceIds = Object.freeze([...normalized.retainedIds])
+  retainedWorkspaces = Object.freeze([...normalized.retainedWorkspaces])
+  return getRetainedNativeWorkspaces()
 }
 
 export function getNativeWorkspaceIdentity() {
@@ -108,6 +172,11 @@ export function getNativeWorkspaceIdentity() {
 /** Shell-authenticated identities which are still eligible for relaunch. */
 export function getRetainedNativeWorkspaceIds() {
   return [...retainedWorkspaceIds]
+}
+
+/** Shell-authenticated retained identities, including canonical storage kind. */
+export function getRetainedNativeWorkspaces() {
+  return retainedWorkspaces.map((workspace) => ({ ...workspace }))
 }
 
 export function isCanonicalWorkspace(identity = currentWorkspace) {

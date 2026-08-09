@@ -3,6 +3,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 export const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
+export const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
+export const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 export const NATIVE_WORKSPACE_STATE_FILENAME = 'native-workspaces-v1.json'
 export const NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 
@@ -152,12 +154,64 @@ export function createWorkspaceIdentityHandler({ isAuthorized, identityForWebCon
   return async (event) => {
     if (!isAuthorized(event)) return null
     const identity = identityForWebContents(event.sender)
-    const retainedWorkspaceIds = retainedIdentities()
+    const retainedWorkspaces = retainedIdentities()
       .filter(isNativeWorkspaceIdentity)
-      .map((item) => item.id)
+      .map((item) => ({ id: item.id, kind: item.kind }))
+    const retainedWorkspaceIds = retainedWorkspaces.map((item) => item.id)
     return isNativeWorkspaceIdentity(identity)
-      ? { id: identity.id, kind: identity.kind, retainedWorkspaceIds }
+      ? { id: identity.id, kind: identity.kind, retainedWorkspaceIds, retainedWorkspaces }
       : null
+  }
+}
+
+function absoluteLocalPath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return false
+  if (value.startsWith('/')) return value !== '/' && !/^\/+$/u.test(value)
+  if (/^[a-z]:[\\/]/i.test(value)) return !/^[a-z]:[\\/]*$/i.test(value)
+  return /^\\\\[^\\]+\\[^\\]+/.test(value)
+}
+
+export function createWorkspaceFocusHandler({
+  isAuthorized,
+  identityForWebContents,
+  retainedIdentities,
+  windowForWorkspace,
+  focusWindow,
+  notifyProjectFocus,
+}) {
+  for (const [name, value] of Object.entries({
+    isAuthorized,
+    identityForWebContents,
+    retainedIdentities,
+    windowForWorkspace,
+    focusWindow,
+    notifyProjectFocus,
+  })) {
+    if (typeof value !== 'function') throw new TypeError(`${name} must be a function.`)
+  }
+  return async (event, request) => {
+    if (!isAuthorized(event) || !request || typeof request !== 'object') return false
+    const source = identityForWebContents(event.sender)
+    const targetWorkspaceId = typeof request.workspaceId === 'string'
+      ? request.workspaceId.toLowerCase()
+      : ''
+    if (!isNativeWorkspaceIdentity(source)
+      || !NATIVE_WORKSPACE_ID_PATTERN.test(targetWorkspaceId)
+      || source.id === targetWorkspaceId
+      || typeof request.projectId !== 'string'
+      || request.projectId.length === 0
+      || request.projectId.length > 256
+      || !absoluteLocalPath(request.projectPath)) return false
+    const targetIdentity = retainedIdentities()
+      .find((identity) => isNativeWorkspaceIdentity(identity) && identity.id === targetWorkspaceId)
+    if (!targetIdentity) return false
+    const targetWindow = windowForWorkspace(targetWorkspaceId)
+    if (!targetWindow || await focusWindow(targetWindow) === false) return false
+    await notifyProjectFocus(targetWindow, {
+      projectId: request.projectId,
+      projectPath: request.projectPath,
+    })
+    return true
   }
 }
 

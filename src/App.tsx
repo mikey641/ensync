@@ -4,6 +4,7 @@ import {
   ArrowDown,
   ArrowRight,
   ArrowUp,
+  Bell,
   Bot,
   Boxes,
   Check,
@@ -22,6 +23,8 @@ import {
   History,
   Layers3,
   LifeBuoy,
+  LockKeyhole,
+  LogOut,
   Menu,
   MessageSquareText,
   Paperclip,
@@ -35,6 +38,7 @@ import {
   Square,
   Smartphone,
   TerminalSquare,
+  UserRound,
   Wifi,
   X,
 } from 'lucide-react'
@@ -77,6 +81,14 @@ import {
 } from './lib/remoteSsh'
 import { supportRepairHost } from './lib/supportRepairHost'
 import {
+  accountSyncHost,
+  type AccountSyncStatus,
+} from './lib/accountSyncHost'
+import {
+  mergeAccountWorkspace,
+  prepareAccountWorkspace,
+} from './lib/accountWorkspaceSync.mjs'
+import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
@@ -95,9 +107,23 @@ import {
 } from './lib/nativeProjectFolder.mjs'
 import { createChatRunRegistry } from './lib/chatRunRegistry.mjs'
 import { createChatRunCancellationRegistry } from './lib/chatRunCancellation.mjs'
+import {
+  adoptReconnectableHostJobState,
+  runningHostJobCandidates,
+} from './lib/hostJobRecovery.mjs'
 import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
+import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
+import {
+  acknowledgeAgentUpdateReminder,
+  agentUpdateDue,
+  readAgentUpdatePreferences,
+  recordAgentUpdateMaintenance,
+  writeAgentUpdatePreferences,
+  type AgentUpdateMode,
+  type AgentUpdatePreferences,
+} from './lib/agentUpdatePreferences.mjs'
 import {
   nextWorkingElapsedDelay,
   workingElapsedLabel,
@@ -108,7 +134,10 @@ import {
   insertAgentReplyBeforeLaterQueued,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
+  promoteQueuedMessageToActiveTurn,
+  promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
+  promptQueueStatusPresentation,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -140,10 +169,18 @@ import {
 import {
   getNativeWorkspaceIdentity,
   getRetainedNativeWorkspaceIds,
+  getRetainedNativeWorkspaces,
   isCanonicalWorkspace,
+  refreshRetainedNativeWorkspaces,
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
+import {
+  findRetainedWorkspaceForProject,
+  nativeProjectPathKey,
+  workspaceProjectHistoryScore,
+} from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
+import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -163,6 +200,15 @@ const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
+const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
+  configured: false,
+  authenticated: false,
+  username: null,
+  remoteRevision: null,
+  lastSyncedAt: null,
+  encryption: 'aes-256-gcm',
+  credentialStorage: 'host_memory_only',
+}
 
 function useWorkingElapsedLabel(running: boolean, startedAt: string | null) {
   const [nowMs, setNowMs] = useState(() => Date.now())
@@ -238,6 +284,8 @@ type StoredState = {
   recentProjectRecoveryIds?: string[]
   /** Exact source-prefix hashes applied by explicit external conversation imports. */
   conversationImportIds?: string[]
+  /** Retired native-window project histories already merged into canonical. */
+  archivedProjectRecoveryIds?: string[]
 }
 
 type PersistedInFlightRun = {
@@ -281,10 +329,14 @@ function readInitialStoredState(): StoredState | null {
     const reconciled = stored
       ? reconcileInterruptedWorkspaceState(stored, { preserveHostJobs: true }).state
       : null
-    return recoverRecentProjectHistory(reconciled, window.localStorage, {
+    const withRecentProjects = recoverRecentProjectHistory(reconciled, window.localStorage, {
       identity,
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
       legacyStates,
+    }).state
+    return recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
+      identity,
+      retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
     }).state
   } catch {
     return null
@@ -363,6 +415,7 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     usageReason: status.usage.reason,
     canConnect: status.canConnect,
     canUpdate: status.canUpdate,
+    updateStrategy: status.updateStrategy,
     updateReason: status.updateReason,
     routeKind: status.routeKind,
     chatExecution: status.chatExecution,
@@ -457,10 +510,23 @@ function runNeedsReconciliation(error: unknown) {
   const code = error instanceof EnsyncHostError || error instanceof RemoteSshClientError
     ? error.code
     : null
-  return code !== null && ['run_timed_out', 'ssh_timed_out', 'invalid_cli_output', 'empty_cli_response', 'cli_failed'].includes(code)
+  return code !== null && [
+    'run_timed_out',
+    'ssh_timed_out',
+    'invalid_cli_output',
+    'empty_cli_response',
+    'cli_failed',
+    'execution_stream_disconnected',
+    'chat_job_stream_disconnected',
+    'invalid_execution_stream',
+    'invalid_chat_job_stream',
+  ].includes(code)
 }
 
-const PROJECT_COLORS = ['#93dfa0', '#83b9f3', '#e4ac82', '#c7a8ff', '#f5cf70']
+function runWasInterrupted(error: unknown) {
+  return error instanceof EnsyncHostError && error.code === 'execution_stream_disconnected'
+}
+
 const EMPTY_PROJECT: RelayProject = {
   id: '',
   name: 'Select project',
@@ -479,13 +545,8 @@ const EMPTY_PROJECT: RelayProject = {
   verified: false,
 }
 
-function projectColor(projectId: string) {
-  const value = [...projectId].reduce((total, character) => total + character.charCodeAt(0), 0)
-  return PROJECT_COLORS[value % PROJECT_COLORS.length]
-}
-
 function verifiedProject(project: ProjectInspection): RelayProject {
-  return { ...project, color: projectColor(project.id), verified: true }
+  return { ...project, color: projectColor(project.path || project.id), verified: true }
 }
 
 function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
@@ -629,6 +690,7 @@ function App() {
   const workspaceRecoveryIds = hydrated?.workspaceRecoveryIds ?? []
   const recentProjectRecoveryIds = hydrated?.recentProjectRecoveryIds ?? []
   const conversationImportIds = hydrated?.conversationImportIds ?? []
+  const archivedProjectRecoveryIds = hydrated?.archivedProjectRecoveryIds ?? []
   const [chats, setChats] = useState<Chat[]>(() => (hydrated?.chats ?? initialChats).map(normalizeChatModelChoice))
   const [tabs, setTabs] = useState<WorkspaceTab[]>(
     Array.isArray(hydrated?.tabs)
@@ -660,12 +722,23 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
+  const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
+  const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
+  const [agentUpdatePreferences, setAgentUpdatePreferences] = useState<AgentUpdatePreferences>(() =>
+    readAgentUpdatePreferences(window.localStorage),
+  )
+  const [agentUpdateNotice, setAgentUpdateNotice] = useState<{ tone: 'success' | 'error'; message: string } | null>(null)
   const [supportOpen, setSupportOpen] = useState(false)
   const [contextOpen, setContextOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
   const [gitWorkflowMode, setGitWorkflowMode] = useState<'clone' | 'manage' | null>(null)
   const [projects, setProjects] = useState<RelayProject[]>(() =>
-    (hydrated?.projects ?? []).map((project) => ({ ...project, verified: false })),
+    (hydrated?.projects ?? []).map((project) => ({
+      ...project,
+      color: projectColor(project.path || project.id),
+      verified: false,
+    })),
   )
   const [nativeRecentProjects, setNativeRecentProjects] = useState<NativeRecentProject[]>(getNativeRecentProjects)
   const [activeProjectId, setActiveProjectId] = useState(hydrated?.activeProjectId ?? '')
@@ -679,10 +752,13 @@ function App() {
   const chatRunCancellationRef = useRef(createChatRunCancellationRegistry())
   const providerRefreshInFlightRef = useRef<Promise<boolean> | null>(null)
   const recoveringChatIdsRef = useRef(new Set<string>())
+  const rediscoveringHostJobsRef = useRef(false)
+  const rediscoveredHostJobsRef = useRef(false)
   const steeringChatIdsRef = useRef(new Set<string>())
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
+  const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
   )
@@ -700,6 +776,7 @@ function App() {
   const [inFlightRuns, setInFlightRuns] = useState<Record<string, PersistedInFlightRun>>(
     hydrated?.inFlightRuns ?? {},
   )
+  const [hostJobRecoveryRetry, setHostJobRecoveryRetry] = useState(0)
   const [promptQueues, setPromptQueues] = useState<PromptQueues>(() => normalizePromptQueues(hydrated?.promptQueues))
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>({ kind: 'local' })
   const chatsRef = useRef(chats)
@@ -715,6 +792,10 @@ function App() {
   const inFlightRunsRef = useRef(inFlightRuns)
   const promptQueuesRef = useRef(promptQueues)
   const executionTargetRef = useRef(executionTarget)
+  const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
+  const accountSyncFingerprintRef = useRef<string | null>(null)
+  const automaticUpdateAttemptRef = useRef(false)
+  const focusProjectRequestRef = useRef<(project: RelayProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
   chatsRef.current = chats
   tabsRef.current = tabs
   activeTabIdRef.current = activeTabId
@@ -756,6 +837,7 @@ function App() {
     workspaceRecoveryIds,
     recentProjectRecoveryIds,
     conversationImportIds,
+    archivedProjectRecoveryIds,
   }
   const workspaceSnapshotRef = useRef(workspaceSnapshot)
   workspaceSnapshotRef.current = workspaceSnapshot
@@ -771,6 +853,123 @@ function App() {
       console.error('[ensync-workspace-persistence]', error)
     }
   }, [workspaceSnapshotKeys])
+
+  const saveAgentUpdatePreferences = useCallback((update: AgentUpdatePreferences | ((current: AgentUpdatePreferences) => AgentUpdatePreferences)) => {
+    setAgentUpdatePreferences((current) => writeAgentUpdatePreferences(
+      window.localStorage,
+      typeof update === 'function' ? update(current) : update,
+    ))
+  }, [])
+
+  const setAgentUpdateMode = useCallback((mode: AgentUpdateMode) => {
+    saveAgentUpdatePreferences((current) => ({ ...current, mode }))
+    setAgentUpdateNotice(null)
+  }, [saveAgentUpdatePreferences])
+
+  const acknowledgeAgentUpdate = useCallback(() => {
+    saveAgentUpdatePreferences((current) => acknowledgeAgentUpdateReminder(current))
+  }, [saveAgentUpdatePreferences])
+
+  const recordAgentMaintenance = useCallback(() => {
+    saveAgentUpdatePreferences((current) => recordAgentUpdateMaintenance(current))
+  }, [saveAgentUpdatePreferences])
+
+  const synchronizeAccountWorkspace = useCallback(() => {
+    if (accountSyncInFlightRef.current) return accountSyncInFlightRef.current
+    const run = (async () => {
+      setAccountSyncPhase('syncing')
+      setAccountSyncMessage(null)
+      try {
+        const pulled = await accountSyncHost.pull()
+        let merged = mergeAccountWorkspace(workspaceSnapshotRef.current, pulled.state)
+        let portable = prepareAccountWorkspace(merged.state)
+        const remotePortable = pulled.state ? prepareAccountWorkspace(pulled.state as Record<string, unknown>) : null
+        let revision = pulled.revision
+        let updatedAt = pulled.updatedAt
+
+        if (!remotePortable || JSON.stringify(remotePortable) !== JSON.stringify(portable)) {
+          const pushed = await accountSyncHost.push(portable, revision)
+          if (pushed.status === 'conflict') {
+            merged = mergeAccountWorkspace(merged.state, pushed.remoteState)
+            portable = prepareAccountWorkspace(merged.state)
+            const retry = await accountSyncHost.push(portable, pushed.revision)
+            if (retry.status === 'conflict') {
+              throw new Error('Synchronized conversations changed again. Try Sync now once more.')
+            }
+            revision = retry.revision
+            updatedAt = retry.updatedAt
+          } else {
+            revision = pushed.revision
+            updatedAt = pushed.updatedAt
+          }
+        }
+
+        const nextState = merged.state as StoredState
+        setChats((nextState.chats ?? []).map(normalizeChatModelChoice))
+        const nextProjects = (nextState.projects ?? []).map((project) => ({
+          ...project,
+          color: projectColor(project.path || project.id),
+          verified: project.verified === true,
+        }))
+        setProjects(nextProjects)
+        commitWorkspace({ chats: nextState.chats ?? [], projects: nextProjects })
+        accountSyncFingerprintRef.current = JSON.stringify(portable)
+        const syncedAt = new Date().toISOString()
+        setAccountSyncStatus((current) => ({
+          ...current,
+          authenticated: true,
+          remoteRevision: revision,
+          lastSyncedAt: syncedAt,
+        }))
+        setAccountSyncPhase('idle')
+        setAccountSyncMessage(
+          merged.importedChats > 0
+            ? `${merged.importedChats} ${merged.importedChats === 1 ? 'conversation' : 'conversations'} added from your account.`
+            : updatedAt
+              ? 'Conversations are up to date.'
+              : 'Your conversations are now protected by account sync.',
+        )
+      } catch (error) {
+        setAccountSyncPhase('error')
+        setAccountSyncMessage(error instanceof Error ? error.message : 'Conversations could not be synchronized.')
+        throw error
+      }
+    })().finally(() => {
+      accountSyncInFlightRef.current = null
+    })
+    accountSyncInFlightRef.current = run
+    return run
+  }, [commitWorkspace])
+
+  const authenticateAccountSync = useCallback(async (mode: 'register' | 'login', username: string, password: string) => {
+    setAccountSyncPhase('syncing')
+    setAccountSyncMessage(null)
+    try {
+      const status = mode === 'register'
+        ? await accountSyncHost.register(username, password)
+        : await accountSyncHost.login(username, password)
+      setAccountSyncStatus(status)
+      await synchronizeAccountWorkspace()
+    } catch (error) {
+      setAccountSyncPhase('error')
+      setAccountSyncMessage(error instanceof Error ? error.message : 'Account login failed.')
+      throw error
+    }
+  }, [synchronizeAccountWorkspace])
+
+  const logoutAccountSync = useCallback(async () => {
+    setAccountSyncPhase('syncing')
+    setAccountSyncMessage(null)
+    try {
+      const status = await accountSyncHost.logout()
+      setAccountSyncStatus(status)
+      accountSyncFingerprintRef.current = null
+      setAccountSyncPhase('idle')
+    } catch (error) {
+      setAccountSyncPhase('error')
+      setAccountSyncMessage(error instanceof Error ? error.message : 'Account logout failed.')
+    }
+  }, [])
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? EMPTY_PROJECT
   const recentProjectOptions = useMemo(() => {
@@ -814,6 +1013,18 @@ function App() {
     readCompletionByChat,
   })
   const executionProviders = useMemo(() => providersForTarget(providers, executionTarget), [providers, executionTarget])
+  const installedAgentProviders = useMemo(
+    () => providers.filter((provider) => provider.installed === true),
+    [providers],
+  )
+  const updateableAgentProviders = useMemo(
+    () => installedAgentProviders.filter((provider) => provider.canUpdate === true),
+    [installedAgentProviders],
+  )
+  const agentUpdateReminderDue = hostOnline
+    && agentUpdatePreferences.mode === 'remind'
+    && installedAgentProviders.length > 0
+    && agentUpdateDue(agentUpdatePreferences)
   const displayProjectChats = projectChats.map((chat) => ({
     ...chat,
     provider: providerForChat(executionProviders, chat, fallbackProviderOrder).id,
@@ -828,6 +1039,14 @@ function App() {
     && supportsChat(supportProvider)
     && (supportProvider.usage === null || supportProvider.usage < 100)
   const currentTargetKey = targetKey(executionTarget)
+  const accountWorkspaceDocument = useMemo(
+    () => prepareAccountWorkspace({ chats, projects }),
+    [chats, projects],
+  )
+  const accountWorkspaceFingerprint = useMemo(
+    () => JSON.stringify(accountWorkspaceDocument),
+    [accountWorkspaceDocument],
+  )
 
   const markChatRead = useCallback((chatId: string) => {
     const chat = chatsRef.current.find((item) => item.id === chatId)
@@ -850,7 +1069,11 @@ function App() {
     const retained: ChatExecutionEvent[] = []
     for (let index = events.length - 1; index >= 0 && retained.length < 500; index -= 1) {
       const candidate = events[index]
-      const size = candidate.type === 'output' ? candidate.text.length : candidate.type === 'started' ? candidate.command.length + candidate.cwd.length : candidate.message.length
+      const size = candidate.type === 'output' || candidate.type === 'note'
+        ? candidate.text.length
+        : candidate.type === 'started'
+          ? candidate.command.length + candidate.cwd.length
+          : candidate.message.length
       if (retained.length > 0 && retainedCharacters + size > 1024 * 1024) break
       retained.unshift(candidate)
       retainedCharacters += size
@@ -858,6 +1081,20 @@ function App() {
     const next = { ...chatExecutionEventsRef.current, [chatId]: retained }
     chatExecutionEventsRef.current = next
     setChatExecutionEvents(next)
+    if (event.type === 'notice' && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? '')) {
+      const subtitle = ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(event.code ?? '')
+        ? 'Waiting for this chat workspace'
+        : 'Working in protected branch'
+      const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
+        ...chat,
+        subtitle,
+        workspace: event.code === 'project_workspace_ready' && event.workspace
+          ? { path: event.workspace.path, branch: event.workspace.branch }
+          : chat.workspace,
+      } : chat)
+      chatsRef.current = nextChats
+      setChats(nextChats)
+    }
   }, [])
 
   const updateInFlightRun = useCallback((chatId: string, update: (run: PersistedInFlightRun | undefined) => PersistedInFlightRun | undefined) => {
@@ -922,7 +1159,7 @@ function App() {
         setProviders(defaultProviders.map((provider) => ({
           ...provider,
           status: `Ensync Host unavailable: ${message}`,
-          usageReason: 'Start Ensync with npm run dev so the loopback host can inspect local CLIs.',
+          usageReason: 'Ensync is reconnecting to the local Host. Verified CLI values will return automatically.',
         })))
         return false
       }
@@ -982,6 +1219,109 @@ function App() {
   }, [refreshProviders])
 
   useEffect(() => subscribeNativeRecentProjects(setNativeRecentProjects), [])
+
+  useEffect(() => {
+    const synchronizePreferences = (event: StorageEvent) => {
+      if (event.storageArea === window.localStorage) {
+        setAgentUpdatePreferences(readAgentUpdatePreferences(window.localStorage))
+      }
+    }
+    window.addEventListener('storage', synchronizePreferences)
+    return () => window.removeEventListener('storage', synchronizePreferences)
+  }, [])
+
+  useEffect(() => {
+    if (agentUpdatePreferences.mode !== 'automatic'
+      || !hostOnline
+      || installedAgentProviders.length === 0
+      || Object.keys(inFlightRuns).length > 0
+      || !agentUpdateDue(agentUpdatePreferences)
+      || automaticUpdateAttemptRef.current) return
+
+    let cancelled = false
+    automaticUpdateAttemptRef.current = true
+    const providerManaged = installedAgentProviders.filter((provider) => provider.updateStrategy === 'provider_automatic')
+    const guideOnly = installedAgentProviders.filter((provider) => provider.updateStrategy === 'official_guide')
+    void Promise.allSettled(updateableAgentProviders.map((provider) =>
+      ensyncHost.updateProvider(provider.id, true, 'automatic'),
+    )).then((results) => {
+      if (cancelled) return
+      const completed = results.flatMap((result, index) =>
+        result.status === 'fulfilled' && (result.value.started || result.value.deduplicated)
+          ? [updateableAgentProviders[index].name]
+          : [],
+      )
+      const failed = results.flatMap((result, index) =>
+        result.status === 'fulfilled' && (result.value.started || result.value.deduplicated)
+          ? []
+          : [updateableAgentProviders[index].name],
+      )
+      if (completed.length === updateableAgentProviders.length) {
+        recordAgentMaintenance()
+        const details = [
+          completed.length > 0 ? `Update terminals opened for ${completed.join(', ')}.` : null,
+          providerManaged.length > 0 ? `${providerManaged.map((provider) => provider.name).join(', ')} use their own automatic updater.` : null,
+          guideOnly.length > 0 ? `${guideOnly.map((provider) => provider.name).join(', ')} still need their official update guide because maintenance depends on the installation method or operating system.` : null,
+        ].filter((detail): detail is string => detail !== null)
+        setAgentUpdateNotice({
+          tone: guideOnly.length > 0 ? 'error' : 'success',
+          message: `${details.join(' ')} Provider updaters remain authoritative for completion.`,
+        })
+      } else if (completed.length > 0) {
+        setAgentUpdateNotice({
+          tone: 'error',
+          message: `Update opened for ${completed.join(' and ')}, but ${failed.join(' and ')} could not start. Ensync will retry while the policy remains due.`,
+        })
+      } else {
+        setAgentUpdateNotice({
+          tone: 'error',
+          message: 'Automatic agent updates could not start. Ensync will retry while the Host is online and idle.',
+        })
+      }
+    }).finally(() => {
+      automaticUpdateAttemptRef.current = false
+    })
+    return () => { cancelled = true }
+  }, [agentUpdatePreferences, hostOnline, inFlightRuns, installedAgentProviders, recordAgentMaintenance, updateableAgentProviders])
+
+  useEffect(() => {
+    let cancelled = false
+    void accountSyncHost.status().then((status) => {
+      if (cancelled) return
+      setAccountSyncStatus(status)
+      setAccountSyncPhase('idle')
+      if (status.authenticated) void synchronizeAccountWorkspace().catch(() => {})
+    }).catch((error: unknown) => {
+      if (cancelled) return
+      setAccountSyncPhase('error')
+      setAccountSyncMessage(error instanceof Error ? error.message : 'Account sync status is unavailable.')
+    })
+    return () => { cancelled = true }
+  }, [synchronizeAccountWorkspace])
+
+  useEffect(() => {
+    if (!accountSyncStatus.authenticated
+      || accountWorkspaceFingerprint === accountSyncFingerprintRef.current) return
+    const timer = window.setTimeout(() => {
+      void synchronizeAccountWorkspace().catch(() => {})
+    }, 1_200)
+    return () => window.clearTimeout(timer)
+  }, [accountSyncStatus.authenticated, accountWorkspaceFingerprint, synchronizeAccountWorkspace])
+
+  useEffect(() => {
+    if (!accountSyncStatus.authenticated) return
+    const poll = () => {
+      if (document.visibilityState === 'visible') void synchronizeAccountWorkspace().catch(() => {})
+    }
+    const timer = window.setInterval(poll, 30_000)
+    window.addEventListener('focus', poll)
+    window.addEventListener('online', poll)
+    return () => {
+      window.clearInterval(timer)
+      window.removeEventListener('focus', poll)
+      window.removeEventListener('online', poll)
+    }
+  }, [accountSyncStatus.authenticated, synchronizeAccountWorkspace])
 
   useLayoutEffect(() => {
     commitWorkspace()
@@ -1186,7 +1526,45 @@ function App() {
     setActiveTabId('')
   }
 
-  const focusProject = (project: RelayProject) => {
+  const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
+    const localHistoryScore = workspaceProjectHistoryScore({
+      projects,
+      chats,
+      drafts,
+      draftAttachments,
+      chatErrors,
+      chatExecutionEvents,
+      inFlightRuns,
+      promptQueues,
+    }, project)
+    if (allowNativeRoute && localHistoryScore === 0 && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
+      let retainedWorkspaces = getRetainedNativeWorkspaces()
+      try {
+        retainedWorkspaces = await refreshRetainedNativeWorkspaces(window)
+      } catch (error) {
+        console.error('[ensync-workspace-refresh]', error)
+      }
+      const target = findRetainedWorkspaceForProject(window.localStorage, {
+        currentWorkspace: nativeWorkspaceIdentity,
+        retainedWorkspaces,
+        project,
+      })
+      if (target) {
+        try {
+          const focused = await window.ensyncDesktop.focusWorkspace({
+            workspaceId: target.workspace.id,
+            projectId: target.projectId,
+            projectPath: project.path,
+          })
+          if (focused) {
+            setProjectOpen(false)
+            return
+          }
+        } catch (error) {
+          console.error('[ensync-workspace-focus]', error)
+        }
+      }
+    }
     setProjects((current) => [project, ...current.filter((item) => item.id !== project.id)])
     setActiveProjectId(project.id)
     void rememberNativeRecentProject(project).catch((error) => console.error('[ensync-recent-projects]', error))
@@ -1206,17 +1584,36 @@ function App() {
     setProjectOpen(false)
   }
 
-  const inspectAndFocusProject = async (projectPath: string) => {
+  focusProjectRequestRef.current = focusProject
+
+  const inspectAndFocusProject = async (projectPath: string, allowNativeRoute = true) => {
     setProjectError(null)
     try {
       const response = await ensyncHost.inspectProject(projectPath)
-      focusProject(verifiedProject(response.project))
+      await focusProject(verifiedProject(response.project), allowNativeRoute)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ensync Host could not inspect the project folder.'
       setProjectError(message)
       throw error
     }
   }
+
+  useEffect(() => window.ensyncDesktop?.onWorkspaceProjectFocus?.((request) => {
+    if (!request || typeof request.projectId !== 'string' || typeof request.projectPath !== 'string') return
+    void (async () => {
+      try {
+        const response = await ensyncHost.inspectProject(request.projectPath)
+        await focusProjectRequestRef.current(verifiedProject(response.project), false)
+        setProjectError(null)
+      } catch (error) {
+        const path = nativeProjectPathKey(request.projectPath)
+        const remembered = projectsRef.current.find((project) => project.id === request.projectId
+          || (path && nativeProjectPathKey(project.path) === path))
+        if (remembered) await focusProjectRequestRef.current(remembered, false)
+        setProjectError(error instanceof Error ? error.message : 'Ensync Host could not recheck the focused project.')
+      }
+    })()
+  }), [])
 
   const setChatProvider = (chatId: string, providerId: ProviderId) => {
     setChats((current) => current.map((chat) => (chat.id === chatId ? { ...chat, provider: providerId, providerMode: 'fixed', model: null } : chat)))
@@ -1249,10 +1646,13 @@ function App() {
     if (!supportRepairAvailable || (supportProvider.id !== 'codex' && supportProvider.id !== 'claude')) {
       throw new Error('AI repair requires a verified local project and a connected Codex or Claude subscription with available usage.')
     }
+    const stamp = Date.now()
+    const chatId = `support-repair-${stamp}`
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -1266,8 +1666,6 @@ function App() {
       sessionId: null,
     })
 
-    const stamp = Date.now()
-    const chatId = `support-repair-${stamp}`
     const tabId = `tab-${stamp}`
     const repairChat: Chat = {
       id: chatId,
@@ -1278,6 +1676,9 @@ function App() {
       provider: result.run.provider,
       providerMode: 'fixed',
       model: result.run.requestedModel,
+      workspace: result.run.workspace
+        ? { path: result.run.workspace.path, branch: result.run.workspace.branch }
+        : null,
       messages: [
         { id: `msg-${stamp}-report`, role: 'user', content: `Support report: ${report.ticket.summary}`, time: timeNow() },
         { id: `msg-${stamp}-repair`, role: 'agent', provider: result.run.provider, content: result.run.response, time: timeNow() },
@@ -1380,9 +1781,16 @@ function App() {
   }) => {
     let gitAfter: GitStatus | null = null
     let gitAfterReason = gitReason
-    if (continuityCapsuleUsed && runTargetKey === 'local' && projectPath) {
+    const effectiveProjectPath = result.workspace?.path ?? projectPath
+    const effectiveGitBefore = result.workspace?.gitBefore ? {
+      branch: result.workspace.gitBefore.branch,
+      dirty: result.workspace.gitBefore.dirty,
+      changedFiles: result.workspace.gitBefore.changedFiles,
+      checkedAt: result.workspace.gitBefore.checkedAt,
+    } : gitBefore
+    if (continuityCapsuleUsed && runTargetKey === 'local' && effectiveProjectPath) {
       try {
-        const response = await ensyncHost.gitStatus(projectPath)
+        const response = await ensyncHost.gitStatus(effectiveProjectPath)
         gitAfter = response.git
         gitAfterReason = ''
       } catch (gitError) {
@@ -1436,6 +1844,9 @@ function App() {
         ...chat,
         subtitle: 'Updated just now',
         messages,
+        workspace: result.workspace
+          ? { path: result.workspace.path, branch: result.workspace.branch }
+          : chat.workspace,
         model: null,
         sizeTier: chat.sizeTier ?? null,
         continuation: continuityCapsuleUsed ? {
@@ -1449,7 +1860,10 @@ function App() {
           attemptedProviders,
           fallbackReason,
           completedAt: result.completedAt,
-          gitBefore,
+          workspace: result.workspace
+            ? { path: result.workspace.path, branch: result.workspace.branch }
+            : chat.continuation?.workspace ?? null,
+          gitBefore: effectiveGitBefore,
           gitAfter: continuationGit(gitAfter),
           gitReason: gitAfterReason || null,
           semanticSummary: extractedResponse.semanticSummary,
@@ -1602,12 +2016,15 @@ function App() {
     const providerPrompt = messageTextWithAttachments(message, attachments)
     if (!providerPrompt || !chatToSendCurrent) return
     const runTarget = executionTargetRef.current
-    const runProject = queuedPrompt
+    let runProject = queuedPrompt
       ? projectsRef.current.find((project) => project.id === queuedPrompt.preferences.projectId
         && project.path === queuedPrompt.preferences.projectPath)
       : projectsRef.current.find((project) => project.id === chatToSendCurrent.projectId)
     if (queuedPrompt && targetKey(runTarget) !== queuedPrompt.preferences.executionTargetKey) {
-      setChatErrors((current) => ({ ...current, [chatId]: `Queue paused: reconnect the exact ${queuedPrompt.preferences.executionTargetKey} target, then choose Run next after review.` }))
+      setChatErrors((current) => ({
+        ...current,
+        [chatId]: `Queue paused: reconnect the exact ${queuedPrompt.preferences.executionTargetKey} target. Ensync will not run this message on another computer.`,
+      }))
       return
     }
     if (attachments.length > 0 && runTarget.kind !== 'local') {
@@ -1630,9 +2047,35 @@ function App() {
     const runAutoFallback = queuedPrompt?.preferences.automaticFallback ?? autoFallback
     const runAutoContext = queuedPrompt?.preferences.autoContextSkill ?? autoContextSkill
     if (!chatToSend) return
-    if (!runProject?.id || !runProject.verified || chatToSend.projectId !== runProject.id) {
+    if (!runProject?.id || chatToSend.projectId !== runProject.id) {
       setChatErrors((current) => ({ ...current, [chatId]: 'Re-open the project through Ensync Host before running this chat.' }))
       return
+    }
+    if (!runProject.verified) {
+      try {
+        const response = await ensyncHost.inspectProject(runProject.path)
+        const inspectedProject = verifiedProject(response.project)
+        if (inspectedProject.id !== runProject.id) {
+          setChatErrors((current) => ({ ...current, [chatId]: 'The project folder now resolves to a different Ensync project. Review and focus it before running this chat.' }))
+          return
+        }
+        runProject = inspectedProject
+        const nextProjects = [
+          inspectedProject,
+          ...projectsRef.current.filter((project) => project.id !== inspectedProject.id),
+        ]
+        projectsRef.current = nextProjects
+        setProjects(nextProjects)
+        void rememberNativeRecentProject(inspectedProject).catch((error) => console.error('[ensync-recent-projects]', error))
+      } catch (error) {
+        setChatErrors((current) => ({
+          ...current,
+          [chatId]: error instanceof Error
+            ? error.message
+            : 'Ensync Host could not re-verify the project before this run.',
+        }))
+        return
+      }
     }
     const runPreferences = chatRunPreferences(chatToSend, runAutoFallback)
     const automaticMode = runPreferences.automaticProvider
@@ -1953,6 +2396,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -1961,6 +2405,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -2058,6 +2503,20 @@ function App() {
         updateChatError(chatId, null)
         return
       }
+      if (runWasInterrupted(runError)) {
+        markDetachedRunInterrupted(chatId, inFlightRunsRef.current[chatId] ?? {
+          turnId,
+          provider: routedProvider.id,
+          sizeTier: chatToSend.sizeTier ?? null,
+          executionTarget: runTargetKey,
+          attemptedProviders,
+          fallbackReason,
+          providerProcessStarted,
+          startedAt: runStartedAt,
+          gitBefore: continuationGit(handoffGitStatus),
+        })
+        return
+      }
       const failureMessage = runError instanceof Error ? runError.message : 'The Ensync Host run failed.'
       const failedChats: Chat[] = chatsRef.current.map((chat): Chat => chat.id === chatId ? {
         ...chat,
@@ -2099,6 +2558,106 @@ function App() {
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (runTarget.kind === 'local') void refreshProviders(false)
       if (queueMayAdvance) queueMicrotask(() => void drainPromptQueue(chatId))
+    }
+  }
+
+  const handlePushQueuedNow = async (chatId: string) => {
+    const entry = promptQueuesRef.current[chatId]?.[0]
+    const activeRun = inFlightRunsRef.current[chatId]
+    const chat = chatsRef.current.find((item) => item.id === chatId)
+    const queuedMessage = chat?.messages.find((item) =>
+      item.id === entry?.messageId && item.role === 'user' && item.deliveryStatus === 'queued')
+    const exactActiveCodexTurn = entry
+      && activeRun
+      && entry.predecessorTurnId === activeRun.turnId
+      && entry.preferences.executionTargetKey === activeRun.executionTarget
+      && entry.preferences.projectId === activeRun.projectId
+      && entry.preferences.projectPath === activeRun.projectPath
+      && activeRun.provider === 'codex'
+      && activeRun.executionTarget === 'local'
+      && typeof activeRun.jobId === 'string'
+      && Boolean(activeRun.jobId)
+    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
+      updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
+      return
+    }
+    if (steeringChatIdsRef.current.has(chatId)) return
+
+    steeringChatIdsRef.current.add(chatId)
+    setPushingQueuedChatIds((current) => new Set(current).add(chatId))
+    try {
+      await ensyncHost.steerChatJob(
+        activeRun.jobId,
+        messageTextWithAttachments(entry.prompt, entry.attachments),
+        normalizeFileAttachments(entry.attachments).map((attachment) => attachment.path),
+      )
+
+      const replyAlreadyVisible = chatsRef.current.some((currentChat) => currentChat.id === chatId
+        && currentChat.messages.some((item) => item.role === 'agent' && item.turnId === activeRun.turnId))
+      const nextChats = chatsRef.current.map((currentChat) => currentChat.id === chatId ? {
+        ...currentChat,
+        messages: promoteQueuedMessageToActiveTurn(
+          currentChat.messages,
+          entry.messageId,
+          activeRun.turnId,
+        ),
+      } : currentChat)
+      const nextQueues = promoteQueuedPromptToActiveTurn(
+        promptQueuesRef.current,
+        chatId,
+        entry.id,
+        activeRun.turnId,
+      )
+      chatsRef.current = nextChats
+      setChats(nextChats)
+      updatePromptQueues(nextQueues)
+
+      let nextSessions = chatSessionsRef.current
+      const session = chatSessionsRef.current[chatId]
+      if (replyAlreadyVisible && session?.provider === 'codex' && typeof session.syncedMessageCount === 'number') {
+        nextSessions = {
+          ...chatSessionsRef.current,
+          [chatId]: { ...session, syncedMessageCount: session.syncedMessageCount + 1 },
+        }
+        chatSessionsRef.current = nextSessions
+        setChatSessions(nextSessions)
+      }
+      const nextErrors = updateChatError(chatId, null)
+      commitWorkspace({
+        chats: nextChats,
+        promptQueues: nextQueues,
+        chatSessions: nextSessions,
+        chatErrors: nextErrors,
+      })
+    } catch (steerError) {
+      const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
+      if (safelyNotDelivered) {
+        updateChatError(chatId, `${steerError.message} It remains queued.`)
+      } else {
+        // An unconfirmed live delivery must never execute later as a separate
+        // queued turn, because that could duplicate project mutations.
+        const nextQueues = removePromptFromQueue(promptQueuesRef.current, chatId, entry.id)
+        const nextChats: Chat[] = chatsRef.current.map((currentChat): Chat => currentChat.id === chatId ? {
+          ...currentChat,
+          messages: currentChat.messages.map((item) => item.id === entry.messageId
+            ? { ...item, deliveryStatus: 'interrupted' as const }
+            : item),
+        } : currentChat)
+        chatsRef.current = nextChats
+        setChats(nextChats)
+        updatePromptQueues(nextQueues)
+        const nextErrors = updateChatError(chatId, steerError instanceof Error
+          ? `${steerError.message} The message was removed from automatic execution to prevent a duplicate.`
+          : 'Ensync could not confirm live delivery. The message was removed from automatic execution to prevent a duplicate.')
+        commitWorkspace({ chats: nextChats, promptQueues: nextQueues, chatErrors: nextErrors })
+      }
+    } finally {
+      steeringChatIdsRef.current.delete(chatId)
+      setPushingQueuedChatIds((current) => {
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
     }
   }
 
@@ -2200,7 +2759,6 @@ function App() {
           }
           const reconnectableTransportFailure = !(error instanceof EnsyncHostError)
             || error.code === 'chat_job_stream_disconnected'
-            || error.code === 'invalid_chat_job_stream'
             || (error.code === null && error.status >= 500)
           if (reconnectableTransportFailure) {
             await waitToReconnect()
@@ -2238,10 +2796,121 @@ function App() {
     }
   }, [recoverDetachedRun])
 
+  useEffect(() => {
+    if (rediscoveredHostJobsRef.current || rediscoveringHostJobsRef.current) return
+    const candidates = runningHostJobCandidates(chatsRef.current)
+      .filter((candidate) => !inFlightRunsRef.current[candidate.chatId])
+    if (candidates.length === 0) {
+      rediscoveredHostJobsRef.current = true
+      return
+    }
+
+    let disposed = false
+    rediscoveringHostJobsRef.current = true
+    void (async () => {
+      const inspected = await Promise.all(candidates.map(async (candidate) => {
+        try {
+          const { job } = await ensyncHost.chatJob(candidate.jobId)
+          return { candidate, job, hostReached: true }
+        } catch (error) {
+          return {
+            candidate,
+            job: null,
+            hostReached: error instanceof EnsyncHostError && error.status === 404,
+          }
+        }
+      }))
+      if (disposed) return
+
+      const reconnectableByChat = new Map<string, (typeof inspected)[number]>()
+      for (const item of inspected) {
+        if (!item.job || !['running', 'completed'].includes(item.job.state)) continue
+        const chat = chatsRef.current.find((candidate) => candidate.id === item.candidate.chatId)
+        const exactTurnStillMissing = chat?.messages.some((message) => message.role === 'user'
+          && message.turnId === item.candidate.turnId
+          && ['pending', 'failed', 'interrupted'].includes(message.deliveryStatus ?? ''))
+          && !chat.messages.some((message) => message.role === 'agent' && message.turnId === item.candidate.turnId)
+        if (!exactTurnStillMissing) continue
+        const current = reconnectableByChat.get(item.candidate.chatId)
+        const preferItem = !current
+          || (item.job.state === 'running' && current.job?.state !== 'running')
+          || (item.job.state === current.job?.state
+            && Date.parse(item.job.startedAt) > Date.parse(current.job?.startedAt ?? ''))
+        if (preferItem) {
+          reconnectableByChat.set(item.candidate.chatId, item)
+        }
+      }
+
+      for (const { candidate, job } of reconnectableByChat.values()) {
+        if (!job || inFlightRunsRef.current[candidate.chatId]) continue
+        const chat = chatsRef.current.find((item) => item.id === candidate.chatId)
+        const project = projectsRef.current.find((item) => item.id === chat?.projectId)
+        const exactExecutionTarget = job.kind === 'local'
+          ? 'local'
+          : executionTargetRef.current.kind === 'ssh'
+            ? targetKey(executionTargetRef.current)
+            : null
+        if (!chat || !project?.path || exactExecutionTarget === null) continue
+
+        const adopted = adoptReconnectableHostJobState({
+          chats: chatsRef.current,
+          chatErrors: chatErrorsRef.current,
+          chatExecutionEvents: chatExecutionEventsRef.current,
+          inFlightRuns: inFlightRunsRef.current,
+        }, {
+          candidate,
+          job,
+          projectPath: project.path,
+          executionTarget: exactExecutionTarget,
+        })
+        if (!adopted) continue
+
+        const nextChats = adopted.chats as Chat[]
+        const nextErrors = adopted.chatErrors
+        const nextEvents = adopted.chatExecutionEvents as Record<string, ChatExecutionEvent[]>
+        const nextRuns = adopted.inFlightRuns as Record<string, PersistedInFlightRun>
+        const recoveredRun = adopted.inFlightRun as PersistedInFlightRun
+        chatsRef.current = nextChats
+        chatErrorsRef.current = nextErrors
+        chatExecutionEventsRef.current = nextEvents
+        inFlightRunsRef.current = nextRuns
+        setChats(nextChats)
+        setChatErrors(nextErrors)
+        setChatExecutionEvents(nextEvents)
+        setInFlightRuns(nextRuns)
+        commitWorkspace({
+          chats: nextChats,
+          chatErrors: nextErrors,
+          chatExecutionEvents: nextEvents,
+          inFlightRuns: nextRuns,
+        })
+        void recoverDetachedRun(candidate.chatId, recoveredRun)
+      }
+
+      // A Host 404 proves that the exact candidate is absent. Transport/lease
+      // failures leave discovery eligible for the next healthy Host refresh.
+      if (inspected.every((item) => item.hostReached)) {
+        rediscoveredHostJobsRef.current = true
+      } else if (hostJobRecoveryRetry < 8) {
+        window.setTimeout(() => setHostJobRecoveryRetry((current) => current + 1), 750)
+      }
+    })().finally(() => {
+      rediscoveringHostJobsRef.current = false
+    })
+
+    return () => { disposed = true }
+  }, [commitWorkspace, hostJobRecoveryRetry, hostOnline, recoverDetachedRun])
+
   const handleResumeQueue = (chatId: string) => {
     updatePromptQueues(approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString()))
     setChatErrors((current) => ({ ...current, [chatId]: null }))
     queueMicrotask(() => drainPromptQueue(chatId))
+  }
+
+  const reviewAgentUpdates = () => {
+    acknowledgeAgentUpdate()
+    setAgentUpdateNotice(null)
+    setWizardOpen(true)
   }
 
   useEffect(() => {
@@ -2255,13 +2924,27 @@ function App() {
       <header className="titlebar" {...getSectionProps('titleBar')}>
         <div className="traffic-lights" aria-hidden="true"><span /><span /><span /></div>
         <div className="wordmark"><span className="wordmark__mark" aria-hidden="true"><span /><span /></span><span>ensync</span></div>
-        <button className="project-switcher" onClick={() => setProjectOpen(true)}>
-          <FolderGit2 size={14} /> {activeProject.name} <ChevronDown size={13} />
+        <button
+          className={`project-switcher ${activeProject.id ? 'project-switcher--selected' : ''}`}
+          style={{ '--project-color': activeProject.color } as React.CSSProperties}
+          onClick={() => setProjectOpen(true)}
+          title={activeProject.path || 'Select a project'}
+        >
+          <span className="project-switcher__mark" aria-hidden="true"><FolderGit2 size={13} /></span>
+          <span className="project-switcher__name">{activeProject.name}</span>
+          <ChevronDown size={13} />
         </button>
         <div className="titlebar__tools">
           <button className={`host-pill ${hostOnline ? '' : 'host-pill--offline'}`} onClick={() => setRemoteOpen(true)}><span /><Server size={13} /> {hostOnline ? (executionTarget.kind === 'ssh' ? executionTarget.connection.hostname : 'Local host') : 'Host offline'}</button>
           <button className="usage-pill" onClick={() => setUsageOpen(true)} title={activeProvider.usage === null ? activeProvider.usageReason : `${activeProvider.usage}% used`}><i style={{ '--usage': `${activeProvider.usage ?? 0}%` } as React.CSSProperties} /><span>{activeProvider.usage === null ? 'Usage —' : `${activeProvider.usage}% used`}</span></button>
           <button className="search-command" onClick={() => setCommandOpen(true)}><Search size={14} /><span>Search or jump to</span><kbd>Ctrl/⌘ K</kbd></button>
+          <button
+            className={`icon-button mobile-account account-activity ${accountSyncStatus.authenticated ? 'account-activity--connected' : ''}`}
+            onClick={() => setSettingsOpen(true)}
+            aria-label={accountSyncStatus.authenticated ? `Chat sync: ${accountSyncStatus.username}` : 'Account & chat sync'}
+          >
+            <UserRound size={18} />
+          </button>
           <button
             className="icon-button mobile-menu"
             onClick={toggleConversationSidebar}
@@ -2287,12 +2970,21 @@ function App() {
             >
               <MessageSquareText size={20} />
             </button>
-            <button className="activity-button" title="Agent connections" onClick={() => setWizardOpen(true)}><Bot size={20} /></button>
+            <button
+              className={`activity-button ${agentUpdateReminderDue ? 'agent-update-activity--due' : ''}`}
+              title={agentUpdateReminderDue ? 'Agent update reminder' : 'Agent connections'}
+              aria-label={agentUpdateReminderDue ? 'Agent connections, update review due' : 'Agent connections'}
+              onClick={() => {
+                if (agentUpdateReminderDue) acknowledgeAgentUpdate()
+                setWizardOpen(true)
+              }}
+            ><Bot size={20} /></button>
             <button className="activity-button" title="Project memory" onClick={() => setContextOpen(true)}><Layers3 size={20} /></button>
             <button className="activity-button" title="Remote runtime" onClick={() => setRemoteOpen(true)}><Server size={20} /></button>
           </div>
           <div>
             <button className="activity-button" title="Help desk" onClick={() => setSupportOpen(true)}><LifeBuoy size={19} /></button>
+            <button className={`activity-button account-activity ${accountSyncStatus.authenticated ? 'account-activity--connected' : ''}`} title={accountSyncStatus.authenticated ? `Chat sync: ${accountSyncStatus.username}` : 'Account & chat sync'} onClick={() => setSettingsOpen(true)}><UserRound size={19} /></button>
             <button className="activity-button" title="Settings" onClick={() => setSettingsOpen(true)}><Settings size={19} /></button>
           </div>
         </nav>
@@ -2332,7 +3024,7 @@ function App() {
           </div>
           <div className="sidebar__footer">
             <button onClick={() => setContextOpen(true)}>
-              <span className="sync-icon"><FileText size={14} /></span>
+              <span className="sync-icon project-context-icon" style={{ '--project-color': activeProject.color } as React.CSSProperties}><FileText size={14} /></span>
               <span><strong>Project context</strong><small>{activeProject.verified ? `${activeProject.context.files.length} .relay files found` : 'Not verified by Ensync Host'}</small></span>
               <ChevronRight size={14} />
             </button>
@@ -2383,6 +3075,22 @@ function App() {
                   && Boolean(inFlightRuns[chat.id]?.jobId)
                   && (promptQueues[chat.id]?.length ?? 0) === 0
                 }
+                canPushQueuedNow={(() => {
+                  const activeRun = inFlightRuns[chat.id]
+                  const entry = promptQueues[chat.id]?.[0]
+                  return Boolean(
+                    sendingChatIds.has(chat.id)
+                    && activeRun?.provider === 'codex'
+                    && activeRun.executionTarget === 'local'
+                    && activeRun.jobId
+                    && entry
+                    && entry.predecessorTurnId === activeRun.turnId
+                    && entry.preferences.executionTargetKey === activeRun.executionTarget
+                    && entry.preferences.projectId === activeRun.projectId
+                    && entry.preferences.projectPath === activeRun.projectPath,
+                  )
+                })()}
+                pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
                 error={chatErrors[chat.id] ?? null}
@@ -2405,6 +3113,7 @@ function App() {
                 onSend={() => handleSend(chat.id)}
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
+                onPushQueuedNow={() => void handlePushQueuedNow(chat.id)}
                 onProviderMenu={() => {
                   setModelMenuChatId(null)
                   setProviderMenuChatId((current) => current === chat.id ? null : chat.id)
@@ -2429,8 +3138,24 @@ function App() {
         </main>
       </div>
 
-      {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} onClose={() => setSettingsOpen(false)} />}
+      {agentUpdateReminderDue && !settingsOpen && !wizardOpen && (
+        <div className="agent-update-reminder" role="status">
+          <span><Bell size={17} /></span>
+          <div><strong>Weekly agent update review</strong><p>Review all {installedAgentProviders.length} installed {installedAgentProviders.length === 1 ? 'provider' : 'providers'}. Ensync runs only verified native updater commands and otherwise uses the provider's own updater or official guide.</p></div>
+          <button type="button" className="button button--primary" onClick={reviewAgentUpdates}>Review agents</button>
+          <button type="button" className="button button--ghost" onClick={acknowledgeAgentUpdate}>Later</button>
+        </div>
+      )}
+      {!agentUpdateReminderDue && agentUpdateNotice && !settingsOpen && !wizardOpen && (
+        <div className={`agent-update-reminder agent-update-reminder--${agentUpdateNotice.tone}`} role={agentUpdateNotice.tone === 'error' ? 'alert' : 'status'}>
+          <span>{agentUpdateNotice.tone === 'success' ? <CheckCircle2 size={17} /> : <CircleHelp size={17} />}</span>
+          <div><strong>{agentUpdateNotice.tone === 'success' ? 'Agent update cycle started' : 'Agent update needs attention'}</strong><p>{agentUpdateNotice.message}</p></div>
+          <button type="button" className="icon-button" aria-label="Dismiss agent update message" onClick={() => setAgentUpdateNotice(null)}><X size={16} /></button>
+        </div>
+      )}
+
+      {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
       {gitWorkflowMode && <GitWorkflowModal mode={gitWorkflowMode} project={activeProject.verified ? activeProject : null} onImported={(project) => { focusProject(verifiedProject(project)); setGitWorkflowMode(null) }} onClose={() => setGitWorkflowMode(null)} />}
@@ -2466,6 +3191,8 @@ function ConversationPane({
   fileAttachmentsEnabled,
   sending,
   liveSteering,
+  canPushQueuedNow,
+  pushingQueued,
   runStartedAt,
   queuedPrompts,
   error,
@@ -2482,6 +3209,7 @@ function ConversationPane({
   onSend,
   onStop,
   onResumeQueue,
+  onPushQueuedNow,
   onProviderMenu,
   onModelMenu,
   onProviderAuto,
@@ -2504,6 +3232,8 @@ function ConversationPane({
   fileAttachmentsEnabled: boolean
   sending: boolean
   liveSteering: boolean
+  canPushQueuedNow: boolean
+  pushingQueued: boolean
   runStartedAt: string | null
   queuedPrompts: QueuedPrompt[]
   error: string | null
@@ -2520,6 +3250,7 @@ function ConversationPane({
   onSend: () => void
   onStop: () => void
   onResumeQueue: () => void
+  onPushQueuedNow: () => void
   onProviderMenu: () => void
   onModelMenu: () => void
   onProviderAuto: () => void
@@ -2551,12 +3282,16 @@ function ConversationPane({
     && fallbackProviders.some((candidate) => candidate.id !== provider.id)
   const canRunChat = canRunSelectedProvider || canRunFallback
   const queueGate = queuedPromptGate(chat, queuedPrompts[0])
+  const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length)
   const composerQueueState = promptQueueComposerState({
     sending,
     liveSteering,
     draft: draft || (attachments.length > 0 ? 'attached files' : ''),
     canRun: canRunChat,
   })
+  const providerNotes = executionEvents
+    .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
+    .slice(-6)
   const scrollContentRevision = useMemo(() => chatAutoScrollContentRevision({
     messages: chat.messages,
     executionEvents,
@@ -2791,6 +3526,23 @@ function ConversationPane({
               )
             })
           )}
+          {sending && providerNotes.length > 0 && (
+            <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
+              {providerNotes.map((note, index) => {
+                const noteProvider = providers.find((item) => item.id === note.provider) ?? provider
+                return (
+                  <div className="provider-live-note" key={`${note.sequence ?? note.at}-${index}`}>
+                    <ProviderMark provider={noteProvider} small />
+                    <div>
+                      <strong>{noteProvider.name} note</strong>
+                      <MessageContent content={note.text} />
+                      {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          )}
           {sending && <div className="working-line">
             <span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" />
             <em aria-hidden="true">{elapsedWorkingLabel ?? '• Working'}</em>
@@ -2799,8 +3551,9 @@ function ConversationPane({
           {queuedPrompts.length > 0 && (
             <div className={`prompt-queue-status ${queueGate.state === 'paused' ? 'prompt-queue-status--paused' : ''}`} role="status">
               <History size={13} />
-              <span><strong>{queuedPrompts.length} queued</strong>{queueGate.reason ? ` · ${queueGate.reason}` : ' · runs FIFO after verified success'}</span>
-              {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue}>Run next after review</button>}
+              <span className="prompt-queue-status__copy"><strong>{queueStatus.headline}</strong><span>{queueStatus.detail}</span></span>
+              {canPushQueuedNow && <button type="button" className="prompt-queue-status__push" onClick={onPushQueuedNow} disabled={pushingQueued} title="Deliver the first queued message to the active Codex turn now">{pushingQueued ? 'Pushing…' : 'Push now'}</button>}
+              {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
             </div>
           )}
           {!sending && chat.messages.at(-1)?.deliveryStatus === 'cancelled' && (
@@ -2824,6 +3577,14 @@ function ConversationPane({
           </button>
         )}
       </div>
+
+      {chat.workspace && (
+        <div className="chat-workspace-status" role="status" title={chat.workspace.path}>
+          <ShieldCheck size={14} />
+          <span><strong>Protected branch</strong> {chat.workspace.branch}</span>
+          <small>Shared checkout unchanged</small>
+        </div>
+      )}
 
       {(sending || executionEvents.length > 0) && (
         <ExecutionPanel
@@ -2911,6 +3672,13 @@ function ExecutionPanel({
   onStop: () => void
 }) {
   const outputRef = useRef<HTMLPreElement>(null)
+  const latestProviderNote = [...events].reverse().find((event) => event.type === 'note')
+  const latestWorkspaceState = [...events].reverse().find((event) =>
+    event.type === 'notice'
+    && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? ''))
+  const waitingForWorkspace = sending
+    && latestWorkspaceState?.type === 'notice'
+    && ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(latestWorkspaceState.code ?? '')
 
   useLayoutEffect(() => {
     if (!open || !outputRef.current) return
@@ -2930,9 +3698,13 @@ function ExecutionPanel({
         >
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <TerminalSquare size={14} />
-          <strong>{sending ? 'Live CLI execution' : 'CLI execution'}</strong>
-          {sending && <span className="execution-panel__live"><i /> running</span>}
-          <small>CLI-visible output only · hidden reasoning is never available</small>
+          <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
+          {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
+          <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
+            {latestProviderNote?.type === 'note'
+              ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
+              : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
+          </small>
         </button>
         {sending && <button className="execution-panel__stop" type="button" onClick={onStop} aria-label={`Stop ${providerName} in this chat`}><Square size={11} /> Stop</button>}
       </div>
@@ -2940,6 +3712,9 @@ function ExecutionPanel({
         <pre className="execution-panel__output" ref={outputRef} aria-live="polite" dir="auto">
           {events.length === 0 && sending && <span className="execution-panel__host">[Ensync Host] Waiting for the CLI process to start…</span>}
           {events.map((event, index) => {
+            if (event.type === 'note') {
+              return <span className="execution-panel__note" key={`${event.at}-${index}`}>[{event.provider} note] {event.text}{event.redacted ? '\n[Ensync Host] Possible secret redacted from this note.' : ''}{'\n'}</span>
+            }
             if (event.type === 'notice') {
               return <span className="execution-panel__host" key={`${event.at}-${index}`}>[Ensync Host] {event.message}{'\n'}</span>
             }
@@ -2971,7 +3746,7 @@ function EmptyConversation({ provider }: { provider: Provider }) {
   )
 }
 
-function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onRefresh, onClose }: { providers: Provider[]; hostOnline: boolean; hostError: string | null; hasActiveRuns: boolean; onRefresh: (force?: boolean) => Promise<boolean>; onClose: () => void }) {
+function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onRefresh, onUpdateStarted, onClose }: { providers: Provider[]; hostOnline: boolean; hostError: string | null; hasActiveRuns: boolean; onRefresh: (force?: boolean) => Promise<boolean>; onUpdateStarted: () => void; onClose: () => void }) {
   const [selected, setSelected] = useState<ProviderId>('claude')
   const [busyAction, setBusyAction] = useState<'connect' | 'update' | 'refresh' | null>(null)
   const [feedback, setFeedback] = useState<{ providerId: ProviderId; action: 'connect' | 'update' | 'refresh'; command: string | null; message: string } | null>(null)
@@ -3011,6 +3786,7 @@ function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onR
     setError(null)
     try {
       const result = await ensyncHost.updateProvider(targetProviderId, true)
+      if (result.started) onUpdateStarted()
       setFeedback({ providerId: targetProviderId, action: 'update', command: result.command.display, message: result.message })
     } catch (updateError) {
       setError({
@@ -3083,7 +3859,99 @@ function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onR
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; onClose: () => void }) {
+function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
+  const [username, setUsername] = useState('')
+  const [password, setPassword] = useState('')
+  const busy = phase === 'checking' || phase === 'syncing'
+  const lastSynced = status.lastSyncedAt
+    ? new Date(status.lastSyncedAt).toLocaleString()
+    : 'Not synced yet'
+
+  const authenticate = async (mode: 'register' | 'login') => {
+    if (busy || !username.trim() || password.length < 12) return
+    try {
+      await onAuthenticate(mode, username.trim(), password)
+      setPassword('')
+    } catch {
+      // The parent owns the durable, user-visible error state.
+    }
+  }
+
+  return (
+    <section className="setting-section account-sync-setting">
+      <div className="setting-title">
+        <div><h3>Account &amp; chat sync</h3><p>Use one username to keep your conversation history available across your computers.</p></div>
+        {status.authenticated && <span className="account-sync-badge"><i /> SYNC ON</span>}
+      </div>
+      {phase === 'checking' ? (
+        <div className="account-sync-unavailable"><RotateCw className="spin" size={17} /><span><strong>Checking account sync</strong><small>Asking the local Ensync Host for its configured service.</small></span></div>
+      ) : !status.configured ? (
+        <div className="account-sync-unavailable"><Cloud size={18} /><span><strong>Account sync is not configured in this build</strong><small>Set an HTTPS ENSYNC_SYNC_SERVICE_URL for the Host. Ensync will not pretend a cloud account exists.</small></span></div>
+      ) : status.authenticated ? (
+        <div className="account-sync-connected">
+          <div className="account-sync-profile"><span><UserRound size={18} /></span><p><strong>{status.username}</strong><small>{chatCount} {chatCount === 1 ? 'conversation' : 'conversations'} · last sync {lastSynced}</small></p><span className="account-sync-encryption"><LockKeyhole size={13} /> AES-256</span></div>
+          <div className="account-sync-actions">
+            <p><ShieldCheck size={14} /><span>Chats are encrypted before upload. CLI logins, provider sessions, terminal output, queued work, and local attachments stay on this computer.</span></p>
+            <button type="button" className="button button--ghost" onClick={() => void onSync().catch(() => {})} disabled={busy}><RotateCw className={busy ? 'spin' : ''} size={14} /> {busy ? 'Syncing…' : 'Sync now'}</button>
+            <button type="button" className="button button--ghost" onClick={() => void onLogout()} disabled={busy}><LogOut size={14} /> Sign out</button>
+          </div>
+          <small className="account-sync-session-note">For now, login stays only in Ensync Host memory. Restarting the Host requires signing in again; synchronized chats remain in your account.</small>
+        </div>
+      ) : (
+        <form className="account-sync-form" onSubmit={(event) => { event.preventDefault(); void authenticate('login') }}>
+          <label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" minLength={3} maxLength={32} placeholder="your-name" disabled={busy} /></label>
+          <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" minLength={12} maxLength={256} placeholder="At least 12 characters" disabled={busy} /></label>
+          <div className="account-sync-form__actions"><button type="button" className="button button--ghost" onClick={() => void authenticate('register')} disabled={busy || !username.trim() || password.length < 12}>Create account</button><button type="submit" className="button button--primary" disabled={busy || !username.trim() || password.length < 12}>{busy ? 'Connecting…' : 'Sign in & sync'}</button></div>
+          <p><LockKeyhole size={13} /> Your password is used for account login and local encryption-key derivation. It is never stored in the conversation snapshot.</p>
+        </form>
+      )}
+      {message && <div className={phase === 'error' ? 'connection-error' : 'account-sync-message'} role={phase === 'error' ? 'alert' : 'status'}>{message}</div>}
+    </section>
+  )
+}
+
+function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }: { preferences: AgentUpdatePreferences; providers: Provider[]; onModeChange: (mode: AgentUpdateMode) => void; onReview: () => void }) {
+  const lastCycle = preferences.lastMaintenanceAt
+    ? new Date(preferences.lastMaintenanceAt).toLocaleString()
+    : 'No review or update cycle yet'
+  const commandProviders = providers.filter((provider) => provider.updateStrategy === 'ensync_command')
+  const providerManaged = providers.filter((provider) => provider.updateStrategy === 'provider_automatic')
+  const guideOnly = providers.filter((provider) => provider.updateStrategy === 'official_guide')
+  const options: Array<{ mode: AgentUpdateMode; title: string; detail: string }> = [
+    { mode: 'remind', title: 'Remind weekly', detail: 'Review every installed provider. No command runs.' },
+    { mode: 'automatic', title: 'Automatic weekly', detail: 'When idle, run verified updaters and flag providers that still need their guide.' },
+    { mode: 'manual', title: 'Manual only', detail: 'Update from Agent Connections or the provider’s official guide.' },
+  ]
+
+  return (
+    <section className="setting-section agent-update-setting">
+      <div className="setting-title">
+        <div><h3>Agent updates</h3><p>Keep supported local CLIs maintained without guessing versions from a package registry.</p></div>
+        <button type="button" className="button button--ghost" onClick={onReview}><RotateCw size={14} /> Review now</button>
+      </div>
+      <div className="agent-update-policy" role="radiogroup" aria-label="Agent update policy">
+        {options.map((option) => (
+          <button key={option.mode} type="button" role="radio" aria-checked={preferences.mode === option.mode} className={preferences.mode === option.mode ? 'selected' : ''} onClick={() => onModeChange(option.mode)}>
+            <span>{option.mode === 'remind' ? <Bell size={16} /> : option.mode === 'automatic' ? <RotateCw size={16} /> : <ShieldCheck size={16} />}</span>
+            <strong>{option.title}</strong>
+            <small>{option.detail}</small>
+            {preferences.mode === option.mode && <Check size={14} />}
+          </button>
+        ))}
+      </div>
+      <div className="agent-update-provider-summary">
+        <div>
+          <strong>{providers.length > 0 ? `${providers.length} installed provider${providers.length === 1 ? '' : 's'} covered` : 'No provider CLIs installed'}</strong>
+          <small>{providers.length > 0 ? providers.map((provider) => `${provider.name} ${provider.version ?? 'version not reported'}`).join(' · ') : 'Install a provider CLI to enable update reviews.'}</small>
+        </div>
+        <span>Last cycle: {lastCycle}</span>
+      </div>
+      {providers.length > 0 && <p className="agent-update-trust"><ShieldCheck size={14} /><span>{commandProviders.length} fixed native {commandProviders.length === 1 ? 'updater' : 'updaters'} · {providerManaged.length} provider-managed automatic · {guideOnly.length} official-guide only. Ensync never guesses a package manager or launches updates during an active Host run.</span></p>}
+    </section>
+  )
+}
+
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -3106,6 +3974,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
       <div className="modal settings-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal__header compact"><div><span className="eyebrow">PREFERENCES</span><h2>Make Ensync yours</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>
         <div className="settings-body">
+          <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onLogout={onAccountLogout} onSync={onAccountSync} />
           <section className="setting-section workspace-layout-setting">
             <div className="setting-title"><div><h3>New conversation view</h3><p>Choose whether open conversations share the screen or use one workspace.</p></div></div>
             <div className="choice-row layout-choice-row" role="radiogroup" aria-label="New conversation view">
@@ -3126,6 +3995,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <CompletionNotificationPreferences className="setting-section" />
           <UIVisibilityPreferences />
           <NativeUpdatePreferences />
+          <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
           <section className="setting-section">
             <div className="setting-title"><div><h3>Ensync Auto Context skill</h3><p>Keep one task synchronized with Auto or a provider you pin, on this computer or the selected SSH/VM worker.</p></div><Toggle enabled={autoContextSkill} onChange={() => setAutoContextSkill(!autoContextSkill)} label="Ensync Auto Context skill" /></div>
             <div className={`auto-context-summary ${autoContextSkill ? 'auto-context-summary--active' : ''}`}>
@@ -3221,8 +4091,15 @@ function ProjectSwitcher({ projects, activeProject, hostError, onInspect, onOpen
           <div className="project-section-label">RECENT LOCAL WORKSPACES</div>
           <div className="project-list">
             {filtered.map((project) => (
-              <button className={activeProject.id === project.id ? 'active' : ''} key={project.id} onClick={() => void inspect(project.path)} disabled={busy}>
-                <span className="project-icon" style={{ '--project-color': project.color } as React.CSSProperties}><FolderGit2 size={18} /></span>
+              <button
+                className={activeProject.id === project.id ? 'active' : ''}
+                style={{ '--project-color': project.color } as React.CSSProperties}
+                key={project.id}
+                onClick={() => void inspect(project.path)}
+                disabled={busy}
+                aria-current={activeProject.id === project.id ? 'true' : undefined}
+              >
+                <span className="project-icon"><FolderGit2 size={18} /></span>
                 <span className="project-copy"><strong>{project.name}</strong><small>{project.path}</small></span>
                 <span className="project-meta"><em>Local folder</em><small>{project.verified ? `${project.context.files.length} .relay files inspected` : 'Recheck before focusing'}</small></span>
                 {activeProject.id === project.id && project.verified ? <span className="open-badge"><i /> FOCUSED</span> : <ChevronRight size={15} />}
