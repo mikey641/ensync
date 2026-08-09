@@ -141,7 +141,7 @@ async function checkedGit(args, options = {}) {
   return result
 }
 
-function validateRepositoryLocation(repositoryUrl) {
+export function validateRepositoryLocation(repositoryUrl) {
   if (typeof repositoryUrl !== 'string') {
     throw new GitWorkflowError('Enter a Git repository URL or absolute local repository path.', {
       code: 'invalid_repository',
