@@ -20,3 +20,10 @@ export function selectAutomaticProviderAfterRefresh(
   priorityOrder: readonly ProviderId[],
   refreshProviders: () => Promise<Provider[] | null>,
 ): Promise<Provider | null>
+
+export function selectAutomaticFallbackProviderAfterRefresh(
+  providers: Provider[],
+  priorityOrder: readonly ProviderId[],
+  attemptedProviderIds: readonly ProviderId[],
+  refreshProviders?: () => Promise<Provider[] | null>,
+): Promise<Provider | null>
