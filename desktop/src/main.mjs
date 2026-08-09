@@ -531,6 +531,7 @@ if (!singleInstance) {
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
       platform: process.platform,
+      storeManaged: process.windowsStore === true,
       isPackaged: app.isPackaged,
       executablePath: process.execPath,
       manifestUrls: configuredUpdateManifestUrls(),

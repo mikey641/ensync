@@ -2,7 +2,7 @@
 
 Ensync is a universal AI agent workspace for continuing one coding task across subscription-backed CLIs. It preserves the conversation, verified project, shared `.relay` feature memory and plan, `CLAUDE.md` and `AGENTS.md` adapters, and host-observed Git state. It is conversation-first: code stays out of the primary interface unless the user asks for it.
 
-The public product site is [ensync.vercel.app](https://ensync.vercel.app). Download buttons are deliberately disabled until real signed Windows and signed/notarized macOS builds are published with matching SHA-256 checksums.
+The public product site is [ensync.vercel.app](https://ensync.vercel.app). The macOS download stays disabled until a signed/notarized build with a matching SHA-256 checksum is published; Windows stays disabled until the certified Microsoft Store listing URL is configured.
 
 ## What works
 
@@ -19,8 +19,8 @@ The public product site is [ensync.vercel.app](https://ensync.vercel.app). Downl
 - Typed, non-fabricated usage telemetry: subscription quota for Codex and Claude when reported; session-only data for Copilot and Junie; local model inventory/load state for Ollama; explicit unavailable state for Cursor and Kiro account quota.
 - Verified SSH workers, guarded Oracle VirtualBox provisioning, and approval-gated Telegram operation through Ensync Host.
 - Local-first help desk with reviewable redacted diagnostics and an opt-in one-run bug repair through the connected Codex or Claude subscription. Results always require user review and never claim the bug is fixed automatically.
-- Electron packaging for universal macOS DMG/ZIP and Windows x64 NSIS/ZIP, with native CI, signature/notarization attestations, checksums, and fail-closed public release generation.
-- Manual native updates in Settings: the signed desktop app shows its installed version, checks the same production manifest as the download site only on request, downloads with real byte progress, verifies SHA-256 plus the installed publisher identity, and opens the verified DMG/installer only after a separate click. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable; Ensync never silently installs, quits, or restarts.
+- Electron packaging for universal macOS DMG/ZIP and a guarded Windows x64 AppX upload package. macOS uses native signing/notarization attestations and fail-closed public release generation; Windows is signed, certified, installed, and updated by Microsoft Store.
+- Manual native updates in Settings for direct desktop releases: the signed macOS app checks the production manifest only on request, verifies SHA-256 plus its Developer ID, and opens the verified DMG only after a separate click. A Microsoft Store Windows install instead reports Store-managed updates and disables Ensync's installer controls. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable.
 
 Only Codex and Claude currently have tested structured chat runners and may enter automatic fallback. Every other account-backed provider remains discovery-only until its execution adapter has equivalent parsing, subscription-authentication proof, paid-overage guards, session handling, and safe-retry proof. Ollama remains a separate local fallback and never enters the subscription pool.
 
@@ -66,11 +66,11 @@ The in-app help desk stores tickets locally and creates a report for review. Aut
 npm --prefix desktop test
 npm --prefix desktop run smoke
 npm --prefix desktop run package:mac # on macOS
-npm --prefix desktop run package:win # on Windows
+npm --prefix desktop run package:win-store # on Windows with Partner Center identity variables
 cd site && npm test
 ```
 
-The tag-triggered release workflow refuses to create a public GitHub release unless Windows signing and macOS app/DMG signing plus app/DMG notarization are verified. It then deploys the exact generated manifest to the Vercel download/update feed; a failed Vercel deployment leaves the older fail-closed feed in place. Local unsigned artifacts stay private test builds. See `desktop/README.md` for certificate, notarization, and Vercel inputs and `site/README.md` for the manifest contract.
+The tag-triggered release workflow refuses to create a public GitHub release unless macOS app/DMG signing and notarization are verified. Its Windows AppX remains a private Actions artifact for Partner Center upload and can never enter the public binary release. Microsoft Store owns Windows certification and updates. The workflow deploys the exact macOS manifest to Vercel; a failed deployment leaves the older fail-closed feed in place. See `desktop/README.md` for Store identity, Apple notarization, and Vercel inputs and `site/README.md` for the public link contract.
 
 ## Project memory
 

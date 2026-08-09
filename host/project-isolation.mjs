@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -10,6 +10,7 @@ const DEFAULT_LOCK_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 5_000
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
+const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
 
 const AGENT_COMMIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Ensync Agent',
@@ -450,12 +451,21 @@ export class ProjectIsolationService {
         }
         await writeOwner()
 
+        const refreshOwner = async () => {
+          const current = JSON.parse(await readFile(ownerPath, 'utf8'))
+          if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
+          const heartbeatAt = new Date(this.#now())
+          // Keep the owner record immutable after acquisition. Replacing an
+          // existing file can fail on Windows while another Host is reading it,
+          // whereas updating timestamps preserves atomic metadata reads and is
+          // already the conservative freshness source used by stale detection.
+          await utimes(ownerPath, heartbeatAt, heartbeatAt)
+        }
+
         const heartbeat = setInterval(() => {
           void (async () => {
             try {
-              const current = JSON.parse(await readFile(ownerPath, 'utf8'))
-              if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
-              await writeOwner()
+              await refreshOwner()
             } catch (error) {
               failure = new ProjectIsolationError(
                 'workspace_write_lock_lost',
@@ -578,10 +588,13 @@ export class ProjectIsolationService {
       }
 
       await mkdir(resolve(configuredPath, '..'), { recursive: true, mode: 0o700 })
+      const worktreeArgs = branchExists
+        ? ['worktree', 'add', configuredPath, branch]
+        : ['worktree', 'add', '-b', branch, configuredPath, startingPoint]
       await this.#git(
-        branchExists
-          ? ['worktree', 'add', configuredPath, branch]
-          : ['worktree', 'add', '-b', branch, configuredPath, startingPoint],
+        seededFromSharedCheckout
+          ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
+          : worktreeArgs,
         {
           cwd: repository.repositoryPath,
           code: 'managed_worktree_create_failed',
@@ -740,7 +753,7 @@ export class ProjectIsolationService {
     }
     try {
       await this.#git(['read-tree', repository.head], { cwd: repository.repositoryPath, env })
-      await this.#git(['add', '-A', '--', '.'], {
+      await this.#git([...BYTE_PRESERVING_GIT_CONFIG, 'add', '-A', '--', '.'], {
         cwd: repository.repositoryPath,
         env,
         code: 'shared_checkout_snapshot_failed',

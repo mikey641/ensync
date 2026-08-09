@@ -3,20 +3,29 @@ import { spawnSync } from 'node:child_process'
 import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { resolveWindowsStorePackageConfig, verifyWindowsStoreManifest } from './windows-store.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const releaseRoot = resolve(desktopRoot, 'release')
 const platformIndex = process.argv.indexOf('--platform')
 const platform = platformIndex >= 0 ? process.argv[platformIndex + 1] : null
-if (!['macos', 'windows'].includes(platform)) {
-  throw new Error('Use --platform macos or --platform windows.')
+if (!['macos', 'windows', 'windows-store'].includes(platform)) {
+  throw new Error('Use --platform macos, windows, or windows-store.')
 }
 
 const packageJson = JSON.parse(await readFile(resolve(desktopRoot, 'package.json'), 'utf8'))
 const version = packageJson.version
 const entries = await readdir(releaseRoot, { withFileTypes: true })
-const expectedExtensions = platform === 'macos' ? ['.dmg', '.zip'] : ['.exe', '.zip']
-const platformMarker = platform === 'macos' ? '-mac-' : '-windows-'
+const expectedExtensions = platform === 'macos'
+  ? ['.dmg', '.zip']
+  : platform === 'windows-store'
+    ? ['.appx']
+    : ['.exe', '.zip']
+const platformMarker = platform === 'macos'
+  ? '-mac-'
+  : platform === 'windows-store'
+    ? '-windows-store-'
+    : '-windows-'
 const artifacts = entries
   .filter((entry) => entry.isFile())
   .map((entry) => join(releaseRoot, entry.name))
@@ -43,6 +52,7 @@ async function fileRecord(file) {
 
 let signed = false
 let notarized = false
+let storePackage = null
 if (platform === 'macos') {
   const appDirectory = entries
     .filter((entry) => entry.isDirectory() && entry.name.startsWith('mac'))
@@ -57,7 +67,7 @@ if (platform === 'macos') {
   const diskImageNotarized = signed
     && spawnSync('xcrun', ['stapler', 'validate', diskImage], { stdio: 'ignore' }).status === 0
   notarized = appNotarized && diskImageNotarized
-} else {
+} else if (platform === 'windows') {
   const installer = artifacts.find((file) => file.toLowerCase().endsWith('.exe'))
   const result = spawnSync('powershell.exe', [
     '-NoLogo',
@@ -71,6 +81,17 @@ if (platform === 'macos') {
     windowsHide: true,
   })
   signed = result.status === 0 && result.stdout.trim() === 'Valid'
+} else {
+  const artifact = artifacts[0]
+  const manifestResult = spawnSync('tar.exe', ['-xOf', artifact, 'AppxManifest.xml'], {
+    encoding: 'utf8',
+    windowsHide: true,
+  })
+  if (manifestResult.status !== 0 || !manifestResult.stdout.trim()) {
+    throw new Error('The Windows Store package does not contain a readable AppxManifest.xml.')
+  }
+  const expected = resolveWindowsStorePackageConfig(process.env, { productVersion: version })
+  storePackage = verifyWindowsStoreManifest(manifestResult.stdout, expected)
 }
 
 const attestation = {
@@ -81,6 +102,9 @@ const attestation = {
   signed,
   notarized: platform === 'macos' ? notarized : null,
   architectures: platform === 'macos' ? ['universal'] : ['x64'],
+  distribution: platform === 'windows-store' ? 'microsoft-store' : 'direct',
+  storeCertification: platform === 'windows-store' ? 'pending' : null,
+  packageIdentity: storePackage,
   artifacts: await Promise.all(artifacts.sort().map(fileRecord)),
 }
 

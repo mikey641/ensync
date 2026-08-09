@@ -1,5 +1,6 @@
 {
   "schemaVersion": 1,
+  "channel": "beta",
   "latest": {
     "version": null,
     "publishedAt": null,
@@ -8,7 +9,7 @@
   "platforms": {
     "macos": {
       "status": "unavailable",
-      "reason": "No signed macOS build has been published yet.",
+      "reason": "No signed macOS beta build has been published yet.",
       "version": null,
       "url": null,
       "sha256": null,
@@ -18,7 +19,7 @@
     },
     "windows": {
       "status": "unavailable",
-      "reason": "The Microsoft Store listing has not been certified and published yet.",
+      "reason": "The Microsoft Store beta package has not been certified for a package flight yet.",
       "version": null,
       "url": null,
       "sha256": null,

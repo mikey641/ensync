@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { releaseLabel, resolveDownload } from '../public/release-manifest.mjs';
+import { releaseLabel, resolveDownload, resolveWindowsStoreListing } from '../public/release-manifest.mjs';
 
 function manifest(overrides = {}) {
   return {
@@ -57,4 +57,17 @@ test('rejects a platform build that does not match latest', () => {
 test('fails closed for an absent or unsupported manifest', () => {
   assert.equal(resolveDownload(null, 'windows').available, false);
   assert.equal(resolveDownload({ schemaVersion: 2 }, 'windows').available, false);
+});
+
+test('accepts only exact Microsoft Store product listing URLs', () => {
+  const available = resolveWindowsStoreListing({
+    downloads: { windowsStoreUrl: 'https://apps.microsoft.com/detail/ensync/9ABC123?hl=en-US' },
+  });
+  assert.equal(available.available, true);
+  assert.equal(available.url, 'https://apps.microsoft.com/detail/ensync/9ABC123?hl=en-US');
+
+  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: null } }).available, false);
+  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'https://example.com/detail/ensync' } }).available, false);
+  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'http://apps.microsoft.com/detail/ensync' } }).available, false);
+  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'https://apps.microsoft.com/store/apps' } }).available, false);
 });

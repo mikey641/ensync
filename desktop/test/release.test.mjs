@@ -10,18 +10,17 @@ import { createHash } from 'node:crypto'
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const generator = resolve(desktopRoot, 'scripts/generate-release.mjs')
 
-async function fixture({ macSigned = true, macNotarized = true, windowsSigned = true } = {}) {
+async function fixture({ macSigned = true, macNotarized = true, includePrivateStorePackage = false, version = '1.2.3' } = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-release-'))
   const input = join(root, 'input')
   const output = join(root, 'output')
   await mkdir(input)
 
   const names = [
-    'Ensync-1.2.3-mac-universal.dmg',
-    'Ensync-1.2.3-mac-universal.zip',
-    'Ensync-1.2.3-windows-x64.exe',
-    'Ensync-1.2.3-windows-x64.zip',
+    `Ensync-${version}-mac-universal.dmg`,
+    `Ensync-${version}-mac-universal.zip`,
   ]
+  if (includePrivateStorePackage) names.push(`Ensync-${version}-windows-store-x64.appx`)
   const records = []
   for (const [index, name] of names.entries()) {
     const contents = Buffer.alloc(1_000_001, index + 1)
@@ -33,26 +32,15 @@ async function fixture({ macSigned = true, macNotarized = true, windowsSigned = 
     })
   }
 
-  const attestations = [
-    {
-      schemaVersion: 1,
-      platform: 'macos',
-      version: '1.2.3',
-      signed: macSigned,
-      notarized: macNotarized,
-      architectures: ['universal'],
-      artifacts: records.filter((record) => record.name.includes('-mac-')),
-    },
-    {
-      schemaVersion: 1,
-      platform: 'windows',
-      version: '1.2.3',
-      signed: windowsSigned,
-      notarized: null,
-      architectures: ['x64'],
-      artifacts: records.filter((record) => record.name.includes('-windows-')),
-    },
-  ]
+  const attestations = [{
+    schemaVersion: 1,
+    platform: 'macos',
+    version,
+    signed: macSigned,
+    notarized: macNotarized,
+    architectures: ['universal'],
+    artifacts: records.filter((record) => record.name.includes('-mac-')),
+  }]
   for (const attestation of attestations) {
     await writeFile(
       join(input, `attestation-${attestation.platform}.json`),
@@ -62,35 +50,67 @@ async function fixture({ macSigned = true, macNotarized = true, windowsSigned = 
   return { input, output }
 }
 
-function generate(input, output) {
+function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
   return spawnSync(process.execPath, [
     generator,
     '--input', input,
     '--output', output,
-    '--tag', 'v1.2.3',
+    '--tag', tag,
     '--repository', 'ensync/ensync',
+    '--channel', channel,
   ], { encoding: 'utf8' })
 }
 
-test('release generation produces download metadata only for signed native artifacts', async () => {
+test('release generation publishes signed macOS artifacts and leaves Windows to Store certification', async () => {
   const { input, output } = await fixture()
   const result = generate(input, output)
   assert.equal(result.status, 0, result.stderr)
 
   const manifest = JSON.parse(await readFile(join(output, 'releases.json'), 'utf8'))
+  assert.equal(manifest.channel, 'stable')
   assert.equal(manifest.platforms.macos.status, 'available')
-  assert.equal(manifest.platforms.windows.status, 'available')
+  assert.equal(manifest.platforms.windows.status, 'unavailable')
+  assert.match(manifest.platforms.windows.reason, /Microsoft Store/)
   assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\//)
   assert.equal(manifest.platforms.macos.signed, true)
   assert.equal(manifest.platforms.macos.notarized, true)
-  assert.equal(manifest.platforms.windows.notarized, null)
+  assert.equal(manifest.platforms.windows.url, null)
 })
 
-test('release generation refuses unsigned Windows artifacts', async () => {
-  const { input, output } = await fixture({ windowsSigned: false })
+test('prerelease generation writes only the beta manifest and labels its channel', async () => {
+  const version = '1.2.3-beta.1'
+  const { input, output } = await fixture({ version })
+  const result = generate(input, output, { tag: `v${version}`, channel: 'beta' })
+  assert.equal(result.status, 0, result.stderr)
+
+  const manifest = JSON.parse(await readFile(join(output, 'releases-beta.json'), 'utf8'))
+  assert.equal(manifest.channel, 'beta')
+  assert.equal(manifest.latest.version, version)
+  await assert.rejects(readFile(join(output, 'releases.json')), { code: 'ENOENT' })
+})
+
+test('release generation refuses a tag that does not match its selected channel', async () => {
+  const stable = await fixture()
+  const stableAsBeta = generate(stable.input, stable.output, { channel: 'beta' })
+  assert.notEqual(stableAsBeta.status, 0)
+  assert.match(stableAsBeta.stderr, /beta channel requires/)
+
+  const prerelease = await fixture({ version: '1.2.3-beta.1' })
+  const betaAsStable = generate(prerelease.input, prerelease.output, {
+    tag: 'v1.2.3-beta.1',
+    channel: 'stable',
+  })
+  assert.notEqual(betaAsStable.status, 0)
+  assert.match(betaAsStable.stderr, /prerelease tag may publish only/)
+})
+
+test('release generation never copies a private uncertified Store package into public assets', async () => {
+  const { input, output } = await fixture({ includePrivateStorePackage: true })
   const result = generate(input, output)
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /windows artifacts are unsigned/)
+  assert.equal(result.status, 0, result.stderr)
+  await assert.rejects(readFile(join(output, 'Ensync-1.2.3-windows-store-x64.appx')), { code: 'ENOENT' })
+  const checksums = await readFile(join(output, 'SHA256SUMS.txt'), 'utf8')
+  assert.doesNotMatch(checksums, /windows-store/)
 })
 
 test('release generation refuses a signed but unnotarized macOS build', async () => {

@@ -3670,7 +3670,7 @@ function ConversationPane({
               )
             })
           )}
-          {sending && providerNotes.length > 0 && (
+          {providerNotes.length > 0 && (
             <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
               {providerNotes.map((note, index) => {
                 const noteProvider = providers.find((item) => item.id === note.provider) ?? provider
