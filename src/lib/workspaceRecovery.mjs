@@ -171,8 +171,13 @@ export function mergeRecoveredWorkspaceState(currentState, recoveredState, optio
     chats,
     tabs,
     splitLayout: remapSplitLayout(current.splitLayout, recovered.splitLayout, tabIdMap),
-    // Only live current runs survive. Historical pending work was reconciled.
-    inFlightRuns: { ...(current.inFlightRuns ?? {}) },
+    // Explicit operator recovery never revives historical work. A project
+    // recovered from this browser profile may retain only Host-backed opaque
+    // job IDs so the renderer can adopt the already-running/completed job
+    // without replaying its prompt.
+    inFlightRuns: options.preserveHostJobs
+      ? remapRecord(recovered.inFlightRuns, chatIdMap, current.inFlightRuns)
+      : { ...(current.inFlightRuns ?? {}) },
   }
   for (const key of chatScopedKeys) {
     merged[key] = remapRecord(recovered[key], chatIdMap, current[key])

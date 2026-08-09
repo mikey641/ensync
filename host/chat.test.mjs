@@ -197,6 +197,7 @@ test('retained Codex jobs use the live runner and validate steering through the 
   }, { liveTurnId: 'job_1111111111111111' })
   await started
 
+  assert.equal(service.hasRunningRuns(), true)
   assert.equal(liveInput.id, 'job_1111111111111111')
   assert.equal(liveInput.prompt, 'Start live')
   assert.equal(liveInput.effort, 'medium')
@@ -214,6 +215,7 @@ test('retained Codex jobs use the live runner and validate steering through the 
     completedAt: '2026-08-07T12:00:00.000Z',
   })
   assert.equal((await run).response, 'done')
+  assert.equal(service.hasRunningRuns(), false)
 })
 
 test('every local file type validates and Codex receives supported images on new or resumed turns', async (context) => {
@@ -385,7 +387,8 @@ test('live execution events preserve CLI line boundaries, redact secrets, and ke
   const projectPath = await projectFixture(context)
   const cliLines = [
     JSON.stringify({ type: 'item.completed', item: { type: 'command_execution', aggregated_output: 'api_key=super-secret-value-12345' } }),
-    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Verified response' } }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', phase: 'commentary', text: 'Checking authorization=provider-note-secret' } }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', phase: 'final_answer', text: 'Verified response' } }),
     JSON.stringify({ type: 'turn.completed' }),
   ]
   const stdout = cliLines.join('\n')
@@ -413,6 +416,12 @@ test('live execution events preserve CLI line boundaries, redact secrets, and ke
   assert.equal(output.some((event) => event.stream === 'stderr' && event.text === 'provider diagnostic\n'), true)
   assert.equal(output.some((event) => event.redacted && event.text.includes('api_key=[REDACTED]')), true)
   assert.equal(JSON.stringify(output).includes('super-secret-value-12345'), false)
+  const notes = events.filter((event) => event.type === 'note')
+  assert.equal(notes.length, 1)
+  assert.equal(notes[0].provider, 'codex')
+  assert.equal(notes[0].redacted, true)
+  assert.equal(notes[0].text, 'Checking authorization=[REDACTED]')
+  assert.equal(JSON.stringify(notes).includes('provider-note-secret'), false)
   assert.equal(result.response, 'Verified response')
   assert.equal('stdout' in result, false)
   assert.equal('stderr' in result, false)
@@ -430,31 +439,55 @@ test('Claude chat resumes a verified session without putting the prompt in argum
   const projectPath = await projectFixture(context)
   const sessionId = '123e4567-e89b-12d3-a456-426614174000'
   let captured
+  const events = []
   const service = new ChatRunService({
     statusService: statusService(readyProvider('claude')),
     processRunner: async (...call) => {
       captured = call
+      const stdout = [
+        JSON.stringify({
+          type: 'system',
+          subtype: 'init',
+          session_id: sessionId,
+          model: 'claude-opus-4-6',
+        }),
+        // Claude Code streams one event per content block, so the progress text and the
+        // tool call that justifies showing it arrive as separate assistant events that
+        // share a message id. The final answer is a text-only message that never gets one.
+        JSON.stringify({
+          type: 'assistant',
+          message: {
+            id: 'msg_progress',
+            content: [
+              { type: 'thinking', thinking: 'hidden reasoning that must never leave the Host' },
+              { type: 'text', text: 'I found the affected test and am updating it.' },
+            ],
+          },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: { id: 'msg_progress', content: [{ type: 'tool_use', id: 'tool-1', name: 'Edit', input: {} }] },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: { id: 'msg_final', content: [{ type: 'text', text: 'Real Claude response' }] },
+        }),
+        JSON.stringify({
+          type: 'result',
+          is_error: false,
+          result: 'Real Claude response',
+          session_id: sessionId,
+          usage: { input_tokens: 34, output_tokens: 13, cache_read_input_tokens: 5 },
+          modelUsage: { 'claude-opus-4-6': { inputTokens: 34, outputTokens: 13 } },
+        }),
+      ].join('\n')
+      call[2].onStdout(stdout)
       return {
         exitCode: 0,
         error: null,
         timedOut: false,
         stderr: '',
-        stdout: [
-          JSON.stringify({
-            type: 'system',
-            subtype: 'init',
-            session_id: sessionId,
-            model: 'claude-opus-4-6',
-          }),
-          JSON.stringify({
-            type: 'result',
-            is_error: false,
-            result: 'Real Claude response',
-            session_id: sessionId,
-            usage: { input_tokens: 34, output_tokens: 13, cache_read_input_tokens: 5 },
-            modelUsage: { 'claude-opus-4-6': { inputTokens: 34, outputTokens: 13 } },
-          }),
-        ].join('\n'),
+        stdout,
       }
     },
   })
@@ -465,7 +498,7 @@ test('Claude chat resumes a verified session without putting the prompt in argum
     prompt: 'Continue the implementation',
     sessionId,
     effort: 'max',
-  })
+  }, { onEvent: (event) => events.push(event) })
 
   assert.deepEqual(captured[1], [
     '--print',
@@ -487,6 +520,58 @@ test('Claude chat resumes a verified session without putting the prompt in argum
     outputTokens: 13,
     cachedInputTokens: 5,
   })
+  assert.deepEqual(
+    events.filter((event) => event.type === 'note').map((event) => ({ provider: event.provider, text: event.text })),
+    [{ provider: 'claude', text: 'I found the affected test and am updating it.' }],
+  )
+})
+
+test('Claude progress notes span split content-block events and exclude reasoning and the final answer', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const cliLines = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'thinking', thinking: 'private-reasoning-marker' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'Reading the failing test first.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_2', content: [{ type: 'text', text: 'Now updating the note reader.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_2', content: [{ type: 'tool_use', id: 'tool-2', name: 'Edit', input: {} }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_3', content: [{ type: 'text', text: 'Claude notes now reach the conversation.' }] } }),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: 'Claude notes now reach the conversation.',
+      session_id: sessionId,
+    }),
+  ]
+  const stdout = cliLines.join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      // Network chunks do not respect CLI line boundaries.
+      const boundary = stdout.indexOf('failing test') + 4
+      options.onStdout(stdout.slice(0, boundary))
+      options.onStdout(stdout.slice(boundary))
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Fix the note reader' },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  assert.deepEqual(
+    events.filter((event) => event.type === 'note').map((event) => event.text),
+    ['Reading the failing test first.', 'Now updating the note reader.'],
+  )
+  assert.equal(result.response, 'Claude notes now reach the conversation.')
+  assert.equal(
+    JSON.stringify(events.filter((event) => event.type === 'note')).includes('private-reasoning-marker'),
+    false,
+  )
 })
 
 test('chat refuses unsupported providers and non-subscription authentication', async (context) => {
@@ -574,6 +659,50 @@ test('chat timeout and malformed CLI output are explicit failures', async (conte
   )
 })
 
+test('successful provider streams receive bounded repair before Ensync surfaces an error', () => {
+  const codexOutput = [
+    'Ensync Host returned a malformed execution event.',
+    `\u001b[32m${JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' })}\u001b[0m`,
+    JSON.stringify({
+      type: 'item.completed',
+      item: { type: 'agent_message', text: 'Recovered Codex response' },
+    }),
+    JSON.stringify({ type: 'turn.completed' }),
+  ].join('\n')
+  const codex = parseCodexChatResult(codexOutput)
+
+  assert.equal(codex.response, 'Recovered Codex response')
+  assert.deepEqual(codex.outputRecovery, {
+    applied: true,
+    normalizedLineCount: 1,
+    discardedLineCount: 1,
+  })
+
+  const claude = parseClaudeChatResult([
+    'Claude Code emitted a one-line startup diagnostic.',
+    JSON.stringify({ type: 'result', is_error: false, result: 'Recovered Claude response' }),
+  ].join('\n'))
+  assert.equal(claude.response, 'Recovered Claude response')
+  assert.deepEqual(claude.outputRecovery, {
+    applied: true,
+    normalizedLineCount: 0,
+    discardedLineCount: 1,
+  })
+
+  const excessiveNoise = [
+    ...Array.from({ length: 33 }, (_, index) => `diagnostic ${index}`),
+    JSON.stringify({ type: 'turn.completed' }),
+  ].join('\n')
+  assert.throws(
+    () => parseCodexChatResult(excessiveNoise),
+    (error) =>
+      error instanceof ChatRunError
+      && error.code === 'invalid_cli_output'
+      && error.safeToRetry === false
+      && error.message.includes('bounded repair'),
+  )
+})
+
 test('quota retry safety requires a structured terminal failure with zero activity', () => {
   const codexSafe = [
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
@@ -618,6 +747,8 @@ test('quota retry safety requires a structured terminal failure with zero activi
   assert.equal(quotaFailureIsSafe('codex', codexSafe), true)
   assert.equal(quotaFailureIsSafe('codex', codexWithCommand), false)
   assert.equal(quotaFailureIsSafe('codex', codexWithUnknownWork), false)
+  assert.equal(quotaFailureIsSafe('codex', `unverified diagnostic\n${codexSafe}`), false)
+  assert.equal(quotaFailureIsSafe('codex', `\u001b[32m${codexSafe}\u001b[0m`), false)
   assert.equal(quotaFailureIsSafe('codex', '', 'Usage limit reached'), false)
   assert.equal(quotaFailureIsSafe('claude', claudeSafe), true)
   assert.equal(quotaFailureIsSafe('claude', claudeWithTool), false)
