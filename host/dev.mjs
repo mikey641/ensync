@@ -3,9 +3,24 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const projectRoot = dirname(dirname(fileURLToPath(import.meta.url)))
+const bundledSyncPort = process.env.ENSYNC_SYNC_PORT ?? '43122'
+const bundledSyncUrl = `http://127.0.0.1:${bundledSyncPort}`
+const syncServiceUrl = process.env.ENSYNC_SYNC_SERVICE_URL ?? bundledSyncUrl
+const hostEnvironment = { ...process.env, ENSYNC_SYNC_SERVICE_URL: syncServiceUrl }
 const children = [
-  spawn(process.execPath, [join(projectRoot, 'host', 'server.mjs')], {
+  ...(process.env.ENSYNC_SYNC_SERVICE_URL ? [] : [
+    spawn(process.execPath, [join(projectRoot, 'sync-service', 'server.mjs')], {
+      cwd: projectRoot,
+      env: process.env,
+      stdio: 'inherit',
+    }),
+  ]),
+  // Keep the backend in sync with the Vite renderer during development. Without
+  // Node's watcher, Host parser and recovery fixes do not take effect until the
+  // entire dev stack is restarted, leaving the renderer connected to stale code.
+  spawn(process.execPath, ['--watch', join(projectRoot, 'host', 'server.mjs')], {
     cwd: projectRoot,
+    env: hostEnvironment,
     stdio: 'inherit',
   }),
   spawn(process.execPath, [join(projectRoot, 'node_modules', 'vite', 'bin', 'vite.js')], {

@@ -1,13 +1,17 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import * as promptQueueContract from '../src/lib/promptQueue.mjs'
 import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
+  promoteQueuedMessageToActiveTurn,
+  promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
+  promptQueueStatusPresentation,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -34,6 +38,48 @@ test('per-chat queues preserve FIFO order and independent chat state', () => {
   assert.deepEqual(queues['chat-b'].map((item) => item.turnId), ['turn-b'])
 })
 
+test('confirmed live delivery consumes only the head and rebases its FIFO successor', () => {
+  const queues = {
+    'chat-a': [
+      entry('turn-2', 'turn-1'),
+      entry('turn-3', 'turn-2'),
+      entry('turn-4', 'turn-3'),
+    ],
+  }
+  const promoted = promoteQueuedPromptToActiveTurn(queues, 'chat-a', 'queue-turn-2', 'turn-1')
+  assert.deepEqual(promoted['chat-a'].map((item) => [item.turnId, item.predecessorTurnId]), [
+    ['turn-3', 'turn-1'],
+    ['turn-4', 'turn-3'],
+  ])
+  assert.equal(
+    promoteQueuedPromptToActiveTurn(queues, 'chat-a', 'queue-turn-3', 'turn-1'),
+    queues,
+  )
+})
+
+test('confirmed queued messages join the active turn without crossing its reply', () => {
+  const pendingMessages = [
+    { id: 'u1', role: 'user', turnId: 'turn-1', deliveryStatus: 'pending' },
+    { id: 'u2', role: 'user', turnId: 'turn-2', deliveryStatus: 'queued' },
+    { id: 'u3', role: 'user', turnId: 'turn-3', deliveryStatus: 'queued' },
+  ]
+  const pending = promoteQueuedMessageToActiveTurn(pendingMessages, 'u2', 'turn-1')
+  assert.deepEqual(pending.map((message) => [message.id, message.turnId, message.deliveryStatus]), [
+    ['u1', 'turn-1', 'pending'],
+    ['u2', 'turn-1', 'pending'],
+    ['u3', 'turn-3', 'queued'],
+  ])
+
+  const completed = promoteQueuedMessageToActiveTurn([
+    pendingMessages[0],
+    { id: 'a1', role: 'agent', turnId: 'turn-1' },
+    pendingMessages[1],
+    pendingMessages[2],
+  ], 'u2', 'turn-1')
+  assert.deepEqual(completed.map((message) => message.id), ['u1', 'u2', 'a1', 'u3'])
+  assert.equal(completed[1].deliveryStatus, 'completed')
+})
+
 test('automatic queue advancement requires a matching verified reply', () => {
   const queued = entry('turn-2', 'turn-1')
   const pending = { messages: [{ role: 'user', turnId: 'turn-1', deliveryStatus: 'pending' }] }
@@ -54,6 +100,22 @@ test('explicit review approval releases only the next prompt', () => {
   const approved = approveNextQueuedPrompt(queues, 'chat-a', '2026-08-06T12:01:00.000Z')
   assert.equal(queuedPromptGate({ messages: [] }, approved['chat-a'][0]).state, 'ready')
   assert.equal(approved['chat-a'][1].resumeApprovedAt, undefined)
+})
+
+test('queue status explains the safety pause and the exact action in plain language', () => {
+  assert.deepEqual(promptQueueStatusPresentation({
+    state: 'paused',
+    reason: 'The preceding turn failed.',
+  }, 1), {
+    headline: '1 message paused',
+    detail: 'The preceding turn failed. Review possible partial project changes before continuing. Running the next message will not retry the previous turn.',
+    actionLabel: 'Run next message anyway',
+  })
+  assert.deepEqual(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 2), {
+    headline: '2 messages queued',
+    detail: 'It will run automatically after the current turn finishes successfully.',
+    actionLabel: null,
+  })
 })
 
 test('execution context stops before its own prompt and replies precede future queued prompts', () => {
@@ -95,6 +157,10 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     hint: '↵ queue · stop ends current only',
   })
   assert.equal(promptQueueComposerState({ sending: true, draft: '   ', canRun: true }).sendEnabled, false)
+})
+
+test('active-run submissions always queue before an explicit Push now action', () => {
+  assert.equal(promptQueueContract.promptSubmissionMode?.({ hasActiveRun: true }), 'queue')
   assert.deepEqual(promptQueueComposerState({
     sending: true,
     draft: 'correct the active task',
@@ -102,8 +168,8 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     liveSteering: true,
   }), {
     sendEnabled: true,
-    sendLabel: 'Steer the active Codex turn',
+    sendLabel: 'Queue message in this chat',
     stopVisible: true,
-    hint: '↵ steer now · stop ends turn',
+    hint: '↵ queue · stop ends current only',
   })
 })

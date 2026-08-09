@@ -8,7 +8,7 @@ export type WorkspaceRecoverySummary = {
 export function mergeRecoveredWorkspaceState<T extends object>(
   currentState: T,
   recoveredState: Partial<T>,
-  options?: { now?: () => string },
+  options?: { now?: () => string; preserveHostJobs?: boolean },
 ): {
   state: T
   summary: WorkspaceRecoverySummary
