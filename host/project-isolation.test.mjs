@@ -705,3 +705,20 @@ test('checkSharedCheckout treats an Ensync land commit as landed, not changed', 
   assert.equal(result.landed, true)
   assert.equal(result.changed, false)
 })
+
+test('checkSharedCheckout reports a landed commit plus a concurrent user edit as changed, landed, and not destructive', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect-land-mixed')
+  context.after(() => lease.release())
+
+  await writeFile(join(fixture.repository, 'other-chat.txt'), 'landed content\n')
+  await git(fixture.repository, ['add', 'other-chat.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-feedbeeffeedbeeffeedbeef'])
+  await writeFile(join(fixture.repository, 'concurrent-user-edit.txt'), 'typed during run\n')
+
+  const result = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(result.changed, true)
+  assert.equal(result.landed, true)
+  assert.equal(result.destructive, false)
+})
