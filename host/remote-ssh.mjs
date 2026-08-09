@@ -271,6 +271,13 @@ function bridgeFailure(envelope) {
     provider_not_authenticated: 'The requested provider is not authenticated on the remote machine.',
     subscription_auth_required: 'The remote provider is not using a verified subscription login.',
     unsupported_provider: 'Remote chat supports Codex and Claude Code only.',
+    project_isolation_required: 'Remote agent execution requires a verified Git working tree and directly runnable Git installation.',
+    project_baseline_unavailable: 'Create an initial remote Git commit before starting an isolated Ensync workspace.',
+    shared_checkout_snapshot_failed: 'Git could not safely copy the remote shared checkout into a protected Ensync workspace. The shared checkout was left unchanged.',
+    managed_worktree_missing: 'The protected remote Ensync worktree is missing or inaccessible.',
+    managed_worktree_mismatch: 'The protected remote Ensync worktree no longer matches its registered branch or repository.',
+    managed_worktree_create_failed: 'Git could not create the protected remote Ensync worktree.',
+    managed_project_missing: 'The selected project directory is missing from its protected remote worktree.',
   }
   return new RemoteSshError(
     code,
@@ -332,6 +339,23 @@ function validateRemoteChatRequest(request) {
   }
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
     throw new RemoteSshError('invalid_prompt', 'Enter a message before running remote chat.')
+  }
+  if (request.workspaceKey === undefined || request.workspaceKey === null) {
+    throw new RemoteSshError(
+      'client_upgrade_required',
+      'This Ensync window is older than the running Host. Quit Ensync completely and reopen it before starting another remote agent run.',
+    )
+  }
+  if (
+    typeof request.workspaceKey !== 'string'
+    || !request.workspaceKey.trim()
+    || request.workspaceKey.length > 512
+    || CONTROL_CHARACTER_PATTERN.test(request.workspaceKey)
+  ) {
+    throw new RemoteSshError(
+      'invalid_workspace_key',
+      'A stable Ensync conversation workspace key is required for remote agent execution.',
+    )
   }
   if (request.prompt.length > MAX_PROMPT_LENGTH) {
     throw new RemoteSshError(
@@ -452,6 +476,7 @@ export class RemoteSshService {
         operation: 'chat',
         provider: request.provider,
         projectPath: connection.projectPath,
+        workspaceKey: request.workspaceKey,
         prompt: request.prompt,
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
@@ -488,6 +513,23 @@ export class RemoteSshService {
     }
     if (!execution.envelope.ok) throw bridgeFailure(execution.envelope)
     const result = execution.envelope.result
+    const workspace = result?.workspace
+    if (
+      !workspace
+      || typeof workspace.path !== 'string'
+      || typeof workspace.repositoryPath !== 'string'
+      || typeof workspace.branch !== 'string'
+      || !workspace.gitBefore
+    ) {
+      throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned no verified protected workspace.', 502)
+    }
+    options.onEvent?.({
+      type: 'notice',
+      code: 'project_workspace_ready',
+      message: `Remote protected workspace used on ${workspace.branch} at ${workspace.path}. The shared checkout was not the provider working directory.`,
+      workspace: { path: workspace.path, branch: workspace.branch },
+      at: new Date().toISOString(),
+    })
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)
@@ -540,12 +582,14 @@ export class RemoteSshService {
     return {
       provider: request.provider,
       projectPath: result.projectPath,
+      workspace,
       response: parsed.response,
       sessionId: parsed.sessionId ?? request.sessionId ?? null,
       model: parsed.model,
       requestedModel: request.model ?? null,
       requestedEffort: request.effort ?? null,
       usage: parsed.usage,
+      outputRecovery: parsed.outputRecovery,
       durationMs: Date.now() - startedAt,
       completedAt: result.completedAt,
       remote: {
