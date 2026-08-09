@@ -92,6 +92,7 @@ import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
+  selectAutomaticFallbackProviderAfterRefresh,
   selectAutomaticProvider,
   selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
@@ -2602,7 +2603,19 @@ function App() {
           if (runWasCancelled(attemptError, runController.signal)) throw cancelledRunError()
           const proof = fallbackEnabled ? safeFallbackProof(attemptError) : null
           if (!proof) throw attemptError
-          const fallback = selectAutomaticProvider(runExecutionProviders, runFallbackOrder, attemptedProviders)
+          const fallback = await selectAutomaticFallbackProviderAfterRefresh(
+            runExecutionProviders,
+            runFallbackOrder,
+            attemptedProviders,
+            runTarget.kind === 'local'
+              ? async () => {
+                  const online = await refreshProviders(true)
+                  if (!online) return null
+                  runExecutionProviders = providersForTarget(providersRef.current, runTarget)
+                  return runExecutionProviders
+                }
+              : undefined,
+          )
           if (!fallback) throw attemptError
           const reason = proof.kind === 'quota'
             ? `${routedProvider.name} reported a Host-verified quota failure with zero observed activity; continuing with ${fallback.name}.`

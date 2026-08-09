@@ -69,3 +69,27 @@ export async function selectAutomaticProviderAfterRefresh(providers, priorityOrd
     ? selectAutomaticProvider(refreshed, priorityOrder)
     : null
 }
+
+/**
+ * A provider run can invalidate the renderer snapshot that existed when the
+ * turn started. Refresh local provider facts before choosing a safe runtime
+ * fallback, while retaining the last verified snapshot if that refresh fails.
+ */
+export async function selectAutomaticFallbackProviderAfterRefresh(
+  providers,
+  priorityOrder,
+  attemptedProviderIds,
+  refreshProviders,
+) {
+  const current = selectAutomaticProvider(providers, priorityOrder, attemptedProviderIds)
+  if (typeof refreshProviders !== 'function') return current
+  let refreshed
+  try {
+    refreshed = await refreshProviders()
+  } catch {
+    return current
+  }
+  return Array.isArray(refreshed)
+    ? selectAutomaticProvider(refreshed, priorityOrder, attemptedProviderIds)
+    : current
+}
