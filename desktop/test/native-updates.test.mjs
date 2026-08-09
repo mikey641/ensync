@@ -265,10 +265,13 @@ test('every update IPC action rejects an unregistered sender before invoking nat
   assert.equal(invoked, 1)
 })
 
-test('desktop package includes the updater and production HTTPS manifest feed', async () => {
+test('desktop package includes the updater and production HTTPS manifest feeds', async () => {
   const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'))
   assert.ok(manifest.build.files.includes('src/native-updates.mjs'))
-  assert.equal(manifest.ensync.updateManifestUrl, 'https://ensync.vercel.app/releases.json')
+  assert.deepEqual(manifest.ensync.updateManifestUrls, {
+    stable: 'https://ensync.vercel.app/releases.json',
+    beta: 'https://ensync.vercel.app/releases-beta.json',
+  })
   assert.equal(manifest.build.dmg.sign, true)
   assert.equal(manifest.build.afterAllArtifactBuild, 'scripts/notarize-artifacts.cjs')
 })
