@@ -37,6 +37,7 @@ export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry
 export function promptQueueStatusPresentation(
   gate: ReturnType<typeof queuedPromptGate>,
   count: number,
+  delivery?: { liveDeliverySupported: boolean; activeProviderName: string | null },
 ): {
   headline: string
   detail: string
