@@ -665,3 +665,43 @@ test('commitAgentWork on a clean worktree commits nothing', async (context) => {
   assert.equal(result.changedFiles, 0)
   assert.equal(result.head, headBefore)
 })
+
+test('checkSharedCheckout reports user-style changes without attribution and reverts as destructive', async (context) => {
+  const fixture = await repositoryFixture(context)
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'dirty before run\n')
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect')
+  context.after(() => lease.release())
+
+  // Unchanged.
+  const same = await isolation.checkSharedCheckout(lease.workspace)
+  assert.deepEqual({ available: same.available, changed: same.changed }, { available: true, changed: false })
+
+  // Additive edit: changed, not destructive.
+  await writeFile(join(fixture.repository, 'new-user-file.txt'), 'user typing during run\n')
+  const edited = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(edited.changed, true)
+  assert.equal(edited.destructive, false)
+
+  // git checkout . shape: the pre-run dirty file reverts with no commit — destructive.
+  await rm(join(fixture.repository, 'new-user-file.txt'))
+  await git(fixture.repository, ['checkout', '--', 'tracked.txt'])
+  const reverted = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(reverted.changed, true)
+  assert.equal(reverted.destructive, true)
+})
+
+test('checkSharedCheckout treats an Ensync land commit as landed, not changed', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect-land')
+  context.after(() => lease.release())
+
+  await writeFile(join(fixture.repository, 'other-chat.txt'), 'landed content\n')
+  await git(fixture.repository, ['add', 'other-chat.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-feedbeeffeedbeeffeedbeef'])
+
+  const result = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(result.landed, true)
+  assert.equal(result.changed, false)
+})

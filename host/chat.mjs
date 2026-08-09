@@ -877,6 +877,17 @@ export class ChatRunService {
             at: new Date().toISOString(),
           })
         }
+        const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+        if (sharedCheck.available && sharedCheck.changed) {
+          options.onEvent?.({
+            type: 'notice',
+            code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+            message: sharedCheck.destructive
+              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+              : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`,
+            at: new Date().toISOString(),
+          })
+        }
       }
       await workspaceLease?.release()
     }

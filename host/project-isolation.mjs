@@ -213,6 +213,46 @@ export class ProjectIsolationService {
     return this.#commitWorktree(workspace.repositoryPath, workspace.branch, { ...details, outcome })
   }
 
+  async checkSharedCheckout(workspace) {
+    const before = workspace?.shared
+    if (!before) return { available: false }
+    try {
+      const headResult = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: before.repositoryPath })
+      const statusResult = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+        cwd: before.repositoryPath,
+      })
+      const afterHead = firstLine(headResult.stdout)
+      const afterEntries = statusResult.stdout.split('\0').filter(Boolean)
+      const headMoved = afterHead !== before.head
+      const statusMoved = afterEntries.join('\n') !== before.statusEntries.join('\n')
+      let landed = false
+      if (headMoved) {
+        const log = await this.#git(['log', '--format=%s', `${before.head}..${afterHead}`], {
+          cwd: before.repositoryPath,
+          allowFailure: true,
+        })
+        const subjects = log.exitCode === 0 ? log.stdout.split(/\r?\n/).filter(Boolean) : []
+        landed = subjects.length > 0 && subjects.every((subject) => subject.startsWith('Ensync land: '))
+      }
+      // git checkout . shape: same head, a previously-dirty path is no longer dirty.
+      const afterPaths = new Set(afterEntries.map((entry) => entry.slice(3)))
+      const destructive = !headMoved
+        && before.statusEntries.some((entry) => !afterPaths.has(entry.slice(3)))
+      const changed = landed ? statusMoved : (headMoved || statusMoved)
+      return {
+        available: true,
+        changed,
+        destructive: changed && destructive,
+        landed,
+        before: { head: before.head, changedFiles: before.statusEntries.length },
+        after: { head: afterHead, changedFiles: afterEntries.length },
+        checkedAt: new Date(this.#now()).toISOString(),
+      }
+    } catch {
+      return { available: false }
+    }
+  }
+
   async #commitWorktree(worktreePath, branch, details) {
     const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
       cwd: worktreePath,
@@ -599,6 +639,17 @@ export class ProjectIsolationService {
     const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
     const changedFiles = status.stdout.split('\0').filter(Boolean).length
     const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
+
+    const sharedHead = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: repository.repositoryPath })
+    const sharedStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+      cwd: repository.repositoryPath,
+    })
+    const shared = {
+      repositoryPath: repository.repositoryPath,
+      head: firstLine(sharedHead.stdout),
+      statusEntries: sharedStatus.stdout.split('\0').filter(Boolean),
+    }
+
     return {
       canonicalProjectPath,
       repositoryPath: worktreePath,
@@ -606,6 +657,7 @@ export class ProjectIsolationService {
       branch,
       reused,
       seededFromSharedCheckout,
+      shared,
       gitBefore: {
         branch,
         head: firstLine(head.stdout),
