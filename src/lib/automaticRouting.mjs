@@ -55,3 +55,17 @@ export function selectAutomaticProvider(providers, priorityOrder, attemptedProvi
   if (verifiedAvailable) return verifiedAvailable
   return candidates.find((provider) => exactUsedPercent(provider) === null) ?? null
 }
+
+/**
+ * Provider telemetry can become stale while a renderer is suspended. Re-probe
+ * once before declaring Auto unavailable, then select from the returned
+ * snapshot so the caller does not have to wait for a React render cycle.
+ */
+export async function selectAutomaticProviderAfterRefresh(providers, priorityOrder, refreshProviders) {
+  const selected = selectAutomaticProvider(providers, priorityOrder)
+  if (selected || typeof refreshProviders !== 'function') return selected
+  const refreshed = await refreshProviders()
+  return Array.isArray(refreshed)
+    ? selectAutomaticProvider(refreshed, priorityOrder)
+    : null
+}

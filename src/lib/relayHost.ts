@@ -564,6 +564,24 @@ export class EnsyncHostClient {
     })
   }
 
+  probeAttachmentPaths(paths: string[]) {
+    return this.request<{ results: { path: string; readable: boolean }[] }>('/chat/attachments/probe', {
+      method: 'POST',
+      body: JSON.stringify({ paths }),
+    })
+  }
+
+  storeChatAttachment(name: string, bytes: ArrayBuffer) {
+    return this.request<{ attachment: { path: string; name: string } }>(
+      `/chat/attachments?name=${encodeURIComponent(name)}`,
+      {
+        method: 'POST',
+        body: bytes,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      },
+    )
+  }
+
   async attachChatJob(
     jobId: string,
     onEvent: (event: ChatExecutionEvent) => void,

@@ -72,3 +72,15 @@ test('process reports inactivity separately from its hard ceiling', async () => 
   assert.equal(active.timeoutReason, 'hard_limit')
   assert.equal(active.aborted, false)
 })
+
+test('process capture reports when provider output was truncated', async () => {
+  const result = await runProcess(
+    process.execPath,
+    ['-e', 'process.stdout.write("123456789")'],
+    { maxCaptureBytes: 5 },
+  )
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.stdout, '12345')
+  assert.equal(result.outputTruncated, true)
+})

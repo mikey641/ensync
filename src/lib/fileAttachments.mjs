@@ -53,6 +53,66 @@ export function droppedFileAttachments(files, pathForFile) {
   return { attachments: normalizeFileAttachments(attachments), unavailable }
 }
 
+// Drop time is the only moment the renderer can read files the OS hides from
+// other processes (macOS screenshot drag temp dirs, for example). Paths the
+// host cannot open are copied through the host right away and attached at the
+// stored copy's path; everything else stays attached by reference so agents
+// can still edit the original file.
+export async function resolveDroppedAttachments(files, pathForFile, hostOps) {
+  const unavailable = []
+  if (typeof pathForFile !== 'function') {
+    return { attachments: [], unavailable: Array.from(files ?? [], (file) => file?.name ?? 'file') }
+  }
+
+  const resolved = []
+  for (const file of Array.from(files ?? [])) {
+    const name = nonEmptyString(file?.name) ?? 'file'
+    let path = null
+    try {
+      path = nonEmptyString(pathForFile(file))
+    } catch {
+      path = null
+    }
+    if (path) resolved.push({ file, name, path })
+    else unavailable.push(name)
+  }
+  const byReference = () => ({
+    attachments: normalizeFileAttachments(resolved),
+    unavailable,
+  })
+  if (resolved.length === 0 || !hostOps) return byReference()
+
+  let unreadable
+  try {
+    const probe = await hostOps.probeAttachmentPaths(resolved.map((item) => item.path))
+    unreadable = new Set((probe?.results ?? [])
+      .filter((result) => result?.readable === false)
+      .map((result) => result.path))
+  } catch {
+    // The host is unreachable, so keep today's by-reference behavior; the
+    // host re-probes every path at send time and fails with guidance then.
+    return byReference()
+  }
+
+  const attachments = []
+  for (const item of resolved) {
+    if (!unreadable.has(item.path)) {
+      attachments.push({ name: item.name, path: item.path })
+      continue
+    }
+    try {
+      const bytes = await item.file.arrayBuffer()
+      const stored = await hostOps.storeChatAttachment(item.name, bytes)
+      const storedPath = nonEmptyString(stored?.attachment?.path)
+      if (!storedPath) throw new Error('The host did not return a stored attachment path.')
+      attachments.push({ name: item.name, path: storedPath })
+    } catch {
+      unavailable.push(item.name)
+    }
+  }
+  return { attachments: normalizeFileAttachments(attachments), unavailable }
+}
+
 export function messageTextWithAttachments(message, attachments) {
   const text = nonEmptyString(message) ?? ''
   const normalized = normalizeFileAttachments(attachments)

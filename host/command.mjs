@@ -56,8 +56,9 @@ const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g
 const MAX_CAPTURE_BYTES = 256 * 1024
 const MIN_CONFIGURED_HARD_TIMEOUT_MS = 1_000
 
-// The hard run ceiling is a runaway backstop, not the hang detector (that is the
-// inactivity watchdog), so an explicit operator override may raise or lower it.
+// The hard ceiling is a runaway-process backstop. The inactivity watchdog is
+// responsible for detecting a hung provider, so operators may raise or lower
+// this limit explicitly without changing the normal hang-detection behavior.
 export function configuredHardTimeoutMs(environment, fallbackMs) {
   const raw = environment?.ENSYNC_CHAT_HARD_TIMEOUT_MS
   if (typeof raw !== 'string' || raw.trim() === '') return fallbackMs
@@ -170,6 +171,7 @@ export function runProcess(executable, args, options = {}) {
   return new Promise((resolve) => {
     let stdout = ''
     let stderr = ''
+    let outputTruncated = false
     let settled = false
     let timedOut = false
     let timeoutReason = null
@@ -213,8 +215,14 @@ export function runProcess(executable, args, options = {}) {
     if (aborted) onAbort()
 
     const append = (current, chunk) => {
-      if (current.length >= maxCaptureBytes) return current
-      return `${current}${chunk.toString('utf8')}`.slice(0, maxCaptureBytes)
+      const text = chunk.toString('utf8')
+      const remaining = maxCaptureBytes - current.length
+      if (remaining <= 0) {
+        if (text.length > 0) outputTruncated = true
+        return current
+      }
+      if (text.length > remaining) outputTruncated = true
+      return `${current}${text.slice(0, remaining)}`
     }
 
     const timeout = (reason) => {
@@ -277,6 +285,7 @@ export function runProcess(executable, args, options = {}) {
         timedOut,
         timeoutReason,
         aborted,
+        outputTruncated,
       })
     }
 

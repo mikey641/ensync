@@ -148,7 +148,7 @@ test('separate Host instances allow different conversation worktrees in one repo
   await second.release()
 })
 
-test('a rapid lease heartbeat never falsely loses or corrupts its own owner record', async (context) => {
+test('a rapid lease heartbeat never corrupts its owner record', async (context) => {
   const fixture = await repositoryFixture(context)
   const service = new ProjectIsolationService({
     rootPath: join(fixture.root, 'host-a'),

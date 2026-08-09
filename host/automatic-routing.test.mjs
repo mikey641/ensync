@@ -74,3 +74,43 @@ test('safe fallback uses the same priority and never repeats an attempted provid
   assert.equal(fallback?.id, 'claude')
   assert.equal(selectAutomaticProvider(providers, ['codex', 'claude'], ['codex', 'claude']), null)
 })
+
+test('Auto refreshes a stale empty provider snapshot before giving up', async () => {
+  const routing = await import('../src/lib/automaticRouting.mjs')
+  assert.equal(typeof routing.selectAutomaticProviderAfterRefresh, 'function')
+  let refreshes = 0
+  const selected = await routing.selectAutomaticProviderAfterRefresh(
+    [
+      provider('codex', { connected: false, usage: null }),
+      provider('claude', { connected: false, usage: null }),
+    ],
+    ['codex', 'claude'],
+    async () => {
+      refreshes += 1
+      return [
+        provider('codex', { connected: true, usage: 88 }),
+        provider('claude', { connected: true, usage: 19 }),
+      ]
+    },
+  )
+
+  assert.equal(refreshes, 1)
+  assert.equal(selected?.id, 'codex')
+})
+
+test('Auto does not refresh when the current provider snapshot is runnable', async () => {
+  const routing = await import('../src/lib/automaticRouting.mjs')
+  assert.equal(typeof routing.selectAutomaticProviderAfterRefresh, 'function')
+  let refreshes = 0
+  const selected = await routing.selectAutomaticProviderAfterRefresh(
+    [provider('codex', { connected: true, usage: 88 })],
+    ['codex', 'claude'],
+    async () => {
+      refreshes += 1
+      return []
+    },
+  )
+
+  assert.equal(refreshes, 0)
+  assert.equal(selected?.id, 'codex')
+})

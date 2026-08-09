@@ -556,6 +556,154 @@ test('Claude chat resumes a verified session without putting the prompt in argum
   )
 })
 
+test('Claude progress notes survive per-content-block assistant events', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'thinking', thinking: 'hidden reasoning' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'text', text: 'Reading the failing test first.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'file body' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_b', content: [{ type: 'thinking', thinking: 'more hidden reasoning' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_b', content: [{ type: 'text', text: 'Real Claude response' }] } }),
+    JSON.stringify({ type: 'result', is_error: false, result: 'Real Claude response', session_id: sessionId }),
+  ].join('\n')
+
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      options.onStdout(stdout)
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Fix the test' },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  assert.equal(result.response, 'Real Claude response')
+  assert.deepEqual(
+    events.filter((event) => event.type === 'note').map((event) => ({ provider: event.provider, text: event.text })),
+    [{ provider: 'claude', text: 'Reading the failing test first.' }],
+  )
+  assert.equal(JSON.stringify(events.filter((event) => event.type === 'note')).includes('hidden reasoning'), false)
+})
+
+test('Claude startup-only code 1 is safe for automatic fallback', async (context) => {
+  const projectPath = await projectFixture(context)
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: '123e4567-e89b-12d3-a456-426614174000' }),
+    JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'SessionStart:startup' }),
+    JSON.stringify({ type: 'system', subtype: 'hook_response', hook_name: 'SessionStart:startup' }),
+  ].join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async () => ({
+      exitCode: 1,
+      error: null,
+      timedOut: false,
+      outputTruncated: false,
+      stderr: '',
+      stdout,
+    }),
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'claude', projectPath, prompt: 'Start the task' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_startup_failed'
+      && error.safeToRetry === true,
+  )
+})
+
+test('Claude code 1 after an assistant event is not replayable', async (context) => {
+  const projectPath = await projectFixture(context)
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'I started the task.' }] } }),
+  ].join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async () => ({
+      exitCode: 1,
+      error: null,
+      timedOut: false,
+      outputTruncated: false,
+      stderr: '',
+      stdout,
+    }),
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'claude', projectPath, prompt: 'Start the task' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'cli_failed'
+      && error.safeToRetry === false,
+  )
+})
+
+test('a truncated Claude startup stream is not replayable', async (context) => {
+  const projectPath = await projectFixture(context)
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async () => ({
+      exitCode: 1,
+      error: null,
+      timedOut: false,
+      outputTruncated: true,
+      stderr: '',
+      stdout: JSON.stringify({ type: 'system', subtype: 'init' }),
+    }),
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'claude', projectPath, prompt: 'Start the task' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'cli_failed'
+      && error.safeToRetry === false,
+  )
+})
+
+test('only exact SessionStart lifecycle output proves a replayable Claude startup failure', async (context) => {
+  const projectPath = await projectFixture(context)
+  const unsafeStreams = [
+    {
+      stdout: [
+        JSON.stringify({ type: 'system', subtype: 'init' }),
+        JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'PreToolUse:command' }),
+      ].join('\n'),
+      stderr: '',
+    },
+    {
+      stdout: JSON.stringify({ type: 'system', subtype: 'init' }),
+      stderr: 'Unexpected provider diagnostic',
+    },
+  ]
+
+  for (const stream of unsafeStreams) {
+    const service = new ChatRunService({
+      statusService: statusService(readyProvider('claude')),
+      processRunner: async () => ({
+        exitCode: 1,
+        error: null,
+        timedOut: false,
+        outputTruncated: false,
+        ...stream,
+      }),
+    })
+
+    await assert.rejects(
+      service.run({ provider: 'claude', projectPath, prompt: 'Start the task' }),
+      (error) => error instanceof ChatRunError
+        && error.code === 'cli_failed'
+        && error.safeToRetry === false,
+    )
+  }
+})
+
 test('chat refuses unsupported providers and non-subscription authentication', async (context) => {
   const projectPath = await projectFixture(context)
   let processCalls = 0

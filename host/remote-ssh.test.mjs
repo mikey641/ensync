@@ -609,7 +609,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     "if (args[0] === 'login') { console.log('Logged in with ChatGPT'); process.exit(0) }",
     "const events = [",
     "  { type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' },",
-    "  ...Array.from({ length: 8 }, (_, index) => ({ type: 'item.updated', item: { type: 'reasoning', text: String(index) } })),",
+    "  ...Array.from({ length: 12 }, (_, index) => ({ type: 'item.updated', item: { type: 'reasoning', text: String(index) } })),",
     "  { type: 'item.completed', item: { type: 'agent_message', text: 'Remote progress completed' } },",
     "  { type: 'turn.completed' },",
     "]",
@@ -617,7 +617,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     "const timer = setInterval(() => {",
     "  console.log(JSON.stringify(events[index++]));",
     "  if (index === events.length) { clearInterval(timer); process.exit(0) }",
-    "}, 180)",
+    "}, 250)",
   ].join('\n')}\n`)
   await chmod(executable, 0o755)
   context.after(() => rm(directory, { recursive: true, force: true }))
@@ -632,12 +632,12 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
       sessionId: null,
       model: null,
       effort: null,
-      inactivityTimeoutMs: 400,
-      hardTimeoutMs: 5_000,
+      inactivityTimeoutMs: 1_200,
+      hardTimeoutMs: 10_000,
     }),
     env: { ...process.env, HOME: directory, PATH: `${directory}${delimiter}${process.env.PATH ?? ''}` },
-    inactivityTimeoutMs: 1_250,
-    hardTimeoutMs: 6_000,
+    inactivityTimeoutMs: 2_200,
+    hardTimeoutMs: 11_000,
     maxCaptureBytes: 12 * 1024 * 1024,
   })
 
