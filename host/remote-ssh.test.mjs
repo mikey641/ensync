@@ -341,6 +341,57 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   assert.equal(result.remote.target.hostname, 'worker.example.com')
 })
 
+test('remote chat honors ENSYNC_CHAT_HARD_TIMEOUT_MS for the bridge hard ceiling', async () => {
+  const cliStdout = [
+    JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+    JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'Remote Codex response' } }),
+    JSON.stringify({ type: 'turn.completed' }),
+  ].join('\n')
+  let captured
+  const service = new RemoteSshService({
+    sshFinder: async () => '/fake/bin/ssh',
+    environment: { ENSYNC_CHAT_HARD_TIMEOUT_MS: `${8 * 60 * 60 * 1_000}` },
+    processRunner: async (...args) => {
+      captured = args
+      return processResult({
+        stdout: encodeRemoteBridgeEnvelope({
+          ok: true,
+          result: {
+            operation: 'chat',
+            provider: 'codex',
+            projectPath: '/srv/projects/ensync',
+            workspace: remoteWorkspace(),
+            executable: '/usr/local/bin/codex',
+            authentication: { state: 'authenticated', method: 'ChatGPT login' },
+            process: processResult({ stdout: cliStdout }),
+            remote: {
+              platform: 'linux',
+              release: '6.8.0',
+              arch: 'x64',
+              hostname: 'worker',
+              nodeVersion: 'v22.18.0',
+            },
+            completedAt: '2026-08-06T10:05:00.000Z',
+          },
+        }),
+      })
+    },
+  })
+
+  await service.runChat({
+    connection: connection(),
+    provider: 'codex',
+    workspaceKey: WORKSPACE_KEY,
+    prompt: 'Run a long remote task',
+  })
+
+  const payloadMarker = captured[2].input.lastIndexOf(')("')
+  const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
+  const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
+  assert.equal(remotePayload.hardTimeoutMs, 8 * 60 * 60 * 1_000)
+  assert.equal(remotePayload.inactivityTimeoutMs, 15 * 60 * 1_000)
+})
+
 test('a destructive shared-checkout change surfaces a reverted notice through the same event surface', async () => {
   const cliStdout = [
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
@@ -558,7 +609,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     "if (args[0] === 'login') { console.log('Logged in with ChatGPT'); process.exit(0) }",
     "const events = [",
     "  { type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' },",
-    "  ...Array.from({ length: 8 }, (_, index) => ({ type: 'item.updated', item: { type: 'reasoning', text: String(index) } })),",
+    "  ...Array.from({ length: 12 }, (_, index) => ({ type: 'item.updated', item: { type: 'reasoning', text: String(index) } })),",
     "  { type: 'item.completed', item: { type: 'agent_message', text: 'Remote progress completed' } },",
     "  { type: 'turn.completed' },",
     "]",
@@ -566,7 +617,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     "const timer = setInterval(() => {",
     "  console.log(JSON.stringify(events[index++]));",
     "  if (index === events.length) { clearInterval(timer); process.exit(0) }",
-    "}, 180)",
+    "}, 250)",
   ].join('\n')}\n`)
   await chmod(executable, 0o755)
   context.after(() => rm(directory, { recursive: true, force: true }))
@@ -581,12 +632,12 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
       sessionId: null,
       model: null,
       effort: null,
-      inactivityTimeoutMs: 400,
-      hardTimeoutMs: 5_000,
+      inactivityTimeoutMs: 1_200,
+      hardTimeoutMs: 10_000,
     }),
     env: { ...process.env, HOME: directory, PATH: `${directory}${delimiter}${process.env.PATH ?? ''}` },
-    inactivityTimeoutMs: 1_250,
-    hardTimeoutMs: 6_000,
+    inactivityTimeoutMs: 2_200,
+    hardTimeoutMs: 11_000,
     maxCaptureBytes: 12 * 1024 * 1024,
   })
 

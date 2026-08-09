@@ -6,7 +6,7 @@ import {
   parseCodexChatResult,
   quotaFailureIsSafe,
 } from './chat.mjs'
-import { describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
+import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
   createRemoteBridgeInput,
   decodeRemoteBridgeEnvelope,
@@ -14,7 +14,7 @@ import {
 
 const DEFAULT_SSH_TIMEOUT_MS = 30_000
 const DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_CHAT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+const DEFAULT_CHAT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const CHAT_TRANSPORT_TIMEOUT_GRACE_MS = 30_000
 const MAX_CHAT_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
@@ -429,7 +429,8 @@ export class RemoteSshService {
   constructor(options = {}) {
     this.#adapter = options.adapter ?? new RemoteSshProcessAdapter(options)
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_CHAT_HARD_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs
+      ?? configuredHardTimeoutMs(options.environment ?? process.env, DEFAULT_CHAT_HARD_TIMEOUT_MS)
   }
 
   async probe(input) {

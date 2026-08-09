@@ -444,13 +444,20 @@ export class ProjectIsolationService {
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
         })
+        // Replace the record atomically so no heartbeat, release, or competing
+        // Host can observe a file between truncate and write.
         const writeOwner = async () => {
-          await writeFile(ownerPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
-          try { await chmod(ownerPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+          const pendingPath = `${ownerPath}.${this.#uuid()}.tmp`
+          await writeFile(pendingPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
+          try { await chmod(pendingPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+          await rename(pendingPath, ownerPath)
         }
         await writeOwner()
 
+        let heartbeatTicking = false
         const heartbeat = setInterval(() => {
+          if (heartbeatTicking) return
+          heartbeatTicking = true
           void (async () => {
             try {
               const current = JSON.parse(await readFile(ownerPath, 'utf8'))
@@ -466,6 +473,8 @@ export class ProjectIsolationService {
               )
               controller.abort(failure)
               clearInterval(heartbeat)
+            } finally {
+              heartbeatTicking = false
             }
           })()
         }, this.#heartbeatMs)
