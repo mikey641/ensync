@@ -20,8 +20,12 @@ test('runtime conversation text uses automatic isolated direction without changi
   ])
 
   assert.equal(app.match(/<MessageContent content=\{message\.content\} \/>/g)?.length, 2)
-  assert.match(messageContent, /<p key=\{index\} dir="auto">\{block\.text\}<\/p>/)
+  assert.match(messageContent, /<p dir="auto"><InlineText text=\{block\.text\} \/><\/p>/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
+  assert.match(messageContent, /<th key=\{index\} scope="col" dir="auto"/)
+  assert.match(messageContent, /<td key=\{index\} dir="auto"/)
+  assert.match(messageContent, /className: 'message-heading', dir: 'auto'/)
+  assert.match(messageContent, /<li dir="auto">/)
   assert.match(app, /<textarea[\s\S]*?data-chat-composer=\{chat\.id\}[\s\S]*?dir="auto"/)
   assert.match(app, /<pre className="execution-panel__output"[^>]*dir="auto">/)
   assert.match(contextHeader, /chat-context-header__message-preview" dir="auto"/)
@@ -29,6 +33,9 @@ test('runtime conversation text uses automatic isolated direction without changi
   assert.equal(splitWorkspace.match(/className="relay-split-pane-title" dir="auto"/g)?.length, 2)
 
   assert.match(appCss, /\.message-content p\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
+  assert.match(appCss, /\.message-table th, \.message-table td\s*\{[^}]*text-align:\s*start;[^}]*unicode-bidi:\s*plaintext;/s)
+  assert.match(appCss, /\.message-heading\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
+  assert.match(appCss, /\.message-list li\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
   assert.match(appCss, /\.execution-panel__output\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
   assert.match(appCss, /\.composer textarea\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
   assert.match(contextHeaderCss, /\.chat-context-header__message-preview\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
