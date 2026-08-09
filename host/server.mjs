@@ -341,6 +341,18 @@ export function createEnsyncHost(options = {}) {
         return sendJson(response, 200, result, origin)
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/git/unlanded') {
+        const body = await readJsonBody(request)
+        const unlanded = await git.unlanded(body.projectPath)
+        return sendJson(response, 200, { unlanded }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/git/land') {
+        const body = await readJsonBody(request)
+        const result = await git.land(body)
+        return sendJson(response, 200, result, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/chat/run') {
         const cancellation = requestCancellation(request, response)
         try {
