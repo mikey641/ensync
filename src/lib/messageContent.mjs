@@ -32,6 +32,17 @@ function appendTextBlock(blocks, text) {
   }
 }
 
+const LONG_MESSAGE_CHARACTER_LIMIT = 900
+const LONG_MESSAGE_LINE_LIMIT = 14
+
+export function isLongMessageContent(value) {
+  const content = typeof value === 'string' ? value : String(value ?? '')
+  if (Array.from(content).length > LONG_MESSAGE_CHARACTER_LIMIT) return true
+
+  const lineBreaks = content.match(/\r\n|\n|\r/g)?.length ?? 0
+  return lineBreaks + 1 > LONG_MESSAGE_LINE_LIMIT
+}
+
 /**
  * Splits message Markdown into ordered prose and fenced-code blocks. The text
  * itself is never interpreted as HTML, and non-fence Markdown remains exact.

@@ -1,0 +1,41 @@
+.message-content-shell {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.message-content--preview {
+  max-height: 13.2em;
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 72%, transparent 100%);
+}
+
+.message-collapse-toggle {
+  min-height: 32px;
+  margin-top: 6px;
+  padding: 4px 8px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--font-label);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.message-collapse-toggle:hover {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.message-collapse-toggle:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.message--user .message-collapse-toggle {
+  margin-left: auto;
+}

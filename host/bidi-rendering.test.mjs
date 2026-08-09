@@ -19,7 +19,7 @@ test('runtime conversation text uses automatic isolated direction without changi
     readFile(splitWorkspacePath, 'utf8'),
   ])
 
-  assert.equal(app.match(/<MessageContent content=\{message\.content\} \/>/g)?.length, 2)
+  assert.equal(app.match(/<MessageContent content=\{message\.content\} collapsible \/>/g)?.length, 2)
   assert.match(messageContent, /<p key=\{index\} dir="auto">\{block\.text\}<\/p>/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
   assert.match(app, /<textarea[\s\S]*?data-chat-composer=\{chat\.id\}[\s\S]*?dir="auto"/)
