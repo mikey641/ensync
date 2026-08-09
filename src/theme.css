@@ -29,6 +29,8 @@
   --accent-ui-strong: #70e9a4;
   --accent-ui-text: #082514;
   --accent-ui-soft: #173a27;
+  --accent-header-bg: #235339;
+  --accent-header-text: #7ce8ab;
   --completion-ui: #58bd7f;
   --focus-ring: rgba(69, 212, 131, 0.72);
   --overlay: rgba(0, 0, 0, 0.68);
@@ -79,6 +81,8 @@
   --accent-ui-strong: #0e6837;
   --accent-ui-text: #ffffff;
   --accent-ui-soft: #dff3e6;
+  --accent-header-bg: #cfe9d8;
+  --accent-header-text: #0e6837;
   --completion-ui: #2d7d4f;
   --focus-ring: rgba(23, 132, 73, 0.62);
   --overlay: rgba(25, 31, 27, 0.36);
@@ -2322,18 +2326,14 @@ kbd {
   color: var(--accent-ui);
 }
 
-.relay-split-workspace {
-  --relay-split-accent: var(--completion-ui);
-}
+/* The split workspace ships in a lazily imported chunk whose stylesheet is
+ * appended after this one, so equal-specificity brand rules for pane headers
+ * would lose the cascade. Those palette values live with the workspace rules in
+ * SplitWorkspace.css and read the accent tokens defined above. */
 
-.relay-split-pane--active > .relay-split-pane-tab {
-  border-bottom-color: var(--accent-ui);
-  background: color-mix(in srgb, var(--accent-ui) 12%, var(--surface-titlebar));
-}
-
-.relay-tabs-mode-tab--active {
-  border-color: var(--accent-ui);
-  background: color-mix(in srgb, var(--accent-ui) 10%, var(--surface-main));
+.activity-button--active {
+  color: var(--accent-ui);
+  background: var(--accent-ui-soft);
 }
 
 .composer__toolbar .send-button {
