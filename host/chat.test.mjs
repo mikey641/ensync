@@ -683,6 +683,43 @@ test('a truncated Claude startup stream is not replayable', async (context) => {
   )
 })
 
+test('only exact SessionStart lifecycle output proves a replayable Claude startup failure', async (context) => {
+  const projectPath = await projectFixture(context)
+  const unsafeStreams = [
+    {
+      stdout: [
+        JSON.stringify({ type: 'system', subtype: 'init' }),
+        JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'PreToolUse:command' }),
+      ].join('\n'),
+      stderr: '',
+    },
+    {
+      stdout: JSON.stringify({ type: 'system', subtype: 'init' }),
+      stderr: 'Unexpected provider diagnostic',
+    },
+  ]
+
+  for (const stream of unsafeStreams) {
+    const service = new ChatRunService({
+      statusService: statusService(readyProvider('claude')),
+      processRunner: async () => ({
+        exitCode: 1,
+        error: null,
+        timedOut: false,
+        outputTruncated: false,
+        ...stream,
+      }),
+    })
+
+    await assert.rejects(
+      service.run({ provider: 'claude', projectPath, prompt: 'Start the task' }),
+      (error) => error instanceof ChatRunError
+        && error.code === 'cli_failed'
+        && error.safeToRetry === false,
+    )
+  }
+})
+
 test('chat refuses unsupported providers and non-subscription authentication', async (context) => {
   const projectPath = await projectFixture(context)
   let processCalls = 0

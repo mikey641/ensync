@@ -458,12 +458,17 @@ function claudeEventsProveNoActivity(events) {
   })
 }
 
-function claudeStartupFailureIsSafe(stdout, outputTruncated) {
-  if (outputTruncated === true) return false
+function claudeStartupFailureIsSafe(stdout, stderr, outputTruncated) {
+  if (outputTruncated === true || (typeof stderr === 'string' && stderr.trim())) return false
   const events = structuredEvents(stdout)
   if (!events) return false
-  const startupSubtypes = new Set(['init', 'hook_started', 'hook_response'])
-  return events.every((event) => event.type === 'system' && startupSubtypes.has(event.subtype))
+  return events.every((event) => {
+    if (event.type !== 'system') return false
+    if (event.subtype === 'init') return true
+    if (!['hook_started', 'hook_response'].includes(event.subtype)) return false
+    return event.hook_event === 'SessionStart'
+      || (typeof event.hook_name === 'string' && event.hook_name.startsWith('SessionStart:'))
+  })
 }
 
 export function quotaFailureIsSafe(provider, stdout, stderr = '') {
@@ -939,7 +944,11 @@ export class ChatRunService {
       }
       if (
         request.provider === 'claude'
-        && claudeStartupFailureIsSafe(processResult.stdout, processResult.outputTruncated)
+        && claudeStartupFailureIsSafe(
+          processResult.stdout,
+          processResult.stderr,
+          processResult.outputTruncated,
+        )
       ) {
         throw new ChatRunError(
           'provider_startup_failed',
