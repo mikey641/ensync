@@ -3,6 +3,7 @@ import { createInterface } from 'node:readline'
 import { extname } from 'node:path'
 import { commandInvocation } from './command.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
+import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
@@ -73,8 +74,10 @@ class CodexLiveSession {
   #threadId = null
   #turnId = null
   #turnStarted = false
+  #steerReady = false
   #settled = false
   #agentMessages = []
+  #agentMessagePhases = new Map()
   #model = null
   #usage = null
   #stderr = ''
@@ -87,6 +90,7 @@ class CodexLiveSession {
   #rejectReady
   #done
   #ready
+  #eventRepair = new JsonEventRepairTracker()
 
   constructor(input, options = {}) {
     this.id = input.id
@@ -216,6 +220,13 @@ class CodexLiveSession {
         )
       }
       this.#turnStarted = true
+      this.#steerReady = true
+      this.onEvent?.({
+        type: 'notice',
+        code: 'live_steer_ready',
+        message: 'Codex is ready to accept messages pushed into this active turn.',
+        at: new Date().toISOString(),
+      })
       this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
       const completedTurn = await this.#done
       if (completedTurn?.status !== 'completed') {
@@ -247,6 +258,7 @@ class CodexLiveSession {
         requestedModel: this.input.model ?? null,
         requestedEffort: this.input.effort ?? null,
         usage: this.#usage,
+        outputRecovery: this.#eventRepair.recovery,
         durationMs: Date.now() - startedAt,
         completedAt: new Date().toISOString(),
       }
@@ -272,7 +284,7 @@ class CodexLiveSession {
       )
     }
     await this.#ready
-    if (this.#settled || !this.#threadId || !this.#turnId) {
+    if (this.#settled || !this.#steerReady || !this.#threadId || !this.#turnId) {
       throw new CodexLiveTurnError(
         'live_steer_unavailable',
         'There is no active Codex turn to steer. The message was not delivered.',
@@ -309,6 +321,10 @@ class CodexLiveSession {
         false,
       )
     }
+  }
+
+  canSteer() {
+    return this.#steerReady && !this.#settled && Boolean(this.#threadId) && Boolean(this.#turnId)
   }
 
   #abort = () => {
@@ -360,16 +376,17 @@ class CodexLiveSession {
     this.#touch()
     let message
     try {
-      message = JSON.parse(line)
+      message = this.#eventRepair.decode(line, { allowRepair: true })
     } catch {
       this.#fail(new CodexLiveTurnError(
         'invalid_cli_output',
-        'Codex app-server returned a malformed protocol message.',
+        'Ensync Host tried a bounded repair of Codex app-server output but could not recover a verifiable protocol stream.',
         502,
-        !this.#turnStarted,
+        false,
       ))
       return
     }
+    if (!message) return
 
     if (message.id != null && !message.method) {
       const pending = this.#requests.get(message.id)
@@ -406,12 +423,26 @@ class CodexLiveSession {
       this.#turnId = params.turn.id
       this.#turnStarted = true
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
-      if (typeof params.item.text === 'string' && params.item.text.trim()) this.#agentMessages.push(params.item)
+      const phase = params.item.phase ?? this.#agentMessagePhases.get(params.item.id) ?? null
+      this.#agentMessagePhases.delete(params.item.id)
+      if (typeof params.item.text === 'string' && params.item.text.trim()) {
+        this.#agentMessages.push(params.item)
+        if (phase === 'commentary') {
+          this.onEvent?.({
+            type: 'note',
+            provider: 'codex',
+            text: params.item.text.trim(),
+            redacted: false,
+            at: new Date().toISOString(),
+          })
+        }
+      }
     } else if (message.method === 'thread/tokenUsage/updated') {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
       this.#model = params.toModel
     } else if (message.method === 'turn/completed' && params?.threadId === this.#threadId) {
+      this.#closeSteering('Codex finished the active turn; new messages will use the persistent queue.')
       this.#settled = true
       this.#resolveDone(params.turn)
     } else if (message.method === 'item/commandExecution/outputDelta' && typeof params?.delta === 'string') {
@@ -422,14 +453,18 @@ class CodexLiveSession {
         redacted: false,
         at: new Date().toISOString(),
       })
-    } else if (message.method === 'item/started' && params?.item?.type === 'commandExecution') {
-      this.onEvent?.({
-        type: 'output',
-        stream: 'stdout',
-        text: `\n> ${params.item.command}\n`,
-        redacted: false,
-        at: new Date().toISOString(),
-      })
+    } else if (message.method === 'item/started') {
+      if (params?.item?.type === 'agentMessage' && typeof params.item.id === 'string') {
+        this.#agentMessagePhases.set(params.item.id, params.item.phase ?? null)
+      } else if (params?.item?.type === 'commandExecution') {
+        this.onEvent?.({
+          type: 'output',
+          stream: 'stdout',
+          text: `\n> ${params.item.command}\n`,
+          redacted: false,
+          at: new Date().toISOString(),
+        })
+      }
     }
   }
 
@@ -447,12 +482,24 @@ class CodexLiveSession {
 
   #fail(error) {
     if (this.#settled) return
+    this.#closeSteering('Codex can no longer accept messages in this active turn.')
     this.#settled = true
     this.#rejectReady(error)
     this.#rejectDone(error)
     for (const pending of this.#requests.values()) pending.reject(error)
     this.#requests.clear()
     this.#terminate()
+  }
+
+  #closeSteering(message) {
+    if (!this.#steerReady) return
+    this.#steerReady = false
+    this.onEvent?.({
+      type: 'notice',
+      code: 'live_steer_closed',
+      message,
+      at: new Date().toISOString(),
+    })
   }
 
   #finishProcess() {
@@ -534,5 +581,9 @@ export class CodexLiveTurnRunner {
       )
     }
     return session.steer(prompt, attachmentPaths)
+  }
+
+  canSteer(id) {
+    return this.#sessions.get(id)?.canSteer() === true
   }
 }

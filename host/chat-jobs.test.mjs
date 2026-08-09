@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 
-import { ChatJobJournal } from './chat-job-journal.mjs'
+import { ChatJobJournal, ChatJobJournalInUseError } from './chat-job-journal.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { createEnsyncHost } from './server.mjs'
 
@@ -65,6 +65,26 @@ test('a detached subscriber can reconnect without cancelling the provider job', 
   assert.equal(service.get(JOB_A).providerProcessStarted, true)
 })
 
+test('a repaired provider stream is reported as recovery instead of a chat error', async () => {
+  const service = new ChatJobService({
+    runLocal: async () => ({
+      provider: 'codex',
+      response: 'done',
+      completedAt: '2026-08-07T10:00:03.000Z',
+      outputRecovery: { applied: true, normalizedLineCount: 1, discardedLineCount: 1 },
+    }),
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'continue' } })
+  await waitFor(() => service.get(JOB_A).state === 'completed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+
+  assert.deepEqual(events.map((event) => event.type), ['notice', 'completed'])
+  assert.match(events[0].message, /automatically repaired 2 malformed provider output lines/i)
+})
+
 test('only explicit cancellation aborts the exact retained job', async () => {
   let firstSignal
   let secondSignal
@@ -113,6 +133,7 @@ test('job starts are idempotent only for the same request', () => {
 test('a running local Codex job accepts steering while unsupported jobs reject it safely', async () => {
   let releaseCodex
   let codexStarted = false
+  let codexSteerReady = false
   const steered = []
   const service = new ChatJobService({
     runLocal: async (_request, options) => {
@@ -125,12 +146,21 @@ test('a running local Codex job accepts steering while unsupported jobs reject i
       steered.push({ jobId, input })
       return { turnId: 'provider-turn-1' }
     },
+    canSteerLocal: (jobId) => codexSteerReady && jobId === JOB_A,
   })
 
   service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'start' } })
   service.start({ jobId: JOB_B, kind: 'ssh', request: { provider: 'codex', prompt: 'remote' } })
   await waitFor(() => codexStarted)
 
+  assert.equal(service.get(JOB_A).steerable, false)
+  await assert.rejects(
+    service.steer(JOB_A, { prompt: 'too early' }),
+    (error) => error instanceof ChatJobError && error.code === 'live_steer_unavailable' && error.safeToRetry,
+  )
+  codexSteerReady = true
+  assert.equal(service.get(JOB_A).steerable, true)
+  assert.equal(service.get(JOB_B).steerable, false)
   assert.deepEqual(await service.steer(JOB_A, { prompt: 'change direction' }), { turnId: 'provider-turn-1' })
   assert.deepEqual(steered, [{ jobId: JOB_A, input: { prompt: 'change direction' } }])
   await assert.rejects(
@@ -259,4 +289,52 @@ test('a Host restart reconciles a journaled running job instead of replaying it'
   assert.equal(events.at(-1).code, 'host_job_orphaned')
   assert.equal(events.at(-1).safeToRetry, false)
   assert.equal(executions, 0)
+})
+
+test('a second live Host cannot reconcile or overwrite the first Host journal', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-chat-journal-fence-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'jobs.json')
+  const first = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-a', pid: process.pid },
+  })
+  first.save([])
+
+  const competing = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-b', pid: process.pid },
+  })
+  assert.throws(() => competing.load(), ChatJobJournalInUseError)
+  assert.throws(() => competing.save([]), ChatJobJournalInUseError)
+})
+
+test('frequent live output checkpoints are batched while terminal events remain durable', async () => {
+  let release
+  let saves = 0
+  const journal = {
+    load: () => [],
+    save: () => { saves += 1 },
+  }
+  const service = new ChatJobService({
+    journal,
+    runLocal: async (_request, options) => {
+      options.onEvent({ type: 'started', at: new Date().toISOString() })
+      for (let index = 0; index < 100; index += 1) {
+        options.onEvent({ type: 'output', text: `chunk-${index}`, at: new Date().toISOString() })
+      }
+      await new Promise((resolve) => { release = resolve })
+      return { provider: 'codex', response: 'done' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'continue' } })
+  await waitFor(() => release)
+  assert.equal(saves, 2)
+  await new Promise((resolve) => setTimeout(resolve, 300))
+  assert.equal(saves, 3)
+  release()
+  await waitFor(() => service.get(JOB_A).state === 'completed')
+  assert.equal(saves, 4)
 })

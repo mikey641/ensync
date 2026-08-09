@@ -50,7 +50,24 @@ function defaultErrorPayload(error) {
   }
 }
 
-function publicJob(job) {
+function outputRecoveryNotice(result) {
+  const recovery = result?.outputRecovery
+  if (!recovery || recovery.applied !== true) return null
+  const repairedLines = (Number.isSafeInteger(recovery.normalizedLineCount) ? recovery.normalizedLineCount : 0)
+    + (Number.isSafeInteger(recovery.discardedLineCount) ? recovery.discardedLineCount : 0)
+  if (repairedLines < 1) return null
+  return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
+}
+
+function publicJob(job, canSteerLocal) {
+  let steerable = false
+  if (job.state === 'running' && job.kind === 'local' && job.request?.provider === 'codex') {
+    try {
+      steerable = canSteerLocal?.(job.id) === true
+    } catch {
+      steerable = false
+    }
+  }
   return {
     id: job.id,
     kind: job.kind,
@@ -60,6 +77,7 @@ function publicJob(job) {
     firstSequence: job.events[0]?.sequence ?? job.sequence + 1,
     lastSequence: job.sequence,
     providerProcessStarted: job.providerProcessStarted,
+    steerable,
   }
 }
 
@@ -83,6 +101,7 @@ export class ChatJobService {
   #runLocal
   #runRemote
   #steerLocal
+  #canSteerLocal
   #normalizeError
   #now
   #maxJobs
@@ -90,6 +109,7 @@ export class ChatJobService {
   #maxEventCharacters
   #finishedTtlMs
   #journal
+  #persistTimer = null
 
   constructor(options = {}) {
     if (typeof options.runLocal !== 'function' || typeof options.runRemote !== 'function') {
@@ -98,6 +118,7 @@ export class ChatJobService {
     this.#runLocal = options.runLocal
     this.#runRemote = options.runRemote
     this.#steerLocal = options.steerLocal
+    this.#canSteerLocal = options.canSteerLocal
     this.#normalizeError = options.normalizeError ?? defaultErrorPayload
     this.#now = options.now ?? (() => new Date().toISOString())
     this.#maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS
@@ -124,7 +145,7 @@ export class ChatJobService {
       if (existing.requestHash !== hash) {
         throw new ChatJobError('chat_job_conflict', 'That chat job ID already belongs to another request.', 409)
       }
-      return publicJob(existing)
+      return publicJob(existing, this.#canSteerLocal)
     }
 
     this.#trimFinishedJobs()
@@ -166,20 +187,20 @@ export class ChatJobService {
     queueMicrotask(() => {
       job.completion = this.#execute(job)
     })
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   get(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   cancel(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
     if (job.state === 'running' && !job.controller.signal.aborted) job.controller.abort()
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   hasRunningJobs() {
@@ -188,14 +209,16 @@ export class ChatJobService {
 
   sweep() {
     const changed = this.#trimExpiredJobs()
-    if (changed) this.#persist()
+    if (changed) this.#flushPersist()
     return changed
   }
 
   async shutdown() {
+    this.#flushPersist()
     const running = [...this.#jobs.values()].filter((job) => job.state === 'running')
     for (const job of running) job.controller.abort()
     await Promise.allSettled(running.map((job) => job.completion).filter(Boolean))
+    this.#flushPersist()
   }
 
   async steer(jobId, input) {
@@ -213,6 +236,14 @@ export class ChatJobService {
       throw new ChatJobError(
         'live_steer_unavailable',
         'This provider or execution target cannot accept a live instruction. The message was not delivered.',
+        409,
+        true,
+      )
+    }
+    if (typeof this.#canSteerLocal !== 'function' || this.#canSteerLocal(job.id) !== true) {
+      throw new ChatJobError(
+        'live_steer_unavailable',
+        'Codex does not currently have an active turn that can accept this message. It was not delivered.',
         409,
         true,
       )
@@ -271,10 +302,17 @@ export class ChatJobService {
           message: 'SSH execution is continuing in Ensync Host. Provider output remains buffered by the verified SSH bridge.',
           at: this.#now(),
         })
-        result = await this.#runRemote(job.request, { signal: job.controller.signal })
+        result = await this.#runRemote(job.request, {
+          signal: job.controller.signal,
+          onEvent: (event) => this.#record(job, event),
+        })
       }
       job.state = 'completed'
       job.finishedAt = this.#now()
+      const recoveryNotice = outputRecoveryNotice(result)
+      if (recoveryNotice) {
+        this.#record(job, { type: 'notice', message: recoveryNotice, at: job.finishedAt })
+      }
       this.#record(job, { type: 'completed', result, at: job.finishedAt })
     } catch (error) {
       const payload = this.#normalizeError(error)
@@ -316,7 +354,11 @@ export class ChatJobService {
       job.subscribers.clear()
     }
     try {
-      this.#persist()
+      if (['started', 'completed', 'error', 'cancelled'].includes(recorded.type)) {
+        this.#flushPersist()
+      } else {
+        this.#schedulePersist(job)
+      }
     } catch (error) {
       // The initial running record was already durable before execution. If a
       // later checkpoint cannot be written, keep the live result authoritative;
@@ -417,5 +459,25 @@ export class ChatJobService {
       events: job.events.map(journalSafe),
     }))
     this.#journal.save(jobs)
+  }
+
+  #schedulePersist(job) {
+    if (!this.#journal || this.#persistTimer) return
+    this.#persistTimer = setTimeout(() => {
+      this.#persistTimer = null
+      try {
+        this.#persist()
+      } catch (error) {
+        job.journalFailure = error instanceof Error ? error.message : 'Chat job journal write failed.'
+      }
+    }, 250)
+    this.#persistTimer.unref?.()
+  }
+
+  #flushPersist() {
+    if (!this.#journal) return
+    if (this.#persistTimer) clearTimeout(this.#persistTimer)
+    this.#persistTimer = null
+    this.#persist()
   }
 }

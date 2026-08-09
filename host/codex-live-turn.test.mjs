@@ -47,6 +47,22 @@ function fakeCodexAppServer() {
       } else if (message.method === 'turn/steer') {
         send({ id: message.id, result: { turnId: '01900000-0000-7000-8000-000000000002' } })
         send({
+          method: 'item/started',
+          params: {
+            threadId: '01900000-0000-7000-8000-000000000001',
+            turnId: '01900000-0000-7000-8000-000000000002',
+            item: { type: 'agentMessage', id: 'note-1', text: '', phase: 'commentary' },
+          },
+        })
+        send({
+          method: 'item/completed',
+          params: {
+            threadId: '01900000-0000-7000-8000-000000000001',
+            turnId: '01900000-0000-7000-8000-000000000002',
+            item: { type: 'agentMessage', id: 'note-1', text: 'Checking the compact layout.', phase: null },
+          },
+        })
+        send({
           method: 'thread/tokenUsage/updated',
           params: {
             threadId: '01900000-0000-7000-8000-000000000001',
@@ -59,7 +75,7 @@ function fakeCodexAppServer() {
           params: {
             threadId: '01900000-0000-7000-8000-000000000001',
             turnId: '01900000-0000-7000-8000-000000000002',
-            item: { type: 'agentMessage', id: 'agent-1', text: 'Applied the correction.' },
+            item: { type: 'agentMessage', id: 'agent-1', text: 'Applied the correction.', phase: 'final_answer' },
           },
         })
         send({
@@ -110,7 +126,11 @@ test('Codex live turns accept a steering instruction before one verified complet
     env: { PATH: '/usr/bin' },
   }, { onEvent: (event) => events.push(event) })
 
+  fake.child.stdout.write('Codex app-server startup diagnostic\n')
+
+  assert.equal(runner.canSteer('job_1111111111111111'), false)
   await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  await waitFor(() => runner.canSteer('job_1111111111111111'))
   const delivery = await runner.steer('job_1111111111111111', 'Use the compact layout', [])
   const result = await run
 
@@ -118,14 +138,32 @@ test('Codex live turns accept a steering instruction before one verified complet
   assert.equal(result.response, 'Applied the correction.')
   assert.equal(result.sessionId, '01900000-0000-7000-8000-000000000001')
   assert.equal(result.model, 'gpt-test')
+  assert.equal(runner.canSteer('job_1111111111111111'), false)
   assert.deepEqual(result.usage, {
     source: 'cli', inputTokens: 12, outputTokens: 4, cachedInputTokens: 3,
+  })
+  assert.deepEqual(result.outputRecovery, {
+    applied: true, normalizedLineCount: 0, discardedLineCount: 1,
   })
   assert.equal(
     fake.requests.find((request) => request.method === 'turn/steer').params.input[0].text,
     'Use the compact layout',
   )
   assert.ok(events.some((event) => event.type === 'notice' && event.message.includes('delivered')))
+  assert.deepEqual(
+    events.filter((event) => event.type === 'notice' && event.code?.startsWith('live_steer_')).map((event) => event.code),
+    ['live_steer_ready', 'live_steer_closed'],
+  )
+  assert.deepEqual(
+    events.find((event) => event.type === 'note'),
+    {
+      type: 'note',
+      provider: 'codex',
+      text: 'Checking the compact layout.',
+      redacted: false,
+      at: events.find((event) => event.type === 'note').at,
+    },
+  )
 })
 
 test('steering a missing live turn is explicitly safe to fall back to FIFO', async () => {
@@ -133,5 +171,35 @@ test('steering a missing live turn is explicitly safe to fall back to FIFO', asy
   await assert.rejects(
     runner.steer('job_2222222222222222', 'Follow up', []),
     (error) => error.code === 'live_steer_unavailable' && error.safeToRetry === true,
+  )
+})
+
+test('an app-server stream beyond the repair bound is never replayable', async () => {
+  const fake = fakeCodexAppServer()
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+  })
+  const run = runner.run({
+    id: 'job_3333333333333333',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  })
+
+  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  for (let index = 0; index < 33; index += 1) {
+    fake.child.stdout.write(`unverified diagnostic ${index}\n`)
+  }
+
+  await assert.rejects(
+    run,
+    (error) => error.code === 'invalid_cli_output' && error.safeToRetry === false,
   )
 })
