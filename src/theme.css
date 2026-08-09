@@ -9,31 +9,34 @@
 :root[data-theme='dark'] {
   color-scheme: dark;
   --surface-canvas: #191919;
-  --surface-titlebar: #191919;
-  --surface-rail: #191919;
-  --surface-sidebar: #171717;
-  --surface-main: #212121;
-  --surface-elevated: #2f2f2f;
-  --surface-control: #2f2f2f;
-  --surface-subtle: #292929;
-  --surface-hover: #292929;
-  --surface-active: #383838;
-  --border-strong: #595959;
-  --border-default: #424242;
-  --border-soft: #333333;
-  --text-primary: #ececec;
-  --text-secondary: #b9b9b3;
-  --text-muted: #a3a39d;
-  --text-faint: #8e8e88;
-  --accent-ui: #19c69a;
-  --accent-ui-strong: #37d6ae;
-  --accent-ui-text: #14231f;
-  --accent-ui-soft: #1f3d35;
-  --focus-ring: rgba(25, 198, 154, 0.72);
+  --surface-titlebar: #1d1d1c;
+  --surface-rail: #1a1a19;
+  --surface-sidebar: #1d1d1c;
+  --surface-main: #232322;
+  --surface-elevated: #2d2d2b;
+  --surface-control: #2b2b29;
+  --surface-subtle: #282826;
+  --surface-hover: #32322f;
+  --surface-active: #3a3a36;
+  --border-strong: #62625c;
+  --border-default: #484843;
+  --border-soft: #363633;
+  --text-primary: #f0f1ed;
+  --text-secondary: #c9cbc5;
+  --text-muted: #a3a59f;
+  --text-faint: #858780;
+  --accent-ui: #45d483;
+  --accent-ui-strong: #70e9a4;
+  --accent-ui-text: #082514;
+  --accent-ui-soft: #173a27;
+  --accent-header-bg: #235339;
+  --accent-header-text: #7ce8ab;
+  --completion-ui: #58bd7f;
+  --focus-ring: rgba(69, 212, 131, 0.72);
   --overlay: rgba(0, 0, 0, 0.68);
-  --shadow-elevated: 0 32px 90px rgba(0, 0, 0, 0.35);
-  --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.2);
-  --scroll-thumb: #595959;
+  --shadow-elevated: 0 32px 90px rgba(0, 0, 0, 0.38);
+  --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.22);
+  --scroll-thumb: #59615c;
   --radius-control: 12px;
   --radius-card: 18px;
   --radius-modal: 22px;
@@ -57,32 +60,35 @@
 
 :root[data-theme='light'] {
   color-scheme: light;
-  --surface-canvas: #f7f7f5;
-  --surface-titlebar: #ffffff;
-  --surface-rail: #f0f0ed;
-  --surface-sidebar: #f7f7f5;
-  --surface-main: #ffffff;
+  --surface-canvas: #f5f5f2;
+  --surface-titlebar: #fafaf7;
+  --surface-rail: #efefeb;
+  --surface-sidebar: #f5f5f2;
+  --surface-main: #fbfbf8;
   --surface-elevated: #ffffff;
-  --surface-control: #f0f0ed;
-  --surface-subtle: #f0f0ed;
-  --surface-hover: #e7e7e2;
-  --surface-active: #e7e7e2;
-  --border-strong: #c7c7c1;
-  --border-default: #deded9;
-  --border-soft: #e7e7e2;
-  --text-primary: #202123;
-  --text-secondary: #62625f;
-  --text-muted: #777772;
-  --text-faint: #8e8e89;
-  --accent-ui: #10a37f;
-  --accent-ui-strong: #08775d;
+  --surface-control: #efefeb;
+  --surface-subtle: #f1f1ed;
+  --surface-hover: #e8e8e2;
+  --surface-active: #dfdfd8;
+  --border-strong: #bdbdb5;
+  --border-default: #d6d6cf;
+  --border-soft: #e6e6df;
+  --text-primary: #242521;
+  --text-secondary: #5d5f59;
+  --text-muted: #767872;
+  --text-faint: #8d8f88;
+  --accent-ui: #178449;
+  --accent-ui-strong: #0e6837;
   --accent-ui-text: #ffffff;
-  --accent-ui-soft: #dff4ed;
-  --focus-ring: rgba(16, 163, 127, 0.62);
-  --overlay: rgba(32, 33, 35, 0.34);
-  --shadow-elevated: 0 32px 90px rgba(32, 33, 35, 0.13);
-  --shadow-soft: 0 8px 30px rgba(32, 33, 35, 0.07);
-  --scroll-thumb: #c7c7c1;
+  --accent-ui-soft: #dff3e6;
+  --accent-header-bg: #cfe9d8;
+  --accent-header-text: #0e6837;
+  --completion-ui: #2d7d4f;
+  --focus-ring: rgba(23, 132, 73, 0.62);
+  --overlay: rgba(25, 31, 27, 0.36);
+  --shadow-elevated: 0 32px 90px rgba(25, 31, 27, 0.14);
+  --shadow-soft: 0 8px 30px rgba(25, 31, 27, 0.08);
+  --scroll-thumb: #b9c0bb;
 }
 
 :root,
@@ -2322,6 +2328,39 @@ kbd {
   }
 
   .composer {
-    border-radius: 22px;
+    border-radius: 16px;
   }
+}
+
+/* Palette-only Ensync brand layer. Layout and component styling stay owned by
+ * the established workspace rules above. */
+.wordmark__mark {
+  color: var(--accent-ui);
+}
+
+/* The split workspace ships in a lazily imported chunk whose stylesheet is
+ * appended after this one, so equal-specificity brand rules for pane headers
+ * would lose the cascade. Those palette values live with the workspace rules in
+ * SplitWorkspace.css and read the accent tokens defined above. */
+
+.activity-button--active {
+  color: var(--accent-ui);
+  background: var(--accent-ui-soft);
+}
+
+.composer__toolbar .send-button {
+  border-color: var(--border-default);
+  background: var(--surface-control);
+  color: var(--text-faint);
+}
+
+.composer__toolbar .send-button--ready,
+.composer__toolbar .send-button--ready:hover {
+  border-color: var(--accent-ui);
+  background: var(--accent-ui);
+  color: var(--accent-ui-text);
+}
+
+.composer__toolbar .send-button--ready:hover {
+  background: var(--accent-ui-strong);
 }
