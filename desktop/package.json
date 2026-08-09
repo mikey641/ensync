@@ -53,6 +53,7 @@
       "src/native-workspaces.mjs",
       "src/recent-projects.mjs",
       "src/device-preferences.mjs",
+      "src/window-state.mjs",
       "src/workspace-recovery.mjs",
       "src/codex-conversation-import.mjs",
       "src/native-updates.mjs",

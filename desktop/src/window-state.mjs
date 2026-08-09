@@ -43,13 +43,13 @@ export function normalizeWindowState(value) {
 /**
  * Reads the presentation a window should reopen with. Maximized and full-screen
  * windows report their restored rectangle so leaving that mode later does not
- * snap the window to a stale size. A minimized window reports nothing at all:
- * its live bounds describe the stashed window, not the one the user arranged.
+ * snap the window to a stale size. Electron returns these normal bounds even
+ * while minimized, so closing a minimized window does not lose its placement.
  */
 export function readNativeWindowState(window) {
   if (!window || typeof window !== 'object') return null
   try {
-    if (window.isDestroyed() || window.isMinimized()) return null
+    if (window.isDestroyed()) return null
     const bounds = window.getNormalBounds()
     return normalizeWindowState({
       x: Math.round(bounds.x),
@@ -78,7 +78,7 @@ function visibleArea(rect, workArea) {
 }
 
 function clampExtent(value, minimum, available) {
-  return Math.max(minimum, Math.min(value, Math.max(minimum, available)))
+  return Math.max(Math.min(minimum, available), Math.min(value, available))
 }
 
 /**
@@ -90,12 +90,17 @@ function clampExtent(value, minimum, available) {
 export function resolveWindowPlacement({
   state,
   displays = [],
+  primaryDisplay = null,
   minimum = MINIMUM_WINDOW_BOUNDS,
   defaults = DEFAULT_WINDOW_BOUNDS,
 } = {}) {
   const normalized = normalizeWindowState(state)
   const workAreas = (Array.isArray(displays) ? displays : []).map(normalizeWorkArea).filter(Boolean)
-  const primary = workAreas[0] ?? null
+  const primary = normalizeWorkArea(primaryDisplay) ?? workAreas[0] ?? null
+  if (primary && !workAreas.some((area) => area.x === primary.x && area.y === primary.y
+    && area.width === primary.width && area.height === primary.height)) {
+    workAreas.unshift(primary)
+  }
 
   if (!normalized) {
     return {
@@ -138,6 +143,101 @@ export function resolveWindowPlacement({
   const x = Math.max(target.x, Math.min(normalized.x, target.x + target.width - width))
   const y = Math.max(target.y, Math.min(normalized.y, target.y + target.height - height))
   return { bounds: { x, y, width, height }, ...presentation }
+}
+
+const WINDOW_STATE_PERSIST_DELAY_MS = 400
+const DEBOUNCED_WINDOW_STATE_EVENTS = Object.freeze(['resize', 'move'])
+const IMMEDIATE_WINDOW_STATE_EVENTS = Object.freeze([
+  'maximize',
+  'unmaximize',
+  'enter-full-screen',
+  'leave-full-screen',
+  'close',
+])
+
+/**
+ * Couples one native workspace identity to its display-aware placement and
+ * live BrowserWindow geometry without making the Electron entry point own the
+ * persistence timing details.
+ */
+export function createWindowStateSession({
+  workspaceId,
+  store = null,
+  displays = [],
+  primaryDisplay = null,
+  minimum = MINIMUM_WINDOW_BOUNDS,
+  persistDelayMs = WINDOW_STATE_PERSIST_DELAY_MS,
+  setTimer = setTimeout,
+  clearTimer = clearTimeout,
+} = {}) {
+  const placement = resolveWindowPlacement({
+    state: store?.get?.(workspaceId) ?? null,
+    displays,
+    primaryDisplay,
+    minimum,
+  })
+  const browserWindowOptions = Object.freeze({
+    ...placement.bounds,
+    minWidth: Math.min(minimum.width, placement.bounds.width),
+    minHeight: Math.min(minimum.height, placement.bounds.height),
+    ...(placement.fullScreen ? { fullscreen: true } : {}),
+  })
+  const delay = Number.isFinite(persistDelayMs) && persistDelayMs >= 0
+    ? persistDelayMs
+    : WINDOW_STATE_PERSIST_DELAY_MS
+  let observedWindow = null
+  let timer = null
+
+  const clearScheduledPersist = () => {
+    if (timer === null) return
+    clearTimer(timer)
+    timer = null
+  }
+  const persist = () => {
+    clearScheduledPersist()
+    const state = readNativeWindowState(observedWindow)
+    if (state) store?.save?.(workspaceId, state)
+  }
+  const schedulePersist = () => {
+    clearScheduledPersist()
+    timer = setTimer(persist, delay)
+  }
+  const dispose = () => {
+    clearScheduledPersist()
+    if (observedWindow?.removeListener) {
+      for (const event of DEBOUNCED_WINDOW_STATE_EVENTS) {
+        observedWindow.removeListener(event, schedulePersist)
+      }
+      for (const event of IMMEDIATE_WINDOW_STATE_EVENTS) {
+        observedWindow.removeListener(event, persist)
+      }
+    }
+    observedWindow = null
+  }
+
+  return Object.freeze({
+    placement,
+    browserWindowOptions,
+    showWhenReady(window, show) {
+      if (!window?.once || typeof show !== 'function') return false
+      window.once('ready-to-show', () => {
+        if (placement.maximized && !placement.fullScreen) window.maximize?.()
+        show(window)
+      })
+      return true
+    },
+    observe(window) {
+      dispose()
+      if (!window?.on) return dispose
+      observedWindow = window
+      for (const event of DEBOUNCED_WINDOW_STATE_EVENTS) window.on(event, schedulePersist)
+      for (const event of IMMEDIATE_WINDOW_STATE_EVENTS) window.on(event, persist)
+      return dispose
+    },
+    forget() {
+      return store?.remove?.(workspaceId) ?? false
+    },
+  })
 }
 
 function normalizeRecords(value) {
