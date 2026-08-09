@@ -287,6 +287,36 @@ function bridgeFailure(envelope) {
   )
 }
 
+function emitSharedCheckoutNotice(sharedCheckout, options) {
+  if (!sharedCheckout || !sharedCheckout.changed) return
+  const at = new Date().toISOString()
+  const root = typeof sharedCheckout.root === 'string' && sharedCheckout.root ? sharedCheckout.root : null
+  if (sharedCheckout.destructive) {
+    options.onEvent?.({
+      type: 'notice',
+      code: 'shared_checkout_reverted',
+      message: `Previously modified files in the remote repository root${root ? ` at ${root}` : ''} were reverted while this run was active, with no commit containing those changes. Ensync did not change the remote repository. Review it before relying on its state.`,
+      at,
+    })
+    return
+  }
+  if (sharedCheckout.landed) {
+    options.onEvent?.({
+      type: 'notice',
+      code: 'shared_checkout_changed',
+      message: `Explicit Ensync land merges arrived on the remote repository${root ? ` at ${root}` : ''} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`,
+      at,
+    })
+    return
+  }
+  options.onEvent?.({
+    type: 'notice',
+    code: 'shared_checkout_changed',
+    message: `The remote repository root${root ? ` at ${root}` : ''} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`,
+    at,
+  })
+}
+
 function parseRemoteChat(provider, stdout) {
   return provider === 'codex' ? parseCodexChatResult(stdout) : parseClaudeChatResult(stdout)
 }
@@ -530,6 +560,7 @@ export class RemoteSshService {
       workspace: { path: workspace.path, branch: workspace.branch },
       at: new Date().toISOString(),
     })
+    emitSharedCheckoutNotice(result?.sharedCheckout, options)
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)
