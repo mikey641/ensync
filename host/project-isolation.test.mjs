@@ -722,3 +722,27 @@ test('checkSharedCheckout reports a landed commit plus a concurrent user edit as
   assert.equal(result.landed, true)
   assert.equal(result.destructive, false)
 })
+
+test('recoverStrandedWorktrees commits dirty stranded worktrees and skips active leases', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const stranded = await isolation.acquire(fixture.repository, 'window-a:chat-stranded')
+  await writeFile(join(stranded.workspace.projectPath, 'stranded.txt'), 'never committed\n')
+  const strandedPath = stranded.workspace.repositoryPath
+  await stranded.release()
+
+  const active = await isolation.acquire(fixture.repository, 'window-a:chat-active')
+  context.after(() => active.release())
+  await writeFile(join(active.workspace.projectPath, 'active.txt'), 'in flight\n')
+
+  const summary = await isolation.recoverStrandedWorktrees()
+  assert.equal(summary.recovered.length, 1)
+  assert.equal(summary.recovered[0].worktreePath, strandedPath)
+  assert.equal(summary.recovered[0].changedFiles, 1)
+  assert.ok(summary.skipped.some((entry) => entry.reason === 'active_lease'))
+  const subject = await git(strandedPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'Ensync agent work (recovered)')
+  // The active worktree was not touched.
+  assert.match(await git(active.workspace.repositoryPath, ['status', '--porcelain']), /active\.txt/)
+})
