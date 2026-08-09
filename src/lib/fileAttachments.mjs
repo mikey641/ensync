@@ -24,9 +24,20 @@ export function appendFileAttachments(current, incoming) {
   ])
 }
 
-export function fileDragContainsFiles(types) {
+export function fileDragContainsFiles(value) {
   try {
-    return Array.from(types ?? []).includes('Files')
+    const dataTransfer = value && typeof value === 'object' && !Array.isArray(value)
+      && ('types' in value || 'items' in value || 'files' in value)
+      ? value
+      : null
+    const types = dataTransfer?.types ?? value
+    if (Array.from(types ?? []).some((type) => String(type).toLowerCase() === 'files')) {
+      return true
+    }
+    if (Array.from(dataTransfer?.items ?? []).some((item) => item?.kind === 'file')) {
+      return true
+    }
+    return Number(dataTransfer?.files?.length ?? 0) > 0
   } catch {
     return false
   }

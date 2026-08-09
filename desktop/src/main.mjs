@@ -13,6 +13,8 @@ import {
   HostProcessController,
 } from './runtime.mjs'
 import {
+  CHAT_FILE_PICKER_CHANNEL,
+  createChatFilePickerHandler,
   createProjectFolderPickerHandler,
   PROJECT_FOLDER_PICKER_CHANNEL,
 } from './project-picker.mjs'
@@ -24,11 +26,16 @@ import {
 } from './native-windows.mjs'
 import {
   createNativeWorkspaceStore,
+  createWorkspaceFocusHandler,
   createWorkspaceIdentityIpcManager,
+  createWorkspaceOpenProjectHandler,
   isNativeWorkspaceIdentity,
   nativeWorkspaceRestorationOrder,
   NATIVE_WORKSPACE_STATE_FILENAME,
   shouldRetainNativeWorkspaceOnClose,
+  WORKSPACE_FOCUS_CHANNEL,
+  WORKSPACE_OPEN_PROJECT_CHANNEL,
+  WORKSPACE_PROJECT_FOCUS_CHANNEL,
 } from './native-workspaces.mjs'
 import {
   createWorkspaceRecoveryHandler,
@@ -48,6 +55,13 @@ import {
   RECENT_PROJECTS_REMEMBER_CHANNEL,
 } from './recent-projects.mjs'
 import {
+  COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
+  createDevicePreferencesHandlers,
+  createDevicePreferencesStore,
+  DEVICE_PREFERENCES_FILENAME,
+  DEVICE_PREFERENCES_GET_CHANNEL,
+} from './device-preferences.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -55,12 +69,14 @@ import {
   UPDATE_DOWNLOAD_CHANNEL,
   UPDATE_GET_STATE_CHANNEL,
   UPDATE_OPEN_INSTALLER_CHANNEL,
+  UPDATE_SET_CHANNEL_CHANNEL,
   UPDATE_STATE_CHANNEL,
 } from './native-updates.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
+const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -75,24 +91,37 @@ let nativeBridgeRegistered = false
 let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
+let devicePreferencesStore = null
 const nativeWindows = createNativeWindowRegistry()
+const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
 const workspaceIdentityIpc = createWorkspaceIdentityIpcManager({
   ipcMain,
   isAuthorized: isAuthorizedNativeEvent,
   identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
   retainedIdentities: () => nativeWorkspaceStore?.list() ?? [],
+  projectLaunchForIdentity: (identity) => projectLaunchByWorkspace.get(identity?.id) ?? null,
   hasRegisteredWindows: () => nativeWindows.size > 0,
 })
 
-function configuredUpdateManifestUrl() {
+function configuredUpdateManifestUrls() {
   try {
     const manifest = JSON.parse(readFileSync(join(desktopRoot, 'package.json'), 'utf8'))
-    return typeof manifest.ensync?.updateManifestUrl === 'string'
-      ? manifest.ensync.updateManifestUrl
-      : null
+    const configured = manifest.ensync?.updateManifestUrls
+    if (configured && typeof configured === 'object') {
+      return {
+        stable: typeof configured.stable === 'string' ? configured.stable : null,
+        beta: typeof configured.beta === 'string' ? configured.beta : null,
+      }
+    }
+    return {
+      stable: typeof manifest.ensync?.updateManifestUrl === 'string'
+        ? manifest.ensync.updateManifestUrl
+        : null,
+      beta: null,
+    }
   } catch {
-    return null
+    return { stable: null, beta: null }
   }
 }
 
@@ -138,6 +167,25 @@ function openNewWindow() {
   })
 }
 
+async function openProjectWindow(project, sourceWorkspace) {
+  const identity = nativeWorkspaceStore?.createIsolated()
+  if (!identity) return false
+  projectLaunchByWorkspace.set(identity.id, {
+    projectId: project.projectId,
+    projectPath: project.projectPath,
+    sourceWorkspace: { id: sourceWorkspace.id, kind: sourceWorkspace.kind },
+  })
+  try {
+    await createWindow(identity)
+    return true
+  } catch (error) {
+    projectLaunchByWorkspace.delete(identity.id)
+    nativeWorkspaceStore?.remove(identity.id)
+    handleWindowCreationFailure(error)
+    return false
+  }
+}
+
 function installApplicationMenu() {
   const template = createNativeWindowMenuTemplate({
     appName: app.name,
@@ -153,6 +201,21 @@ function registerNativeBridge() {
   // the rest of the bridge so a later native feature cannot leave it missing.
   workspaceIdentityIpc.register()
   if (nativeBridgeRegistered) return
+  ipcMain.handle(WORKSPACE_FOCUS_CHANNEL, createWorkspaceFocusHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+    retainedIdentities: () => nativeWorkspaceStore?.list() ?? [],
+    windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+    focusWindow: (window) => showWindow(window),
+    notifyProjectFocus: (window, project) => {
+      window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)
+    },
+  }))
+  ipcMain.handle(WORKSPACE_OPEN_PROJECT_CHANNEL, createWorkspaceOpenProjectHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+    openProjectWindow,
+  }))
   ipcMain.handle(WORKSPACE_RECOVERY_CHANNEL, createWorkspaceRecoveryHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -177,6 +240,16 @@ function registerNativeBridge() {
     },
     onError: (error) => console.error('[ensync-folder-picker]', error),
   }))
+  ipcMain.handle(CHAT_FILE_PICKER_CHANNEL, createChatFilePickerHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    openDialog: async (event, options) => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      return parent
+        ? dialog.showOpenDialog(parent, options)
+        : dialog.showOpenDialog(options)
+    },
+    onError: (error) => console.error('[ensync-file-picker]', error),
+  }))
   const recentProjectHandlers = createRecentProjectHandlers({
     isAuthorized: isAuthorizedNativeEvent,
     store: recentProjectStore,
@@ -191,12 +264,22 @@ function registerNativeBridge() {
   ipcMain.handle(RECENT_PROJECTS_GET_CHANNEL, recentProjectHandlers.get)
   ipcMain.handle(RECENT_PROJECTS_MIGRATE_CHANNEL, recentProjectHandlers.migrate)
   ipcMain.handle(RECENT_PROJECTS_REMEMBER_CHANNEL, recentProjectHandlers.remember)
+  const devicePreferencesHandlers = createDevicePreferencesHandlers({
+    isAuthorized: isAuthorizedNativeEvent,
+    store: devicePreferencesStore,
+  })
+  ipcMain.handle(DEVICE_PREFERENCES_GET_CHANNEL, devicePreferencesHandlers.get)
+  ipcMain.handle(
+    COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
+    devicePreferencesHandlers.setCompletionNotifications,
+  )
   const updateActions = new Map([
     [UPDATE_GET_STATE_CHANNEL, () => updateManager.getState()],
     [UPDATE_CHECK_CHANNEL, () => updateManager.check()],
     [UPDATE_DOWNLOAD_CHANNEL, () => updateManager.download()],
     [UPDATE_CANCEL_CHANNEL, () => updateManager.cancel()],
     [UPDATE_OPEN_INSTALLER_CHANNEL, () => updateManager.openDownloadedInstaller()],
+    [UPDATE_SET_CHANNEL_CHANNEL, (channel) => updateManager.setChannel(channel)],
   ])
   for (const [channel, action] of updateActions) {
     ipcMain.handle(channel, createAuthorizedUpdateHandler({
@@ -213,17 +296,23 @@ function unregisterNativeBridge() {
   if (nativeWindows.size > 0) return false
   workspaceIdentityIpc.dispose()
   if (!nativeBridgeRegistered) return true
+  ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
+  ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
+  ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_GET_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_MIGRATE_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_REMEMBER_CHANNEL)
+  ipcMain.removeHandler(DEVICE_PREFERENCES_GET_CHANNEL)
+  ipcMain.removeHandler(COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL)
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL)
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL)
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(UPDATE_CANCEL_CHANNEL)
   ipcMain.removeHandler(UPDATE_OPEN_INSTALLER_CHANNEL)
+  ipcMain.removeHandler(UPDATE_SET_CHANNEL_CHANNEL)
   nativeBridgeRegistered = false
   return true
 }
@@ -265,17 +354,19 @@ async function ensureRuntime() {
       cwd: app.getPath('home'),
       env: {
         ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
+        ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
       },
       stateFilePath: join(app.getPath('userData'), HOST_DAEMON_STATE_FILENAME),
       journalFilePath: join(app.getPath('userData'), HOST_JOB_JOURNAL_FILENAME),
     })
-    const host = await controller.start()
+    await controller.start()
     try {
       const handler = await createAppProtocolHandler({
         uiRoot: paths.uiRoot,
-        hostPort: host.port,
-        hostToken: controller.authToken,
-        ownerId: controller.ownerId,
+        // Resolve the endpoint for every API request. Healthy traffic reuses
+        // the cached lease; if the detached Host actually ended, the controller
+        // starts exactly one journal-aware replacement before proxying.
+        resolveHostConnection: () => controller.ensureConnected(),
       })
       protocol.handle(APP_SCHEME, handler)
       hostController = controller
@@ -393,6 +484,7 @@ async function createWindow(workspaceIdentity) {
   window.once('ready-to-show', () => showWindow(window))
   window.on('closed', () => {
     recovery.dispose()
+    projectLaunchByWorkspace.delete(workspaceIdentity.id)
     const retainWorkspace = shouldRetainNativeWorkspaceOnClose({
       identity: workspaceIdentity,
       quitting: quitting || preserveWorkspaceRecord,
@@ -446,14 +538,19 @@ if (!singleInstance) {
     recentProjectStore = createRecentProjectStore({
       filePath: join(app.getPath('userData'), RECENT_PROJECTS_FILENAME),
     })
+    devicePreferencesStore = createDevicePreferencesStore({
+      filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
+    })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
       platform: process.platform,
       isPackaged: app.isPackaged,
       executablePath: process.execPath,
-      manifestUrl: configuredUpdateManifestUrl(),
+      manifestUrls: configuredUpdateManifestUrls(),
+      initialChannel: devicePreferencesStore.get().updateChannel,
       tempRoot: app.getPath('temp'),
       openInstaller: (path) => shell.openPath(path),
+      persistChannel: (channel) => devicePreferencesStore.setUpdateChannel(channel),
       onStateChange: broadcastUpdateState,
     })
     // Register native IPC before awaiting updater initialization. On macOS an
@@ -463,11 +560,20 @@ if (!singleInstance) {
     nativeWorkspaceStore.ensureCanonical()
     return updateManager.initialize()
   }).then(() => {
-    const identities = nativeWorkspaceRestorationOrder(nativeWorkspaceStore.list())
+    const retainedIdentities = nativeWorkspaceStore.list()
+    const startupFocusIdentity = retainedIdentities.at(-1)
+    const identities = nativeWorkspaceRestorationOrder(retainedIdentities)
     return identities.reduce(
       (previous, identity) => previous.then(() => createWindow(identity)),
       Promise.resolve(),
-    )
+    ).then(() => {
+      // Canonical must hydrate first, but the last-used retained workspace must
+      // be visible after restoration. Otherwise a clean secondary window can
+      // make the user's saved chats look as if they disappeared.
+      if (startupFocusIdentity) {
+        showWindow(nativeWindows.windowForWorkspace(startupFocusIdentity.id))
+      }
+    })
   }).catch(handleStartupFailure)
 }
 
