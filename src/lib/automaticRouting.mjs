@@ -2,7 +2,7 @@
  * Automatic routing priority is a user preference, not provider catalog order.
  * Keep this allowlist limited to runners with tested chat execution.
  */
-export const DEFAULT_FALLBACK_PROVIDER_ORDER = Object.freeze(['codex', 'claude'])
+export const DEFAULT_FALLBACK_PROVIDER_ORDER = Object.freeze(['codex', 'claude', 'droid'])
 
 const AUTOMATIC_PROVIDER_IDS = new Set(DEFAULT_FALLBACK_PROVIDER_ORDER)
 

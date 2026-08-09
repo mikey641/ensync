@@ -2,6 +2,9 @@ import { findExecutable, runProcess } from './command.mjs'
 import { parseCodexAppServerProbe, probeCodexAppServer } from './codex-app-server.mjs'
 import { probeClaudeUsage } from './claude-usage.mjs'
 import { probeCopilotAuthentication } from './copilot-auth.mjs'
+import { probeDroidAuthentication } from './droid-auth.mjs'
+import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
+import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
 
 // Product-navigation heuristic: broadly recognized subscription coding agents
@@ -166,9 +169,7 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: [],
     updateArgs: ['update'],
-    authentication: unsupportedAuthentication(
-      'Factory Droid uses browser account sign-in during first-run onboarding, but does not document a non-interactive subscription authentication-status command.',
-    ),
+    authentication: probeDroidAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
       'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
@@ -335,10 +336,10 @@ const providerCatalog = {
   },
   droid: {
     routeKind: 'subscription',
-    chatExecution: 'discovery_only',
+    chatExecution: 'supported',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Browser onboarding is wired, but subscription-mode headless execution, /limits parsing, and Extra Usage protection are not yet tested.',
+    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Ensync still has no /limits quota adapter, so remaining capacity is unknown.',
   },
   auggie: {
     routeKind: 'subscription',
@@ -664,6 +665,10 @@ async function inspectProvider(provider) {
       `${commandCandidates.join(' or ')} was not found on PATH.`,
       checkedAt,
     )
+    const installCommand = hasInstallCommand(provider.id)
+      ? getInstallCommand(provider.id)
+      : null
+    const mcp = await probeMcpConfig(provider.id)
     return {
       id: provider.id,
       name: provider.name,
@@ -677,9 +682,12 @@ async function inspectProvider(provider) {
       availableModels: [],
       canConnect: false,
       connectReason: `Install ${provider.name} and make ${commandCandidates.join(' or ')} available on PATH.`,
+      canInstall: hasInstallCommand(provider.id),
+      installCommand,
       canUpdate: false,
       updateStrategy: providerUpdateStrategy(provider),
       updateReason: providerUpdateReason(provider, false),
+      mcp,
       ...catalog,
       checkedAt,
     }
@@ -703,6 +711,7 @@ async function inspectProvider(provider) {
     : null
   const versionOutput = combinedOutput(versionResult).split('\n')[0]?.trim()
   const version = versionResult.exitCode === 0 && versionOutput ? versionOutput : null
+  const mcp = await probeMcpConfig(provider.id)
 
   return {
     id: provider.id,
@@ -721,9 +730,14 @@ async function inspectProvider(provider) {
       : catalog.setupKind === 'none'
         ? `${provider.name} does not require an account login.`
         : `${provider.name} does not provide a provider-neutral subscription login command.`,
+    canInstall: hasInstallCommand(provider.id),
+    installCommand: hasInstallCommand(provider.id)
+      ? getInstallCommand(provider.id)
+      : null,
     canUpdate: Array.isArray(provider.updateArgs),
     updateStrategy: providerUpdateStrategy(provider),
     updateReason: providerUpdateReason(provider, true),
+    mcp,
     ...catalog,
     checkedAt,
   }
