@@ -37,6 +37,7 @@ test('Codex app-server parser keeps exact quota data and the real model catalog'
   assert.equal(result.usage.kind, 'subscription_quota')
   assert.equal(result.usage.remainingPercent, 29)
   assert.equal(result.usage.resetAt, new Date(1_800_086_400_000).toISOString())
+  assert.equal(result.usage.resetWindow, 'Weekly')
   assert.equal(result.usage.plan, 'pro')
   assert.equal(result.usage.model, 'gpt-default')
   assert.deepEqual(result.usage.details, [
@@ -66,6 +67,7 @@ test('Codex app-server parser falls back to the canonical rateLimits bucket', ()
 
   assert.equal(result.usage.usedPercent, 32)
   assert.equal(result.usage.remainingPercent, 68)
+  assert.equal(result.usage.resetWindow, 'Weekly')
   assert.deepEqual(result.usage.details, [
     { label: 'Quota type', value: 'Subscription quota' },
     { label: 'Current window', value: 'Weekly' },

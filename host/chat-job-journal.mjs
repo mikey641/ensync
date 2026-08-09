@@ -35,6 +35,24 @@ function readCandidate(path) {
   }
 }
 
+function processIsAlive(pid) {
+  if (!Number.isInteger(pid) || pid < 1) return false
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return error?.code === 'EPERM'
+  }
+}
+
+export class ChatJobJournalInUseError extends Error {
+  constructor() {
+    super('Another live Ensync Host owns the provider-job journal. The competing Host was not allowed to reconcile or overwrite its jobs.')
+    this.name = 'ChatJobJournalInUseError'
+    this.code = 'chat_job_journal_in_use'
+  }
+}
+
 /**
  * Checksummed, bounded metadata/event storage for Host-owned jobs. Callers
  * provide already-redacted public events; prompts and raw provider streams are
@@ -49,6 +67,16 @@ export class ChatJobJournal {
     this.stagingPath = `${options.filePath}.staging`
     this.backupPath = `${options.filePath}.backup`
     this.revision = 0
+    this.writer = options.writer && typeof options.writer.instanceId === 'string'
+      && Number.isInteger(options.writer.pid) && options.writer.pid > 0
+      ? { instanceId: options.writer.instanceId, pid: options.writer.pid }
+      : null
+  }
+
+  #assertWriter(payload) {
+    const writer = payload?.writer
+    if (!this.writer || !writer || writer.instanceId === this.writer.instanceId) return
+    if (processIsAlive(writer.pid)) throw new ChatJobJournalInUseError()
   }
 
   load() {
@@ -57,15 +85,23 @@ export class ChatJobJournal {
       .filter((item) => item.payload)
       .sort((left, right) => (right.payload.revision ?? 0) - (left.payload.revision ?? 0))
     const selected = candidates[0]?.payload
+    this.#assertWriter(selected)
     this.revision = Number.isSafeInteger(selected?.revision) ? selected.revision : 0
     return selected?.jobs ?? []
   }
 
   save(jobs) {
     mkdirSync(dirname(this.filePath), { recursive: true, mode: 0o700 })
+    const latest = [this.filePath, this.stagingPath, this.backupPath]
+      .map(readCandidate)
+      .filter(Boolean)
+      .sort((left, right) => (right.revision ?? 0) - (left.revision ?? 0))[0]
+    this.#assertWriter(latest)
+    if (Number.isSafeInteger(latest?.revision)) this.revision = Math.max(this.revision, latest.revision)
     const payload = {
       revision: this.revision + 1,
       savedAt: new Date().toISOString(),
+      ...(this.writer ? { writer: this.writer } : {}),
       jobs,
     }
     const envelope = JSON.stringify({

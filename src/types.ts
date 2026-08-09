@@ -41,11 +41,14 @@ export type Provider = {
   resetsIn: string | null
   /** Exact CLI-rendered schedule retained when the CLI omits an absolute timestamp. */
   resetLabel?: string | null
+  /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   usageReason: string
   canConnect: boolean
   /** True only when Ensync has a fixed, verified provider-owned self-update command. */
   canUpdate?: boolean
+  /** How this installed provider receives updates without inferring its install method. */
+  updateStrategy?: 'ensync_command' | 'provider_automatic' | 'official_guide'
   updateReason?: string | null
   routeKind: 'subscription' | 'local'
   chatExecution: 'supported' | 'discovery_only'
@@ -99,10 +102,17 @@ export type ContinuationState = {
   gitReason: string | null
   /** Provider-authored handoff retained for future agents, never rendered as message text. */
   semanticSummary?: string | null
+  /** Host-managed local Git worktree used for this conversation. */
+  workspace?: {
+    path: string
+    branch: string
+  } | null
 }
 
 export type Chat = {
   id: string
+  /** Local provider-neutral key for this conversation's protected agent worktree. */
+  agentWorkspaceKey?: string
   projectId: string
   title: string
   subtitle: string
@@ -115,6 +125,11 @@ export type Chat = {
   /** Friendly effort tier over the provider's default model; null/undefined omits the effort flag. */
   sizeTier?: ModelSizeTier | null
   messages: Message[]
+  /** Stable Host-managed worktree used by this conversation's local agent runs. */
+  workspace?: {
+    path: string
+    branch: string
+  } | null
   /** Non-secret identity used to update one explicitly imported external conversation without duplication. */
   importSource?: {
     kind: 'codex_session'

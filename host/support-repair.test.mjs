@@ -21,6 +21,7 @@ function validRequest(overrides = {}) {
     provider: 'codex',
     projectId: VERIFIED_PROJECT.id,
     projectPath: '/requested/project',
+    workspaceKey: 'canonical-window:support-repair-1',
     prompt: 'Fix the conversation panel overflow and verify the focused test.',
     diagnostics: {
       summary: 'Long unbroken output escapes the message container.',
@@ -110,6 +111,7 @@ test('repair re-inspects and binds the run to the exact canonical project identi
   const runRequest = calls.runs[0]
   assert.equal(runRequest.provider, 'claude')
   assert.equal(runRequest.projectPath, VERIFIED_PROJECT.path)
+  assert.equal(runRequest.workspaceKey, 'canonical-window:support-repair-1')
   assert.equal(runRequest.model, 'claude-opus-4-6')
   assert.equal(runRequest.timeoutMs, 30_000)
   assert.match(runRequest.prompt, /git commit, git push/)
