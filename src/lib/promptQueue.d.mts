@@ -27,14 +27,24 @@ export type PromptQueues = Record<string, QueuedPrompt[]>
 export function normalizePromptQueues(value: unknown): PromptQueues
 export function appendPromptToQueue(queues: PromptQueues, chatId: string, entry: QueuedPrompt): PromptQueues
 export function removePromptFromQueue(queues: PromptQueues, chatId: string, entryId: string): PromptQueues
+export function promoteQueuedPromptToActiveTurn(queues: PromptQueues, chatId: string, entryId: string, activeTurnId: string): PromptQueues
 export function approveNextQueuedPrompt(queues: PromptQueues, chatId: string, approvedAt: string): PromptQueues
 export function predecessorTurnIdForPrompt(queue: QueuedPrompt[], messages: Message[], inFlightRun?: { turnId?: string } | null): string | null
 export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry: QueuedPrompt | undefined): {
   state: 'empty' | 'ready' | 'waiting' | 'paused'
   reason: string | null
 }
+export function promptQueueStatusPresentation(
+  gate: ReturnType<typeof queuedPromptGate>,
+  count: number,
+): {
+  headline: string
+  detail: string
+  actionLabel: string | null
+}
 export function transcriptMessagesBeforeTurn(messages: Message[], turnId: string): Message[]
 export function insertAgentReplyBeforeLaterQueued(messages: Message[], turnId: string, reply: Message): Message[]
+export function promoteQueuedMessageToActiveTurn(messages: Message[], messageId: string, activeTurnId: string): Message[]
 export function promptQueueComposerState(input: { sending: boolean; draft: string; canRun: boolean; liveSteering?: boolean }): {
   sendEnabled: boolean
   sendLabel: string
