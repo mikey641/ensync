@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Dialogue Bloom</title>
+  <desc id="description">Four conversation petals meet around one central context.</desc>
+  <defs>
+    <path id="dialogue-petal" d="M50 17C65 17 76 28 76 40C76 50 68 57 57 57H50Z"/>
+  </defs>
+  <g fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" stroke-linejoin="round">
+    <use href="#dialogue-petal"/>
+    <use href="#dialogue-petal" transform="rotate(90 50 50)"/>
+    <use href="#dialogue-petal" transform="rotate(180 50 50)"/>
+    <use href="#dialogue-petal" transform="rotate(270 50 50)"/>
+  </g>
+</svg>

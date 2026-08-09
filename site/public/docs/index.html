@@ -29,7 +29,7 @@
         <div class="docs-content">
           <section id="status">
             <p class="eyebrow">Start here</p><h2>Current product status</h2>
-            <div class="callout"><strong>No public desktop release yet</strong><p>The repository contains a local prototype. This site intentionally keeps macOS and Windows download actions disabled until signed artifacts are published in the release manifest.</p></div>
+            <div class="callout"><strong>No public desktop release yet</strong><p>The repository contains a local prototype. This site keeps macOS disabled until a signed/notarized artifact is published and Windows disabled until the certified Microsoft Store listing is configured.</p></div>
             <p>In the current prototype, Ensync Host can discover provider CLIs and run verified chats through authenticated Claude Code and Codex subscriptions. The broader catalog is visible for discovery, but it is not yet eligible for automatic chat routing.</p>
           </section>
           <section id="concepts">
@@ -91,9 +91,9 @@
             <ul><li>Codex usage and model data come from the initialized local app-server.</li><li>Claude usage comes from the CLI's local usage surface only when the structured event proves zero model turns, API duration, tokens, and cost.</li><li>Kimi stays unknown until Ensync has a version-gated, non-consuming quota probe. Its optional paid Extra Usage is never counted as subscription capacity.</li><li>Providers without a verified quota surface remain explicitly unknown.</li><li>Ollama is a local runtime, so it has local model and process capacity rather than a subscription percentage.</li></ul>
           </section>
           <section id="downloads">
-            <p class="eyebrow">Releases</p><h2>Manifest-gated downloads</h2>
-            <p>The download page fetches <code>/releases.json</code>. A button becomes active only when the requested platform is marked available, matches the latest version, is explicitly marked signed, uses an HTTPS artifact URL, and includes a 64-character SHA-256 checksum.</p>
-            <p>If the manifest cannot be loaded or fails validation, the site offers no download. macOS and Windows are evaluated independently and held to the same requirements.</p>
+            <p class="eyebrow">Releases</p><h2>Verified release channels</h2>
+            <p>The macOS button reads <code>/releases.json</code> and activates only for a matching signed/notarized HTTPS artifact with a real SHA-256 checksum.</p>
+            <p>The Windows button reads the public site configuration and activates only for an exact <code>https://apps.microsoft.com/detail/...</code> listing. Microsoft Store signs, installs, and updates that package. Missing or invalid release data always leaves the relevant button disabled.</p>
             <a class="button button-secondary" href="/#download">Check release availability</a>
           </section>
           <section id="security">

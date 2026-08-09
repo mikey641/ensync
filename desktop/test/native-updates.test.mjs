@@ -92,6 +92,33 @@ test('development and unsigned packaged builds fail closed without checking the 
   assert.equal(fetched, 0)
 })
 
+test('Microsoft Store installations delegate updates without checking Ensync feeds or signatures', async () => {
+  let fetched = 0
+  let signatureChecks = 0
+  const manager = createNativeUpdateManager({
+    installedVersion: '1.0.0',
+    platform: 'win32',
+    storeManaged: true,
+    isPackaged: true,
+    executablePath: 'C:\\Program Files\\WindowsApps\\Ensync.exe',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
+    tempRoot: tmpdir(),
+    fetchImpl: async () => { fetched += 1 },
+    verifyInstalledBuild: async () => { signatureChecks += 1; return { verified: true, signerIdentity: 'CN=Store' } },
+    openInstaller: async () => '',
+  })
+
+  const state = await manager.initialize()
+  assert.equal(state.phase, 'managed')
+  assert.match(state.message, /Microsoft Store/)
+  assert.equal(state.canCheck, false)
+  assert.equal(state.canChangeChannel, false)
+  assert.equal((await manager.check()).phase, 'managed')
+  assert.equal((await manager.setChannel('beta')).channel, 'stable')
+  assert.equal(fetched, 0)
+  assert.equal(signatureChecks, 0)
+})
+
 test('macOS verification requires a real team identity and the downloaded DMG to match it and pass Gatekeeper', async () => {
   const commands = []
   const runCommand = async (executable, args) => {

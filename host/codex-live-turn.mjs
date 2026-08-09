@@ -7,7 +7,7 @@ import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_STDERR_CHARACTERS = 256 * 1024
 
 export class CodexLiveTurnError extends Error {
@@ -73,8 +73,10 @@ class CodexLiveSession {
   #nextRequestId = 1
   #threadId = null
   #turnId = null
+  #activatedTurnId = null
   #turnStarted = false
   #settled = false
+  #readySettled = false
   #agentMessages = []
   #agentMessagePhases = new Map()
   #model = null
@@ -209,8 +211,8 @@ class CodexLiveSession {
         ...(this.input.model ? { model: this.input.model } : {}),
         ...(this.input.effort ? { effort: this.input.effort } : {}),
       })
-      this.#turnId = turnResponse?.turn?.id
-      if (typeof this.#turnId !== 'string' || !this.#turnId) {
+      const startedTurnId = turnResponse?.turn?.id
+      if (typeof startedTurnId !== 'string' || !startedTurnId) {
         throw new CodexLiveTurnError(
           'invalid_cli_output',
           'Codex app-server did not return a valid active turn ID.',
@@ -218,8 +220,17 @@ class CodexLiveSession {
           true,
         )
       }
+      if (this.#activatedTurnId && this.#activatedTurnId !== startedTurnId) {
+        throw new CodexLiveTurnError(
+          'invalid_cli_output',
+          'Codex app-server started a different turn than the one it reported active.',
+          502,
+          false,
+        )
+      }
+      this.#turnId = startedTurnId
       this.#turnStarted = true
-      this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
+      this.#resolveReadyIfActive()
       const completedTurn = await this.#done
       if (completedTurn?.status !== 'completed') {
         throw new CodexLiveTurnError(
@@ -407,9 +418,25 @@ class CodexLiveSession {
     }
 
     const params = message.params
+    // Notifications tagged with another thread's ID (for example, child
+    // threads Codex spawns for subagents) must never touch this session's
+    // turn identity, transcript, usage, or event stream.
+    if (typeof params?.threadId === 'string' && params.threadId !== this.#threadId) return
+
     if (message.method === 'turn/started' && params?.turn?.id) {
+      if (this.#turnId && this.#turnId !== params.turn.id) {
+        this.#fail(new CodexLiveTurnError(
+          'invalid_cli_output',
+          'Codex app-server activated a different turn than the one Ensync started.',
+          502,
+          false,
+        ))
+        return
+      }
       this.#turnId = params.turn.id
+      this.#activatedTurnId = params.turn.id
       this.#turnStarted = true
+      this.#resolveReadyIfActive()
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
       const phase = params.item.phase ?? this.#agentMessagePhases.get(params.item.id) ?? null
       this.#agentMessagePhases.delete(params.item.id)
@@ -429,8 +456,14 @@ class CodexLiveSession {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
       this.#model = params.toModel
-    } else if (message.method === 'turn/completed' && params?.threadId === this.#threadId) {
+    } else if (message.method === 'turn/completed' && params?.turn?.id === this.#turnId) {
       this.#settled = true
+      this.#rejectReadyOnce(new CodexLiveTurnError(
+        'live_steer_unavailable',
+        'The Codex turn already finished, so this message was not delivered to it.',
+        409,
+        true,
+      ))
       this.#resolveDone(params.turn)
     } else if (message.method === 'item/commandExecution/outputDelta' && typeof params?.delta === 'string') {
       this.onEvent?.({
@@ -467,10 +500,29 @@ class CodexLiveSession {
     this.#inactivityTimer.unref?.()
   }
 
+  // Steering readiness requires the turn identity to be fully established:
+  // the turn/start response and the turn/started activation notification must
+  // both have arrived and agree before any turn/steer can be trusted.
+  #resolveReadyIfActive() {
+    if (this.#readySettled
+      || this.#settled
+      || !this.#threadId
+      || !this.#turnId
+      || this.#activatedTurnId !== this.#turnId) return
+    this.#readySettled = true
+    this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
+  }
+
+  #rejectReadyOnce(error) {
+    if (this.#readySettled) return
+    this.#readySettled = true
+    this.#rejectReady(error)
+  }
+
   #fail(error) {
     if (this.#settled) return
     this.#settled = true
-    this.#rejectReady(error)
+    this.#rejectReadyOnce(error)
     this.#rejectDone(error)
     for (const pending of this.#requests.values()) pending.reject(error)
     this.#requests.clear()

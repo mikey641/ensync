@@ -1,0 +1,55 @@
+name: Windows Store package
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Semantic product version, such as 0.1.0-beta.1
+        required: true
+        default: 0.1.0-beta.1
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-store-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-2025
+    env:
+      ENSYNC_PRODUCT_VERSION: ${{ inputs.version }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      - name: Validate and apply the product version
+        shell: pwsh
+        run: |
+          if ($env:ENSYNC_PRODUCT_VERSION -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$') {
+            throw 'version must be a semantic version such as 0.1.0-beta.1'
+          }
+          npm --prefix desktop version --no-git-tag-version --allow-same-version $env:ENSYNC_PRODUCT_VERSION
+      - run: npm run test:host
+      - name: Build the guarded Partner Center upload package
+        run: npm --prefix desktop run package:win-store
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ensync-windows-store-${{ inputs.version }}-${{ github.run_number }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            desktop/release/*.appx
+            desktop/release/attestation-windows-store.json

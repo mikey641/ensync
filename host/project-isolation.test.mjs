@@ -91,6 +91,7 @@ test('a dirty shared checkout seeds a protected workspace without changing the s
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
   const baseline = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await git(fixture.repository, ['config', 'core.autocrlf', 'true'])
   await writeFile(join(fixture.repository, 'tracked.txt'), 'unique user change\n')
   await writeFile(join(fixture.repository, 'untracked.txt'), 'also unique\n')
 
@@ -146,6 +147,25 @@ test('separate Host instances allow different conversation worktrees in one repo
   second.assertHeld()
   await first.release()
   await second.release()
+})
+
+test('a rapid lease heartbeat never corrupts its owner record', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const service = new ProjectIsolationService({
+    rootPath: join(fixture.root, 'host-a'),
+    heartbeatMs: 1,
+    lockStaleMs: 5_000,
+    lockPollMs: 10,
+  })
+  const acquired = await service.acquire(fixture.repository, 'window-a:chat-a')
+  const ownerPath = join(workspaceLockPath(fixture.repository, '.git', 'window-a:chat-a'), 'owner.json')
+  const deadline = Date.now() + 400
+  while (Date.now() < deadline) {
+    JSON.parse(await readFile(ownerPath, 'utf8'))
+    acquired.assertHeld()
+  }
+  acquired.assertHeld()
+  await acquired.release()
 })
 
 test('separate Host instances serialize duplicate runs against the same conversation worktree', async (context) => {

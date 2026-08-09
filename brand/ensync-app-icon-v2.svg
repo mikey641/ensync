@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description">
+  <title id="title">Ensync app icon</title>
+  <desc id="description">The Ensync Continuity Loop in mint on charcoal.</desc>
+  <rect x="4" y="4" width="92" height="92" rx="23" fill="#202123"/>
+  <g fill="none" stroke="#7EE2BC" stroke-width="8.5">
+    <rect x="13" y="28" width="56" height="26" rx="13" transform="rotate(-38 41 41)"/>
+    <rect x="31" y="46" width="56" height="26" rx="13" transform="rotate(-38 59 59)"/>
+  </g>
+</svg>

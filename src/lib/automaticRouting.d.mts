@@ -14,3 +14,9 @@ export function selectAutomaticProvider(
   priorityOrder: readonly ProviderId[],
   attemptedProviderIds?: readonly ProviderId[],
 ): Provider | null
+
+export function selectAutomaticProviderAfterRefresh(
+  providers: Provider[],
+  priorityOrder: readonly ProviderId[],
+  refreshProviders: () => Promise<Provider[] | null>,
+): Promise<Provider | null>

@@ -6,7 +6,7 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist/**', 'desktop/**', 'site/**', 'node_modules/**']),
+  globalIgnores(['dist/**', 'desktop/**', 'site/**', 'node_modules/**', '.claude/worktrees/**']),
   {
     files: ['host/**/*.mjs', '*.config.{js,mjs,ts}'],
     extends: [js.configs.recommended],

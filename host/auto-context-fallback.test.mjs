@@ -95,6 +95,10 @@ test('UI fallback accepts only explicit Host safe proofs and keeps saved ranking
     kind: 'preflight',
     code: 'provider_not_authenticated',
   })
+  assert.deepEqual(safeFallbackProof({ code: 'provider_startup_failed', safeToRetry: true }), {
+    kind: 'preflight',
+    code: 'provider_startup_failed',
+  })
   for (const code of ['run_timed_out', 'invalid_cli_output', 'empty_cli_response', 'cli_failed']) {
     assert.equal(safeFallbackProof({ code, safeToRetry: true }), null)
   }

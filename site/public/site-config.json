@@ -1,9 +1,12 @@
 {
   "schemaVersion": 1,
   "support": {
-    "email": null,
+    "email": "mikey641@gmail.com",
     "issueTrackerUrl": null,
     "statusPageUrl": null
+  },
+  "downloads": {
+    "windowsStoreUrl": null
   },
   "sourceRepositoryUrl": null
 }
