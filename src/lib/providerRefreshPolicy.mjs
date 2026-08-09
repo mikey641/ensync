@@ -1,7 +1,7 @@
 export const PROVIDER_REFRESH_INTERVAL_MS = 60_000
 export const PROVIDER_REFRESH_HIDDEN_INTERVAL_MS = 5 * 60_000
-export const PROVIDER_REFRESH_OFFLINE_BASE_MS = 15_000
-export const PROVIDER_REFRESH_OFFLINE_MAX_MS = 5 * 60_000
+export const PROVIDER_REFRESH_OFFLINE_BASE_MS = 1_000
+export const PROVIDER_REFRESH_OFFLINE_MAX_MS = 60_000
 
 /**
  * Returns only the delay before the next real Host read. It never derives or modifies
