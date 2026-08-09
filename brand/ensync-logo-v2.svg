@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="380" height="100" viewBox="0 0 380 100" role="img" aria-labelledby="title description">
+  <title id="title">Ensync</title>
+  <desc id="description">Ensync Continuity Loop emblem with lowercase wordmark.</desc>
+  <g fill="none" stroke="#202123" stroke-width="8.5">
+    <rect x="13" y="28" width="56" height="26" rx="13" transform="rotate(-38 41 41)"/>
+    <rect x="31" y="46" width="56" height="26" rx="13" transform="rotate(-38 59 59)"/>
+  </g>
+  <text x="116" y="67" fill="#202123" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="57" font-weight="650" letter-spacing="-3.2">ensync</text>
+</svg>

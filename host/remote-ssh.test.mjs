@@ -602,6 +602,7 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     assert.equal(result.exitCode, 0, result.stderr)
   }
   const baseline = (await runGit(['rev-parse', 'HEAD'], { cwd: projectPath })).stdout.trim()
+  assert.equal((await runGit(['config', 'core.autocrlf', 'true'], { cwd: projectPath })).exitCode, 0)
   await writeFile(join(projectPath, 'tracked.txt'), 'unique shared-checkout change\n')
   await writeFile(join(projectPath, 'untracked.txt'), 'unique untracked change\n')
   await writeFile(executable, `#!${process.execPath}\n${[

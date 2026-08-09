@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Orbit Bridge</title>
+  <desc id="description">Two provider orbits exchange one central task without breaking its boundary.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round">
+    <path d="M50 18A32 32 0 0 1 82 50A32 32 0 0 1 50 82"/>
+    <path d="M50 82A32 32 0 0 1 18 50A32 32 0 0 1 50 18" opacity=".48"/>
+    <path d="M35 50H65"/>
+  </g>
+  <circle cx="50" cy="50" r="6" fill="currentColor"/>
+</svg>

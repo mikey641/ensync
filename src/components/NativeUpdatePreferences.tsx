@@ -22,6 +22,7 @@ function formatBytes(value: number) {
 
 function phaseLabel(state: NativeUpdateState) {
   switch (state.phase) {
+    case 'managed': return 'Managed by Store'
     case 'checking': return 'Checking'
     case 'up_to_date': return 'Up to date'
     case 'available': return 'Update available'
@@ -146,7 +147,9 @@ export function NativeUpdatePreferences({ className = '' }: { className?: string
       </div>
 
       <p className="native-update-trust">
-        <ShieldCheck size={14} /> Checks are manual. Download and installer opening are separate actions; Ensync never silently installs, quits, or restarts.
+        <ShieldCheck size={14} /> {state.phase === 'managed'
+          ? 'Microsoft Store verifies, installs, and updates this Windows package.'
+          : 'Checks are manual. Download and installer opening are separate actions; Ensync never silently installs, quits, or restarts.'}
       </p>
     </section>
   )

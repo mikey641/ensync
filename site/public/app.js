@@ -1,4 +1,4 @@
-import { releaseLabel, resolveDownload } from '/release-manifest.mjs';
+import { releaseLabel, resolveDownload, resolveWindowsStoreListing } from '/release-manifest.mjs';
 
 const root = document.documentElement;
 const themeButton = document.querySelector('[data-theme-toggle]');
@@ -162,40 +162,70 @@ function setDownloadAvailable(card, download) {
   }
 }
 
+function setWindowsStoreAvailable(card, listing) {
+  const button = card.querySelector('[data-download-button]');
+  const status = card.querySelector('[data-download-status]');
+  const detail = card.querySelector('[data-download-detail]');
+  const checksum = card.querySelector('[data-download-checksum]');
+
+  card.dataset.available = 'true';
+  if (button) {
+    button.href = listing.url;
+    button.removeAttribute('aria-disabled');
+    button.removeAttribute('tabindex');
+    button.textContent = 'Get from Microsoft Store';
+  }
+  if (status) status.textContent = 'Microsoft Store';
+  if (detail) detail.textContent = 'Signed, installed, and updated by Microsoft Store.';
+  if (checksum) checksum.hidden = true;
+}
+
+async function fetchJson(path) {
+  const response = await fetch(path, { cache: 'no-store' });
+  if (!response.ok) throw new Error(`${path} returned ${response.status}`);
+  return response.json();
+}
+
 async function hydrateDownloads() {
   const cards = [...document.querySelectorAll('[data-download-platform]')];
   if (!cards.length) return;
 
-  try {
-    const response = await fetch('/releases.json', { cache: 'no-store' });
-    if (!response.ok) throw new Error(`Release manifest returned ${response.status}`);
-    const manifest = await response.json();
+  const [manifestResult, configResult] = await Promise.allSettled([
+    fetchJson('/releases.json'),
+    fetchJson('/site-config.json'),
+  ]);
+  const manifest = manifestResult.status === 'fulfilled' ? manifestResult.value : null;
+  const storeListing = configResult.status === 'fulfilled'
+    ? resolveWindowsStoreListing(configResult.value)
+    : resolveWindowsStoreListing(null);
 
-    let availableCount = 0;
-    for (const card of cards) {
-      const download = resolveDownload(manifest, card.dataset.downloadPlatform);
-      if (download.available) {
-        availableCount += 1;
-        setDownloadAvailable(card, download);
-      } else {
-        setDownloadUnavailable(card, download.reason);
-      }
+  let availableCount = 0;
+  for (const card of cards) {
+    const platform = card.dataset.downloadPlatform;
+    if (platform === 'windows' && storeListing.available) {
+      availableCount += 1;
+      setWindowsStoreAvailable(card, storeListing);
+      continue;
     }
+    const download = resolveDownload(manifest, platform);
+    if (download.available) {
+      availableCount += 1;
+      setDownloadAvailable(card, download);
+    } else {
+      const reason = platform === 'windows' && !storeListing.available
+        ? storeListing.reason
+        : download.reason;
+      setDownloadUnavailable(card, reason);
+    }
+  }
 
-    const manifestStatus = document.querySelector('[data-manifest-status]');
-    if (manifestStatus) manifestStatus.textContent = 'Release manifest checked';
-    const releaseTruth = document.querySelector('[data-release-truth]');
-    if (releaseTruth && availableCount > 0) {
-      releaseTruth.textContent = 'Only platforms with a manifest-verified signed build and checksum are available. Other platforms remain disabled.';
-    }
-  } catch {
-    for (const card of cards) {
-      setDownloadUnavailable(card, 'Release status could not be verified. No download was offered.');
-    }
-    const manifestStatus = document.querySelector('[data-manifest-status]');
-    if (manifestStatus) manifestStatus.textContent = 'Release manifest unavailable';
-    const releaseTruth = document.querySelector('[data-release-truth]');
-    if (releaseTruth) releaseTruth.textContent = 'The release manifest could not be verified, so no download was offered.';
+  const manifestStatus = document.querySelector('[data-manifest-status]');
+  if (manifestStatus) manifestStatus.textContent = manifest ? 'Release sources checked' : 'Release manifest unavailable';
+  const releaseTruth = document.querySelector('[data-release-truth]');
+  if (releaseTruth && availableCount > 0) {
+    releaseTruth.textContent = 'macOS requires a manifest-verified signed build and checksum. Windows is offered only through its verified Microsoft Store listing.';
+  } else if (releaseTruth && !manifest) {
+    releaseTruth.textContent = 'The release manifest could not be verified and no Microsoft Store listing is configured, so no download was offered.';
   }
 }
 

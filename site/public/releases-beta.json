@@ -1,0 +1,31 @@
+{
+  "schemaVersion": 1,
+  "channel": "beta",
+  "latest": {
+    "version": null,
+    "publishedAt": null,
+    "notesUrl": null
+  },
+  "platforms": {
+    "macos": {
+      "status": "unavailable",
+      "reason": "No signed macOS beta build has been published yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": false,
+      "architectures": []
+    },
+    "windows": {
+      "status": "unavailable",
+      "reason": "The Microsoft Store beta package has not been certified for a package flight yet.",
+      "version": null,
+      "url": null,
+      "sha256": null,
+      "signed": false,
+      "notarized": null,
+      "architectures": []
+    }
+  }
+}

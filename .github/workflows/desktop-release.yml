@@ -7,7 +7,7 @@ on:
       - 'v[0-9]+.[0-9]+.[0-9]+-*'
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: desktop-release-${{ github.ref }}
@@ -22,23 +22,26 @@ jobs:
       ENSYNC_APPLE_ID: ${{ secrets.ENSYNC_APPLE_ID }}
       ENSYNC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.ENSYNC_APPLE_APP_SPECIFIC_PASSWORD }}
       ENSYNC_APPLE_TEAM_ID: ${{ secrets.ENSYNC_APPLE_TEAM_ID }}
-      WINDOWS_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      WINDOWS_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
-      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
-      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
-      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
       VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
-      ENSYNC_RELEASE_REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+      ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
+      ENSYNC_RELEASE_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
+      GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify production signing and deployment inputs
-        run: node desktop/scripts/release-preflight.mjs
+      - name: Verify macOS signing, Store identity, and deployment inputs
+        shell: bash
+        run: |
+          visibility=""
+          if test -n "$ENSYNC_RELEASE_REPOSITORY" && test -n "$GH_TOKEN"; then
+            visibility="$(gh api "repos/$ENSYNC_RELEASE_REPOSITORY" --jq '.visibility' 2>/dev/null || true)"
+          fi
+          ENSYNC_RELEASE_REPOSITORY_VISIBILITY="$visibility" node desktop/scripts/release-preflight.mjs
 
   macos:
     needs: preflight
@@ -76,19 +79,14 @@ jobs:
             desktop/release/*.zip
             desktop/release/attestation-macos.json
 
-  windows:
+  windows-store:
     needs: preflight
     runs-on: windows-2025
     env:
-      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
-      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
-      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
-      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -106,21 +104,23 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
-      - name: Build, test, sign when configured, and attest Windows artifacts
-        run: npm --prefix desktop run package:win
+      - name: Build and attest the private Partner Center upload package
+        run: npm --prefix desktop run package:win-store
       - uses: actions/upload-artifact@v4
         with:
-          name: ensync-windows-${{ github.ref_name }}
+          name: ensync-windows-store-${{ github.ref_name }}
           if-no-files-found: error
           retention-days: 14
           path: |
-            desktop/release/*.exe
-            desktop/release/*.zip
-            desktop/release/attestation-windows.json
+            desktop/release/*.appx
+            desktop/release/attestation-windows-store.json
 
   publish:
-    needs: [macos, windows]
+    needs: [macos, windows-store]
     runs-on: ubuntu-24.04
+    env:
+      ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
+      ENSYNC_RELEASE_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -128,24 +128,41 @@ jobs:
           node-version: 20
       - uses: actions/download-artifact@v4
         with:
-          pattern: ensync-*-${{ github.ref_name }}
+          name: ensync-macos-${{ github.ref_name }}
           path: release-input
+      - name: Select the isolated release channel
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "ENSYNC_RELEASE_CHANNEL=beta" >> "$GITHUB_ENV"
+            echo "ENSYNC_RELEASE_MANIFEST=releases-beta.json" >> "$GITHUB_ENV"
+          else
+            echo "ENSYNC_RELEASE_CHANNEL=stable" >> "$GITHUB_ENV"
+            echo "ENSYNC_RELEASE_MANIFEST=releases.json" >> "$GITHUB_ENV"
+          fi
       - name: Verify artifacts and generate checksums and site manifest
         run: >-
           node desktop/scripts/generate-release.mjs
           --input release-input
           --output release-assets
           --tag "${GITHUB_REF_NAME}"
-          --repository "${GITHUB_REPOSITORY}"
+          --repository "${ENSYNC_RELEASE_REPOSITORY}"
+          --channel "${ENSYNC_RELEASE_CHANNEL}"
       - name: Create or repair the verified GitHub release
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
         run: |
-          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber
-            gh release edit "${GITHUB_REF_NAME}" --title "Ensync ${GITHUB_REF_NAME}"
+          if gh release view "${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber --repo "$ENSYNC_RELEASE_REPOSITORY"
+            gh release edit "${GITHUB_REF_NAME}" --title "Ensync ${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY"
           else
-            gh release create "${GITHUB_REF_NAME}" release-assets/* --verify-tag --generate-notes --title "Ensync ${GITHUB_REF_NAME}"
+            prerelease=()
+            if test "$ENSYNC_RELEASE_CHANNEL" = "beta"; then prerelease=(--prerelease); fi
+            gh release create "${GITHUB_REF_NAME}" release-assets/* \
+              --repo "$ENSYNC_RELEASE_REPOSITORY" \
+              --title "Ensync ${GITHUB_REF_NAME}" \
+              --notes "Verified Ensync macOS artifacts built from private source revision ${GITHUB_SHA}. The Windows Store package remains a private Actions artifact pending Partner Center certification." \
+              "${prerelease[@]}"
           fi
       - name: Publish the verified manifest to the production download and update feed
         env:
@@ -156,6 +173,18 @@ jobs:
           test -n "$VERCEL_TOKEN"
           test -n "$VERCEL_ORG_ID"
           test -n "$VERCEL_PROJECT_ID"
-          cp release-assets/releases.json site/public/releases.json
+          if test "$ENSYNC_RELEASE_MANIFEST" = "releases-beta.json"; then
+            other_manifest="releases.json"
+          else
+            other_manifest="releases-beta.json"
+          fi
+          staging="site/public/$other_manifest.remote"
+          if curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 15 --max-filesize 1048576 \
+            "https://ensync.vercel.app/$other_manifest" --output "$staging"; then
+            mv "$staging" "site/public/$other_manifest"
+          else
+            rm -f "$staging"
+          fi
+          cp "release-assets/$ENSYNC_RELEASE_MANIFEST" "site/public/$ENSYNC_RELEASE_MANIFEST"
           npm --prefix site test
           npx --yes vercel@58.7.1 --cwd site --prod --yes --token "$VERCEL_TOKEN"

@@ -6,6 +6,9 @@
   --relay-split-text: var(--text, #ececec);
   --relay-split-text-muted: var(--muted, #a3a39d);
   --relay-split-accent: var(--accent, #19c69a);
+  --relay-split-completion: var(--completion-ui, var(--relay-split-accent));
+  --relay-split-active-header-bg: var(--accent-header-bg, var(--relay-split-bg-raised));
+  --relay-split-active-header-text: var(--accent-header-text, var(--relay-split-text));
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -135,9 +138,9 @@
 }
 
 .relay-tabs-mode-tab--active {
-  border-color: var(--relay-split-border);
-  color: var(--relay-split-text);
-  background: var(--relay-split-bg);
+  border-color: var(--relay-split-accent);
+  color: var(--relay-split-active-header-text);
+  background: var(--relay-split-active-header-bg);
 }
 
 .relay-tabs-mode-tab--dragging {
@@ -309,8 +312,9 @@
 }
 
 .relay-split-pane--active .relay-split-pane-tab {
-  color: var(--relay-split-text);
-  background: color-mix(in srgb, var(--relay-split-bg-raised) 70%, var(--relay-split-bg));
+  color: var(--relay-split-active-header-text);
+  border-bottom-color: var(--relay-split-accent);
+  background: var(--relay-split-active-header-bg);
 }
 
 .relay-split-pane-title {
@@ -338,8 +342,8 @@
   height: 7px;
   flex: 0 0 7px;
   border-radius: 50%;
-  background: var(--relay-split-accent);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-split-accent) 18%, transparent);
+  background: var(--relay-split-completion);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--relay-split-completion) 18%, transparent);
 }
 
 .relay-split-completed-status {
@@ -357,19 +361,19 @@
 .relay-split-workspace[data-completion-indicator='header'] .relay-tabs-mode-tab--completed,
 .relay-split-workspace[data-completion-indicator='header'] .relay-split-pane--completed > .relay-split-pane-tab,
 .relay-split-workspace[data-completion-indicator='header'] .relay-split-hidden-tab--completed {
-  color: var(--relay-split-accent);
-  border-color: color-mix(in srgb, var(--relay-split-accent) 72%, var(--relay-split-border));
-  background: color-mix(in srgb, var(--relay-split-accent) 15%, var(--relay-split-bg-raised));
-  box-shadow: inset 0 3px 0 var(--relay-split-accent);
+  color: var(--relay-split-completion);
+  border-color: color-mix(in srgb, var(--relay-split-completion) 72%, var(--relay-split-border));
+  background: color-mix(in srgb, var(--relay-split-completion) 15%, var(--relay-split-bg-raised));
+  box-shadow: inset 0 3px 0 var(--relay-split-completion);
 }
 
 .relay-split-workspace[data-completion-indicator='tab'] .relay-tabs-mode-tab--completed,
 .relay-split-workspace[data-completion-indicator='tab'] .relay-split-pane--completed > .relay-split-pane-tab,
 .relay-split-workspace[data-completion-indicator='tab'] .relay-split-hidden-tab--completed {
   color: var(--relay-split-text);
-  border-color: var(--relay-split-accent);
-  background: color-mix(in srgb, var(--relay-split-accent) 28%, var(--relay-split-bg-raised));
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-split-accent) 35%, transparent);
+  border-color: var(--relay-split-completion);
+  background: color-mix(in srgb, var(--relay-split-completion) 28%, var(--relay-split-bg-raised));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--relay-split-completion) 35%, transparent);
 }
 
 .relay-split-workspace[data-completion-indicator='tab'] .relay-split-pane--completed::after {
@@ -377,9 +381,9 @@
   position: absolute;
   z-index: 4;
   inset: 0;
-  border: 2px solid color-mix(in srgb, var(--relay-split-accent) 82%, transparent);
-  background: color-mix(in srgb, var(--relay-split-accent) 6%, transparent);
-  box-shadow: inset 0 0 18px color-mix(in srgb, var(--relay-split-accent) 10%, transparent);
+  border: 2px solid color-mix(in srgb, var(--relay-split-completion) 82%, transparent);
+  background: color-mix(in srgb, var(--relay-split-completion) 6%, transparent);
+  box-shadow: inset 0 0 18px color-mix(in srgb, var(--relay-split-completion) 10%, transparent);
   pointer-events: none;
 }
 
@@ -432,6 +436,13 @@
   color: var(--relay-split-text);
   background: var(--relay-split-bg-hover);
   outline: none;
+}
+
+.relay-split-pane--active .relay-split-pane-tab .relay-split-pane-actions button:hover,
+.relay-split-pane--active .relay-split-pane-tab .relay-split-pane-actions button:focus-visible,
+.relay-tabs-mode-tab--active .relay-tabs-mode-tab-actions button:hover {
+  color: var(--relay-split-active-header-text);
+  background: color-mix(in srgb, var(--relay-split-accent) 22%, transparent);
 }
 
 .relay-split-pane-content {

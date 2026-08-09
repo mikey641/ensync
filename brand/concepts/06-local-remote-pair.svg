@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync local and remote pair concept</title>
+  <desc id="description">Equal local and remote endpoints connect through one protected task identity.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M27 50H42M58 50H73"/>
+    <rect x="39" y="39" width="22" height="22" rx="6" transform="rotate(45 50 50)"/>
+  </g>
+  <g fill="currentColor">
+    <circle cx="23" cy="50" r="6"/>
+    <circle cx="77" cy="50" r="6"/>
+    <circle cx="50" cy="50" r="3.5"/>
+  </g>
+</svg>

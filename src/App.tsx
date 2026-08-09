@@ -3256,6 +3256,17 @@ function App() {
                     && entry.preferences.projectPath === activeRun.projectPath,
                   )
                 })()}
+                liveDeliverySupported={(() => {
+                  const activeRun = inFlightRuns[chat.id]
+                  // With no active run there is no provider limit to report; keep the plain copy.
+                  if (!activeRun) return true
+                  return activeRun.provider === 'codex' && activeRun.executionTarget === 'local'
+                })()}
+                activeRunProviderName={(() => {
+                  const activeProviderId = inFlightRuns[chat.id]?.provider
+                  if (!activeProviderId) return null
+                  return executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? null
+                })()}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
@@ -3358,6 +3369,8 @@ function ConversationPane({
   sending,
   liveSteering,
   canPushQueuedNow,
+  liveDeliverySupported,
+  activeRunProviderName,
   pushingQueued,
   runStartedAt,
   queuedPrompts,
@@ -3399,6 +3412,8 @@ function ConversationPane({
   sending: boolean
   liveSteering: boolean
   canPushQueuedNow: boolean
+  liveDeliverySupported: boolean
+  activeRunProviderName: string | null
   pushingQueued: boolean
   runStartedAt: string | null
   queuedPrompts: QueuedPrompt[]
@@ -3448,7 +3463,10 @@ function ConversationPane({
     && fallbackProviders.some((candidate) => candidate.id !== provider.id)
   const canRunChat = canRunSelectedProvider || canRunFallback
   const queueGate = queuedPromptGate(chat, queuedPrompts[0])
-  const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length)
+  const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length, {
+    liveDeliverySupported,
+    activeProviderName: activeRunProviderName,
+  })
   const composerQueueState = promptQueueComposerState({
     sending,
     liveSteering,
@@ -3698,7 +3716,7 @@ function ConversationPane({
               )
             })
           )}
-          {sending && providerNotes.length > 0 && (
+          {providerNotes.length > 0 && (
             <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
               {providerNotes.map((note, index) => {
                 const noteProvider = providers.find((item) => item.id === note.provider) ?? provider

@@ -10,6 +10,7 @@ const DEFAULT_LOCK_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 5_000
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
+const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
 
 const AGENT_COMMIT_IDENTITY = {
   GIT_AUTHOR_NAME: 'Ensync Agent',
@@ -590,10 +591,13 @@ export class ProjectIsolationService {
       }
 
       await mkdir(resolve(configuredPath, '..'), { recursive: true, mode: 0o700 })
+      const worktreeArgs = branchExists
+        ? ['worktree', 'add', configuredPath, branch]
+        : ['worktree', 'add', '-b', branch, configuredPath, startingPoint]
       await this.#git(
-        branchExists
-          ? ['worktree', 'add', configuredPath, branch]
-          : ['worktree', 'add', '-b', branch, configuredPath, startingPoint],
+        seededFromSharedCheckout
+          ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
+          : worktreeArgs,
         {
           cwd: repository.repositoryPath,
           code: 'managed_worktree_create_failed',
@@ -752,7 +756,7 @@ export class ProjectIsolationService {
     }
     try {
       await this.#git(['read-tree', repository.head], { cwd: repository.repositoryPath, env })
-      await this.#git(['add', '-A', '--', '.'], {
+      await this.#git([...BYTE_PRESERVING_GIT_CONFIG, 'add', '-A', '--', '.'], {
         cwd: repository.repositoryPath,
         env,
         code: 'shared_checkout_snapshot_failed',

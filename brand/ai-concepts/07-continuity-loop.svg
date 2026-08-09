@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Continuity Loop</title>
+  <desc id="description">Two compact linked loops carry one continuous task between AI providers.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="8.5">
+    <rect x="13" y="28" width="56" height="26" rx="13" transform="rotate(-38 41 41)"/>
+    <rect x="31" y="46" width="56" height="26" rx="13" transform="rotate(-38 59 59)"/>
+  </g>
+</svg>

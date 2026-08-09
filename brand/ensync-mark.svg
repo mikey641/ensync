@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync</title>
+  <desc id="description">Two interlocking rounded loops represent one continuous task moving safely across AI providers.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="7.5">
+    <rect x="14" y="29" width="54" height="24" rx="12" transform="rotate(-38 41 41)"/>
+    <rect x="32" y="47" width="54" height="24" rx="12" transform="rotate(-38 59 59)"/>
+  </g>
+</svg>

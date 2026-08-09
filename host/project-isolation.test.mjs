@@ -91,6 +91,7 @@ test('a dirty shared checkout seeds a protected workspace without changing the s
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
   const baseline = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await git(fixture.repository, ['config', 'core.autocrlf', 'true'])
   await writeFile(join(fixture.repository, 'tracked.txt'), 'unique user change\n')
   await writeFile(join(fixture.repository, 'untracked.txt'), 'also unique\n')
 

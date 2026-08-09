@@ -1,5 +1,6 @@
 export type NativeUpdatePhase =
   | 'initializing'
+  | 'managed'
   | 'unavailable'
   | 'idle'
   | 'checking'

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync durable tabs concept</title>
+  <desc id="description">Offset conversation panes stay linked as durable tabs within one workspace.</desc>
+  <g fill="none" stroke="currentColor" stroke-width="3.5" stroke-linejoin="round">
+    <rect x="18" y="24" width="52" height="44" rx="11" opacity=".35"/>
+    <rect x="30" y="32" width="52" height="44" rx="11"/>
+    <path d="M44 45H68M44 54H62M44 63H57" stroke-linecap="round"/>
+  </g>
+</svg>

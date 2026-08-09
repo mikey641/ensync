@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100" role="img" aria-labelledby="title description" style="color:#202123">
+  <title id="title">Ensync Radial Core</title>
+  <desc id="description">Eight rounded signals orbit one quiet center.</desc>
+  <defs>
+    <rect id="signal" x="46" y="13" width="8" height="22" rx="4"/>
+  </defs>
+  <g fill="currentColor">
+    <use href="#signal"/>
+    <use href="#signal" transform="rotate(45 50 50)"/>
+    <use href="#signal" transform="rotate(90 50 50)"/>
+    <use href="#signal" transform="rotate(135 50 50)"/>
+    <use href="#signal" transform="rotate(180 50 50)"/>
+    <use href="#signal" transform="rotate(225 50 50)"/>
+    <use href="#signal" transform="rotate(270 50 50)"/>
+    <use href="#signal" transform="rotate(315 50 50)"/>
+  </g>
+</svg>
