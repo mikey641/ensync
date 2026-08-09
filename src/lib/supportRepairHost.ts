@@ -6,6 +6,8 @@ export type SupportRepairRequest = {
   projectId: string
   /** Re-inspected and canonicalized by Ensync Host immediately before the run. */
   projectPath: string
+  /** Stable identity for the protected repair worktree created before execution. */
+  workspaceKey: string
   prompt: string
   diagnostics: {
     summary: string
