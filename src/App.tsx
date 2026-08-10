@@ -801,8 +801,6 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
-  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
-  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -1182,16 +1180,6 @@ function App() {
     updateChatError(chatId, null)
     await ensyncHost.answerChatQuestion(activeRun.jobId, answer)
   }, [updateChatError])
-
-  const updateLiveSteeringReadiness = useCallback((chatId: string, ready: boolean) => {
-    const current = liveSteeringReadyChatIdsRef.current
-    if (current.has(chatId) === ready) return
-    const next = new Set(current)
-    if (ready) next.add(chatId)
-    else next.delete(chatId)
-    liveSteeringReadyChatIdsRef.current = next
-    setLiveSteeringReadyChatIds(next)
-  }, [])
 
   const toggleConversationSidebar = useCallback(() => {
     const mobileLayout = window.matchMedia('(max-width: 780px)').matches
@@ -2461,7 +2449,6 @@ function App() {
       return
     }
     if (!chatRunRegistryRef.current.begin(chatId)) return
-    updateLiveSteeringReadiness(chatId, false)
     activeTurnIdsRef.current[chatId] = turnId
     if (queuedPrompt) {
       updatePromptQueues(removePromptFromQueue(promptQueuesRef.current, chatId, queuedPrompt.id))
@@ -2658,11 +2645,6 @@ function App() {
             effort: requestedEffort,
           }
       return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
-        if (event.type === 'started' && targetProviderId === 'codex' && runTarget.kind === 'local') {
-          updateLiveSteeringReadiness(chatId, true)
-        } else if (event.type === 'finished') {
-          updateLiveSteeringReadiness(chatId, false)
-        }
         if (event.type === 'started') providerProcessStarted = true
         if (event.type !== 'finished' && typeof event.sequence === 'number') {
           updateInFlightRun(chatId, (current) => current ? {
@@ -2809,7 +2791,6 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
-      updateLiveSteeringReadiness(chatId, false)
       delete activeTurnIdsRef.current[chatId]
       const nextRuns = updateInFlightRun(chatId, () => undefined)
       commitWorkspace({
@@ -2954,7 +2935,6 @@ function App() {
   const recoverDetachedRun = useCallback(async (chatId: string, initialRun: PersistedInFlightRun) => {
     if (!initialRun.jobId || recoveringChatIdsRef.current.has(chatId)) return
     if (!chatRunRegistryRef.current.begin(chatId)) return
-    updateLiveSteeringReadiness(chatId, false)
     recoveringChatIdsRef.current.add(chatId)
     activeTurnIdsRef.current[chatId] = initialRun.turnId
     const runController = chatRunCancellationRef.current.begin(chatId)
@@ -2985,13 +2965,6 @@ function App() {
           } : current)
           const cursor = inFlightRunsRef.current[chatId]?.lastEventSequence ?? 0
           const result = await ensyncHost.attachChatJob(initialRun.jobId, (event) => {
-            if (event.type === 'started'
-              && initialRun.provider === 'codex'
-              && initialRun.executionTarget === 'local') {
-              updateLiveSteeringReadiness(chatId, true)
-            } else if (event.type === 'finished') {
-              updateLiveSteeringReadiness(chatId, false)
-            }
             if (event.type !== 'finished' && typeof event.sequence === 'number') {
               updateInFlightRun(chatId, (current) => current ? {
                 ...current,
@@ -3046,7 +3019,6 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
-      updateLiveSteeringReadiness(chatId, false)
       recoveringChatIdsRef.current.delete(chatId)
       delete activeTurnIdsRef.current[chatId]
       if (terminal) {
@@ -3063,7 +3035,7 @@ function App() {
       if (initialRun.executionTarget === 'local') void refreshProviders(false)
       if (queueMayAdvance) queueMicrotask(() => void drainPromptQueueRef.current(chatId))
     }
-  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun, updateLiveSteeringReadiness])
+  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3354,7 +3326,7 @@ function App() {
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
-                  && liveSteeringReadyChatIds.has(chat.id)
+                  && Boolean(inFlightRuns[chat.id]?.liveSteerReady)
                   && executionTarget.kind === 'local'
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
@@ -3366,7 +3338,7 @@ function App() {
                   const entry = promptQueues[chat.id]?.[0]
                   return Boolean(
                     sendingChatIds.has(chat.id)
-                    && liveSteeringReadyChatIds.has(chat.id)
+                    && activeRun?.liveSteerReady === true
                     && activeRun?.provider === 'codex'
                     && activeRun.executionTarget === 'local'
                     && activeRun.jobId
