@@ -204,7 +204,7 @@ export function createWindowStateStore({ filePath } = {}) {
       mkdirSync(dirname(filePath), { recursive: true })
       writeFileSync(stagingPath, encoded, { encoding: 'utf8', mode: 0o600 })
       writeFileSync(filePath, encoded, { encoding: 'utf8', mode: 0o600 })
-      try { rmSync(stagingPath) } catch {}
+      try { rmSync(stagingPath) } catch { /* best effort: a retained staging file is recovered on reopen */ }
       return true
     } catch {
       // Window geometry is a convenience. A read-only or full disk must never

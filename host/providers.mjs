@@ -9,10 +9,13 @@ import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
 import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 
-// Product-navigation heuristic: broadly recognized subscription coding agents
-// appear first, followed by progressively more specialist discovery candidates.
-// Ollama stays last because it is a separate local runtime, not a subscription.
+// Product-navigation heuristic: droid leads because it is the subscription
+// runner that reports real remaining capacity most often, then the other
+// broadly recognized subscription coding agents, followed by progressively more
+// specialist discovery candidates. Ollama stays last because it is a separate
+// local runtime, not a subscription.
 const providerNavigationOrder = [
+  'droid',
   'codex',
   'claude',
   'copilot',
@@ -24,7 +27,6 @@ const providerNavigationOrder = [
   'junie',
   'gitlab_duo',
   'oz',
-  'droid',
   'amp',
   'auggie',
   'qoder',

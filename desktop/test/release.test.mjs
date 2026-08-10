@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -11,7 +11,13 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const generator = resolve(desktopRoot, 'scripts/generate-release.mjs')
 const sourceCommit = '35642bfda02d82e007a1639dbd2c642b67c01b7d'
 
-async function fixture({ macSigned = true, macNotarized = true, includePrivateStorePackage = false, version = '1.2.3' } = {}) {
+async function fixture({
+  macSigned = true,
+  macNotarized = true,
+  windowsSigned = true,
+  includePrivateStorePackage = false,
+  version = '1.2.3',
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-release-'))
   const input = join(root, 'input')
   const output = join(root, 'output')
@@ -77,9 +83,9 @@ function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
     generator,
     '--input', input,
     '--output', output,
-    '--tag', 'v1.2.3',
+    '--tag', tag,
     '--repository', 'ensync/ensync-downloads',
-    '--channel', 'stable',
+    '--channel', channel,
     '--source-commit', sourceCommit,
   ], { encoding: 'utf8' })
 }

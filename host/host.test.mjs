@@ -184,6 +184,7 @@ test('host returns real provider states and never invents usage numbers', async 
 
   const payload = await fetch(`${baseUrl}/api/providers?refresh=1`).then((response) => response.json())
   assert.deepEqual(payload.providers.map((provider) => provider.id), [
+    'droid',
     'codex',
     'claude',
     'copilot',
@@ -195,7 +196,6 @@ test('host returns real provider states and never invents usage numbers', async 
     'junie',
     'gitlab_duo',
     'oz',
-    'droid',
     'amp',
     'auggie',
     'qoder',
@@ -226,7 +226,7 @@ test('host returns real provider states and never invents usage numbers', async 
 
   assert.deepEqual(
     payload.providers.filter((provider) => provider.chatExecution === 'supported').map((provider) => provider.id),
-    ['codex', 'claude', 'droid'],
+    ['droid', 'codex', 'claude'],
   )
 
   const usage = await fetch(`${baseUrl}/api/usage`).then((response) => response.json())

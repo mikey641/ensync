@@ -280,6 +280,16 @@ function registerNativeBridge() {
     targetWorkspaceId: process.env.ENSYNC_CODEX_IMPORT_TARGET ?? null,
     confirmation: process.env.ENSYNC_CODEX_IMPORT_CONFIRM ?? null,
   }))
+  ipcMain.handle(CHAT_FILE_PICKER_CHANNEL, createChatFilePickerHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    openDialog: async (event, options) => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      return parent
+        ? dialog.showOpenDialog(parent, options)
+        : dialog.showOpenDialog(options)
+    },
+    onError: (error) => console.error('[ensync-file-picker]', error),
+  }))
   ipcMain.handle(PROJECT_FOLDER_PICKER_CHANNEL, createProjectFolderPickerHandler({
     isAuthorized: isAuthorizedNativeEvent,
     openDialog: async (event, options) => {
@@ -634,6 +644,9 @@ if (!singleInstance) {
     windowStateStore = createWindowStateStore({
       filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
+    const installedBuildInfo = app.isPackaged
+      ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
+      : null
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
       installedBuildInfo,

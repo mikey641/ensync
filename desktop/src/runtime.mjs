@@ -501,7 +501,7 @@ export class HostProcessController {
       }
 
       let ownerPid = null
-      let createdAt = NaN
+      let createdAt
       try {
         const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
         ownerPid = owner?.pid

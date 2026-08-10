@@ -254,6 +254,7 @@ export function parseCodexConversationImport({
   imported.sort((left, right) => left.sortTime - right.sortTime
     || left.sortPriority - right.sortPriority
     || left.sourceOrder - right.sourceOrder)
+  // eslint-disable-next-line no-unused-vars -- rest-sibling omit: the sort keys are internal ordering state that must not leak into the imported message.
   const messages = imported.map(({ sortTime: _sortTime, sortPriority: _sortPriority, sourceOrder: _sourceOrder, ...message }) => message)
   const userMessages = messages.filter((message) => message.role === 'user').length
   const assistantMessages = messages.filter((message) => message.role === 'agent').length
