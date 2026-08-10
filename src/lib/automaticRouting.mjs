@@ -57,14 +57,18 @@ export function selectAutomaticProvider(providers, priorityOrder, attemptedProvi
 }
 
 /**
- * The provider a conversation displays must be a fact whenever one exists, never
- * a forecast re-derived on every render. An executing run owns the current turn,
- * and once it ends the last Host-verified turn still owns the conversation's
- * resumable session. Only a fixed preference or a conversation that has never run
- * falls back to the live automatic selection.
+ * The provider a conversation displays must be a fact. An executing run owns the
+ * current turn, so it always wins: re-resolving automatic routing on each render
+ * is what let a mid-run usage refresh rename a streaming Codex turn to Claude
+ * Code in the header. Callers that can observe a run must pass it.
  *
- * Re-resolving automatic routing on each render is what let a mid-run usage
- * refresh rename a streaming Codex turn to Claude Code in the header.
+ * Once no run is executing, an automatic conversation shows where the next turn
+ * would actually go, because automatic routing is re-resolved from live usage at
+ * send time and never resumes the previous turn's provider by itself. Pinning an
+ * idle Auto conversation to the provider that ran last is what showed Factory
+ * Droid after a one-turn quota fallback while the next turn would have run on
+ * Claude Code. The last Host-verified turn is kept only as the last resort, when
+ * automatic routing currently has no candidate at all.
  *
  * Returns null when nothing is resolvable so callers keep their own last resort.
  */
@@ -73,9 +77,11 @@ export function conversationProviderId({ chat, activeRun, providers, priorityOrd
   const running = activeRun?.provider
   if (typeof running === 'string' && available.has(running)) return running
   if (chat?.providerMode === 'fixed') return typeof chat.provider === 'string' ? chat.provider : null
+  const nextAutomatic = selectAutomaticProvider(providers ?? [], priorityOrder)?.id
+  if (typeof nextAutomatic === 'string') return nextAutomatic
   const lastVerified = chat?.continuation?.provider
   if (typeof lastVerified === 'string' && available.has(lastVerified)) return lastVerified
-  return selectAutomaticProvider(providers ?? [], priorityOrder)?.id ?? null
+  return null
 }
 
 /**

@@ -86,14 +86,44 @@ test('an executing run owns the displayed provider while usage moves under it', 
   }), 'codex')
 })
 
-test('an idle automatic conversation keeps the provider that verifiably ran its last turn', () => {
+test('an idle automatic conversation shows where the next turn would actually run', () => {
   const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
   assert.equal(conversationProviderId({
     chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
     activeRun: undefined,
     providers,
     priorityOrder: ['codex', 'claude'],
-  }), 'codex')
+  }), 'claude')
+})
+
+test('a one-turn quota fallback does not pin the idle automatic display to the fallback provider', () => {
+  const providers = [
+    provider('codex', { usage: 100 }),
+    provider('claude', { usage: 70 }),
+    provider('droid', { usage: null }),
+  ]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'droid' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude', 'droid'],
+  }), 'claude')
+})
+
+test('the last verified turn is shown only when automatic routing has no candidate', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 100 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'claude' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'droid' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), null)
 })
 
 test('an automatic conversation that has never run shows the current automatic selection', () => {
