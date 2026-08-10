@@ -7,12 +7,17 @@ import { probeDroidLimits } from './droid-limits.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
+import { rankProvidersByAvailability } from './provider-availability.mjs'
 import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 
-// Product-navigation heuristic: broadly recognized subscription coding agents
-// appear first, followed by progressively more specialist discovery candidates.
-// Ollama stays last because it is a separate local runtime, not a subscription.
+// Tie-breaker only. Live provider lists are ordered by real availability (see
+// provider-availability.mjs); this order decides what happens when two
+// providers are equally available, and what the list looks like before any
+// usage has been probed. Broadly recognized subscription coding agents appear
+// first, followed by progressively more specialist discovery candidates. Ollama
+// stays last because it is a separate local runtime, not a subscription.
 const providerNavigationOrder = [
+  'droid',
   'codex',
   'claude',
   'copilot',
@@ -24,7 +29,6 @@ const providerNavigationOrder = [
   'junie',
   'gitlab_duo',
   'oz',
-  'droid',
   'amp',
   'auggie',
   'qoder',
@@ -812,8 +816,9 @@ export class ProviderStatusService {
       providers = await Promise.all(this.#definitions.map((provider) => this.#inspect(provider)))
     } while (this.#invalidatedWhileRefreshing)
 
-    this.#cache = { createdAt: Date.now(), providers }
-    return providers
+    const ranked = rankProvidersByAvailability(providers, providerNavigationOrder)
+    this.#cache = { createdAt: Date.now(), providers: ranked }
+    return ranked
   }
 
   async get(id, options = {}) {

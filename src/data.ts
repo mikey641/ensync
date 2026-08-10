@@ -437,6 +437,7 @@ const defaultProviderCatalog: Array<Omit<Provider, 'agentCoordination'>> = [
 // Keep the offline/loading fallback in the same navigation order returned by
 // Ensync Host. This is a recognition heuristic, not a market-share ranking.
 const providerNavigationOrder: Provider['id'][] = [
+  'droid',
   'codex',
   'claude',
   'copilot',
@@ -448,7 +449,6 @@ const providerNavigationOrder: Provider['id'][] = [
   'junie',
   'gitlab_duo',
   'oz',
-  'droid',
   'amp',
   'auggie',
   'qoder',
