@@ -218,7 +218,6 @@ test('workspace focus routes only authorized project requests to a different ret
     identityForWebContents: (webContents) => webContents === sender ? source : null,
     retainedIdentities: () => [source, target],
     windowForWorkspace: (id) => id === target.id ? targetWindow : null,
-    openWorkspaceWindow: () => { throw new Error('live target must not be reopened') },
     focusWindow: (window) => { actions.push(['focus', window]); return true },
     notifyProjectFocus: (window, project) => { actions.push(['notify', window, project]) },
   })
@@ -235,45 +234,6 @@ test('workspace focus routes only authorized project requests to a different ret
   assert.equal(await handler({ sender: {} }, request), false)
   assert.equal(await handler({ sender }, { ...request, workspaceId: source.id }), false)
   assert.equal(await handler({ sender }, { ...request, projectPath: 'relative/path' }), false)
-})
-
-test('workspace focus reopens the exact retained identity instead of creating a replacement', async () => {
-  const source = { id: IDS[0], kind: 'isolated' }
-  const target = { id: IDS[1], kind: 'canonical' }
-  const sender = {}
-  const reopenedWindow = {}
-  const actions = []
-  const handler = createWorkspaceFocusHandler({
-    isAuthorized: (event) => event.sender === sender,
-    identityForWebContents: () => source,
-    retainedIdentities: () => [source, target],
-    windowForWorkspace: () => null,
-    openWorkspaceWindow: (identity, projectLaunch) => {
-      actions.push(['open', identity, projectLaunch])
-      return reopenedWindow
-    },
-    focusWindow: (window) => { actions.push(['focus', window]); return true },
-    notifyProjectFocus: (window, project) => { actions.push(['notify', window, project]) },
-  })
-  const request = {
-    workspaceId: target.id,
-    projectId: 'project-nadlan',
-    projectPath: '/Users/example/nadlan-desk',
-  }
-
-  assert.equal(await handler({ sender }, request), true)
-  assert.deepEqual(actions, [
-    ['open', target, {
-      projectId: 'project-nadlan',
-      projectPath: '/Users/example/nadlan-desk',
-      sourceWorkspace: source,
-    }],
-    ['focus', reopenedWindow],
-    ['notify', reopenedWindow, {
-      projectId: 'project-nadlan',
-      projectPath: '/Users/example/nadlan-desk',
-    }],
-  ])
 })
 
 test('opening a project workspace is authorized and keeps the source identity', async () => {

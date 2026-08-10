@@ -215,12 +215,7 @@ export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurn
   ]
 }
 
-/** Active-run submissions enter FIFO; live delivery is only an explicit Push now action. */
-export function promptSubmissionMode({ hasActiveRun }) {
-  return hasActiveRun ? 'queue' : 'run'
-}
-
-export function promptQueueComposerState({ sending, draft, canRun }) {
+export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
   return {
     sendEnabled: hasDraft && Boolean(canRun),

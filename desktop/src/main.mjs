@@ -188,15 +188,6 @@ async function openProjectWindow(project, sourceWorkspace) {
   }
 }
 
-async function reopenProjectWindow(identity, projectLaunch) {
-  projectLaunchByWorkspace.set(identity.id, projectLaunch)
-  try {
-    return await createWindow(identity)
-  } finally {
-    projectLaunchByWorkspace.delete(identity.id)
-  }
-}
-
 function installApplicationMenu() {
   const template = createNativeWindowMenuTemplate({
     appName: app.name,
@@ -242,7 +233,6 @@ function registerNativeBridge() {
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
     retainedIdentities: () => nativeWorkspaceStore?.list() ?? [],
     windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
-    openWorkspaceWindow: reopenProjectWindow,
     focusWindow: (window) => showWindow(window),
     notifyProjectFocus: (window, project) => {
       window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)

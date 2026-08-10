@@ -1,9 +1,7 @@
-import { useState, type CSSProperties, type ReactNode } from 'react'
-import { Check, Copy } from 'lucide-react'
-import { classifyLinkTarget, filePathFromText, parseMarkdown } from '../lib/markdown.mjs'
-import type { InlineNode, MarkdownBlock } from '../lib/markdown.mjs'
-
-const HEADING_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const
+import { useId, useMemo, useState } from 'react'
+import { Check, ChevronDown, ChevronUp, Copy } from 'lucide-react'
+import { isLongMessageContent, parseMessageContent } from '../lib/messageContent.mjs'
+import './MessageContent.css'
 
 function CodeBlock({ code, language }: { code: string; language: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -32,42 +30,50 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   )
 }
 
-function canOpenNatively() {
-  return typeof window.ensyncDesktop?.openPath === 'function'
-}
-
-function FileChip({ display, path, line, projectPath }: {
-  display: string
-  path: string
-  line: number | null
-  projectPath?: string | null
-}) {
-  const [failed, setFailed] = useState(false)
-
-  const open = async () => {
-    let ok: boolean
-    try {
-      const target = line == null ? path : `${path}:${line}`
-      const result = await window.ensyncDesktop?.openPath?.({ path: target, projectPath: projectPath ?? null })
-      ok = result?.ok === true
-    } catch {
-      ok = false
-    }
-    if (!ok) {
-      setFailed(true)
-      window.setTimeout(() => setFailed(false), 1_800)
-    }
-  }
+export function MessageContent({ content, collapsible = false }: { content: string; collapsible?: boolean }) {
+  const blocks = useMemo(() => parseMessageContent(content), [content])
+  const [collapsed, setCollapsed] = useState(false)
+  const contentId = useId()
+  const canCollapse = collapsible && isLongMessageContent(content)
+  const isCollapsed = canCollapse && collapsed
+  const preview = useMemo(() => {
+    if (!canCollapse) return ''
+    const plainText = blocks
+      .map((block) => block.type === 'code' ? block.code : block.text)
+      .join('')
+      .trim()
+    const characters = Array.from(plainText)
+    return characters.length > 540
+      ? `${characters.slice(0, 540).join('').trimEnd()}…`
+      : plainText
+  }, [blocks, canCollapse])
 
   return (
-    <button
-      type="button"
-      className={failed ? 'message-file-chip message-file-chip--failed' : 'message-file-chip'}
-      onClick={open}
-      title={failed ? "Couldn't open" : `Open ${path}`}
-    >
-      <code dir="ltr">{display}</code>
-    </button>
+    <div className="message-content-shell">
+      {isCollapsed ? (
+        <div id={contentId} className="message-content message-content--preview">
+          <p dir="auto">{preview}</p>
+        </div>
+      ) : (
+        <div id={contentId} className="message-content">
+          {blocks.map((block, index) => block.type === 'code'
+            ? <CodeBlock key={index} code={block.code} language={block.language} />
+            : <p key={index} dir="auto">{block.text}</p>)}
+        </div>
+      )}
+      {canCollapse && (
+        <button
+          className="message-collapse-toggle"
+          type="button"
+          aria-expanded={!isCollapsed}
+          aria-controls={contentId}
+          onClick={() => setCollapsed((current) => !current)}
+        >
+          {isCollapsed ? <ChevronDown size={14} /> : <ChevronUp size={14} />}
+          {isCollapsed ? 'Expand message' : 'Collapse message'}
+        </button>
+      )}
+    </div>
   )
 }
 

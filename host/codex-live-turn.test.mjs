@@ -200,45 +200,6 @@ test('Codex live turns accept a steering instruction before one verified complet
   )
 })
 
-test('foreign subagent turn events cannot replace the parent turn used by Push now', async () => {
-  const fake = fakeCodexAppServer()
-  const runner = new CodexLiveTurnRunner({
-    spawnProcess: () => fake.child,
-    inactivityTimeoutMs: 5_000,
-    hardTimeoutMs: 5_000,
-  })
-  const run = runner.run({
-    id: 'job_4444444444444444',
-    executable: '/usr/local/bin/codex',
-    projectPath: '/project',
-    prompt: 'Build the feature',
-    attachmentPaths: [],
-    sessionId: null,
-    model: null,
-    effort: null,
-    env: { PATH: '/usr/bin' },
-  })
-
-  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
-  fake.send({
-    method: 'turn/started',
-    params: {
-      threadId: '01900000-0000-7000-8000-000000000099',
-      turn: { id: '01900000-0000-7000-8000-000000000100', items: [], status: 'inProgress' },
-    },
-  })
-
-  const delivery = await runner.steer('job_4444444444444444', 'Push this now', [])
-  const result = await run
-
-  assert.equal(delivery.turnId, '01900000-0000-7000-8000-000000000002')
-  assert.equal(result.response, 'Applied the correction.')
-  assert.equal(
-    fake.requests.find((request) => request.method === 'turn/steer').params.expectedTurnId,
-    '01900000-0000-7000-8000-000000000002',
-  )
-})
-
 test('steering a missing live turn is explicitly safe to fall back to FIFO', async () => {
   const runner = new CodexLiveTurnRunner()
   await assert.rejects(

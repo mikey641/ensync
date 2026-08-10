@@ -115,6 +115,17 @@ function appendProseBlocks(blocks, text) {
   appendTextBlock(blocks, text.slice(cursor))
 }
 
+const LONG_MESSAGE_CHARACTER_LIMIT = 900
+const LONG_MESSAGE_LINE_LIMIT = 14
+
+export function isLongMessageContent(value) {
+  const content = typeof value === 'string' ? value : String(value ?? '')
+  if (Array.from(content).length > LONG_MESSAGE_CHARACTER_LIMIT) return true
+
+  const lineBreaks = content.match(/\r\n|\n|\r/g)?.length ?? 0
+  return lineBreaks + 1 > LONG_MESSAGE_LINE_LIMIT
+}
+
 /**
  * Reads a GitHub-style table: a header row, a delimiter row with matching cell
  * count, then rows until a blank or pipe-less line.

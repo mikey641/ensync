@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { parseInline, parseMessageContent } from '../src/lib/messageContent.mjs'
+import { isLongMessageContent, parseMessageContent } from '../src/lib/messageContent.mjs'
 
 test('message content preserves alternating prose and fenced code in order', () => {
   const content = [
@@ -282,4 +282,14 @@ test('a file link opens the in-app file display before any system opener', async
   assert.match(app, /<FileViewerModal path=\{viewedFilePath\} onClose=\{\(\) => setViewedFilePath\(null\)\} \/>/)
   assert.match(app, /onOpenFile=\{setViewedFilePath\}/)
   assert.equal(app.match(/<MessageContent content=\{[^}]+\} onOpenFile=\{onOpenFile\} \/>/g)?.length, 3)
+})
+
+test('message content becomes collapsible only after a meaningful length or line threshold', () => {
+  assert.equal(isLongMessageContent('A concise message.\nWith a second line.'), false)
+  assert.equal(isLongMessageContent('x'.repeat(900)), false)
+  assert.equal(isLongMessageContent('x'.repeat(901)), true)
+  assert.equal(isLongMessageContent('🙂'.repeat(900)), false)
+  assert.equal(isLongMessageContent('🙂'.repeat(901)), true)
+  assert.equal(isLongMessageContent(Array.from({ length: 14 }, (_, index) => `line ${index}`).join('\n')), false)
+  assert.equal(isLongMessageContent(Array.from({ length: 15 }, (_, index) => `line ${index}`).join('\n')), true)
 })

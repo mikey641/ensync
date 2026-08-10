@@ -228,7 +228,6 @@ export function createWorkspaceFocusHandler({
   identityForWebContents,
   retainedIdentities,
   windowForWorkspace,
-  openWorkspaceWindow,
   focusWindow,
   notifyProjectFocus,
 }) {
@@ -237,7 +236,6 @@ export function createWorkspaceFocusHandler({
     identityForWebContents,
     retainedIdentities,
     windowForWorkspace,
-    openWorkspaceWindow,
     focusWindow,
     notifyProjectFocus,
   })) {
@@ -260,11 +258,6 @@ export function createWorkspaceFocusHandler({
       .find((identity) => isNativeWorkspaceIdentity(identity) && identity.id === targetWorkspaceId)
     if (!targetIdentity) return false
     const targetWindow = windowForWorkspace(targetWorkspaceId)
-      ?? await openWorkspaceWindow(targetIdentity, {
-        projectId: request.projectId,
-        projectPath: request.projectPath,
-        sourceWorkspace: { id: source.id, kind: source.kind },
-      })
     if (!targetWindow || await focusWindow(targetWindow) === false) return false
     await notifyProjectFocus(targetWindow, {
       projectId: request.projectId,

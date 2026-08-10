@@ -17,5 +17,6 @@ export type MessageInlineNode =
   | { type: 'em'; children: MessageInlineNode[] }
   | { type: 'strike'; children: MessageInlineNode[] }
 
+export function isLongMessageContent(value: unknown): boolean
 export function parseMessageContent(value: unknown): MessageContentBlock[]
 export function parseInline(value: unknown): MessageInlineNode[]

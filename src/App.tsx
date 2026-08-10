@@ -158,7 +158,6 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
-  promptSubmissionMode,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -1716,14 +1715,9 @@ function App() {
             setProjectOpen(false)
             return
           }
-          setProjectError('Ensync could not reopen the saved project window. The current project remains open.')
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
-          setProjectError(error instanceof Error
-            ? error.message
-            : 'Ensync could not reopen the saved project window. The current project remains open.')
         }
-        return
       }
       if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
         return
@@ -3320,6 +3314,14 @@ function App() {
                 attachments={draftAttachments[chat.id] ?? []}
                 attachmentError={attachmentErrors[chat.id] ?? null}
                 sending={sendingChatIds.has(chat.id)}
+                liveSteering={
+                  sendingChatIds.has(chat.id)
+                  && executionTarget.kind === 'local'
+                  && inFlightRuns[chat.id]?.provider === 'codex'
+                  && inFlightRuns[chat.id]?.executionTarget === 'local'
+                  && Boolean(inFlightRuns[chat.id]?.jobId)
+                  && (promptQueues[chat.id]?.length ?? 0) === 0
+                }
                 canPushQueuedNow={(() => {
                   const activeRun = inFlightRuns[chat.id]
                   const entry = promptQueues[chat.id]?.[0]
@@ -3439,6 +3441,7 @@ function ConversationPane({
   attachments,
   attachmentError,
   sending,
+  liveSteering,
   canPushQueuedNow,
   pushingQueued,
   runStartedAt,
@@ -3487,6 +3490,7 @@ function ConversationPane({
   attachments: FileAttachment[]
   attachmentError: string | null
   sending: boolean
+  liveSteering: boolean
   canPushQueuedNow: boolean
   pushingQueued: boolean
   runStartedAt: string | null
@@ -3711,12 +3715,12 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} projectPath={projectPath} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} collapsible />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} projectPath={projectPath} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} collapsible /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
