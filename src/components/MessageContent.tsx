@@ -1,7 +1,9 @@
-import { Fragment, useState } from 'react'
+import { Fragment, createElement, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { parseInlineSegments, parseMessageContent } from '../lib/messageContent.mjs'
-import type { MessageInlineLink } from '../lib/messageContent.mjs'
+import { parseInline, parseMessageContent } from '../lib/messageContent.mjs'
+import type { MessageContentBlock, MessageInlineNode, MessageTableAlignment } from '../lib/messageContent.mjs'
+
+const CELL_ALIGNMENT = { left: 'start', center: 'center', right: 'end' } as const
 
 function CodeBlock({ code, language }: { code: string; language: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -30,62 +32,120 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   )
 }
 
-function InlineLink({ segment, onOpenFile }: {
-  segment: MessageInlineLink
-  onOpenFile?: (path: string) => void
-}) {
-  if (segment.kind === 'file') {
-    // A local path cannot navigate the workspace origin. Ensync displays the
-    // file itself, and falls back to the native shell only where no viewer is
-    // wired up. Browser mode without either keeps the plain file href.
-    const openFile = (event: React.MouseEvent<HTMLAnchorElement>) => {
-      if (onOpenFile) {
-        event.preventDefault()
-        onOpenFile(segment.path)
-        return
-      }
-
-      const openLocalFile = window.ensyncDesktop?.openLocalFile
-      if (typeof openLocalFile !== 'function') return
-      event.preventDefault()
-      void openLocalFile(segment.path)
-    }
-
+function InlineNode({ node }: { node: MessageInlineNode }) {
+  if (node.type === 'text') return <>{node.text}</>
+  if (node.type === 'code') return <code className="message-inline-code">{node.text}</code>
+  if (node.type === 'link') {
     return (
-      <a className="message-link" href={segment.href} title={segment.path} onClick={openFile} dir="ltr">
-        {segment.label}
+      <a className="message-link" href={node.href} target="_blank" rel="noreferrer noopener">
+        <Inline nodes={node.children} />
       </a>
     )
   }
-
-  return (
-    <a className="message-link" href={segment.href} title={segment.href} target="_blank" rel="noreferrer">
-      {segment.label}
-    </a>
-  )
+  if (node.type === 'strong') return <strong><Inline nodes={node.children} /></strong>
+  if (node.type === 'em') return <em><Inline nodes={node.children} /></em>
+  return <s><Inline nodes={node.children} /></s>
 }
 
-function InlineText({ text, onOpenFile }: { text: string; onOpenFile?: (path: string) => void }) {
+function Inline({ nodes }: { nodes: MessageInlineNode[] }) {
   return (
     <>
-      {parseInlineSegments(text).map((segment, position) => (segment.type === 'link'
-        ? <InlineLink key={position} segment={segment} onOpenFile={onOpenFile} />
-        : <Fragment key={position}>{segment.text}</Fragment>))}
+      {nodes.map((node, index) => <InlineNode key={index} node={node} />)}
     </>
   )
 }
 
-export function MessageContent({ content, onOpenFile }: {
-  content: string
-  onOpenFile?: (path: string) => void
+function InlineText({ text }: { text: string }) {
+  return <Inline nodes={parseInline(text)} />
+}
+
+function TableBlock({ header, alignments, rows }: {
+  header: string[]
+  alignments: MessageTableAlignment[]
+  rows: string[][]
 }) {
-  const blocks = parseMessageContent(content)
+  const align = (column: number) => CELL_ALIGNMENT[alignments[column] ?? 'left']
 
   return (
+    <div className="message-table" role="region" aria-label="Table" tabIndex={0}>
+      <table>
+        <thead>
+          <tr>
+            {header.map((cell, index) => (
+              <th key={index} scope="col" dir="auto" style={{ textAlign: align(index) }}>
+                <InlineText text={cell} />
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, rowIndex) => (
+            <tr key={rowIndex}>
+              {row.map((cell, index) => (
+                <td key={index} dir="auto" style={{ textAlign: align(index) }}>
+                  <InlineText text={cell} />
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** A single-paragraph item renders inline so tight lists keep their rhythm. */
+function ListItem({ blocks }: { blocks: MessageContentBlock[] }) {
+  if (blocks.length === 1 && blocks[0].type === 'paragraph') {
+    return <li dir="auto"><InlineText text={blocks[0].text} /></li>
+  }
+  return <li dir="auto"><Blocks blocks={blocks} /></li>
+}
+
+function Block({ block }: { block: MessageContentBlock }) {
+  if (block.type === 'code') return <CodeBlock code={block.code} language={block.language} />
+  if (block.type === 'table') {
+    return <TableBlock header={block.header} alignments={block.alignments} rows={block.rows} />
+  }
+  if (block.type === 'heading') {
+    return createElement(
+      `h${Math.min(6, Math.max(1, block.level))}`,
+      { className: 'message-heading', dir: 'auto' },
+      <InlineText text={block.text} />,
+    )
+  }
+  if (block.type === 'rule') return <hr className="message-rule" />
+  if (block.type === 'quote') {
+    return <blockquote className="message-quote"><Blocks blocks={block.blocks} /></blockquote>
+  }
+  if (block.type === 'list') {
+    return block.ordered
+      ? (
+        <ol className="message-list" start={block.start ?? 1}>
+          {block.items.map((item, index) => <ListItem key={index} blocks={item} />)}
+        </ol>
+      )
+      : (
+        <ul className="message-list">
+          {block.items.map((item, index) => <ListItem key={index} blocks={item} />)}
+        </ul>
+      )
+  }
+  return <p dir="auto"><InlineText text={block.text} /></p>
+}
+
+function Blocks({ blocks }: { blocks: MessageContentBlock[] }) {
+  return (
+    <>
+      {blocks.map((block, index) => <Fragment key={index}><Block block={block} /></Fragment>)}
+    </>
+  )
+}
+
+export function MessageContent({ content }: { content: string }) {
+  return (
     <div className="message-content">
-      {blocks.map((block, index) => block.type === 'code'
-        ? <CodeBlock key={index} code={block.code} language={block.language} />
-        : <p key={index} dir="auto"><InlineText text={block.text} onOpenFile={onOpenFile} /></p>)}
+      <Blocks blocks={parseMessageContent(content)} />
     </div>
   )
 }

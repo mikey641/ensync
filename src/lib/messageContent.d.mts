@@ -1,19 +1,21 @@
+export type MessageTableAlignment = 'left' | 'center' | 'right' | null
+
 export type MessageContentBlock =
-  | { type: 'text'; text: string }
+  | { type: 'paragraph'; text: string }
+  | { type: 'heading'; level: number; text: string }
   | { type: 'code'; code: string; language: string | null }
-  | { type: 'image'; alt: string; path: string; markdown: string }
+  | { type: 'table'; header: string[]; alignments: MessageTableAlignment[]; rows: string[][] }
+  | { type: 'list'; ordered: boolean; start: number | null; items: MessageContentBlock[][] }
+  | { type: 'quote'; blocks: MessageContentBlock[] }
+  | { type: 'rule' }
 
-export type MessageTextPart =
+export type MessageInlineNode =
   | { type: 'text'; text: string }
-  | { type: 'link'; text: string; href: string }
-
-export type MessageInlineLink =
-  | { type: 'link'; label: string; kind: 'external'; href: string }
-  | { type: 'link'; label: string; kind: 'file'; href: string; path: string }
-
-export type MessageInlineSegment =
-  | { type: 'text'; text: string }
-  | MessageInlineLink
+  | { type: 'code'; text: string }
+  | { type: 'link'; href: string; children: MessageInlineNode[] }
+  | { type: 'strong'; children: MessageInlineNode[] }
+  | { type: 'em'; children: MessageInlineNode[] }
+  | { type: 'strike'; children: MessageInlineNode[] }
 
 export function parseMessageContent(value: unknown): MessageContentBlock[]
-export function parseInlineSegments(value: unknown): MessageInlineSegment[]
+export function parseInline(value: unknown): MessageInlineNode[]
