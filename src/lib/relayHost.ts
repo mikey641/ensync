@@ -248,11 +248,42 @@ export type ChatOutputRecovery = {
   discardedLineCount: number
 }
 
+/** Host-resolved commit a protected worktree was built on. */
+export type ChatRunWorkspaceBase = {
+  sha: string
+  canonicalSha: string | null
+  /** Why this commit is the base; only `remote_default_branch` advanced past the shared checkout. */
+  source:
+    | 'remote_default_branch'
+    | 'already_canonical'
+    | 'local_head'
+    | 'local_head_ahead'
+    | 'divergent_local_history'
+    | 'local_changes_conflict'
+    | 'base_refresh_deferred'
+    | 'stale_remote_ref'
+    | 'unsafe_remote'
+  /** Exact factual reason whenever the base is not the canonical commit. */
+  reason: string | null
+  remote: string | null
+  branch: string | null
+  refreshed: boolean
+}
+
+/** Whether this conversation's committed work is contained by the canonical branch. */
+export type ChatRunWorkspaceIntegration = {
+  canonicalSha: string | null
+  integrated: boolean | null
+  unintegratedCommits: number | null
+}
+
 export type ChatRunWorkspace = {
   path: string
   repositoryPath: string
   branch: string
   reused: boolean
+  base: ChatRunWorkspaceBase | null
+  integration: ChatRunWorkspaceIntegration | null
   gitBefore: {
     branch: string
     head: string
