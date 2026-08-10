@@ -24,7 +24,6 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
-import { installApp } from './install-app.mjs'
 
 const execFile = promisify(execFileCallback)
 const LAND_CHECK_TIMEOUT_MS = 15 * 60 * 1_000
@@ -228,6 +227,10 @@ async function run() {
   // landed work in the installed app.
   if (merged > 0) {
     try {
+      // Imported lazily: repositories that are not the desktop app ship this
+      // same sweep without an installer, and a static import would abort the
+      // whole run before anything could be landed.
+      const { installApp } = await import('./install-app.mjs')
       await installApp({ repoRoot, log: (line) => console.log(`[${repoName}] ${line}`) })
     } catch (error) {
       console.error(`[${repoName}] [install] skipped: ${error.message}`)
