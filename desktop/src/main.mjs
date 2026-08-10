@@ -63,6 +63,13 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
+  createWindowStateStore,
+  MINIMUM_WINDOW_BOUNDS,
+  NATIVE_WINDOW_STATE_FILENAME,
+  readNativeWindowState,
+  resolveWindowPlacement,
+} from './window-state.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -79,6 +86,8 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
+/** Coalesces the resize/move event storms macOS and Windows emit while dragging. */
+const WINDOW_STATE_PERSIST_DELAY_MS = 400
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -94,6 +103,7 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
+let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -445,14 +455,15 @@ async function createWindow(workspaceIdentity) {
     return existingWindowAfterRuntimeStart
   }
 
-  const windowStateSession = createWindowStateSession({
-    workspaceId: workspaceIdentity.id,
-    store: windowStateStore,
+  const placement = resolveWindowPlacement({
+    state: windowStateStore?.get(workspaceIdentity.id) ?? null,
     displays: screen.getAllDisplays(),
-    primaryDisplay: screen.getPrimaryDisplay(),
   })
   const window = new BrowserWindow({
-    ...windowStateSession.browserWindowOptions,
+    ...placement.bounds,
+    minWidth: MINIMUM_WINDOW_BOUNDS.width,
+    minHeight: MINIMUM_WINDOW_BOUNDS.height,
+    fullscreen: placement.fullScreen,
     show: false,
     backgroundColor: '#17181c',
     title: 'Ensync',
@@ -464,6 +475,9 @@ async function createWindow(workspaceIdentity) {
       spellcheck: true,
     },
   })
+  // Maximize before the window is shown so restoration never flashes at the
+  // restored size first. Full screen is already applied by the constructor.
+  if (placement.maximized && !placement.fullScreen) window.maximize()
   nativeWindows.add(window, workspaceIdentity)
   const recovery = createRendererCrashRecovery()
   let recoveryBlockedNoticeShown = false
@@ -513,13 +527,36 @@ async function createWindow(workspaceIdentity) {
         }
       })
   })
+  let windowStateTimer = null
+  const persistWindowState = () => {
+    if (windowStateTimer) {
+      clearTimeout(windowStateTimer)
+      windowStateTimer = null
+    }
+    const state = readNativeWindowState(window)
+    if (state) windowStateStore?.save(workspaceIdentity.id, state)
+  }
+  const scheduleWindowStatePersist = () => {
+    if (windowStateTimer) clearTimeout(windowStateTimer)
+    windowStateTimer = setTimeout(persistWindowState, WINDOW_STATE_PERSIST_DELAY_MS)
+  }
+  for (const event of ['resize', 'move']) window.on(event, scheduleWindowStatePersist)
+  for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) {
+    window.on(event, persistWindowState)
+  }
+  // 'close' still has live geometry; 'closed' does not.
+  window.on('close', persistWindowState)
+
   window.on('focus', () => {
     nativeWindows.focus(window)
     nativeWorkspaceStore?.touch(workspaceIdentity.id)
   })
   windowStateSession.showWhenReady(window, showWindow)
   window.on('closed', () => {
-    disposeWindowState()
+    if (windowStateTimer) {
+      clearTimeout(windowStateTimer)
+      windowStateTimer = null
+    }
     recovery.dispose()
     projectLaunchByWorkspace.delete(workspaceIdentity.id)
     const retainWorkspace = shouldRetainNativeWorkspaceOnClose({
@@ -530,7 +567,9 @@ async function createWindow(workspaceIdentity) {
     })
     if (!retainWorkspace) {
       nativeWorkspaceStore?.remove(workspaceIdentity.id)
-      windowStateSession.forget()
+      // A workspace that will never reopen must not leave its geometry behind as
+      // the shape the next new window inherits.
+      windowStateStore?.remove(workspaceIdentity.id)
     }
     nativeWindows.remove(window)
   })
@@ -578,6 +617,9 @@ if (!singleInstance) {
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
+    })
+    windowStateStore = createWindowStateStore({
+      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
