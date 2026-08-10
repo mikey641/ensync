@@ -160,6 +160,23 @@ export type ProjectInspection = {
   inspectedAt: string
 }
 
+export type LocalFileDisplay =
+  | {
+    status: 'ok'
+    path: string
+    name: string
+    text: string
+    bytes: number
+    truncated: boolean
+    language: string | null
+  }
+  | {
+    status: 'invalid' | 'missing' | 'directory' | 'binary' | 'unreadable'
+    path: string
+    name: string
+    message: string
+  }
+
 export type GitRemote = {
   name: string
   fetchUrls: string[]
@@ -464,6 +481,13 @@ export class EnsyncHostClient {
 
   inspectProject(path: string) {
     return this.request<{ project: ProjectInspection }>('/projects/inspect', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+  }
+
+  readLocalFile(path: string) {
+    return this.request<{ file: LocalFileDisplay }>('/local-file', {
       method: 'POST',
       body: JSON.stringify({ path }),
     })

@@ -1,0 +1,80 @@
+.file-viewer-modal {
+  width: min(920px, calc(100vw - 48px));
+  max-height: min(80vh, 860px);
+  display: flex;
+  flex-direction: column;
+}
+
+.file-viewer__path {
+  max-width: 100%;
+  margin: 3px 0 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  unicode-bidi: isolate;
+  color: var(--text-faint);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: var(--font-label);
+}
+
+.file-viewer__body {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 20px;
+  overflow: hidden;
+}
+
+.file-viewer__meta {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--text-faint);
+  font-size: var(--font-label);
+}
+
+.file-viewer__meta > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.file-viewer__truncated {
+  color: var(--accent);
+}
+
+.file-viewer__note {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: var(--font-ui);
+}
+
+.file-viewer__note--error {
+  color: #d89a8f;
+}
+
+.file-viewer__body pre {
+  min-height: 0;
+  max-width: 100%;
+  flex: 1;
+  margin: 0;
+  padding: 14px 16px;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-canvas) 88%, #000);
+  color: var(--text-secondary);
+  font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+  font-size: var(--font-ui);
+  line-height: 1.6;
+  text-align: left;
+  tab-size: 2;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
+.file-viewer__body code {
+  white-space: pre;
+  unicode-bidi: isolate;
+}

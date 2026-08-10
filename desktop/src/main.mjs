@@ -1,6 +1,7 @@
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
 
@@ -61,6 +62,10 @@ import {
   DEVICE_PREFERENCES_FILENAME,
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
+import {
+  createLocalFileOpenHandler,
+  LOCAL_FILE_OPEN_CHANNEL,
+} from './local-file-open.mjs'
 import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
@@ -241,15 +246,19 @@ function registerNativeBridge() {
     },
     onError: (error) => console.error('[ensync-folder-picker]', error),
   }))
-  ipcMain.handle(CHAT_FILE_PICKER_CHANNEL, createChatFilePickerHandler({
+  ipcMain.handle(LOCAL_FILE_OPEN_CHANNEL, createLocalFileOpenHandler({
     isAuthorized: isAuthorizedNativeEvent,
-    openDialog: async (event, options) => {
-      const parent = BrowserWindow.fromWebContents(event.sender)
-      return parent
-        ? dialog.showOpenDialog(parent, options)
-        : dialog.showOpenDialog(options)
+    describePath: async (path) => {
+      try {
+        const stats = await stat(path)
+        return { exists: true, directory: stats.isDirectory() }
+      } catch {
+        return { exists: false, directory: false }
+      }
     },
-    onError: (error) => console.error('[ensync-file-picker]', error),
+    openPath: (path) => shell.openPath(path),
+    revealPath: (path) => shell.showItemInFolder(path),
+    onError: (error) => console.error('[ensync-open-local-file]', error),
   }))
   const recentProjectHandlers = createRecentProjectHandlers({
     isAuthorized: isAuthorizedNativeEvent,
@@ -303,6 +312,7 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
+  ipcMain.removeHandler(LOCAL_FILE_OPEN_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_GET_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_MIGRATE_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_REMEMBER_CHANNEL)

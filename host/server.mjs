@@ -9,6 +9,7 @@ import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
+import { readLocalFileForDisplay } from './local-file.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
@@ -369,6 +370,12 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const project = await projects.inspect(body.path)
         return sendJson(response, 200, { project }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/local-file') {
+        const body = await readJsonBody(request)
+        const file = await readLocalFileForDisplay(body.path)
+        return sendJson(response, 200, { file }, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/git/clone') {

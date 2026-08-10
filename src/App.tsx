@@ -59,6 +59,7 @@ import { RemoteSshSetup } from './components/RemoteSshSetup'
 import { TelegramSetup } from './components/TelegramSetup'
 import { VirtualBoxSetup } from './components/VirtualBoxSetup'
 import { GitWorkflowModal } from './components/GitWorkflowModal'
+import { FileViewerModal } from './components/FileViewerModal'
 import { NativeUpdatePreferences } from './components/NativeUpdatePreferences'
 import { SupportDesk } from './components/SupportDesk'
 import { UIVisibilityPreferences, useUIVisibility, type UIVisibilityState } from './ui-visibility'
@@ -127,7 +128,6 @@ import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
-import { providerResetText } from './lib/providerResetText.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
   conversationWorkspaceKey,
@@ -758,6 +758,7 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [viewedFilePath, setViewedFilePath] = useState<string | null>(null)
   const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
   const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
   const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
@@ -3359,9 +3360,8 @@ function App() {
               <ConversationPane
                 chat={chat}
                 isActive={isActive}
-                provider={providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])}
-                autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
-                runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
+                onOpenFile={setViewedFilePath}
+                provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
                 providers={executionProviders}
                 projectPath={executionTarget.kind === 'ssh' ? `${executionTarget.connection.username}@${executionTarget.connection.hostname}:${executionTarget.connection.projectPath}` : activeProject.path}
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
@@ -3460,6 +3460,7 @@ function App() {
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
       {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
+      {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
       {gitWorkflowMode && <GitWorkflowModal mode={gitWorkflowMode} project={activeProject.verified ? activeProject : null} onImported={(project) => { focusProject(verifiedProject(project)); setGitWorkflowMode(null) }} onClose={() => setGitWorkflowMode(null)} />}
       {remoteOpen && <RemoteRuntimeModal hostOnline={hostOnline} providers={providers} project={activeProject} chat={activeChat ?? null} executionTarget={executionTarget} initialRuntime={remoteInitialRuntime} fallbackProviderOrder={fallbackProviderOrder} onExecutionTargetChange={setExecutionTarget} onClose={() => { setRemoteOpen(false); setRemoteInitialRuntime('local') }} />}
@@ -3527,6 +3528,7 @@ function ConversationPane({
   onAutoContextSkillChange,
   onExecutionPanelOpenChange,
   onSettings,
+  onOpenFile,
 }: {
   chat: Chat
   isActive: boolean
@@ -3575,6 +3577,7 @@ function ConversationPane({
   onAutoContextSkillChange: () => void
   onExecutionPanelOpenChange: (open: boolean) => void
   onSettings: () => void
+  onOpenFile: (path: string) => void
 }) {
   const { getSectionProps, isVisible, setVisible } = useUIVisibility()
   const providerButtonRef = useRef<HTMLButtonElement>(null)
@@ -3768,12 +3771,12 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} workspacePath={chat.workspace?.path ?? chat.continuation?.workspace?.path} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} onOpenFile={onOpenFile} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} workspacePath={chat.workspace?.path ?? chat.continuation?.workspace?.path} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} onOpenFile={onOpenFile} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
@@ -3787,7 +3790,7 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} />
+                      <MessageContent content={note.text} onOpenFile={onOpenFile} />
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>

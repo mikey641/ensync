@@ -1,22 +1,7 @@
-import { useEffect, useMemo, useState } from 'react'
+import { Fragment, useState } from 'react'
 import { Check, Copy } from 'lucide-react'
-import { parseMessageContent, parseMessageText } from '../lib/messageContent.mjs'
-
-const URL_SCHEME = /^[a-z][a-z0-9+.-]*:/i
-const WINDOWS_ABSOLUTE_PATH = /^[a-z]:[\\/]/i
-
-function isLocalImagePath(path: string) {
-  const value = path.trim()
-  if (!value || value.startsWith('//') || value.startsWith('#')) return false
-  if (WINDOWS_ABSOLUTE_PATH.test(value) || value.startsWith('\\\\')) return true
-  if (!URL_SCHEME.test(value)) return true
-  return value.toLowerCase().startsWith('file:')
-}
-
-function localImageUrl(workspacePath: string, imagePath: string) {
-  const search = new URLSearchParams({ workspacePath, path: imagePath })
-  return `/api/chat/image?${search}`
-}
+import { parseInlineSegments, parseMessageContent } from '../lib/messageContent.mjs'
+import type { MessageInlineLink } from '../lib/messageContent.mjs'
 
 function CodeBlock({ code, language }: { code: string; language: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -45,50 +30,62 @@ function CodeBlock({ code, language }: { code: string; language: string | null }
   )
 }
 
-function LocalMarkdownImage({
-  alt,
-  path,
-  markdown,
-  workspacePath,
-}: {
-  alt: string
-  path: string
-  markdown: string
-  workspacePath: string | null
+function InlineLink({ segment, onOpenFile }: {
+  segment: MessageInlineLink
+  onOpenFile?: (path: string) => void
 }) {
-  const source = useMemo(
-    () => workspacePath && isLocalImagePath(path) ? localImageUrl(workspacePath, path) : null,
-    [path, workspacePath],
-  )
-  const [failed, setFailed] = useState(false)
-  useEffect(() => setFailed(false), [source])
+  if (segment.kind === 'file') {
+    // A local path cannot navigate the workspace origin. Ensync displays the
+    // file itself, and falls back to the native shell only where no viewer is
+    // wired up. Browser mode without either keeps the plain file href.
+    const openFile = (event: React.MouseEvent<HTMLAnchorElement>) => {
+      if (onOpenFile) {
+        event.preventDefault()
+        onOpenFile(segment.path)
+        return
+      }
 
-  if (!source) return <p dir="auto">{markdown}</p>
-  if (failed) {
+      const openLocalFile = window.ensyncDesktop?.openLocalFile
+      if (typeof openLocalFile !== 'function') return
+      event.preventDefault()
+      void openLocalFile(segment.path)
+    }
+
     return (
-      <div className="message-local-image message-local-image--unavailable" role="status">
-        <strong>{alt || 'Local image'}</strong>
-        <span>The file is missing, unsupported, or outside this conversation workspace.</span>
-      </div>
+      <a className="message-link" href={segment.href} title={segment.path} onClick={openFile} dir="ltr">
+        {segment.label}
+      </a>
     )
   }
+
   return (
-    <figure className="message-local-image">
-      <img src={source} alt={alt} loading="lazy" decoding="async" onError={() => setFailed(true)} />
-    </figure>
+    <a className="message-link" href={segment.href} title={segment.href} target="_blank" rel="noreferrer">
+      {segment.label}
+    </a>
   )
 }
 
-export function MessageContent({ content, workspacePath = null }: { content: string; workspacePath?: string | null }) {
+function InlineText({ text, onOpenFile }: { text: string; onOpenFile?: (path: string) => void }) {
+  return (
+    <>
+      {parseInlineSegments(text).map((segment, position) => (segment.type === 'link'
+        ? <InlineLink key={position} segment={segment} onOpenFile={onOpenFile} />
+        : <Fragment key={position}>{segment.text}</Fragment>))}
+    </>
+  )
+}
+
+export function MessageContent({ content, onOpenFile }: {
+  content: string
+  onOpenFile?: (path: string) => void
+}) {
   const blocks = parseMessageContent(content)
 
   return (
     <div className="message-content">
       {blocks.map((block, index) => block.type === 'code'
         ? <CodeBlock key={index} code={block.code} language={block.language} />
-        : block.type === 'image'
-          ? <LocalMarkdownImage key={index} {...block} workspacePath={workspacePath} />
-          : <p key={index} dir="auto">{block.text}</p>)}
+        : <p key={index} dir="auto"><InlineText text={block.text} onOpenFile={onOpenFile} /></p>)}
     </div>
   )
 }
