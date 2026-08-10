@@ -124,10 +124,6 @@ import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
-  conversationWorkspaceKey,
-  resolveConversationWorkspaceKey,
-} from './lib/conversationWorkspaceKey.mjs'
-import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -1800,12 +1796,11 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
-    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: agentWorkspaceKey,
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2566,7 +2561,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2575,7 +2570,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -3471,7 +3466,9 @@ function ConversationPane({
     draft: draft || (attachments.length > 0 ? 'attached files' : ''),
     canRun: canRunChat,
   })
-  const providerNotes = transcriptProviderNotes(executionEvents, sending)
+  const providerNotes = executionEvents
+    .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
+    .slice(-6)
   const scrollContentRevision = useMemo(() => chatAutoScrollContentRevision({
     messages: chat.messages,
     executionEvents,

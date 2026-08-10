@@ -67,13 +67,6 @@ function processIsAlive(pid) {
 }
 
 function workspaceKey(value) {
-  if (value === undefined || value === null) {
-    throw new ProjectIsolationError(
-      'client_upgrade_required',
-      'This Ensync window is older than the running Host. Quit Ensync completely and reopen it before starting another local agent run.',
-      409,
-    )
-  }
   if (
     typeof value !== 'string'
     || !value.trim()

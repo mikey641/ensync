@@ -372,12 +372,6 @@ function validateRemoteChatRequest(request) {
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
     throw new RemoteSshError('invalid_prompt', 'Enter a message before running remote chat.')
   }
-  if (request.workspaceKey === undefined || request.workspaceKey === null) {
-    throw new RemoteSshError(
-      'client_upgrade_required',
-      'This Ensync window is older than the running Host. Quit Ensync completely and reopen it before starting another remote agent run.',
-    )
-  }
   if (
     typeof request.workspaceKey !== 'string'
     || !request.workspaceKey.trim()
