@@ -298,6 +298,9 @@ export function runProcess(executable, args, options = {}) {
     let forceKillTimer = null
     let inactivityTimer = null
     let hardTimer = null
+    // A CLI that is blocked on a question Ensync put to the person is not hung.
+    // The interactive session holds the watchdog for exactly that window.
+    let inactivityHeld = false
 
     const child = spawn(invocation.executable, invocation.args, {
       cwd: options.cwd,
@@ -343,7 +346,7 @@ export function runProcess(executable, args, options = {}) {
     }
 
     const refreshInactivityWatchdog = () => {
-      if (inactivityTimeoutMs === null || settled || timedOut || aborted) return
+      if (inactivityTimeoutMs === null || settled || timedOut || aborted || inactivityHeld) return
       if (inactivityTimer) clearTimeout(inactivityTimer)
       inactivityTimer = setTimeout(() => timeout('inactivity'), inactivityTimeoutMs)
       inactivityTimer.unref?.()
@@ -374,8 +377,35 @@ export function runProcess(executable, args, options = {}) {
       child.stdin.on('error', () => {
         // A CLI may close stdin before consuming it; its exit status remains authoritative.
       })
-      child.stdin.end(options.input, 'utf8')
+      // A bidirectional CLI protocol needs stdin to stay open after the prompt:
+      // the caller closes it once the stream reports its own terminal frame.
+      if (options.keepStdinOpen) child.stdin.write(options.input, 'utf8')
+      else child.stdin.end(options.input, 'utf8')
     }
+
+    // Handed out only after stdin exists, so a session can answer the CLI
+    // without ever reaching the child process itself.
+    options.onSession?.({
+      write: (chunk) => {
+        if (!hasInput || child.stdin.destroyed || child.stdin.writableEnded) return false
+        child.stdin.write(chunk, 'utf8')
+        return true
+      },
+      endInput: () => {
+        if (!hasInput || child.stdin.destroyed || child.stdin.writableEnded) return false
+        child.stdin.end()
+        return true
+      },
+      holdInactivity: () => {
+        inactivityHeld = true
+        if (inactivityTimer) clearTimeout(inactivityTimer)
+        inactivityTimer = null
+      },
+      releaseInactivity: () => {
+        inactivityHeld = false
+        refreshInactivityWatchdog()
+      },
+    })
 
     child.once('spawn', refreshInactivityWatchdog)
     refreshInactivityWatchdog()

@@ -308,7 +308,48 @@ export type ChatRunResponse = {
   completedAt: string
 }
 
+/** One choice the provider offered; `description` exists only where the provider supplied one. */
+export type ProviderQuestionOption = {
+  label: string
+  description: string | null
+}
+
+export type ProviderQuestion = {
+  /** Provider-assigned position; an answer names this and never re-sends question text. */
+  index: number
+  header: string
+  question: string
+  multiSelect: boolean
+  options: ProviderQuestionOption[]
+}
+
+export type PendingProviderQuestion = {
+  questionId: string
+  provider: ChatProviderId
+  questions: ProviderQuestion[]
+  askedAt: string
+}
+
 export type ChatExecutionEvent =
+  | {
+      /** The provider paused its turn to ask the person something. */
+      type: 'question'
+      provider: ChatProviderId
+      questionId: string
+      questions: ProviderQuestion[]
+      at: string
+      sequence?: number
+    }
+  | {
+      /** The question left the queue: answered here, or cancelled when the run ended. */
+      type: 'question_resolved'
+      provider: ChatProviderId
+      questionId: string
+      cancelled: boolean
+      answers: { index: number; question: string; answer: string }[]
+      at: string
+      sequence?: number
+    }
   | {
       type: 'notice'
       message: string
@@ -396,11 +437,22 @@ export type ChatJobSnapshot = {
   providerProcessStarted: boolean
   /** Host-observed active Codex turn readiness; never inferred from job state. */
   steerable: boolean
+  /** Questions the live run is blocked on, so a reconnecting window recovers them. */
+  pendingQuestions: PendingProviderQuestion[]
 }
 
 export type ChatSteerResponse = {
   job: ChatJobSnapshot
   delivery: { turnId: string }
+}
+
+export type ChatQuestionAnswerResponse = {
+  job: ChatJobSnapshot
+  answer: {
+    id: string
+    cancelled: boolean
+    answers: { index: number; question: string; answer: string }[]
+  }
 }
 
 type ErrorPayload = { error?: string; code?: string; safeToRetry?: boolean }
@@ -597,6 +649,14 @@ export class EnsyncHostClient {
     })
   }
 
+  /** Delivers the person's answer to the live provider run that is waiting on it. */
+  answerChatQuestion(jobId: string, answer: { questionId: string; answers?: { index: number; answer: string }[]; cancelled?: boolean }) {
+    return this.request<ChatQuestionAnswerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(answer),
+    })
+  }
+
   probeAttachmentPaths(paths: string[]) {
     return this.request<{ results: { path: string; readable: boolean }[] }>('/chat/attachments/probe', {
       method: 'POST',
@@ -674,7 +734,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid retained job event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note' || event.type === 'question' || event.type === 'question_resolved') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result
@@ -817,7 +877,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid execution event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note' || event.type === 'question' || event.type === 'question_resolved') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result

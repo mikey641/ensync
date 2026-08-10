@@ -249,6 +249,8 @@ export function createEnsyncHost(options = {}) {
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
     canSteerLocal: (jobId) => chats.canSteer(jobId),
+    answerLocal: (jobId, input) => chats.answerQuestion(jobId, input),
+    pendingQuestionsLocal: (jobId) => chats.pendingQuestions(jobId),
     normalizeError: chatJobErrorPayload,
     journal: chatJobJournal,
   })
@@ -496,6 +498,14 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const delivery = await chatJobs.steer(jobId, body)
         return sendJson(response, 200, { job: chatJobs.get(jobId), delivery }, origin)
+      }
+
+      const chatJobAnswerMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)\/answer$/)
+      if (request.method === 'POST' && chatJobAnswerMatch) {
+        const jobId = decodeURIComponent(chatJobAnswerMatch[1])
+        const body = await readJsonBody(request)
+        const answer = chatJobs.answer(jobId, body)
+        return sendJson(response, 200, { job: chatJobs.get(jobId), answer }, origin)
       }
 
       const chatJobMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)$/)
