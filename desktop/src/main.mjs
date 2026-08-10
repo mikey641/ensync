@@ -1,6 +1,7 @@
 import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { existsSync, readFileSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
@@ -63,6 +64,17 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
+  createLocalFileOpenHandler,
+  LOCAL_FILE_OPEN_CHANNEL,
+} from './local-file-open.mjs'
+import {
+  createWindowStateStore,
+  MINIMUM_WINDOW_BOUNDS,
+  NATIVE_WINDOW_STATE_FILENAME,
+  readNativeWindowState,
+  resolveWindowPlacement,
+} from './window-state.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -79,6 +91,9 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
+// A drag emits a resize event per frame. Waiting out the gesture keeps the
+// window-state file from being rewritten hundreds of times per drag.
+const WINDOW_STATE_PERSIST_DELAY_MS = 400
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -94,6 +109,7 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
+let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -480,7 +496,6 @@ async function createWindow(workspaceIdentity) {
   const recovery = createRendererCrashRecovery()
   let recoveryBlockedNoticeShown = false
   let preserveWorkspaceRecord = false
-  const disposeWindowState = windowStateSession.observe(window)
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
@@ -549,7 +564,7 @@ async function createWindow(workspaceIdentity) {
     nativeWindows.focus(window)
     nativeWorkspaceStore?.touch(workspaceIdentity.id)
   })
-  windowStateSession.showWhenReady(window, showWindow)
+  window.once('ready-to-show', () => showWindow(window))
   window.on('closed', () => {
     if (windowStateTimer) {
       clearTimeout(windowStateTimer)
@@ -615,6 +630,9 @@ if (!singleInstance) {
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
+    })
+    windowStateStore = createWindowStateStore({
+      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
