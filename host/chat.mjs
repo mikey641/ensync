@@ -1016,6 +1016,10 @@ export class ChatRunService {
     return this.#activeRuns > 0
   }
 
+  canSteer(jobId) {
+    return this.#codexLiveTurns.canSteer(jobId)
+  }
+
   async steer(liveTurnId, input) {
     if (typeof liveTurnId !== 'string' || !liveTurnId) {
       throw new ChatRunError('invalid_chat_job', 'A retained chat job ID is required.', 400, true)
