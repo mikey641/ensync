@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * Auto-land all unlanded ensync/chat-* branches into main.
+ * Auto-land completed ensync/chat-* branches into main.
  *
  * Pulls origin/main (if a remote is configured), merges every ensync/chat-*
- * branch that has unmerged commits (using -X theirs for content conflicts,
- * keeping branch files for modify/delete conflicts), then pushes the result
- * back to origin (if a remote is configured).
+ * branch that has unmerged commits AND is NOT checked out in an active
+ * worktree (so agents working simultaneously are never interrupted), then
+ * pushes the result back to origin (if a remote is configured).
  *
  * Safe to run on a schedule — exits cleanly when there is nothing to merge.
  */
@@ -32,10 +32,29 @@ async function hasRemote() {
   }
 }
 
+/** Branches currently checked out in a worktree — these are actively being worked on. */
+async function activeWorktreeBranches() {
+  try {
+    const list = await git(['worktree', 'list', '--porcelain'])
+    const active = new Set()
+    for (const line of list.split('\n')) {
+      if (line.startsWith('branch ')) {
+        // Strip 'refs/heads/' prefix if present
+        const branch = line.slice('branch '.length).replace(/^refs\/heads\//, '')
+        if (branch) active.add(branch)
+      }
+    }
+    return active
+  } catch {
+    return new Set()
+  }
+}
+
 async function run() {
   const repoRoot = await git(['rev-parse', '--show-toplevel'])
   const repoName = repoRoot.split('/').pop()
   const remote = await hasRemote()
+  const activeBranches = await activeWorktreeBranches()
 
   if (remote) {
     console.log(`[${repoName}] Pulling origin/main...`)
@@ -55,11 +74,20 @@ async function run() {
 
   let merged = 0
   let skipped = 0
+  let active = 0
 
   for (const branch of branches) {
     const ahead = parseInt(await git(['rev-list', '--count', `HEAD..${branch}`]), 10)
     if (ahead === 0) {
       skipped++
+      continue
+    }
+
+    // Skip branches that are checked out in an active worktree — an agent
+    // is still working on them. They'll be landed once the worktree is gone.
+    if (activeBranches.has(branch)) {
+      console.log(`[${repoName}] Skipping ${branch} (${ahead} commits) — active worktree`)
+      active++
       continue
     }
 
@@ -84,7 +112,7 @@ async function run() {
   }
 
   if (merged > 0) {
-    console.log(`[${repoName}] ${merged} merged, ${skipped} already up to date.`)
+    console.log(`[${repoName}] ${merged} merged, ${skipped} up to date, ${active} active (skipped).`)
     if (remote) {
       console.log(`[${repoName}] Pushing to origin...`)
       try {
@@ -97,7 +125,7 @@ async function run() {
       console.log(`[${repoName}] No remote configured — merged locally only.`)
     }
   } else {
-    console.log(`[${repoName}] Nothing to merge (${skipped} already up to date).`)
+    console.log(`[${repoName}] Nothing to merge (${skipped} up to date, ${active} active).`)
   }
 }
 
