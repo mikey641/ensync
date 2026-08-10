@@ -23,6 +23,7 @@
     "start:foreground": "npm run build:ui && electron .",
     "test": "node --test test/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:win-packaged": "node scripts/smoke-windows-package.mjs",
     "verify": "npm run build:ui && npm test && npm run smoke",
     "release:preflight": "node scripts/release-preflight.mjs",
     "package:mac": "npm run verify && node scripts/package-native.mjs --platform macos && node scripts/attest-build.mjs --platform macos",

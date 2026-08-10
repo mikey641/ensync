@@ -76,7 +76,9 @@ npm --prefix desktop run package:win-store
 
 The macOS command creates a universal DMG and ZIP. The Store command creates one x64 AppX whose manifest identity must exactly match Partner Center. Outputs and a build attestation are written under `desktop/release/`. The AppX attestation deliberately says certification is pending; the file remains private until Microsoft accepts it. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
 
-## Release credentials and Store identity
+For routine Windows verification without owning a Windows computer, run the **Desktop CI** workflow manually from GitHub Actions or open a pull request. Its native `windows-2025` job runs the shared verification suite, creates unsigned NSIS/ZIP test artifacts, launches the packaged `win-unpacked/Ensync.exe` with an isolated temporary profile, requires a real `ensync://app` renderer target plus an authenticated detached-Host health response, and uploads the installer, ZIP, and unsigned attestation for seven days. The smoke process uses an ephemeral loopback DevTools port only inside the CI job and force-cleans the exact spawned test process trees afterward. This is packaging/startup evidence, not Windows code-signing, installation/uninstallation, or a real Codex/Claude subscription-login acceptance test.
+
+## Signing and notarization secrets
 
 Unsigned local builds work for testing, but their generated site manifest remains unavailable. Signing is activated only when these secrets are supplied to the release workflow:
 
