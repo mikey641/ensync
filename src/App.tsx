@@ -3635,8 +3635,10 @@ function ConversationPane({
     activeProviderName: activeRunProviderName,
     stopAndSendAvailable: canStopAndSendNow,
   })
-  // Stopping a turn discards its in-progress work, so the destructive action
-  // is deliberately two-step and disarms itself rather than waiting silently.
+  // Live delivery is Codex-only; every other provider gets the honest
+  // stop-then-run path rather than a silently missing control. Stopping a turn
+  // discards its in-progress work, so the destructive action is deliberately
+  // two-step and disarms itself rather than waiting silently.
   const [stopAndSendArmed, setStopAndSendArmed] = useState(false)
   useEffect(() => {
     if (!canStopAndSendNow && stopAndSendArmed) setStopAndSendArmed(false)
