@@ -16,6 +16,8 @@ import {
   promptQueueComposerState,
   queuedPromptCanStopAndRun,
   queuedPromptCanSteerActiveTurn,
+  queuedPromptCanStopAndSendNow,
+  queueMayAdvanceAfterRun,
   promptQueueStatusPresentation,
   queuedPromptGate,
   removePromptFromQueue,
@@ -195,6 +197,81 @@ test('live steering is offered only for the exact Host-started local Codex turn'
   assert.equal(activeCodexTurnCanAcceptSteering(startedRun), true)
   assert.equal(queuedPromptCanSteerActiveTurn(queued, startedRun), true)
   assert.equal(queuedPromptCanSteerActiveTurn(queued, { ...startedRun, projectPath: '/other' }), false)
+})
+
+test('stop-and-send is offered only when live steering is genuinely unavailable', () => {
+  const queued = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      ...entry('turn-2', 'turn-1').preferences,
+      executionTargetKey: 'local',
+      projectId: 'project-1',
+      projectPath: '/repo',
+    },
+  }
+  const claudeRun = {
+    turnId: 'turn-1',
+    provider: 'claude',
+    executionTarget: 'local',
+    providerProcessStarted: true,
+    projectId: 'project-1',
+    projectPath: '/repo',
+  }
+
+  // Claude cannot be steered at all, so the destructive action is the only one.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, claudeRun), true)
+  // Never offer a destructive stop when the non-destructive push exists.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, {
+    ...claudeRun,
+    provider: 'codex',
+    jobId: 'job-1',
+  }, { liveSteerAvailable: true }), false)
+  // A Codex turn that is not yet steerable may still be stopped and re-sent.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, {
+    ...claudeRun,
+    provider: 'codex',
+  }, { liveSteerAvailable: false }), true)
+
+  // The same exact-snapshot binding as Push now: a drifted queue head is never
+  // worth discarding a running turn for.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, turnId: 'turn-9' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, projectPath: '/other' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, projectId: 'project-9' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, executionTarget: 'ssh:box' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, null), false)
+  assert.equal(queuedPromptCanStopAndSendNow(null, claudeRun), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, turnId: '  ' }), false)
+})
+
+test('only a successful run or a confirmed stop-and-send advances the queue', () => {
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: true }), true)
+  // A plain Stop pauses the tail; that safety rule is unchanged.
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: false }), false)
+  assert.equal(queueMayAdvanceAfterRun({}), false)
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: false, stopAndSendArmed: true }), true)
+})
+
+test('a waiting queue names stop-and-send as an explicitly destructive escape', () => {
+  const detail = promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: false,
+    activeProviderName: 'Claude Code',
+    stopAndSendAvailable: true,
+  }).detail
+  assert.equal(
+    detail,
+    'Claude Code cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully. Stop & send now ends the current turn instead, discarding its in-progress work.',
+  )
+  // Without the action the copy must not describe a control the user cannot see.
+  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: false,
+    activeProviderName: 'Claude Code',
+  }).detail.includes('Stop & send now'), false)
+  // Steerable turns keep the plain copy; Push now is the non-destructive answer.
+  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: true,
+    activeProviderName: 'Codex',
+    stopAndSendAvailable: true,
+  }).detail, 'It will run automatically after the current turn finishes successfully.')
 })
 
 test('only a confirmed unavailable live turn silently falls back to FIFO', () => {

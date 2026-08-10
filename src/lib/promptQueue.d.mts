@@ -41,6 +41,15 @@ export type SteerableActiveRun = {
 }
 export function activeCodexTurnCanAcceptSteering(activeRun: SteerableActiveRun | null | undefined): boolean
 export function queuedPromptCanSteerActiveTurn(entry: QueuedPrompt | undefined, activeRun: SteerableActiveRun | null | undefined): boolean
+export function queuedPromptCanStopAndSendNow(
+  entry: QueuedPrompt | undefined | null,
+  activeRun: SteerableActiveRun | null | undefined,
+  options?: { liveSteerAvailable?: boolean },
+): boolean
+export function queueMayAdvanceAfterRun(input: {
+  completedSuccessfully?: boolean
+  stopAndSendArmed?: boolean
+}): boolean
 export function liveSteerWasSafelyRejected(error: unknown): boolean
 export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry: QueuedPrompt | undefined): {
   state: 'empty' | 'ready' | 'waiting' | 'paused'
@@ -49,7 +58,11 @@ export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry
 export function promptQueueStatusPresentation(
   gate: ReturnType<typeof queuedPromptGate>,
   count: number,
-  delivery?: { liveDeliverySupported: boolean; activeProviderName: string | null },
+  delivery?: {
+    liveDeliverySupported: boolean
+    activeProviderName: string | null
+    stopAndSendAvailable?: boolean
+  },
 ): {
   headline: string
   detail: string

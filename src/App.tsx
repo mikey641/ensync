@@ -155,7 +155,8 @@ import {
   promptQueueComposerState,
   promptQueueStatusPresentation,
   promptSubmissionMode,
-  queuedPromptCanStopAndRun,
+  queueMayAdvanceAfterRun,
+  queuedPromptCanStopAndSendNow,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -804,9 +805,11 @@ function App() {
   const rediscoveringHostJobsRef = useRef(false)
   const rediscoveredHostJobsRef = useRef(false)
   const steeringChatIdsRef = useRef(new Set<string>())
+  // A stop-and-send arms exactly one cancellation to advance the queue. It is
+  // consumed by that run's teardown so a later unrelated stop never inherits it.
+  const stopAndSendChatIdsRef = useRef(new Set<string>())
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
-  const runQueuedAfterStopRef = useRef<ReadonlySet<string>>(new Set())
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
@@ -2213,20 +2216,34 @@ function App() {
   }, [updateChatError])
 
   const handleStop = (chatId: string) => {
+    // A plain Stop must never advance the queue; only stop-and-send arms that.
+    stopAndSendChatIdsRef.current.delete(chatId)
     chatRunCancellationRef.current.stop(chatId)
   }
 
   /**
-   * The honest alternative to live steering for providers that cannot take a
-   * mid-turn instruction: end the turn, then run the queued message. The head
-   * is approved first so the stop this user just asked for does not pause the
-   * queue behind its own cancelled predecessor.
+   * The honest analogue of Push now on providers that cannot be steered: end
+   * the running turn and run the queued head immediately. The turn's
+   * in-progress work is discarded, so this records the same explicit approval
+   * as "Run next message anyway" before stopping — the stopped predecessor is
+   * never retried, and only the head advances.
    */
-  const handleStopAndRunQueued = (chatId: string) => {
-    if (!promptQueuesRef.current[chatId]?.length) return
-    updatePromptQueues(approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString()))
-    setChatErrors((current) => ({ ...current, [chatId]: null }))
-    runQueuedAfterStopRef.current = new Set(runQueuedAfterStopRef.current).add(chatId)
+  const handleStopAndSendNow = (chatId: string) => {
+    const entry = promptQueuesRef.current[chatId]?.[0]
+    const activeRun = inFlightRunsRef.current[chatId]
+    if (!entry || !activeRun) return
+    if (!queuedPromptCanStopAndSendNow(entry, activeRun, {
+      liveSteerAvailable: activeRun.liveSteerReady === true && activeRun.provider === 'codex',
+    })) {
+      updateChatError(chatId, 'This queued message can no longer be matched to the running turn. It remains safely queued.')
+      return
+    }
+
+    const nextQueues = approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString())
+    updatePromptQueues(nextQueues)
+    const nextErrors = updateChatError(chatId, null)
+    commitWorkspace({ promptQueues: nextQueues, chatErrors: nextErrors })
+    stopAndSendChatIdsRef.current.add(chatId)
     chatRunCancellationRef.current.stop(chatId)
   }
 
@@ -2823,7 +2840,11 @@ function App() {
       })
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (runTarget.kind === 'local') void refreshProviders(false)
-      if (queueMayAdvance) queueMicrotask(() => void drainPromptQueue(chatId))
+      // Consume the arm unconditionally so it can never outlive its own run.
+      const stopAndSendArmed = stopAndSendChatIdsRef.current.delete(chatId)
+      if (queueMayAdvanceAfterRun({ completedSuccessfully: queueMayAdvance, stopAndSendArmed })) {
+        queueMicrotask(() => void drainPromptQueue(chatId))
+      }
     }
   }
 
@@ -2953,19 +2974,6 @@ function App() {
   }
   drainPromptQueueRef.current = drainPromptQueue
 
-  // A stop resolves asynchronously; drainPromptQueue refuses while the run is
-  // still registered, so the queued head runs when the registry clears.
-  useEffect(() => {
-    const pending = runQueuedAfterStopRef.current
-    if (pending.size === 0) return
-    const settled = [...pending].filter((chatId) => !sendingChatIds.has(chatId))
-    if (settled.length === 0) return
-    const remaining = new Set(pending)
-    for (const chatId of settled) remaining.delete(chatId)
-    runQueuedAfterStopRef.current = remaining
-    for (const chatId of settled) queueMicrotask(() => drainPromptQueueRef.current(chatId))
-  }, [sendingChatIds])
-
   const recoverDetachedRun = useCallback(async (chatId: string, initialRun: PersistedInFlightRun) => {
     if (!initialRun.jobId || recoveringChatIdsRef.current.has(chatId)) return
     if (!chatRunRegistryRef.current.begin(chatId)) return
@@ -3067,7 +3075,10 @@ function App() {
       }
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (initialRun.executionTarget === 'local') void refreshProviders(false)
-      if (queueMayAdvance) queueMicrotask(() => void drainPromptQueueRef.current(chatId))
+      const stopAndSendArmed = stopAndSendChatIdsRef.current.delete(chatId)
+      if (queueMayAdvanceAfterRun({ completedSuccessfully: queueMayAdvance, stopAndSendArmed })) {
+        queueMicrotask(() => void drainPromptQueueRef.current(chatId))
+      }
     }
   }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
 
@@ -3383,6 +3394,15 @@ function App() {
                     && entry.preferences.projectPath === activeRun.projectPath,
                   )
                 })()}
+                canStopAndSendNow={(() => {
+                  const activeRun = inFlightRuns[chat.id]
+                  return Boolean(
+                    sendingChatIds.has(chat.id)
+                    && queuedPromptCanStopAndSendNow(promptQueues[chat.id]?.[0], activeRun, {
+                      liveSteerAvailable: activeRun?.liveSteerReady === true && activeRun.provider === 'codex',
+                    }),
+                  )
+                })()}
                 liveDeliverySupported={(() => {
                   const activeRun = inFlightRuns[chat.id]
                   // With no active run there is no provider limit to report; keep the plain copy.
@@ -3415,7 +3435,7 @@ function App() {
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
                 onPushQueuedNow={() => void handlePushQueuedNow(chat.id)}
-                onStopAndRunQueued={() => handleStopAndRunQueued(chat.id)}
+                onStopAndSendNow={() => handleStopAndSendNow(chat.id)}
                 onProviderMenu={() => {
                   setModelMenuChatId(null)
                   setProviderMenuChatId((current) => current === chat.id ? null : chat.id)
@@ -3502,6 +3522,7 @@ function ConversationPane({
   sending,
   liveSteering,
   canPushQueuedNow,
+  canStopAndSendNow,
   liveDeliverySupported,
   activeRunProviderName,
   pushingQueued,
@@ -3522,7 +3543,7 @@ function ConversationPane({
   onStop,
   onResumeQueue,
   onPushQueuedNow,
-  onStopAndRunQueued,
+  onStopAndSendNow,
   onProviderMenu,
   onModelMenu,
   onProviderAuto,
@@ -3555,6 +3576,7 @@ function ConversationPane({
   sending: boolean
   liveSteering: boolean
   canPushQueuedNow: boolean
+  canStopAndSendNow: boolean
   liveDeliverySupported: boolean
   activeRunProviderName: string | null
   pushingQueued: boolean
@@ -3575,7 +3597,7 @@ function ConversationPane({
   onStop: () => void
   onResumeQueue: () => void
   onPushQueuedNow: () => void
-  onStopAndRunQueued: () => void
+  onStopAndSendNow: () => void
   onProviderMenu: () => void
   onModelMenu: () => void
   onProviderAuto: () => void
@@ -3611,14 +3633,21 @@ function ConversationPane({
   const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length, {
     liveDeliverySupported,
     activeProviderName: activeRunProviderName,
+    stopAndSendAvailable: canStopAndSendNow,
   })
   // Live delivery is Codex-only; every other provider gets the honest
-  // stop-then-run path rather than a silently missing control.
-  const canStopAndRunQueued = queuedPromptCanStopAndRun({
-    sending,
-    queuedCount: queuedPrompts.length,
-    canPushNow: canPushQueuedNow,
-  })
+  // stop-then-run path rather than a silently missing control. Stopping a turn
+  // discards its in-progress work, so the destructive action is deliberately
+  // two-step and disarms itself rather than waiting silently.
+  const [stopAndSendArmed, setStopAndSendArmed] = useState(false)
+  useEffect(() => {
+    if (!canStopAndSendNow && stopAndSendArmed) setStopAndSendArmed(false)
+  }, [canStopAndSendNow, stopAndSendArmed])
+  useEffect(() => {
+    if (!stopAndSendArmed) return
+    const timer = window.setTimeout(() => setStopAndSendArmed(false), 6000)
+    return () => window.clearTimeout(timer)
+  }, [stopAndSendArmed])
   const composerQueueState = promptQueueComposerState({
     sending,
     liveSteering,
@@ -3867,7 +3896,21 @@ function ConversationPane({
               <History size={13} />
               <span className="prompt-queue-status__copy"><strong>{queueStatus.headline}</strong><span>{queueStatus.detail}</span></span>
               {canPushQueuedNow && <button type="button" className="prompt-queue-status__push" onClick={onPushQueuedNow} disabled={pushingQueued} title="Deliver the first queued message to the active Codex turn now">{pushingQueued ? 'Pushing…' : 'Push now'}</button>}
-              {canStopAndRunQueued && <button type="button" className="prompt-queue-status__push" onClick={onStopAndRunQueued} title={`Stop ${provider.name}'s current turn and run the first queued message now. Work in progress on the current turn is discarded.`}>Stop &amp; send now</button>}
+              {canStopAndSendNow && (
+                <button
+                  type="button"
+                  className={`prompt-queue-status__stop-send${stopAndSendArmed ? ' prompt-queue-status__stop-send--armed' : ''}`}
+                  onClick={() => {
+                    if (!stopAndSendArmed) {
+                      setStopAndSendArmed(true)
+                      return
+                    }
+                    setStopAndSendArmed(false)
+                    onStopAndSendNow()
+                  }}
+                  title={`${activeRunProviderName ?? provider.name} cannot take a new instruction mid-turn. This stops the current turn, discarding its in-progress work, and runs the queued message immediately. The stopped turn is not retried.`}
+                >{stopAndSendArmed ? 'Confirm stop & send' : 'Stop & send now'}</button>
+              )}
               {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
             </div>
           )}
