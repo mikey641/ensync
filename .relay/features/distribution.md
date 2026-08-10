@@ -67,6 +67,22 @@ Stable and beta use separate feed files at the same production origin. Deploying
 
 Conversation, preference, workspace, and Host-journal formats remain backward-readable across an update. Every format change requires migration and recovery tests before beta. A release is not promoted while a prior supported build cannot open the migrated state or while rollback would strand the user's locally stored data.
 
+## Release lifecycle
+
+Active product development stays separate from public distribution. Preparing this lifecycle does not authorize creating remotes, adding credentials, tagging, signing, publishing, or deploying.
+
+1. Development builds are local test artifacts. Every packaged build carries its exact semantic version, source commit, dirty-worktree flag, build time, and `dev` channel identity so a report can identify the bytes under test. Unsigned development builds continue to fail closed for native updates.
+2. Beta is an explicit opt-in update channel with its own HTTPS manifest. Prerelease tags may update only the beta feed and must never replace the stable site download or stable update feed.
+3. Stable is the default channel. A stable tag may update only the stable feed after both native builds, signatures, notarization, checksums, and attestations pass. Stable releases never contain prerelease versions.
+4. Each channel retains prior verified manifest metadata and release artifacts. Rollback changes only that channel's manifest pointer to an already-published, still-verifiable installer; it does not rebuild artifacts, mutate user data, or silently install anything.
+5. Fixes move through one repeatable loop: identify the exact build, reproduce, add a regression test where possible, fix, run full verification, publish to beta after credentials are intentionally activated, confirm the installed beta, then promote through a separately verified stable release.
+
+The source repository is intended to remain private. Public DMG/EXE/ZIP assets live in a separately configured public GitHub releases repository, accessed by a dedicated least-privilege release credential. A source-repository tag identifies the source revision; release manifests and native attestations record that revision without exposing source contents. The workflow must verify the configured binary repository is public before it creates a release.
+
+Stable and beta use separate feed files at the same production origin. Deploying one channel must preserve the other channel's last verified feed. Existing stable clients remain compatible with the additive manifest fields. The updater checks that a feed's declared channel matches the user's selected channel, rejects prerelease versions on stable, and clears any downloaded candidate when the channel changes.
+
+Conversation, preference, workspace, and Host-journal formats remain backward-readable across an update. Every format change requires migration and recovery tests before beta. A release is not promoted while a prior supported build cannot open the migrated state or while rollback would strand the user's locally stored data.
+
 Vercel SSO deployment protection is disabled for the public product site. Site validation is `cd site && npm test`; deployment is `npx vercel --cwd site --prod --yes` after review. Vercel's local `.vercel` and `.env.local` state is ignored and must never be committed.
 
 The public privacy policy at `/privacy/` covers account identifiers, encrypted workspace sync, server- and device-hosted execution, selected AI providers and infrastructure processors, security, retention, user controls, deletion requests, and international processing. The public privacy and support contact is `mikey641@gmail.com`; changing that address requires reviewing the policy and both public pages together. Site validation fails if the policy reverts to a non-legal architecture disclaimer or loses its required disclosures/contact.

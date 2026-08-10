@@ -419,23 +419,14 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    // Notifications tagged with another thread's ID (for example, child
-    // threads Codex spawns for subagents) must never touch this session's
-    // turn identity, transcript, usage, or event stream.
-    if (typeof params?.threadId === 'string' && params.threadId !== this.#threadId) return
+    if (
+      this.#threadId
+      && typeof params?.threadId === 'string'
+      && params.threadId !== this.#threadId
+    ) return
 
     if (message.method === 'turn/started' && params?.turn?.id) {
-      if (this.#turnId && this.#turnId !== params.turn.id) {
-        this.#fail(new CodexLiveTurnError(
-          'invalid_cli_output',
-          'Codex app-server activated a different turn than the one Ensync started.',
-          502,
-          false,
-        ))
-        return
-      }
-      this.#turnId = params.turn.id
-      this.#activatedTurnId = params.turn.id
+      if (!this.#turnId) this.#turnId = params.turn.id
       this.#turnStarted = true
       this.#resolveReadyIfActive()
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
