@@ -117,18 +117,6 @@ Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${worksp
 ${prompt}`
 }
 
-function conflictResolutionPrompt({ branch, baselineSha, conflictFiles }) {
-  return `[ENSYNC HOST CONFLICT RESOLUTION]
-Ensync merged baseline commit ${baselineSha} into this conversation's protected branch ${branch} so the finished work can land, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
-1. Inspect the conflicts with \`git status\` and \`git diff\`.
-2. Edit each conflicted file so the baseline changes and this branch's changes are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible; prefer the baseline's intent for changes this conversation did not make.
-3. Stage each resolved file with \`git add\`.
-4. Conclude the merge with \`git commit --no-verify --no-edit\`.
-Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
-Conflicted files:
-${conflictFiles.map((file) => `- ${file}`).join('\n')}`
-}
-
 function timeoutMessage(providerName, timeoutReason) {
   if (timeoutReason === 'inactivity') {
     return `${providerName} produced no CLI output or lifecycle progress before Ensync Host's inactivity limit and was stopped. Partial work may exist; review the project before retrying.`
@@ -756,8 +744,6 @@ export class ChatRunService {
   #hardTimeoutMs
   #codexLiveTurns
   #projectIsolation
-  #autoLand
-  #gitExecutable
   #activeRuns = 0
 
   constructor(options = {}) {
@@ -769,8 +755,6 @@ export class ChatRunService {
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
     this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
     this.#projectIsolation = options.projectIsolation ?? null
-    this.#autoLand = options.autoLand !== false
-    this.#gitExecutable = options.gitExecutable
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -1022,140 +1006,8 @@ export class ChatRunService {
     }
     } finally {
       combinedSignal.dispose()
-      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
-        let agentWorkSaved = true
-        try {
-          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
-            outcome: runOutcome,
-            provider: request.provider,
-            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
-          })
-          if (workCommit.committed) {
-            options.onEvent?.({
-              type: 'notice',
-              code: 'agent_work_committed',
-              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
-              at: new Date().toISOString(),
-            })
-          }
-        } catch (commitError) {
-          agentWorkSaved = false
-          options.onEvent?.({
-            type: 'notice',
-            code: 'agent_work_commit_failed',
-            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
-            at: new Date().toISOString(),
-          })
-        }
-        try {
-          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
-          if (sharedCheck.available && sharedCheck.changed) {
-            const message = sharedCheck.destructive
-              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
-              : sharedCheck.landed
-                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
-                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
-            options.onEvent?.({
-              type: 'notice',
-              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
-              message,
-              at: new Date().toISOString(),
-            })
-          }
-        } catch {
-          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
-        }
-        if (runOutcome === 'succeeded' && this.#autoLand && agentWorkSaved && !options.signal?.aborted) {
-          await this.#autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options)
-        }
-      }
       await workspaceLease?.release()
     }
-  }
-
-  /**
-   * Automatic landing runs only for verified successful local runs whose work
-   * committed cleanly; failed, cancelled, timed-out, and SSH runs keep their
-   * branches unlanded for explicit review. Any failure here is reported as a
-   * notice and never changes the finished run's outcome.
-   */
-  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options) {
-    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal)
-    try {
-      await autoLandWorkspace(workspace, {
-        allowedRoots: this.#allowedRoots,
-        gitExecutable: this.#gitExecutable,
-        signal: landSignal.signal,
-        onNotice: (code, message) => options.onEvent?.({
-          type: 'notice',
-          code,
-          message,
-          at: new Date().toISOString(),
-        }),
-        runConflictAgent: (details) => this.#runConflictResolutionAgent(provider, request, workspace, containment, details, {
-          onEvent: options.onEvent,
-          signal: landSignal.signal,
-        }),
-      })
-    } catch (error) {
-      options.onEvent?.({
-        type: 'notice',
-        code: 'auto_land_failed',
-        message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
-        at: new Date().toISOString(),
-      })
-    } finally {
-      landSignal.dispose()
-    }
-  }
-
-  /**
-   * Runs the same provider CLI as a fresh, sessionless turn inside the
-   * protected worktree to resolve an in-progress baseline merge. The run is
-   * verified the same way a normal run is: process exit, cancellation,
-   * timeout, and a parseable completed provider result.
-   */
-  async #runConflictResolutionAgent(provider, request, workspace, containment, details, runtime) {
-    const prompt = conflictResolutionPrompt(details)
-    const subRequest = {
-      provider: request.provider,
-      prompt,
-      model: request.model ?? null,
-      effort: request.effort ?? null,
-    }
-    const args = argumentsFor(subRequest, [], containment)
-    const forwarder = outputForwarder(runtime.onEvent, request.provider)
-    this.#activeRuns += 1
-    let processResult
-    try {
-      processResult = await this.#processRunner(provider.executable, args, {
-        cwd: workspace.repositoryPath,
-        env: subscriptionEnvironment(this.#environment),
-        input: prompt,
-        inactivityTimeoutMs: Math.min(this.#inactivityTimeoutMs, this.#hardTimeoutMs),
-        hardTimeoutMs: this.#hardTimeoutMs,
-        maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
-        onStdout: forwarder.stdout,
-        onStderr: forwarder.stderr,
-        signal: runtime.signal,
-      })
-    } finally {
-      this.#activeRuns -= 1
-      forwarder.flush()
-      this.#statusService.invalidate?.()
-    }
-    if (processResult.aborted || runtime.signal?.aborted) {
-      throw new ChatRunError('run_cancelled', 'The conflict-resolution agent run was cancelled.', 499)
-    }
-    if (processResult.timedOut) {
-      throw new ChatRunError('run_timed_out', timeoutMessage(provider.name, processResult.timeoutReason), 504)
-    }
-    if (processResult.error || processResult.exitCode !== 0) {
-      const output = processResult.stderr || processResult.stdout
-      const reason = output ? ` ${redactTerminalText(output.slice(0, 300)).text}` : ''
-      throw new ChatRunError('conflict_resolution_failed', `${describeProcessExit(provider.name, processResult)}.${reason}`, 502)
-    }
-    parseResult(request.provider, processResult.stdout)
   }
 
   hasRunningRuns() {

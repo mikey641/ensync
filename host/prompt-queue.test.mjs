@@ -13,7 +13,6 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
-  queuedPromptCanSteerActiveTurn,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
