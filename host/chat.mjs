@@ -191,6 +191,10 @@ function providerNoteFromEvent(provider, event) {
   return text || null
 }
 
+function createProviderNoteReader(provider) {
+  return (event) => providerNoteFromEvent(provider, event)
+}
+
 function outputForwarder(onEvent, provider) {
   if (typeof onEvent !== 'function') {
     return { stdout() {}, stderr() {}, flush() {} }
