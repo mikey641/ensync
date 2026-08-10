@@ -279,6 +279,10 @@ function redactedRunEvent(event) {
         options: question.options.map((option) => ({
           label: redactTerminalText(option.label).text,
           description: option.description === null ? null : redactTerminalText(option.description).text,
+          // The outcome value is not provider prose: it is an enum member the
+          // Host itself matched against its own allow-list, and it is what the
+          // answer names, so redacting it would break the approval.
+          value: option.value ?? null,
         })),
       })),
     }
@@ -1066,8 +1070,9 @@ export class ChatRunService {
         // autonomy level is the whole enforcement surface, and the runner verifies
         // the CLI echoed that level back before it sends the prompt.
         const result = await this.#droidExecRuns.run({
-          // The retained job ID is what lets a `droid.ask_user` questionnaire
-          // be answered from the renderer instead of declined.
+          // The retained job ID is what lets a `droid.ask_user` questionnaire or
+          // a `droid.request_permission` reach the renderer instead of being
+          // declined: it is the address the reply comes back to.
           id: typeof options.liveTurnId === 'string' && options.liveTurnId ? options.liveTurnId : null,
           executable: provider.executable,
           projectPath: executionProjectPath,

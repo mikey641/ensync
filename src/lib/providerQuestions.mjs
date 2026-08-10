@@ -10,6 +10,19 @@
  * the wire shapes these helpers consume and produce.
  */
 
+/**
+ * An approval, not a question: the provider only accepts one of the outcomes it
+ * offered, so there is nothing to type and nothing to reword.
+ */
+export function isPermissionQuestion(question) {
+  return question?.kind === 'permission'
+}
+
+/** True when the run is blocked on a permission decision rather than a questionnaire. */
+export function isPermissionRequest(pending) {
+  return (pending?.questions ?? []).some(isPermissionQuestion)
+}
+
 /** Empty selection for one pending question: nothing chosen, nothing typed. */
 export function initialQuestionSelection(pending) {
   const selection = {}
@@ -44,8 +57,11 @@ export function setQuestionText(selection, question, text) {
  */
 export function questionAnswerText(selection, question) {
   const entry = entryFor(selection, question.index)
-  const typed = typeof entry.text === 'string' ? entry.text.trim() : ''
   const chosen = entry.options.join(', ')
+  // A permission answer is the chosen outcome and nothing else: free words
+  // cannot be turned into an approval the provider would accept.
+  if (isPermissionQuestion(question)) return chosen
+  const typed = typeof entry.text === 'string' ? entry.text.trim() : ''
   return [chosen, typed].filter(Boolean).join(' — ')
 }
 
@@ -60,10 +76,17 @@ export function questionAnswerPayload(pending, selection) {
   if (!questionAnswersReady(pending, selection)) return null
   return {
     questionId: pending.questionId,
-    answers: pending.questions.map((question) => ({
-      index: question.index,
-      answer: questionAnswerText(selection, question),
-    })),
+    answers: pending.questions.map((question) => {
+      const answer = questionAnswerText(selection, question)
+      // An approval also names the provider's own outcome value, so the Host
+      // never has to infer an enum member from a label.
+      const chosen = isPermissionQuestion(question)
+        ? question.options.find((option) => option.label === answer)
+        : null
+      return chosen
+        ? { index: question.index, answer, value: chosen.value }
+        : { index: question.index, answer }
+    }),
   }
 }
 

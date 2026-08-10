@@ -67,6 +67,8 @@ export type ProviderUsage = {
   checkedAt: string
   details: Array<{ label: string; value: string }>
   reason: string
+  /** True when this refresh's probe failed and the Host kept the previous verified reading. */
+  stale?: boolean
 }
 
 export type CliModel = {
@@ -312,11 +314,15 @@ export type ChatRunResponse = {
 export type ProviderQuestionOption = {
   label: string
   description: string | null
+  /** The provider's own outcome for a permission choice; null for a questionnaire. */
+  value: string | null
 }
 
 export type ProviderQuestion = {
   /** Provider-assigned position; an answer names this and never re-sends question text. */
   index: number
+  /** `permission` is an approval of a tool call: one of the offered outcomes, never typed words. */
+  kind: 'question' | 'permission'
   header: string
   question: string
   multiSelect: boolean
@@ -346,7 +352,7 @@ export type ChatExecutionEvent =
       provider: ChatProviderId
       questionId: string
       cancelled: boolean
-      answers: { index: number; question: string; answer: string }[]
+      answers: { index: number; question: string; answer: string; value?: string }[]
       at: string
       sequence?: number
     }
@@ -451,7 +457,7 @@ export type ChatQuestionAnswerResponse = {
   answer: {
     id: string
     cancelled: boolean
-    answers: { index: number; question: string; answer: string }[]
+    answers: { index: number; question: string; answer: string; value?: string }[]
   }
 }
 
@@ -649,8 +655,12 @@ export class EnsyncHostClient {
     })
   }
 
-  /** Delivers the person's answer to the live provider run that is waiting on it. */
-  answerChatQuestion(jobId: string, answer: { questionId: string; answers?: { index: number; answer: string }[]; cancelled?: boolean }) {
+  /**
+   * Delivers the person's answer to the live provider run that is waiting on it.
+   * A permission answer carries `value`, the provider's own outcome, because a
+   * label alone is not something the provider would accept.
+   */
+  answerChatQuestion(jobId: string, answer: { questionId: string; answers?: { index: number; answer: string; value?: string }[]; cancelled?: boolean }) {
     return this.request<ChatQuestionAnswerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/answer`, {
       method: 'POST',
       body: JSON.stringify(answer),

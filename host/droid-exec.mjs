@@ -3,8 +3,11 @@ import { createInterface } from 'node:readline'
 import { extname } from 'node:path'
 import { commandInvocation } from './command.mjs'
 import {
+  DROID_DECLINE_OUTCOME,
   ProviderQuestionRegistry,
   droidAskUserResult,
+  droidPermissionResult,
+  normalizeDroidPermission,
   normalizeDroidQuestions,
   providerQuestionEvent,
   providerQuestionResolvedEvent,
@@ -237,7 +240,7 @@ class DroidExecSession {
   #hardTimer = null
   #inactivityTimer = null
   #forceKillTimer = null
-  #inactivityHeld = false
+  #inactivityHolds = 0
   #questions
   #resolveDone
   #rejectDone
@@ -464,7 +467,7 @@ class DroidExecSession {
       : 'run a tool'
     return new DroidExecError(
       'provider_permission_declined',
-      `Factory Droid asked for approval to ${refused}, which its pinned "${DROID_AUTONOMY_LEVEL}" autonomy level cannot approve on its own, and ended the turn without a closing message once Ensync declined. Ensync Host never approves interactive permission requests: it commits this conversation's branch itself and performs every push and land, so work Droid finished before the request is saved on the branch. Review the branch before retrying.`,
+      `Factory Droid asked for approval to ${refused}, which its pinned "${DROID_AUTONOMY_LEVEL}" autonomy level cannot approve on its own, and ended the turn without a closing message once Ensync declined. Ensync could not put that request to a person on this run and never approves one on its own; the Host commits this conversation's branch itself and performs every push and land, so work Droid finished before the request is saved on the branch. Review the branch before retrying.`,
       409,
       false,
     )
@@ -563,6 +566,10 @@ class DroidExecSession {
         this.#askUser(message)
         return
       }
+      if (message.method === 'droid.request_permission' && this.#questions) {
+        this.#requestPermission(message)
+        return
+      }
       this.#declineServerRequest(message)
       return
     }
@@ -574,10 +581,8 @@ class DroidExecSession {
 
   /**
    * Puts a `droid.ask_user` questionnaire to the person and answers Droid with
-   * their words. The turn is genuinely blocked meanwhile, so the inactivity
-   * watchdog is held: waiting on a human is not a hung CLI. If the run ends
-   * first, the registry resolves the question as cancelled and Droid still gets
-   * the documented `{ cancelled: true, answers: [] }` outcome.
+   * their words. A questionnaire Ensync cannot read is declined with the
+   * documented `{ cancelled: true, answers: [] }` outcome.
    */
   #askUser(message) {
     const normalized = normalizeDroidQuestions(message.params)
@@ -585,11 +590,40 @@ class DroidExecSession {
       this.#declineServerRequest(message)
       return
     }
+    this.#putToPerson(message, normalized.questions, normalized.toolCallId, droidAskUserResult)
+  }
+
+  /**
+   * Puts a `droid.request_permission` to the person as one decision and answers
+   * Droid with the outcome they chose. Droid returns a single `selectedOption`
+   * for the whole request, so the person approves or declines the request as a
+   * whole rather than one tool use at a time.
+   *
+   * A request Ensync cannot describe, or one offering no outcome Ensync is
+   * willing to present, falls back to the decline that was the only behaviour
+   * before this surface existed. Nothing is ever approved without a person.
+   */
+  #requestPermission(message) {
+    const normalized = normalizeDroidPermission(message.params)
+    if (!normalized) {
+      this.#declineServerRequest(message, 'Ensync had no approval it could safely offer for it')
+      return
+    }
+    this.#putToPerson(message, [normalized.question], normalized.toolCallId, droidPermissionResult)
+  }
+
+  /**
+   * The shared block-on-a-person path. The turn is genuinely blocked meanwhile,
+   * so the inactivity watchdog is held: waiting on a human is not a hung CLI. If
+   * the run ends first, the registry resolves the question as cancelled and
+   * Droid still gets the documented declined outcome.
+   */
+  #putToPerson(message, asked, toolCallId, toResult) {
     const askedAt = new Date().toISOString()
     const { id, questions, answered } = this.#questions.ask({
       provider: 'droid',
-      questions: normalized.questions,
-      toolCallId: normalized.toolCallId,
+      questions: asked,
+      toolCallId,
       askedAt,
     })
     this.onEvent?.(providerQuestionEvent('droid', id, questions, askedAt))
@@ -597,7 +631,7 @@ class DroidExecSession {
     void answered.then((resolution) => {
       this.#releaseInactivity()
       this.onEvent?.(providerQuestionResolvedEvent('droid', id, resolution, new Date().toISOString()))
-      this.#respond(message.id, droidAskUserResult(resolution))
+      this.#respond(message.id, toResult(resolution))
     })
   }
 
@@ -610,14 +644,15 @@ class DroidExecSession {
     return this.#questions ? this.#questions.list() : []
   }
 
-  // Droid asks the client to resolve tool permissions and questionnaires.
-  // Ensync cannot review permissions safely yet, so it declines them with the
-  // provider's own documented outcome values rather than leaving the turn
-  // hanging. Questionnaires reach the person instead; see #askUser.
-  #declineServerRequest(message) {
+  // Droid asks the client to resolve tool permissions and questionnaires. Both
+  // reach the person on a run bound to a retained job (see #requestPermission
+  // and #askUser). Everything else — a run with nobody to ask, an unreadable
+  // request, or a method Ensync does not implement — is declined with the
+  // provider's own documented outcome values rather than left hanging.
+  #declineServerRequest(message, because = 'Ensync declined it safely') {
     let refusedTools = []
     if (message.method === 'droid.request_permission') {
-      this.#respond(message.id, { selectedOption: 'cancel' })
+      this.#respond(message.id, { selectedOption: DROID_DECLINE_OUTCOME })
       // Recorded because Droid stops the turn silently after a decline, and
       // that silence is otherwise indistinguishable from a provider fault.
       refusedTools = droidPermissionToolNames(message.params)
@@ -636,10 +671,16 @@ class DroidExecSession {
         error: { code: -32601, message: 'Unsupported Ensync client request.' },
       })}\n`)
     }
+    const named = refusedTools.length > 0 ? `: ${refusedTools.join(', ')}` : ''
+    // Only a permission decline ends the turn silently, so only it carries the
+    // warning that Droid may stop here without a closing message.
+    const silence = message.method === 'droid.request_permission'
+      ? ' Droid ends the turn after a declined permission, so it may stop here without a closing message.'
+      : ''
     this.onEvent?.({
       type: 'notice',
       code: 'provider_request_declined',
-      message: `Factory Droid requested interactive input (${message.method}${refusedTools.length > 0 ? `: ${refusedTools.join(', ')}` : ''}); Ensync declined it safely. Droid ends the turn after a declined permission, so it may stop here without a closing message.`,
+      message: `Factory Droid requested interactive input (${message.method}${named}); ${because}.${silence}`,
       at: new Date().toISOString(),
     })
   }
@@ -705,19 +746,22 @@ class DroidExecSession {
     this.#pendingAssistantText = []
   }
 
+  // Counted, not a flag: two things can be waiting on the person at once, and
+  // the first one answered must not restart the watchdog while the second is
+  // still open.
   #holdInactivity() {
-    this.#inactivityHeld = true
+    this.#inactivityHolds += 1
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.#inactivityTimer = null
   }
 
   #releaseInactivity() {
-    this.#inactivityHeld = false
+    this.#inactivityHolds = Math.max(0, this.#inactivityHolds - 1)
     this.#touch()
   }
 
   #touch() {
-    if (this.#settled || this.#inactivityHeld || !Number.isFinite(this.inactivityTimeoutMs)) return
+    if (this.#settled || this.#inactivityHolds > 0 || !Number.isFinite(this.inactivityTimeoutMs)) return
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.#inactivityTimer = setTimeout(() => this.#fail(new DroidExecError(
       'run_timed_out',

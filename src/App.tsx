@@ -447,6 +447,8 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     resetLabel: status.usage.resetLabel ?? null,
     resetWindow: status.usage.resetWindow ?? null,
     usageReason: status.usage.reason,
+    usageStale: status.usage.stale === true,
+    usageCheckedAt: status.usage.checkedAt ?? null,
     canConnect: status.canConnect,
     canUpdate: status.canUpdate,
     updateStrategy: status.updateStrategy,
@@ -804,8 +806,6 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
-  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
-  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -1185,16 +1185,6 @@ function App() {
     updateChatError(chatId, null)
     await ensyncHost.answerChatQuestion(activeRun.jobId, answer)
   }, [updateChatError])
-
-  const updateLiveSteeringReadiness = useCallback((chatId: string, ready: boolean) => {
-    const current = liveSteeringReadyChatIdsRef.current
-    if (current.has(chatId) === ready) return
-    const next = new Set(current)
-    if (ready) next.add(chatId)
-    else next.delete(chatId)
-    liveSteeringReadyChatIdsRef.current = next
-    setLiveSteeringReadyChatIds(next)
-  }, [])
 
   const toggleConversationSidebar = useCallback(() => {
     const mobileLayout = window.matchMedia('(max-width: 780px)').matches
@@ -2464,7 +2454,6 @@ function App() {
       return
     }
     if (!chatRunRegistryRef.current.begin(chatId)) return
-    updateLiveSteeringReadiness(chatId, false)
     activeTurnIdsRef.current[chatId] = turnId
     if (queuedPrompt) {
       updatePromptQueues(removePromptFromQueue(promptQueuesRef.current, chatId, queuedPrompt.id))
@@ -2661,11 +2650,6 @@ function App() {
             effort: requestedEffort,
           }
       return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
-        if (event.type === 'started' && targetProviderId === 'codex' && runTarget.kind === 'local') {
-          updateLiveSteeringReadiness(chatId, true)
-        } else if (event.type === 'finished') {
-          updateLiveSteeringReadiness(chatId, false)
-        }
         if (event.type === 'started') providerProcessStarted = true
         if (event.type !== 'finished' && typeof event.sequence === 'number') {
           updateInFlightRun(chatId, (current) => current ? {
@@ -2812,7 +2796,6 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
-      updateLiveSteeringReadiness(chatId, false)
       delete activeTurnIdsRef.current[chatId]
       const nextRuns = updateInFlightRun(chatId, () => undefined)
       commitWorkspace({
@@ -2957,7 +2940,6 @@ function App() {
   const recoverDetachedRun = useCallback(async (chatId: string, initialRun: PersistedInFlightRun) => {
     if (!initialRun.jobId || recoveringChatIdsRef.current.has(chatId)) return
     if (!chatRunRegistryRef.current.begin(chatId)) return
-    updateLiveSteeringReadiness(chatId, false)
     recoveringChatIdsRef.current.add(chatId)
     activeTurnIdsRef.current[chatId] = initialRun.turnId
     const runController = chatRunCancellationRef.current.begin(chatId)
@@ -2988,13 +2970,6 @@ function App() {
           } : current)
           const cursor = inFlightRunsRef.current[chatId]?.lastEventSequence ?? 0
           const result = await ensyncHost.attachChatJob(initialRun.jobId, (event) => {
-            if (event.type === 'started'
-              && initialRun.provider === 'codex'
-              && initialRun.executionTarget === 'local') {
-              updateLiveSteeringReadiness(chatId, true)
-            } else if (event.type === 'finished') {
-              updateLiveSteeringReadiness(chatId, false)
-            }
             if (event.type !== 'finished' && typeof event.sequence === 'number') {
               updateInFlightRun(chatId, (current) => current ? {
                 ...current,
@@ -3049,7 +3024,6 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
-      updateLiveSteeringReadiness(chatId, false)
       recoveringChatIdsRef.current.delete(chatId)
       delete activeTurnIdsRef.current[chatId]
       if (terminal) {
@@ -3066,7 +3040,7 @@ function App() {
       if (initialRun.executionTarget === 'local') void refreshProviders(false)
       if (queueMayAdvance) queueMicrotask(() => void drainPromptQueueRef.current(chatId))
     }
-  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun, updateLiveSteeringReadiness])
+  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3357,7 +3331,7 @@ function App() {
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
-                  && liveSteeringReadyChatIds.has(chat.id)
+                  && Boolean(inFlightRuns[chat.id]?.liveSteerReady)
                   && executionTarget.kind === 'local'
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
@@ -3369,7 +3343,7 @@ function App() {
                   const entry = promptQueues[chat.id]?.[0]
                   return Boolean(
                     sendingChatIds.has(chat.id)
-                    && liveSteeringReadyChatIds.has(chat.id)
+                    && activeRun?.liveSteerReady === true
                     && activeRun?.provider === 'codex'
                     && activeRun.executionTarget === 'local'
                     && activeRun.jobId
@@ -4609,6 +4583,15 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
     return 'No verified non-consuming quota probe.'
   }
 
+  // A retained percentage stays on the card so a lost probe race cannot blank it,
+  // but it is never presented as this refresh's reading.
+  const staleUsageNote = (provider: Provider) => {
+    const measuredAt = provider.usageCheckedAt ? new Date(provider.usageCheckedAt) : null
+    return measuredAt && !Number.isNaN(measuredAt.getTime())
+      ? `Last verified ${measuredAt.toLocaleTimeString()}; this check returned no quota data.`
+      : 'Last verified earlier; this check returned no quota data.'
+  }
+
   const refresh = async () => {
     setRefreshing(true)
     try {
@@ -4638,7 +4621,9 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
                 <div className={`plan-meter ${provider.usage === null ? 'plan-meter--unknown' : ''}`}>{provider.usage !== null && <i style={{ width: `${provider.usage}%`, background: provider.color }} />}</div>
                 {provider.usageDetails.length > 0 && <dl className="usage-details">{provider.usageDetails.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
                 <div className="plan-card__foot"><span>{providerResetText(provider) ? <strong>{providerResetText(provider)}</strong> : 'Reset not reported'}</span><span>{provider.routeKind === 'local' ? (provider.installed ? 'Local runtime' : 'Not installed') : provider.connected ? 'Authenticated' : provider.installed ? provider.authenticationState === 'not_authenticated' ? 'Not authenticated' : 'Login not checked' : 'Not installed'}</span></div>
-                {provider.usage === null && <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>}
+                {provider.usage === null
+                  ? <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>
+                  : provider.usageStale && <p className="usage-unavailable-reason" title={provider.usageReason}>{staleUsageNote(provider)}</p>}
               </div>
             ))}
           </div>
