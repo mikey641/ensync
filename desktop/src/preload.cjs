@@ -14,7 +14,6 @@ const UPDATE_SET_CHANNEL_CHANNEL = 'ensync:updates:set-channel'
 const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
 const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
 const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
-const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
 const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 const WORKSPACE_RECOVERY_CHANNEL = 'ensync:workspace:get-recovery-candidate'
 const CODEX_CONVERSATION_IMPORT_CHANNEL = 'ensync:workspace:get-codex-conversation-import'
@@ -30,7 +29,6 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getWorkspaceIdentity: () => ipcRenderer.invoke(WORKSPACE_IDENTITY_CHANNEL),
   focusWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_FOCUS_CHANNEL, request),
   openProjectWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PROJECT_CHANNEL, request),
-  openPath: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PATH_CHANNEL, request),
   onWorkspaceProjectFocus: (callback) => {
     if (typeof callback !== 'function') return () => {}
     const listener = (_event, request) => callback(request)

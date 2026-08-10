@@ -921,7 +921,9 @@ kbd {
 .agent-update-reminder {
   position: fixed;
   z-index: 140;
-  right: 22px;
+  /* Stays centred on the window instead of growing away from the right edge. */
+  inset-inline: 0;
+  margin-inline: auto;
   bottom: 190px;
   width: min(610px, calc(100vw - 44px));
   min-height: 76px;

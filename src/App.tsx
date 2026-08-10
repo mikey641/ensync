@@ -3789,7 +3789,7 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} projectPath={projectPath} />
+                      <MessageContent content={note.text} />
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>

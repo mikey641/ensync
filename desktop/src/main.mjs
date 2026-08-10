@@ -243,13 +243,6 @@ function registerNativeBridge() {
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
     openProjectWindow,
   }))
-  ipcMain.handle(WORKSPACE_OPEN_PATH_CHANNEL, async (event, request) => {
-    if (!isAuthorizedNativeEvent(event)) return { ok: false, error: 'unauthorized' }
-    const target = resolveOpenablePath(request)
-    if (!target) return { ok: false, error: 'not-found' }
-    const failure = await shell.openPath(target)
-    return failure ? { ok: false, error: failure } : { ok: true }
-  })
   ipcMain.handle(WORKSPACE_RECOVERY_CHANNEL, createWorkspaceRecoveryHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -338,7 +331,6 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
-  ipcMain.removeHandler(WORKSPACE_OPEN_PATH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
   ipcMain.removeHandler(LOCAL_FILE_OPEN_CHANNEL)

@@ -28,7 +28,6 @@ interface Window {
       projectId: string
       projectPath: string
     }) => Promise<boolean>
-    openPath?: (request: { path: string; projectPath?: string | null }) => Promise<{ ok: boolean; error?: string }>
     onWorkspaceProjectFocus?: (callback: (request: {
       projectId: string
       projectPath: string
