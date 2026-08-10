@@ -117,7 +117,14 @@ function fakeDroidExec(options = {}) {
             factoryApiVersion: '1.0.0',
             id: 'server-1',
             method: 'droid.request_permission',
-            params: { toolUses: [], options: [] },
+            params: {
+              toolUses: [{
+                toolUse: { type: 'tool_use', id: 'tool-1', name: 'Execute', input: { command: 'git push' } },
+                confirmationType: 'exec',
+                details: {},
+              }],
+              options: [{ label: 'Cancel', value: 'cancel' }],
+            },
           })
         }
         for (const event of options.script ?? [assistantMessage('pong'), turnCompleted()]) {
@@ -312,11 +319,36 @@ test('a non-quota terminal reason is reported as a failed run that is not replay
 test('an interactive permission request is declined with the provider\u2019s own cancel outcome', async () => {
   const server = fakeDroidExec({ askPermission: true })
   const events = []
-  await runDroid(server, {}, { onEvent: (event) => events.push(event) })
+  const result = await runDroid(server, {}, { onEvent: (event) => events.push(event) })
 
   const declined = server.requests.find((request) => request.type === 'response' && request.id === 'server-1')
   assert.equal(declined.result.selectedOption, 'cancel')
-  assert.ok(events.some((event) => event.code === 'provider_request_declined'))
+  // A decline names the refused tool, and never fails a turn that still answered.
+  const notice = events.find((event) => event.code === 'provider_request_declined')
+  assert.match(notice.message, /Execute/)
+  assert.equal(result.response, 'pong')
+})
+
+test('a turn left empty by a declined permission is reported as the declined permission', async () => {
+  // Verified against the droid CLI: a cancelled tool batch breaks the agent
+  // loop, and in stream-jsonrpc mode Droid appends no closing message yet still
+  // reports `agent_turn_completed` with reason `completed`.
+  const server = fakeDroidExec({
+    askPermission: true,
+    script: [
+      assistantMessage('The diff is correct. Let me commit and push.', 'assistant-1'),
+      { type: 'tool_call', toolUse: { id: 'tool-1', name: 'Execute' } },
+      turnCompleted(),
+    ],
+  })
+  await assert.rejects(runDroid(server), (error) => {
+    assert.equal(error.code, 'provider_permission_declined')
+    assert.equal(error.status, 409)
+    assert.equal(error.safeToRetry, false)
+    assert.match(error.message, /Execute/)
+    assert.match(error.message, new RegExp(DROID_AUTONOMY_LEVEL))
+    return true
+  })
 })
 
 test('a user stop cancels the run without claiming a provider failure', async () => {

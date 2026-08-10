@@ -540,6 +540,9 @@ function runNeedsReconciliation(error: unknown) {
     'ssh_timed_out',
     'invalid_cli_output',
     'empty_cli_response',
+    // Droid ends its turn as soon as Ensync declines a permission request, so
+    // committed work usually exists on the branch and needs reconciling.
+    'provider_permission_declined',
     'cli_failed',
     'execution_stream_disconnected',
     'chat_job_stream_disconnected',

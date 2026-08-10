@@ -117,6 +117,20 @@ Claude Code's permission channel stays deny-all for everything except
 `AskUserQuestion` (see below), and Codex has no client-side approval request at
 all, so this surface is Droid-only.
 
+A decline is never silent for the person. Verified against the droid CLI: a
+cancelled tool batch breaks the agent loop immediately, and the exec-mode
+"insufficient permission" message that would explain it is appended only in
+non-interactive CLI mode — `--input-format stream-jsonrpc` runs as
+`interactive-cli`/`json-rpc`, so Droid emits no closing assistant message and
+still reports `agent_turn_completed` with reason `completed`. A turn that ends
+that way therefore fails as `provider_permission_declined` (409), naming the
+tools from `params.toolUses[].toolUse.name`, instead of the unexplained
+`empty_cli_response`; the renderer treats that code as
+`reconciliation_required` because Ensync Host has already committed the work
+finished before the request. The pinned `medium` autonomy level refuses
+`git push`, which is why the workspace-isolation prompt tells every provider
+that the Host pushes and lands for it.
+
 ## Claude Code
 
 The `AskUserQuestion` tool only reaches a client in `--print` mode when the Host
