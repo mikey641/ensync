@@ -128,6 +128,7 @@ import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
+import { providerResetText } from './lib/providerResetText.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
   conversationWorkspaceKey,
@@ -151,6 +152,7 @@ import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerReadyAfterEvent,
   liveSteerWasSafelyRejected,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
@@ -158,6 +160,7 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  promptSubmissionMode,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -763,6 +766,7 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [viewedFilePath, setViewedFilePath] = useState<string | null>(null)
   const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
   const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
   const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
@@ -799,6 +803,8 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
+  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -3307,6 +3313,8 @@ function App() {
                 isActive={isActive}
                 onOpenFile={setViewedFilePath}
                 provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
+                autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
+                runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
                 providers={executionProviders}
                 projectPath={executionTarget.kind === 'ssh' ? `${executionTarget.connection.username}@${executionTarget.connection.hostname}:${executionTarget.connection.projectPath}` : activeProject.path}
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
@@ -3632,6 +3640,17 @@ function ConversationPane({
     }
   }, [modelMenuOpen, onModelMenu, onProviderMenu, providerMenuOpen])
 
+  const automaticMode = chat.providerMode !== 'fixed'
+  const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
+  // The face of this control is a fact, so say which fact it is and, for Auto,
+  // where the next turn would go when that differs from what is shown.
+  const providerPickerTitle = runningProviderPinned
+    ? `${provider.name} is running this turn.`
+    : automaticMode
+      ? provider.id === autoProvider.id
+        ? `Auto would run the next turn on ${provider.name}.`
+        : `${provider.name} ran this conversation's last turn. Auto would run the next turn on ${autoProvider.name}.`
+      : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
   const modelPickerLabel = selectedSize?.label ?? 'Provider default'

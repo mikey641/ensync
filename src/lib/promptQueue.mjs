@@ -229,6 +229,19 @@ export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurn
   ]
 }
 
+/** Apply only Host-authored live-turn readiness transitions. */
+export function liveSteerReadyAfterEvent(current, event) {
+  if (event?.type === 'notice' && event.code === 'live_steer_ready') return true
+  if (event?.type === 'notice' && event.code === 'live_steer_closed') return false
+  if (event?.type === 'finished') return false
+  return current === true
+}
+
+/** Active-run submissions enter FIFO; live delivery is only an explicit Push now action. */
+export function promptSubmissionMode({ hasActiveRun }) {
+  return hasActiveRun ? 'queue' : 'run'
+}
+
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
   return {

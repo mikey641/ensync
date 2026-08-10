@@ -58,6 +58,11 @@ export function promptQueueStatusPresentation(
 export function transcriptMessagesBeforeTurn(messages: Message[], turnId: string): Message[]
 export function insertAgentReplyBeforeLaterQueued(messages: Message[], turnId: string, reply: Message): Message[]
 export function promoteQueuedMessageToActiveTurn(messages: Message[], messageId: string, activeTurnId: string): Message[]
+export function liveSteerReadyAfterEvent(
+  current: boolean | undefined,
+  event: { type?: string; code?: string | null } | undefined,
+): boolean
+export function promptSubmissionMode(input: { hasActiveRun: boolean }): 'queue' | 'run'
 export function promptQueueComposerState(input: { sending: boolean; draft: string; canRun: boolean; liveSteering?: boolean }): {
   sendEnabled: boolean
   sendLabel: string
