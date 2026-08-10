@@ -186,7 +186,3 @@ function renderBlocks(blocks: MarkdownBlock[], projectPath: string | null | unde
     }
   })
 }
-
-export function MessageContent({ content, projectPath }: { content: string; projectPath?: string | null }) {
-  return <div className="message-content">{renderBlocks(parseMarkdown(content), projectPath)}</div>
-}

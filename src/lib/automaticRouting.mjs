@@ -77,3 +77,38 @@ export function conversationProviderId({ chat, activeRun, providers, priorityOrd
   if (typeof lastVerified === 'string' && available.has(lastVerified)) return lastVerified
   return selectAutomaticProvider(providers ?? [], priorityOrder)?.id ?? null
 }
+
+/**
+ * Refresh providers (if a refresh callback is provided), then select the next
+ * automatic fallback provider that has not been attempted yet.
+ */
+export async function selectAutomaticFallbackProviderAfterRefresh(
+  providers,
+  priorityOrder,
+  attemptedProviderIds = [],
+  refreshProviders,
+) {
+  let current = providers
+  if (typeof refreshProviders === 'function') {
+    const refreshed = await refreshProviders()
+    if (refreshed) current = refreshed
+  }
+  return selectAutomaticProvider(current, priorityOrder, attemptedProviderIds)
+}
+
+/**
+ * Refresh providers (if a refresh callback is provided), then select the
+ * automatic provider for a new conversation.
+ */
+export async function selectAutomaticProviderAfterRefresh(
+  providers,
+  priorityOrder,
+  refreshProviders,
+) {
+  let current = providers
+  if (typeof refreshProviders === 'function') {
+    const refreshed = await refreshProviders()
+    if (refreshed) current = refreshed
+  }
+  return selectAutomaticProvider(current, priorityOrder)
+}

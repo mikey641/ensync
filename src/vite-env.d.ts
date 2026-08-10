@@ -56,5 +56,6 @@ interface Window {
         voiceId: string | null
       }
     } | null>
+    openLocalFile?: (path: string) => void
   }
 }

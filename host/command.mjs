@@ -386,7 +386,7 @@ export function runProcess(executable, args, options = {}) {
         timedOut,
         timeoutReason,
         aborted,
-        outputTruncated,
+        outputTruncated: Boolean(stdoutCapture.truncation || stderrCapture.truncation),
       })
     }
 

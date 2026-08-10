@@ -21,3 +21,16 @@ export function conversationProviderId(input: {
   providers: Provider[]
   priorityOrder: readonly ProviderId[]
 }): ProviderId | null
+
+export function selectAutomaticFallbackProviderAfterRefresh(
+  providers: Provider[],
+  priorityOrder: readonly ProviderId[],
+  attemptedProviderIds?: readonly ProviderId[],
+  refreshProviders?: () => Promise<Provider[] | null>,
+): Promise<Provider | null>
+
+export function selectAutomaticProviderAfterRefresh(
+  providers: Provider[],
+  priorityOrder: readonly ProviderId[],
+  refreshProviders?: () => Promise<Provider[] | null>,
+): Promise<Provider | null>

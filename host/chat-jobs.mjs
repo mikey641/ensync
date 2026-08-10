@@ -59,7 +59,7 @@ function outputRecoveryNotice(result) {
   return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
 }
 
-function publicJob(job) {
+function publicJob(job, canSteerLocal) {
   return {
     id: job.id,
     kind: job.kind,
@@ -69,7 +69,7 @@ function publicJob(job) {
     firstSequence: job.events[0]?.sequence ?? job.sequence + 1,
     lastSequence: job.sequence,
     providerProcessStarted: job.providerProcessStarted,
-    steerable,
+    steerable: typeof canSteerLocal === 'function' && canSteerLocal(job.id) === true,
   }
 }
 

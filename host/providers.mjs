@@ -170,9 +170,7 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: [],
     updateArgs: ['update'],
-    authentication: unsupportedAuthentication(
-      'Factory Droid uses browser account sign-in during first-run onboarding, but does not document a non-interactive subscription authentication-status command.',
-    ),
+    authentication: probeDroidAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
       'Factory Droid exposes plan windows, Droid Core, and Extra Usage only in its interactive /limits view. Verified against droid 0.191.1: no exec or daemon JSON-RPC method returns billing limits, and sending /limits through droid exec consumes a real model turn instead of opening the panel.',
