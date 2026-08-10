@@ -104,6 +104,31 @@ export function queuedPromptCanSteerActiveTurn(entry, activeRun) {
     && entry?.preferences?.projectPath === activeRun.projectPath
 }
 
+/**
+ * Stop-and-send is the only mid-turn delivery available on providers that
+ * cannot be steered. It is destructive — the running turn is cancelled, not
+ * corrected — so it is offered only where live steering is genuinely
+ * unavailable, and only for a head that still binds to the running turn's
+ * exact snapshot. It is never a synonym for Push now.
+ */
+export function queuedPromptCanStopAndSendNow(entry, activeRun, { liveSteerAvailable = false } = {}) {
+  if (liveSteerAvailable) return false
+  if (!nonEmptyString(activeRun?.turnId)) return false
+  return entry?.predecessorTurnId === activeRun.turnId
+    && entry?.preferences?.executionTargetKey === activeRun.executionTarget
+    && entry?.preferences?.projectId === activeRun.projectId
+    && entry?.preferences?.projectPath === activeRun.projectPath
+}
+
+/**
+ * Automatic advancement stays success-only. The one exception is a stop-and-send
+ * the user explicitly confirmed, which already recorded its own approval for the
+ * head prompt; a plain Stop must still pause the tail.
+ */
+export function queueMayAdvanceAfterRun({ completedSuccessfully = false, stopAndSendArmed = false } = {}) {
+  return completedSuccessfully === true || stopAndSendArmed === true
+}
+
 /** This rejection proves the live instruction was not delivered and may remain FIFO. */
 export function liveSteerWasSafelyRejected(error) {
   return error?.code === 'live_steer_unavailable' && error?.safeToRetry === true
@@ -163,9 +188,14 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
       const subject = typeof delivery.activeProviderName === 'string' && delivery.activeProviderName.trim()
         ? delivery.activeProviderName.trim()
         : 'This provider'
+      // Name the destructive escape only when it is actually on screen, and
+      // state what it costs so it can never read as a second Push now.
+      const stopAndSend = delivery.stopAndSendAvailable === true
+        ? ' Stop & send now ends the current turn instead, discarding its in-progress work.'
+        : ''
       return {
         headline,
-        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.`,
+        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.${stopAndSend}`,
         actionLabel: null,
       }
     }

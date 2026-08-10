@@ -1767,6 +1767,24 @@ kbd {
   background: color-mix(in srgb, var(--accent) 20%, var(--surface-subtle));
 }
 
+/* Stop & send discards the running turn's work, so it never borrows the
+ * accent treatment that marks Push now as the safe mid-turn delivery. */
+.prompt-queue-status .prompt-queue-status__stop-send {
+  border-color: color-mix(in srgb, #d7a66a 52%, var(--border-default));
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.prompt-queue-status .prompt-queue-status__stop-send:hover:not(:disabled) {
+  background: color-mix(in srgb, #d7a66a 14%, var(--surface-subtle));
+}
+
+.prompt-queue-status .prompt-queue-status__stop-send--armed {
+  border-color: #d7a66a;
+  background: color-mix(in srgb, #d7a66a 22%, var(--surface-subtle));
+  font-weight: 650;
+}
+
 /* Product-site visual alignment. Keep behavior in the feature components and
  * let this final layer express the shared public-site design language. */
 .titlebar {
