@@ -50,7 +50,7 @@ async function run() {
   // List all ensync/chat-* branches
   const branches = (await git(['branch', '--list', 'ensync/chat-*']))
     .split('\n')
-    .map((line) => line.replace(/^\*?\s+/, '').trim())
+    .map((line) => line.replace(/^[\*\+]\s+/, '').trim())
     .filter(Boolean)
 
   let merged = 0

@@ -9,6 +9,6 @@ echo "--- $(date) ---" >> "$LOG"
 for repo in /Users/mikeyhasson/dev/relay /Users/mikeyhasson/dev/nadlan-desk; do
   if [ -d "$repo/.git" ]; then
     cd "$repo" || continue
-    node scripts/auto-land.mjs >> "$LOG" 2>&1
+    /opt/homebrew/opt/node@22/bin/node scripts/auto-land.mjs >> "$LOG" 2>&1
   fi
 done
