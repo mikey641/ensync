@@ -2160,26 +2160,6 @@ kbd {
   position: relative;
 }
 
-.file-drop-overlay {
-  position: absolute;
-  z-index: 85;
-  inset: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  pointer-events: none;
-  border: 2px dashed color-mix(in srgb, var(--accent-ui) 70%, var(--border-default));
-  border-radius: var(--radius-card);
-  background: color-mix(in srgb, var(--surface-main) 88%, var(--accent-ui));
-  color: var(--text-primary);
-  box-shadow: var(--shadow-elevated);
-}
-
-.file-drop-overlay svg {
-  color: var(--accent-ui);
-}
-
 .composer__attachments {
   padding: 12px 14px 0;
   display: flex;

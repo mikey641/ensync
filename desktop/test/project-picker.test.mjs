@@ -5,6 +5,10 @@ import test from 'node:test'
 import vm from 'node:vm'
 
 import {
+  CHAT_FILE_DIALOG_OPTIONS,
+  CHAT_FILE_PICKER_CHANNEL,
+  CHAT_FILE_PICKER_LIMIT,
+  createChatFilePickerHandler,
   createProjectFolderPickerHandler,
   PROJECT_FOLDER_DIALOG_OPTIONS,
   PROJECT_FOLDER_PICKER_CHANNEL,
@@ -84,6 +88,104 @@ test('project folder picker reports dialog failures without exposing exception d
   assert.equal(observed.length, 1)
 })
 
+test('chat file picker opens a multi-file system dialog and returns deduplicated attachments', async () => {
+  const event = { sender: { id: 8 } }
+  let receivedEvent
+  let receivedOptions
+  const handler = createChatFilePickerHandler({
+    isAuthorized: (candidate) => candidate === event,
+    openDialog: async (candidate, options) => {
+      receivedEvent = candidate
+      receivedOptions = options
+      return {
+        canceled: false,
+        filePaths: ['/Users/example/screenshot.png', '/Users/example/notes.txt', '/Users/example/screenshot.png'],
+      }
+    },
+  })
+
+  assert.deepEqual(await handler(event), {
+    status: 'selected',
+    files: [
+      { name: 'screenshot.png', path: '/Users/example/screenshot.png' },
+      { name: 'notes.txt', path: '/Users/example/notes.txt' },
+    ],
+  })
+  assert.equal(receivedEvent, event)
+  assert.deepEqual(receivedOptions, CHAT_FILE_DIALOG_OPTIONS)
+  assert.deepEqual(receivedOptions.properties, ['openFile', 'multiSelections'])
+})
+
+test('chat file picker derives file names from Windows paths', async () => {
+  const handler = createChatFilePickerHandler({
+    isAuthorized: () => true,
+    openDialog: async () => ({
+      canceled: false,
+      filePaths: ['C:\\Users\\example\\notes.txt'],
+    }),
+  })
+
+  assert.deepEqual(await handler({}), {
+    status: 'selected',
+    files: [{ name: 'notes.txt', path: 'C:\\Users\\example\\notes.txt' }],
+  })
+})
+
+test('chat file picker cancellation returns no attachment paths', async () => {
+  const handler = createChatFilePickerHandler({
+    isAuthorized: () => true,
+    openDialog: async () => ({ canceled: true, filePaths: [] }),
+  })
+
+  assert.deepEqual(await handler({}), { status: 'cancelled' })
+})
+
+test('chat file picker rejects unauthorized renderers without opening a dialog', async () => {
+  let opened = false
+  const handler = createChatFilePickerHandler({
+    isAuthorized: () => false,
+    openDialog: async () => {
+      opened = true
+      return { canceled: false, filePaths: ['/tmp/notes.txt'] }
+    },
+  })
+
+  const result = await handler({})
+  assert.equal(result.status, 'error')
+  assert.match(result.message, /only to the Ensync app window/)
+  assert.equal(opened, false)
+})
+
+test('chat file picker enforces the Host attachment limit before returning paths', async () => {
+  const handler = createChatFilePickerHandler({
+    isAuthorized: () => true,
+    openDialog: async () => ({
+      canceled: false,
+      filePaths: Array.from({ length: CHAT_FILE_PICKER_LIMIT + 1 }, (_, index) => `/tmp/file-${index}.txt`),
+    }),
+  })
+
+  assert.deepEqual(await handler({}), {
+    status: 'error',
+    message: `Choose no more than ${CHAT_FILE_PICKER_LIMIT} files at a time.`,
+  })
+})
+
+test('chat file picker reports malformed dialog paths without exposing exception details', async () => {
+  const observed = []
+  const handler = createChatFilePickerHandler({
+    isAuthorized: () => true,
+    openDialog: async () => ({ canceled: false, filePaths: ['relative.txt'] }),
+    onError: (error) => observed.push(error),
+  })
+
+  assert.deepEqual(await handler({}), {
+    status: 'error',
+    message: 'Ensync could not open the system file chooser.',
+  })
+  assert.equal(observed.length, 1)
+})
+
 test('sandboxed preload exposes only fixed native bridge invocations', async () => {
   const preloadPath = resolve(import.meta.dirname, '../src/preload.cjs')
   const source = await readFile(preloadPath, 'utf8')
@@ -137,6 +239,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'setCompletionNotificationPreferences',
     'onRecentProjectsChanged',
     'chooseProjectFolder',
+    'chooseChatFiles',
     'getUpdateState',
     'checkForUpdates',
     'downloadUpdate',
@@ -167,6 +270,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.getDevicePreferences()
   await exposed[0].value.setCompletionNotificationPreferences({ mode: 'speech', speechText: 'Done.', voiceId: null })
   await exposed[0].value.chooseProjectFolder()
+  await exposed[0].value.chooseChatFiles()
   assert.deepEqual(invocations, [
     ['ensync:workspace:get-identity'],
     ['ensync:workspace:focus', {
@@ -186,6 +290,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     ['ensync:device-preferences:get'],
     ['ensync:device-preferences:set-completion-notifications', { mode: 'speech', speechText: 'Done.', voiceId: null }],
     [PROJECT_FOLDER_PICKER_CHANNEL],
+    [CHAT_FILE_PICKER_CHANNEL],
   ])
   await exposed[0].value.getUpdateState()
   await exposed[0].value.checkForUpdates()
@@ -193,7 +298,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
   await exposed[0].value.setUpdateChannel('beta')
-  assert.deepEqual(invocations.slice(11), [
+  assert.deepEqual(invocations.slice(12), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],

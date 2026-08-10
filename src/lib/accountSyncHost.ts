@@ -6,37 +6,6 @@ export type AccountSyncStatus = {
   lastSyncedAt: string | null
   encryption: 'aes-256-gcm'
   credentialStorage: 'host_memory_only'
-  brokerDevice: {
-    id: string
-    role: 'host' | 'client'
-    label: string
-    registeredAt: string
-    lastSeenAt: string | null
-  } | null
-}
-
-export type SyncBrokerHostStatus = {
-  state: 'disconnected' | 'connected' | 'degraded'
-  running: boolean
-  host: AccountSyncStatus['brokerDevice']
-  lastPollAt: string | null
-  lastError: { code: string; message: string; status: number; safeToRetry: boolean } | null
-  activeJobs: number
-  transport: 'outbound_https_poll'
-  encryption: 'aes-256-gcm'
-}
-
-export type SyncBrokerPairing = {
-  pairing: {
-    id: string
-    host: NonNullable<AccountSyncStatus['brokerDevice']>
-    client: AccountSyncStatus['brokerDevice']
-    createdAt: string
-    expiresAt: string
-    claimedAt: string | null
-    revokedAt: string | null
-  }
-  code: string
 }
 
 export type AccountWorkspacePull = {
@@ -125,38 +94,7 @@ export class AccountSyncHostClient {
       body: JSON.stringify({ state, baseRevision }),
     })
   }
-
-  brokerStatus() {
-    return this.request<SyncBrokerHostStatus>('/broker/status')
-  }
-
-  connectBrokerHost(deviceId: string, label: string) {
-    return this.request<SyncBrokerHostStatus>('/broker/connect', {
-      method: 'POST',
-      body: JSON.stringify({ deviceId, label }),
-    })
-  }
-
-  createBrokerPairing() {
-    return this.request<SyncBrokerPairing>('/broker/pairing', {
-      method: 'POST',
-      body: '{}',
-    })
-  }
-
-  pollBrokerHost() {
-    return this.request<SyncBrokerHostStatus>('/broker/poll', {
-      method: 'POST',
-      body: '{}',
-    })
-  }
-
-  disconnectBrokerHost(revoke = false) {
-    return this.request<SyncBrokerHostStatus>('/broker/disconnect', {
-      method: 'POST',
-      body: JSON.stringify({ revoke }),
-    })
-  }
 }
 
 export const accountSyncHost = new AccountSyncHostClient()
+

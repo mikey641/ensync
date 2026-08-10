@@ -13,6 +13,8 @@ import {
   HostProcessController,
 } from './runtime.mjs'
 import {
+  CHAT_FILE_PICKER_CHANNEL,
+  createChatFilePickerHandler,
   createProjectFolderPickerHandler,
   PROJECT_FOLDER_PICKER_CHANNEL,
 } from './project-picker.mjs'
@@ -238,6 +240,16 @@ function registerNativeBridge() {
     },
     onError: (error) => console.error('[ensync-folder-picker]', error),
   }))
+  ipcMain.handle(CHAT_FILE_PICKER_CHANNEL, createChatFilePickerHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    openDialog: async (event, options) => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      return parent
+        ? dialog.showOpenDialog(parent, options)
+        : dialog.showOpenDialog(options)
+    },
+    onError: (error) => console.error('[ensync-file-picker]', error),
+  }))
   const recentProjectHandlers = createRecentProjectHandlers({
     isAuthorized: isAuthorizedNativeEvent,
     store: recentProjectStore,
@@ -284,6 +296,7 @@ function unregisterNativeBridge() {
   if (nativeWindows.size > 0) return false
   workspaceIdentityIpc.dispose()
   if (!nativeBridgeRegistered) return true
+  ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)

@@ -83,8 +83,6 @@ import { supportRepairHost } from './lib/supportRepairHost'
 import {
   accountSyncHost,
   type AccountSyncStatus,
-  type SyncBrokerHostStatus,
-  type SyncBrokerPairing,
 } from './lib/accountSyncHost'
 import {
   mergeAccountWorkspace,
@@ -210,7 +208,7 @@ import {
 } from './lib/nativeRecentProjects.mjs'
 import {
   appendFileAttachments,
-  fileDragContainsFiles,
+  droppedFileAttachments,
   messageTextWithAttachments,
   normalizeFileAttachments,
   resolveDroppedAttachments,
@@ -221,7 +219,6 @@ const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
-const SYNC_BROKER_HOST_ID_KEY = 'ensync-sync-broker-host-id-v1'
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   configured: false,
   authenticated: false,
@@ -230,18 +227,6 @@ const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   lastSyncedAt: null,
   encryption: 'aes-256-gcm',
   credentialStorage: 'host_memory_only',
-  brokerDevice: null,
-}
-
-function syncBrokerHostDeviceId() {
-  const existing = window.localStorage.getItem(SYNC_BROKER_HOST_ID_KEY)
-  if (existing && /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(existing)) return existing
-  const random = typeof crypto.randomUUID === 'function'
-    ? crypto.randomUUID()
-    : `${Date.now()}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`
-  const deviceId = `host_${random}`
-  window.localStorage.setItem(SYNC_BROKER_HOST_ID_KEY, deviceId)
-  return deviceId
 }
 
 function useWorkingElapsedLabel(running: boolean, startedAt: string | null) {
@@ -822,6 +807,7 @@ function App() {
   )
   const [chatSessions, setChatSessions] = useState<Record<string, { provider: ChatProviderId; sessionId: string; targetKey?: string; syncedMessageCount?: number }>>(hydrated?.chatSessions ?? {})
   const [chatErrors, setChatErrors] = useState<Record<string, string | null>>(hydrated?.chatErrors ?? {})
+  const [attachmentErrors, setAttachmentErrors] = useState<Record<string, string | null>>({})
   const [chatExecutionEvents, setChatExecutionEvents] = useState<Record<string, ChatExecutionEvent[]>>(hydrated?.chatExecutionEvents ?? {})
   const [executionPanelOpenByChat, setExecutionPanelOpenByChat] = useState<Record<string, boolean>>(() =>
     normalizeExecutionPanelOpenByChat(hydrated?.executionPanelOpenByChat),
@@ -2189,6 +2175,98 @@ function App() {
     chatRunCancellationRef.current.stop(chatId)
   }
 
+  const handleFilesDrop = (chatId: string, files: FileList) => {
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'These files are on this computer. Switch the chat to the local Ensync Host before attaching them.',
+      }))
+      return
+    }
+
+    const dropped = droppedFileAttachments(files, window.ensyncDesktop?.getPathForFile)
+    if (dropped.attachments.length > 0) {
+      const nextAttachments = {
+        ...draftAttachmentsRef.current,
+        [chatId]: appendFileAttachments(draftAttachmentsRef.current[chatId], dropped.attachments),
+      }
+      draftAttachmentsRef.current = nextAttachments
+      setDraftAttachments(nextAttachments)
+      setAttachmentErrors((current) => ({ ...current, [chatId]: null }))
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLTextAreaElement>(`[data-chat-composer="${chatId}"]`)?.focus()
+      })
+    }
+    if (dropped.unavailable.length > 0) {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: window.ensyncDesktop?.getPathForFile
+          ? `Ensync could not read the local path for ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
+          : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.',
+      }))
+    }
+  }
+
+  const handleFilesChoose = async (chatId: string) => {
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'These files are on this computer. Switch the chat to the local Ensync Host before attaching them.',
+      }))
+      return
+    }
+
+    const chooseChatFiles = window.ensyncDesktop?.chooseChatFiles
+    if (typeof chooseChatFiles !== 'function') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'File selection is available in the native Ensync app; browsers do not expose safe local file paths.',
+      }))
+      return
+    }
+
+    try {
+      const result = await chooseChatFiles()
+      if (result?.status === 'cancelled') return
+      if (result?.status === 'error') {
+        setAttachmentErrors((current) => ({ ...current, [chatId]: result.message }))
+        return
+      }
+      const selected = normalizeFileAttachments(result?.status === 'selected' ? result.files : [])
+      if (!chatsRef.current.some((chat) => chat.id === chatId)) return
+      if (executionTargetRef.current.kind !== 'local') {
+        setAttachmentErrors((current) => ({
+          ...current,
+          [chatId]: 'The execution target changed while files were being selected. Switch back to the local Ensync Host to attach them.',
+        }))
+        return
+      }
+      if (selected.length === 0) {
+        setAttachmentErrors((current) => ({
+          ...current,
+          [chatId]: 'Ensync could not read the files returned by the system file chooser.',
+        }))
+        return
+      }
+
+      const nextAttachments = {
+        ...draftAttachmentsRef.current,
+        [chatId]: appendFileAttachments(draftAttachmentsRef.current[chatId], selected),
+      }
+      draftAttachmentsRef.current = nextAttachments
+      setDraftAttachments(nextAttachments)
+      setAttachmentErrors((current) => ({ ...current, [chatId]: null }))
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLTextAreaElement>(`[data-chat-composer="${chatId}"]`)?.focus()
+      })
+    } catch {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'Ensync could not open the system file chooser.',
+      }))
+    }
+  }
+
   const updatePromptQueues = (next: PromptQueues) => {
     promptQueuesRef.current = next
     setPromptQueues(next)
@@ -3263,6 +3341,11 @@ function App() {
             onTabReorder={reorderTab}
             onCloseTab={closeTab}
             onNewTab={createChat}
+            onFilesDrop={handleFilesDrop}
+            fileDropAvailable={executionTarget.kind === 'local' && typeof window.ensyncDesktop?.getPathForFile === 'function'}
+            fileDropUnavailableMessage={executionTarget.kind === 'ssh'
+              ? 'Switch to the local Ensync Host to attach files'
+              : 'Local file drops need the native Ensync app'}
             viewMode={conversationLayout}
             showTabHeaders={visibility.tabStrip}
             storageKey={splitLayoutStorageKey}
@@ -3286,7 +3369,7 @@ function App() {
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
                 draft={drafts[chat.id] ?? ''}
                 attachments={draftAttachments[chat.id] ?? []}
-                fileAttachmentsEnabled={executionTarget.kind === 'local'}
+                attachmentError={attachmentErrors[chat.id] ?? null}
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
@@ -3323,10 +3406,6 @@ function App() {
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
-                onAttachmentsAdd={(attachments) => setDraftAttachments((current) => ({
-                  ...current,
-                  [chat.id]: appendFileAttachments(current[chat.id], attachments),
-                }))}
                 onAttachmentRemove={(path) => setDraftAttachments((current) => ({
                   ...current,
                   [chat.id]: (current[chat.id] ?? []).filter((attachment) => attachment.path !== path),
@@ -3347,6 +3426,11 @@ function App() {
                 onProviderChange={(providerId) => setChatProvider(chat.id, providerId)}
                 onSizeTierChange={(sizeTier) => setChatSizeTier(chat.id, sizeTier)}
                 onConnect={() => { setProviderMenuChatId(null); setModelMenuChatId(null); setWizardOpen(true) }}
+                filePickerAvailable={executionTarget.kind === 'local' && typeof window.ensyncDesktop?.chooseChatFiles === 'function'}
+                filePickerUnavailableMessage={executionTarget.kind === 'ssh'
+                  ? 'Switch to the local Ensync Host to attach files'
+                  : 'File selection needs the native Ensync app'}
+                onFilesChoose={() => void handleFilesChoose(chat.id)}
                 onContext={() => setContextOpen(true)}
                 onAutoContextSkillChange={() => setAutoContextSkillEnabled(!autoContextSkill)}
                 onExecutionPanelOpenChange={(open) => setExecutionPanelOpenByChat((current) =>
@@ -3411,7 +3495,7 @@ function ConversationPane({
   projectContextAvailable,
   draft,
   attachments,
-  fileAttachmentsEnabled,
+  attachmentError,
   sending,
   liveSteering,
   canPushQueuedNow,
@@ -3427,7 +3511,6 @@ function ConversationPane({
   executionEvents,
   executionPanelOpen,
   onDraftChange,
-  onAttachmentsAdd,
   onAttachmentRemove,
   onSend,
   onStop,
@@ -3439,6 +3522,9 @@ function ConversationPane({
   onProviderChange,
   onSizeTierChange,
   onConnect,
+  filePickerAvailable,
+  filePickerUnavailableMessage,
+  onFilesChoose,
   onContext,
   onAutoContextSkillChange,
   onExecutionPanelOpenChange,
@@ -3457,7 +3543,7 @@ function ConversationPane({
   projectContextAvailable: boolean
   draft: string
   attachments: FileAttachment[]
-  fileAttachmentsEnabled: boolean
+  attachmentError: string | null
   sending: boolean
   liveSteering: boolean
   canPushQueuedNow: boolean
@@ -3473,7 +3559,6 @@ function ConversationPane({
   executionEvents: ChatExecutionEvent[]
   executionPanelOpen: boolean
   onDraftChange: (value: string) => void
-  onAttachmentsAdd: (attachments: FileAttachment[]) => void
   onAttachmentRemove: (path: string) => void
   onSend: () => void
   onStop: () => void
@@ -3485,6 +3570,9 @@ function ConversationPane({
   onProviderChange: (providerId: ProviderId) => void
   onSizeTierChange: (sizeTier: ModelSizeTier | null) => void
   onConnect: () => void
+  filePickerAvailable: boolean
+  filePickerUnavailableMessage: string
+  onFilesChoose: () => void
   onContext: () => void
   onAutoContextSkillChange: () => void
   onExecutionPanelOpenChange: (open: boolean) => void
@@ -3496,9 +3584,6 @@ function ConversationPane({
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const fileDragDepthRef = useRef(0)
-  const [fileDragActive, setFileDragActive] = useState(false)
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const providerMenuId = `provider-menu-${chat.id}`
   const modelMenuId = `model-menu-${chat.id}`
   const providerMenuStyle = useFloatingMenuPosition(providerMenuOpen, providerButtonRef)
@@ -3584,70 +3669,6 @@ function ConversationPane({
     }
   }, [modelMenuOpen, onModelMenu, onProviderMenu, providerMenuOpen])
 
-  const beginFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current += 1
-    setFileDragActive(true)
-  }
-
-  const continueFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = fileAttachmentsEnabled && window.ensyncDesktop?.getPathForFile
-      ? 'copy'
-      : 'none'
-  }
-
-  const leaveFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
-    if (fileDragDepthRef.current === 0) setFileDragActive(false)
-  }
-
-  const attachDroppedFiles = async (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = 0
-    setFileDragActive(false)
-    if (!fileAttachmentsEnabled) {
-      setAttachmentError('These files are on this computer. Switch the chat to the local Ensync Host before attaching them.')
-      return
-    }
-    // Snapshot synchronously: the DataTransfer list is gone once the drop
-    // handler yields, and OS-protected drops are only copyable right now.
-    const files = Array.from(event.dataTransfer.files)
-    const dropped = await resolveDroppedAttachments(files, window.ensyncDesktop?.getPathForFile, {
-      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
-      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
-    })
-    if (dropped.attachments.length > 0) {
-      onAttachmentsAdd(dropped.attachments)
-      setAttachmentError(null)
-      requestAnimationFrame(() => composerRef.current?.focus())
-    }
-    if (dropped.unavailable.length > 0) {
-      setAttachmentError(window.ensyncDesktop?.getPathForFile
-        ? `Ensync could not attach ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
-        : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.')
-    }
-  }
-  const automaticMode = chat.providerMode !== 'fixed'
-  const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
-  // The face of this control is a fact, so say which fact it is and, for Auto,
-  // where the next turn would go when that differs from what is shown.
-  const providerPickerTitle = runningProviderPinned
-    ? `${provider.name} is running this turn.`
-    : automaticMode
-      ? provider.id === autoProvider.id
-        ? `Auto would run the next turn on ${provider.name}.`
-        : `${provider.name} ran this conversation's last turn. Auto would run the next turn on ${autoProvider.name}.`
-      : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
   const modelPickerLabel = selectedSize?.label ?? 'Provider default'
@@ -3656,19 +3677,7 @@ function ConversationPane({
       ? `${provider.name} cannot run chats here, so model size is unavailable.`
       : `Choose a model size for ${provider.name}'s default model.`
   return (
-    <div
-      className={`conversation ${fileDragActive ? 'conversation--file-drag' : ''}`}
-      onDragEnter={beginFileDrag}
-      onDragOver={continueFileDrag}
-      onDragLeave={leaveFileDrag}
-      onDrop={attachDroppedFiles}
-    >
-      {fileDragActive && (
-        <div className="file-drop-overlay" aria-hidden="true">
-          <Paperclip size={24} />
-          <strong>{fileAttachmentsEnabled ? 'Drop any files to attach' : 'Local files need the local Ensync Host'}</strong>
-        </div>
-      )}
+    <div className="conversation">
       <div className="conversation-header" {...getSectionProps('conversationHeader')}>
         <div>
           <h1 dir="auto">{chat.title}</h1>
@@ -3870,7 +3879,7 @@ function ConversationPane({
           {attachmentError && <div className="composer__attachment-error" role="status"><CircleHelp size={13} />{attachmentError}</div>}
           <div className="composer__toolbar">
             <div className="composer__context-actions">
-              <button className="composer__context-button" type="button" onClick={onContext} title="Open project context" aria-label="Open project context"><Plus size={17} /></button>
+              <button className="composer__context-button" type="button" onClick={onFilesChoose} disabled={!filePickerAvailable} title={filePickerAvailable ? 'Add files' : filePickerUnavailableMessage} aria-label={filePickerAvailable ? 'Add files' : `Add files unavailable: ${filePickerUnavailableMessage}`}><Plus size={17} /></button>
               <button className="context-chip" onClick={onContext} title={projectContextAvailable ? 'Ensync Host found .relay context files' : 'No .relay context files verified by Ensync Host'}><FileText size={13} /><span className="context-chip__label">Project context</span>{projectContextAvailable ? <Check size={12} /> : <CircleHelp size={12} />}</button>
               <button className={`context-chip auto-context-chip ${autoContextSkill ? 'auto-context-chip--active' : ''}`} onClick={onAutoContextSkillChange} role="switch" aria-checked={autoContextSkill} title="Preserve complete project and conversation context when continuing or handing off between providers"><Bot size={13} /><span className="context-chip__label">Auto Context</span>{autoContextSkill ? <Check size={12} /> : null}</button>
             </div>
@@ -4107,10 +4116,6 @@ function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onR
 function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
-  const [brokerStatus, setBrokerStatus] = useState<SyncBrokerHostStatus | null>(null)
-  const [brokerPairing, setBrokerPairing] = useState<SyncBrokerPairing | null>(null)
-  const [brokerBusy, setBrokerBusy] = useState(false)
-  const [brokerError, setBrokerError] = useState<string | null>(null)
   const busy = phase === 'checking' || phase === 'syncing'
   const lastSynced = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString()
@@ -4123,73 +4128,6 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
       setPassword('')
     } catch {
       // The parent owns the durable, user-visible error state.
-    }
-  }
-
-  useEffect(() => {
-    let cancelled = false
-    if (!status.authenticated) {
-      setBrokerStatus(null)
-      setBrokerPairing(null)
-      setBrokerError(null)
-      return () => { cancelled = true }
-    }
-    const refresh = () => {
-      void accountSyncHost.brokerStatus().then((next) => {
-        if (!cancelled) setBrokerStatus(next)
-      }).catch((error: unknown) => {
-        if (!cancelled) setBrokerError(error instanceof Error ? error.message : 'Remote execution status is unavailable.')
-      })
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 5_000)
-    return () => {
-      cancelled = true
-      window.clearInterval(timer)
-    }
-  }, [status.authenticated])
-
-  const enableBroker = async () => {
-    if (brokerBusy) return
-    setBrokerBusy(true)
-    setBrokerError(null)
-    try {
-      const platform = navigator.platform?.trim()
-      setBrokerStatus(await accountSyncHost.connectBrokerHost(
-        syncBrokerHostDeviceId(),
-        platform ? `${platform} Ensync Host` : 'This computer',
-      ))
-    } catch (error) {
-      setBrokerError(error instanceof Error ? error.message : 'Remote execution could not be enabled.')
-    } finally {
-      setBrokerBusy(false)
-    }
-  }
-
-  const createPairing = async () => {
-    if (brokerBusy) return
-    setBrokerBusy(true)
-    setBrokerError(null)
-    try {
-      setBrokerPairing(await accountSyncHost.createBrokerPairing())
-    } catch (error) {
-      setBrokerError(error instanceof Error ? error.message : 'A mobile pairing code could not be created.')
-    } finally {
-      setBrokerBusy(false)
-    }
-  }
-
-  const disableBroker = async () => {
-    if (brokerBusy) return
-    setBrokerBusy(true)
-    setBrokerError(null)
-    try {
-      setBrokerStatus(await accountSyncHost.disconnectBrokerHost(true))
-      setBrokerPairing(null)
-    } catch (error) {
-      setBrokerError(error instanceof Error ? error.message : 'Remote execution could not be disabled.')
-    } finally {
-      setBrokerBusy(false)
     }
   }
 
@@ -4207,26 +4145,9 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
         <div className="account-sync-connected">
           <div className="account-sync-profile"><span><UserRound size={18} /></span><p><strong>{status.username}</strong><small>{chatCount} {chatCount === 1 ? 'conversation' : 'conversations'} · last sync {lastSynced}</small></p><span className="account-sync-encryption"><LockKeyhole size={13} /> AES-256</span></div>
           <div className="account-sync-actions">
-            <p><ShieldCheck size={14} /><span>Chats and remote job payloads are encrypted before upload. Provider credentials and decryption keys stay on your devices.</span></p>
+            <p><ShieldCheck size={14} /><span>Chats are encrypted before upload. CLI logins, provider sessions, terminal output, queued work, and local attachments stay on this computer.</span></p>
             <button type="button" className="button button--ghost" onClick={() => void onSync().catch(() => {})} disabled={busy}><RotateCw className={busy ? 'spin' : ''} size={14} /> {busy ? 'Syncing…' : 'Sync now'}</button>
             <button type="button" className="button button--ghost" onClick={() => void onLogout()} disabled={busy}><LogOut size={14} /> Sign out</button>
-          </div>
-          <div className="sync-broker-panel">
-            <div>
-              <Smartphone size={16} />
-              <span><strong>Remote agent execution</strong><small>{brokerStatus?.running ? `${brokerStatus.host?.label ?? 'This Host'} is accepting encrypted mobile jobs.` : 'Let paired iPhone and Android clients run agents on this Host.'}</small></span>
-              <i className={brokerStatus?.state === 'connected' ? 'connected' : brokerStatus?.state === 'degraded' ? 'degraded' : ''}>{brokerStatus?.state ?? 'checking'}</i>
-            </div>
-            <div className="sync-broker-panel__actions">
-              {brokerStatus?.running ? <>
-                <button type="button" className="button button--ghost" onClick={() => void createPairing()} disabled={brokerBusy}>{brokerBusy ? 'Working…' : 'Pair phone'}</button>
-                <button type="button" className="button button--ghost" onClick={() => void disableBroker()} disabled={brokerBusy}>Disable &amp; revoke</button>
-              </> : (
-                <button type="button" className="button button--primary" onClick={() => void enableBroker()} disabled={brokerBusy}>{brokerBusy ? 'Connecting…' : 'Enable remote execution'}</button>
-              )}
-            </div>
-            {brokerPairing && <div className="sync-broker-pairing" role="status"><span>Enter this one-time code in the mobile app</span><strong>{brokerPairing.code}</strong><small>Expires {new Date(brokerPairing.pairing.expiresAt).toLocaleTimeString()}</small></div>}
-            {(brokerError || brokerStatus?.lastError) && <div className="connection-error" role="alert">{brokerError ?? brokerStatus?.lastError?.message}</div>}
           </div>
           <small className="account-sync-session-note">For now, login stays only in Ensync Host memory. Restarting the Host requires signing in again; synchronized chats remain in your account.</small>
         </div>

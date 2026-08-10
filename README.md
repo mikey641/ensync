@@ -8,7 +8,6 @@ The public product site is [ensync.vercel.app](https://ensync.vercel.app). The m
 
 - Durable conversations, adjacent-or-end new-tab placement, resizable split panes, double-click maximize/restore, and hideable history and chrome.
 - Username/password account sync for encrypted cross-computer conversation history. Stable chat/message IDs merge concurrent additions; CLI credentials, provider sessions, queued or active work, terminal output, and local attachments never enter the account document.
-- End-to-end encrypted remote execution through Ensync Sync. An explicitly paired iPhone or Android client can submit, follow, stop, and steer a job while the selected outbound-connected Ensync Host re-verifies the project and runs Codex or Claude Code through the existing protected-worktree and subscription-only controls. Sync routes ciphertext and minimal delivery metadata; it does not receive plaintext prompts, project paths, results, provider credentials, or decryption keys.
 - Light, dark, and system themes with large default typography.
 - Verified local project focus with a native macOS Finder/Windows folder chooser in the desktop app, browser-safe absolute-path entry, plus Git clone/import, status, remote verification, guarded branch push, and explicitly confirmed production push.
 - Real Codex and Claude Code subscription chat runners with provider-neutral Auto selection and retry-safe quota fallback.
@@ -38,7 +37,7 @@ npm run dev
 
 This starts the Vite interface, the Node Ensync Host, and a development-only account-sync service on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results. Development sync data is stored in the ignored `.ensync-sync-data.json` file.
 
-For multiple computers or mobile clients, deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`, then set the same `ENSYNC_SYNC_SERVICE_URL` for Ensync Host. Plain HTTP is accepted only for an exact loopback address. The bundled service hashes account passwords with scrypt and stores AES-256-GCM encrypted conversation documents plus opaque encrypted broker jobs/events/commands and minimal routing metadata. Host login and broker device credentials are currently memory-only, so restarting Ensync Host requires signing in and enabling remote execution again; encrypted conversations, pairings, and retained broker state remain available.
+For two computers, deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`, then set the same `ENSYNC_SYNC_SERVICE_URL` for Ensync Host on both devices. Plain HTTP is accepted only for an exact loopback address. The bundled service hashes account passwords with scrypt and stores only AES-256-GCM encrypted conversation documents. Host login state is currently memory-only, so restarting Ensync Host requires signing in again; uploaded conversations remain available.
 
 Run the native desktop shell:
 

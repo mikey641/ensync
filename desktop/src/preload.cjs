@@ -3,6 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const PROJECT_FOLDER_PICKER_CHANNEL = 'ensync:project-folder:choose'
+const CHAT_FILE_PICKER_CHANNEL = 'ensync:chat-files:choose'
 const UPDATE_STATE_CHANNEL = 'ensync:updates:state'
 const UPDATE_GET_STATE_CHANNEL = 'ensync:updates:get-state'
 const UPDATE_CHECK_CHANNEL = 'ensync:updates:check'
@@ -51,6 +52,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
     return () => ipcRenderer.removeListener(RECENT_PROJECTS_CHANGED_CHANNEL, listener)
   },
   chooseProjectFolder: () => ipcRenderer.invoke(PROJECT_FOLDER_PICKER_CHANNEL),
+  chooseChatFiles: () => ipcRenderer.invoke(CHAT_FILE_PICKER_CHANNEL),
   getUpdateState: () => ipcRenderer.invoke(UPDATE_GET_STATE_CHANNEL),
   checkForUpdates: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),

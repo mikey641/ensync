@@ -3,6 +3,11 @@
 interface Window {
   ensyncDesktop?: {
     getPathForFile?: (file: File) => string
+    chooseChatFiles?: () => Promise<
+      | { status: 'selected'; files: Array<{ name: string; path: string }> }
+      | { status: 'cancelled' }
+      | { status: 'error'; message: string }
+    >
     getWorkspaceIdentity?: () => Promise<{
       id: string
       kind: 'canonical' | 'isolated'

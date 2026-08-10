@@ -5,9 +5,9 @@ import test from 'node:test'
 import { AccountSyncError, AccountSyncService, normalizeAccountSyncServiceUrl } from './account-sync.mjs'
 import { createEnsyncSyncServer, MemorySyncStore } from '../sync-service/server.mjs'
 
-async function fixture(context, options = {}) {
+async function fixture(context) {
   const store = new MemorySyncStore()
-  const server = createEnsyncSyncServer({ store, ...options })
+  const server = createEnsyncSyncServer({ store })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   context.after(() => server.close())
@@ -18,27 +18,6 @@ async function fixture(context, options = {}) {
     baseUrl: `http://127.0.0.1:${address.port}`,
   }
 }
-
-test('mobile origins receive narrow broker CORS permissions', async (context) => {
-  const { baseUrl } = await fixture(context)
-  const preflight = await fetch(`${baseUrl}/v1/broker/jobs`, {
-    method: 'OPTIONS',
-    headers: {
-      Origin: 'capacitor://localhost',
-      'Access-Control-Request-Method': 'POST',
-      'Access-Control-Request-Headers': 'authorization,content-type,x-ensync-device-id,x-ensync-device-token',
-    },
-  })
-  assert.equal(preflight.status, 204)
-  assert.equal(preflight.headers.get('access-control-allow-origin'), 'capacitor://localhost')
-  assert.match(preflight.headers.get('access-control-allow-headers'), /X-Ensync-Device-Token/i)
-
-  const denied = await fetch(`${baseUrl}/v1/status`, {
-    headers: { Origin: 'https://untrusted.example' },
-  })
-  assert.equal(denied.status, 403)
-  assert.equal((await denied.json()).code, 'origin_not_allowed')
-})
 
 test('account sync requires HTTPS except for an exact loopback development service', () => {
   assert.equal(normalizeAccountSyncServiceUrl('http://127.0.0.1:43122/'), 'http://127.0.0.1:43122')
@@ -112,122 +91,5 @@ test('invalid login does not reveal whether a username exists', async (context) 
     (error) => error instanceof AccountSyncError
       && error.code === 'login_failed'
       && error.message === 'The username or password is incorrect.',
-  )
-})
-
-async function pairedBrokerFixture(context) {
-  const { store, baseUrl } = await fixture(context)
-  const credentials = { username: 'remote-agents', password: 'a strong remote execution password' }
-  const host = new AccountSyncService({ baseUrl })
-  const client = new AccountSyncService({ baseUrl })
-  await host.register(credentials)
-  await client.login(credentials)
-  await host.registerBrokerDevice({
-    deviceId: 'host_device_00000001',
-    role: 'host',
-    label: 'Development Mac',
-  })
-  const pairing = await host.createBrokerPairing()
-  await client.registerBrokerDevice({
-    deviceId: 'client_device_000001',
-    role: 'client',
-    label: 'iPhone',
-  })
-  const claimed = await client.claimBrokerPairing(pairing.code)
-  return { store, host, client, claimed }
-}
-
-test('paired clients submit opaque remote jobs that only the selected Host decrypts and executes', async (context) => {
-  const { store, host, client, claimed } = await pairedBrokerFixture(context)
-  assert.equal(claimed.host.id, 'host_device_00000001')
-  assert.deepEqual((await client.listBrokerHosts()).map((item) => item.id), ['host_device_00000001'])
-
-  const submitted = await client.submitBrokerJob({
-    hostId: claimed.host.id,
-    jobId: 'job_remote_0000000001',
-    kind: 'local',
-    request: {
-      provider: 'codex',
-      projectPath: '/verified/project',
-      prompt: 'private mobile instruction',
-    },
-  })
-  assert.equal(submitted.state, 'queued')
-  const stored = JSON.stringify(store.data)
-  assert.equal(stored.includes('private mobile instruction'), false)
-  assert.equal(stored.includes('/verified/project'), false)
-
-  const [queued] = await host.pollBrokerHostJobs()
-  assert.equal(queued.id, submitted.id)
-  assert.equal(queued.kind, 'local')
-  assert.equal(queued.request.prompt, 'private mobile instruction')
-  await host.claimBrokerJob(queued)
-  await host.publishBrokerEvent(queued, {
-    type: 'started',
-    provider: 'codex',
-    at: '2026-08-08T10:00:00.000Z',
-    sequence: 1,
-  })
-  await host.publishBrokerEvent(queued, {
-    type: 'completed',
-    result: { response: 'private completed response' },
-    at: '2026-08-08T10:00:01.000Z',
-    sequence: 2,
-  })
-  assert.equal(JSON.stringify(store.data).includes('private completed response'), false)
-
-  const completed = await client.brokerJob(submitted.id)
-  assert.equal(completed.state, 'completed')
-  assert.deepEqual(completed.events.map((item) => item.event.type), ['started', 'completed'])
-  assert.equal(completed.events[1].event.result.response, 'private completed response')
-
-  const duplicate = await client.submitBrokerJob({
-    hostId: claimed.host.id,
-    jobId: 'job_remote_0000000001',
-    kind: 'local',
-    request: {
-      provider: 'codex',
-      projectPath: '/verified/project',
-      prompt: 'private mobile instruction',
-    },
-  })
-  assert.equal(duplicate.id, submitted.id)
-  assert.equal(Object.keys(store.data.accounts['remote-agents'].broker.jobs).length, 1)
-})
-
-test('paired clients send encrypted control commands with exact Host acknowledgements', async (context) => {
-  const { store, host, client, claimed } = await pairedBrokerFixture(context)
-  const submitted = await client.submitBrokerJob({
-    hostId: claimed.host.id,
-    jobId: 'job_remote_0000000002',
-    kind: 'local',
-    request: { provider: 'codex', projectPath: '/verified/project', prompt: 'Start.' },
-  })
-  const [queued] = await host.pollBrokerHostJobs()
-  await host.claimBrokerJob(queued)
-  const command = await client.sendBrokerCommand(submitted, 'steer', { prompt: 'secret correction' })
-  assert.equal(JSON.stringify(store.data).includes('secret correction'), false)
-
-  const [received] = await host.pollBrokerCommands(queued)
-  assert.equal(received.id, command.id)
-  assert.equal(received.type, 'steer')
-  assert.deepEqual(received.payload, { prompt: 'secret correction' })
-  await host.acknowledgeBrokerCommand(queued, received, { delivered: true, turnId: 'turn-1' })
-
-  const status = await client.brokerJob(submitted.id)
-  assert.deepEqual(status.commands[0].acknowledgement, {
-    version: 1,
-    acknowledgement: { delivered: true, turnId: 'turn-1' },
-  })
-
-  await client.revokeBrokerPairing(claimed.id)
-  await assert.rejects(
-    () => client.submitBrokerJob({
-      hostId: claimed.host.id,
-      jobId: 'job_remote_0000000003',
-      kind: 'local',
-      request: { provider: 'codex', projectPath: '/verified/project', prompt: 'Must not run.' },
-    }),
-    (error) => error instanceof AccountSyncError && error.code === 'broker_host_not_paired',
   )
 })

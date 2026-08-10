@@ -38,6 +38,8 @@ function recordingHostOps({ unreadable = [], storedPath = '/stored/copy.png', fa
 
 test('file drag detection accepts the browser Files type without filtering MIME types', () => {
   assert.equal(fileDragContainsFiles(['text/plain', 'Files']), true)
+  assert.equal(fileDragContainsFiles({ types: [], items: [{ kind: 'file' }], files: [] }), true)
+  assert.equal(fileDragContainsFiles({ types: [], items: [], files: [{ name: 'fallback.txt' }] }), true)
   assert.equal(fileDragContainsFiles(['text/plain']), false)
 })
 
