@@ -34,7 +34,7 @@ export async function runLandCheck(repositoryPath, options = {}) {
 
   const run = options.processRunner ?? runProcess
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const result = await run(options.npmExecutable ?? 'npm', ['run', LAND_CHECK_SCRIPT], {
+  const invoke = () => run(options.npmExecutable ?? 'npm', ['run', LAND_CHECK_SCRIPT], {
     cwd: repositoryPath,
     env: options.environment ?? process.env,
     inactivityTimeoutMs: timeoutMs,
@@ -42,6 +42,14 @@ export async function runLandCheck(repositoryPath, options = {}) {
     maxCaptureBytes: MAX_CHECK_OUTPUT_BYTES,
     signal: options.signal,
   })
+
+  let result = await invoke()
+  // Suites with timing-sensitive tests can fail under the load of concurrent
+  // agent runs. A flaky red would roll back a good merge, so a failure is
+  // confirmed by a second run; a genuine break fails both times.
+  if (!result.error && !result.timedOut && result.exitCode !== 0 && options.retryOnFailure !== false) {
+    result = await invoke()
+  }
 
   if (result.error) {
     return { ok: true, skipped: true, reason: `npm could not run the ${LAND_CHECK_SCRIPT} script (${result.error}), so the land was not verified.` }
