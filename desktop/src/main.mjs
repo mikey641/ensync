@@ -629,6 +629,12 @@ if (!singleInstance) {
     nativeWorkspaceStore.ensureRestorable()
     return updateManager.initialize()
   }).then(() => {
+    // Auto-check for updates shortly after startup, then every hour,
+    // like VS Code's background update checker. Non-blocking — if the
+    // build is unsigned or no feed is configured, canCheck is false and
+    // these calls are no-ops.
+    setTimeout(() => { updateManager.check().catch(() => {}) }, 5_000)
+    setInterval(() => { updateManager.check().catch(() => {}) }, 3_600_000)
     const retainedIdentities = nativeWorkspaceStore.list()
     const startupFocusIdentity = retainedIdentities.at(-1)
     const identities = nativeWorkspaceRestorationOrder(retainedIdentities)
