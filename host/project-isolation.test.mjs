@@ -251,6 +251,18 @@ test('non-Git projects fail closed before provider execution', async (context) =
   )
 })
 
+test('a stale renderer without a conversation key gets an actionable restart error', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  await assert.rejects(
+    isolation.acquire(fixture.repository, undefined),
+    (error) => error instanceof ProjectIsolationError
+      && error.code === 'client_upgrade_required'
+      && error.message.includes('Quit Ensync completely'),
+  )
+})
+
 test('ChatRunService binds provider cwd to the protected worktree and releases its lease', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })

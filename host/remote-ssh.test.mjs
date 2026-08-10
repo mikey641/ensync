@@ -300,6 +300,7 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
     prompt,
     model: 'gpt-5.4',
     effort: 'high',
+    timeoutMs: 2_000,
   }, { onEvent: (event) => events.push(event) })
 
   assert.equal(captured[1].includes(prompt), false)

@@ -746,7 +746,7 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? null
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
     this.#projectIsolation = options.projectIsolation ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
@@ -885,9 +885,7 @@ export class ChatRunService {
 
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
-    const inactivityTimeoutMs = hardTimeoutMs == null
-      ? this.#inactivityTimeoutMs
-      : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
     const args = argumentsFor(executionRequest, attachmentPaths)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1

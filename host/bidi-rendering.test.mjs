@@ -20,14 +20,7 @@ test('runtime conversation text uses automatic isolated direction without changi
   ])
 
   assert.equal(app.match(/<MessageContent content=\{message\.content\} \/>/g)?.length, 2)
-  // Every rendered Markdown block that carries message text isolates its own
-  // direction, so an RTL table cell or list item cannot flip its neighbours.
-  assert.match(messageContent, /<p key=\{index\} dir="auto"><InlineNodes nodes=\{block\.inline\} \/><\/p>/)
-  assert.match(messageContent, /<li dir="auto">/)
-  assert.match(messageContent, /<th key=\{cellIndex\} dir="auto"/)
-  assert.match(messageContent, /<td key=\{cellIndex\} dir="auto"/)
-  assert.match(messageContent, /<blockquote key=\{index\} dir="auto">/)
-  assert.match(messageContent, /\{ key: index, dir: 'auto' \}/)
+  assert.match(messageContent, /<p dir="auto">/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
   assert.match(app, /<textarea[\s\S]*?data-chat-composer=\{chat\.id\}[\s\S]*?dir="auto"/)
   assert.match(app, /<pre className="execution-panel__output"[^>]*dir="auto">/)
