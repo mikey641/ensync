@@ -330,6 +330,9 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
   }
 
   function validateWorkspaceKey(value) {
+    if (value === undefined || value === null) {
+      throw bridgeError('client_upgrade_required', 'This Ensync bridge is older than the requesting Host. Update Ensync on both computers before starting another remote agent run.')
+    }
     if (typeof value !== 'string' || !value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
       throw bridgeError('invalid_workspace_key', 'A stable Ensync conversation workspace key is required for remote agent execution.')
     }
@@ -428,9 +431,10 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
     }
   }
 
-  async function acquireRemoteWriteLease(commonGitDirectory) {
-    const lockParent = path.join(commonGitDirectory, 'ensync')
-    const lockPath = path.join(lockParent, 'project-write.lock')
+  async function acquireRemoteWorkspaceLease(commonGitDirectory, key) {
+    const workspaceHash = digest(key)
+    const lockParent = path.join(commonGitDirectory, 'ensync', 'workspace-write-locks')
+    const lockPath = path.join(lockParent, workspaceHash + '.lock')
     const ownerPath = path.join(lockPath, 'owner.json')
     await fs.promises.mkdir(lockParent, { recursive: true, mode: 0o700 })
 
@@ -477,7 +481,7 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
             if (quarantineError && quarantineError.code === 'ENOENT') continue
           }
         }
-        sendProgress('lock_wait')
+        sendProgress('workspace_lock_wait')
         await new Promise((resolveWait) => setTimeout(resolveWait, 250))
         continue
       }
@@ -485,9 +489,10 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       try {
         let released = false
         const owner = () => JSON.stringify({
-          version: 1,
+          version: 2,
           token,
           pid: process.pid,
+          workspaceHash,
           acquiredAt,
           heartbeatAt: new Date().toISOString(),
         })
@@ -500,7 +505,7 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
           void (async () => {
             try {
               const current = JSON.parse(await fs.promises.readFile(ownerPath, 'utf8'))
-              if (!current || current.token !== token) throw new Error('Remote project write lease ownership changed.')
+              if (!current || current.token !== token) throw new Error('Remote protected workspace write lease ownership changed.')
               await writeOwner()
             } catch {
               clearInterval(heartbeat)
@@ -570,7 +575,7 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       commonGitDirectory,
       head: firstLine(headResult.stdout),
     }
-    const lease = await acquireRemoteWriteLease(commonGitDirectory)
+    const lease = await acquireRemoteWorkspaceLease(commonGitDirectory, key)
 
     try {
       const workspaceHash = digest(key)

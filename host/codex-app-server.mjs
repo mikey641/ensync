@@ -111,11 +111,14 @@ export function parseCodexAppServerProbe(responses, checkedAt = new Date().toISO
   const windowLabel = limitingWindow?.windowDurationMins
     ? `${limitingWindow.windowDurationMins}-minute window`
     : `${limitingWindow?.name ?? 'current'} window`
+  const resetWindow = limitingWindow
+    ? quotaWindowLabel(limitingWindow.windowDurationMins, limitingWindow.name)
+    : null
   const details = []
   if (limitingWindow) {
     details.push(
       { label: 'Quota type', value: 'Subscription quota' },
-      { label: 'Current window', value: quotaWindowLabel(limitingWindow.windowDurationMins, limitingWindow.name) },
+      { label: 'Current window', value: resetWindow },
       { label: 'Remaining', value: `${Math.max(0, 100 - limitingWindow.usedPercent)}%` },
       { label: 'Used', value: `${limitingWindow.usedPercent}%` },
     )
@@ -147,6 +150,7 @@ export function parseCodexAppServerProbe(responses, checkedAt = new Date().toISO
       usedPercent: limitingWindow?.usedPercent ?? null,
       remainingPercent: limitingWindow ? Math.max(0, 100 - limitingWindow.usedPercent) : null,
       resetAt: limitingWindow?.resetAt ?? null,
+      resetWindow,
       checkedAt,
       details,
       reason: limitingWindow

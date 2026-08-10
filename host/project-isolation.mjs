@@ -27,7 +27,7 @@ function firstLine(value) {
 function cancellationError() {
   return new ProjectIsolationError(
     'run_cancelled',
-    'Run stopped before Ensync Host acquired the project write lease.',
+    'Run stopped before Ensync Host acquired the protected workspace write lease.',
     499,
   )
 }
@@ -67,6 +67,13 @@ function processIsAlive(pid) {
 }
 
 function workspaceKey(value) {
+  if (value === undefined || value === null) {
+    throw new ProjectIsolationError(
+      'client_upgrade_required',
+      'This Ensync window is older than the running Host. Quit Ensync completely and reopen it before starting another local agent run.',
+      409,
+    )
+  }
   if (
     typeof value !== 'string'
     || !value.trim()
@@ -130,9 +137,10 @@ export class ProjectIsolationError extends Error {
 
 /**
  * Creates stable per-conversation Git worktrees and holds one renewable,
- * cross-process write lease for the repository while a provider is active.
- * The lock lives in the shared Git directory so separate Ensync Host processes
- * and linked worktrees resolve to the same serialization boundary.
+ * cross-process write lease for that conversation workspace while a provider
+ * is active. Locks live in the shared Git directory and are keyed by workspace,
+ * so duplicate runs against one worktree serialize while separate conversation
+ * worktrees in the same repository remain concurrent.
  */
 export class ProjectIsolationService {
   #rootPath
@@ -168,7 +176,7 @@ export class ProjectIsolationService {
       'The selected project folder does not exist or cannot be accessed.',
     )
     const repository = await this.#repository(canonicalProjectPath)
-    const lease = await this.#acquireWriteLease(repository.commonGitDirectory, options)
+    const lease = await this.#acquireWorkspaceLease(repository.commonGitDirectory, key, options)
 
     try {
       throwIfCancelled(options.signal)
@@ -250,9 +258,10 @@ export class ProjectIsolationService {
     }
   }
 
-  async #acquireWriteLease(commonGitDirectory, options) {
-    const lockParent = join(commonGitDirectory, 'ensync')
-    const lockPath = join(lockParent, 'project-write.lock')
+  async #acquireWorkspaceLease(commonGitDirectory, key, options) {
+    const workspaceHash = digest(key)
+    const lockParent = join(commonGitDirectory, 'ensync', 'workspace-write-locks')
+    const lockPath = join(lockParent, `${workspaceHash}.lock`)
     const ownerPath = join(lockPath, 'owner.json')
     await mkdir(lockParent, { recursive: true, mode: 0o700 })
     let waitingReported = false
@@ -278,41 +287,36 @@ export class ProjectIsolationService {
         const controller = new AbortController()
         let released = false
         let failure = null
-        let heartbeatTask = null
-        const ownerStagingPath = join(lockPath, `owner-${token}.staging`)
         const owner = () => ({
-          version: 1,
+          version: 2,
           token,
           pid: process.pid,
+          workspaceHash,
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
         })
         const writeOwner = async () => {
-          await writeFile(ownerStagingPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
-          try { await chmod(ownerStagingPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
-          await rename(ownerStagingPath, ownerPath)
+          await writeFile(ownerPath, JSON.stringify(owner()), { encoding: 'utf8', mode: 0o600 })
+          try { await chmod(ownerPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
         }
         await writeOwner()
 
         const heartbeat = setInterval(() => {
-          if (released || heartbeatTask) return
-          heartbeatTask = (async () => {
+          void (async () => {
             try {
               const current = JSON.parse(await readFile(ownerPath, 'utf8'))
-              if (current?.token !== token) throw new Error('Project write lease ownership changed unexpectedly.')
+              if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
               await writeOwner()
             } catch (error) {
               failure = new ProjectIsolationError(
-                'project_write_lock_lost',
+                'workspace_write_lock_lost',
                 error instanceof Error
-                  ? `Ensync Host lost the project write lease: ${error.message}`
-                  : 'Ensync Host lost the project write lease.',
+                  ? `Ensync Host lost the protected workspace write lease: ${error.message}`
+                  : 'Ensync Host lost the protected workspace write lease.',
                 409,
               )
               controller.abort(failure)
               clearInterval(heartbeat)
-            } finally {
-              heartbeatTask = null
             }
           })()
         }, this.#heartbeatMs)
@@ -327,7 +331,6 @@ export class ProjectIsolationService {
             if (released) return
             released = true
             clearInterval(heartbeat)
-            await heartbeatTask?.catch(() => {})
             try {
               const current = JSON.parse(await readFile(ownerPath, 'utf8'))
               if (current?.token === token) await rm(lockPath, { recursive: true, force: true })

@@ -768,22 +768,22 @@ export class ChatRunService {
       )
     }
 
-    let projectLease = null
+    let workspaceLease = null
     let workspace = null
     let combinedSignal = { signal: options.signal, dispose() {} }
     if (this.#projectIsolation) {
       try {
-        projectLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
+        workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
           signal: options.signal,
           onWait: () => options.onEvent?.({
             type: 'notice',
-            code: 'project_write_lock_waiting',
-            message: 'Waiting for another Ensync chat to release this project’s exclusive write lease. No provider process has started.',
+            code: 'workspace_write_lock_waiting',
+            message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
             at: new Date().toISOString(),
           }),
         })
-        workspace = projectLease.workspace
-        combinedSignal = combinedAbortSignal(options.signal, projectLease.signal)
+        workspace = workspaceLease.workspace
+        combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
@@ -833,14 +833,14 @@ export class ChatRunService {
             options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
           },
         })
-        projectLease?.assertHeld()
+        workspaceLease?.assertHeld()
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
-        if (projectLease?.signal.aborted && !options.signal?.aborted) {
-          const reason = projectLease.signal.reason
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
           throw new ChatRunError(
-            'project_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the exclusive project write lease. Partial work may exist in the protected worktree.',
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -894,11 +894,11 @@ export class ChatRunService {
       this.#statusService.invalidate?.()
     }
 
-    if (projectLease?.signal.aborted && !options.signal?.aborted) {
-      const reason = projectLease.signal.reason
+    if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+      const reason = workspaceLease.signal.reason
       throw new ChatRunError(
-        'project_write_lock_lost',
-        reason instanceof Error ? reason.message : 'Ensync Host lost the exclusive project write lease. Partial work may exist in the protected worktree.',
+        'workspace_write_lock_lost',
+        reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
         409,
         false,
       )
@@ -948,7 +948,7 @@ export class ChatRunService {
     }
 
     const parsed = parseResult(request.provider, processResult.stdout)
-    projectLease?.assertHeld()
+    workspaceLease?.assertHeld()
     return {
       provider: request.provider,
       projectPath,
@@ -965,7 +965,7 @@ export class ChatRunService {
     }
     } finally {
       combinedSignal.dispose()
-      await projectLease?.release()
+      await workspaceLease?.release()
     }
   }
 

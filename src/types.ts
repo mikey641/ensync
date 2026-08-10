@@ -47,6 +47,7 @@ export type Provider = {
   resetsIn: string | null
   /** Exact CLI-rendered schedule retained when the CLI omits an absolute timestamp. */
   resetLabel?: string | null
+  /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   usageReason: string
   canConnect: boolean

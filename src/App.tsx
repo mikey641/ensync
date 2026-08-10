@@ -127,7 +127,12 @@ import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
+import { providerResetText } from './lib/providerResetText.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
+import {
+  conversationWorkspaceKey,
+  resolveConversationWorkspaceKey,
+} from './lib/conversationWorkspaceKey.mjs'
 import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
@@ -448,19 +453,6 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     agentCoordination: status.agentCoordination ?? current.agentCoordination,
     checkedAt: status.checkedAt,
   }
-}
-
-function providerResetText(provider: Provider) {
-  if (provider.resetsIn) {
-    const resetAt = new Date(provider.resetsIn)
-    if (!Number.isNaN(resetAt.getTime())) return resetAt.toLocaleString()
-  }
-  if (provider.resetLabel) {
-    return provider.resetWindow
-      ? `${provider.resetWindow} resets ${provider.resetLabel}`
-      : provider.resetLabel
-  }
-  return null
 }
 
 type RelayProject = ProjectInspection & {
@@ -840,6 +832,7 @@ function App() {
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
+  const focusProjectRequestRef = useRef<(project: RelayProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
   chatsRef.current = chats
   tabsRef.current = tabs
   activeTabIdRef.current = activeTabId
@@ -1124,9 +1117,9 @@ function App() {
     const next = { ...chatExecutionEventsRef.current, [chatId]: retained }
     chatExecutionEventsRef.current = next
     setChatExecutionEvents(next)
-    if (event.type === 'notice' && ['project_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? '')) {
-      const subtitle = event.code === 'project_write_lock_waiting'
-        ? 'Waiting for project lock'
+    if (event.type === 'notice' && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? '')) {
+      const subtitle = ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(event.code ?? '')
+        ? 'Waiting for this chat workspace'
         : 'Working in protected branch'
       const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
         ...chat,
@@ -1820,11 +1813,12 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
+    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+      workspaceKey: agentWorkspaceKey,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2685,7 +2679,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2694,7 +2688,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -3933,10 +3927,10 @@ function ExecutionPanel({
   const latestProviderNote = [...events].reverse().find((event) => event.type === 'note')
   const latestWorkspaceState = [...events].reverse().find((event) =>
     event.type === 'notice'
-    && ['project_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? ''))
-  const waitingForProject = sending
+    && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? ''))
+  const waitingForWorkspace = sending
     && latestWorkspaceState?.type === 'notice'
-    && latestWorkspaceState.code === 'project_write_lock_waiting'
+    && ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(latestWorkspaceState.code ?? '')
 
   useLayoutEffect(() => {
     if (!open || !outputRef.current) return
@@ -3956,8 +3950,8 @@ function ExecutionPanel({
         >
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <TerminalSquare size={14} />
-          <strong>{sending ? waitingForProject ? 'Waiting for project' : 'Live CLI execution' : 'CLI execution'}</strong>
-          {sending && <span className="execution-panel__live"><i /> {waitingForProject ? 'queued safely' : 'running'}</span>}
+          <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
+          {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
             {latestProviderNote?.type === 'note'
               ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`

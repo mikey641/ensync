@@ -20,13 +20,7 @@ const SEMVER_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z
 function frozenState(value) {
   return Object.freeze({
     installedVersion: value.installedVersion,
-    installedBuildId: value.installedBuildInfo?.buildId ?? value.installedBuildId ?? null,
-    installedBuildChannel: value.installedBuildInfo?.channel ?? value.installedBuildChannel ?? null,
-    installedSourceCommit: value.installedBuildInfo?.sourceCommit ?? value.installedSourceCommit ?? null,
-    installedSourceDirty: typeof value.installedBuildInfo?.sourceDirty === 'boolean'
-      ? value.installedBuildInfo.sourceDirty
-      : typeof value.installedSourceDirty === 'boolean' ? value.installedSourceDirty : null,
-    installedBuiltAt: value.installedBuildInfo?.builtAt ?? value.installedBuiltAt ?? null,
+    installedBuildId: value.installedBuildId ?? null,
     channel: value.channel === 'beta' ? 'beta' : 'stable',
     phase: value.phase,
     message: value.message,
@@ -306,7 +300,7 @@ function safeInstallerName(url, platform, version) {
 
 export function createNativeUpdateManager({
   installedVersion,
-  installedBuildInfo = null,
+  installedBuildId = null,
   platform,
   storeManaged = false,
   isPackaged,
@@ -329,7 +323,7 @@ export function createNativeUpdateManager({
     : { stable: manifestUrl ?? null, beta: null }
   let state = frozenState({
     installedVersion,
-    installedBuildInfo,
+    installedBuildId,
     channel,
     phase: 'initializing',
     message: 'Checking whether this build can use signed updates.',
@@ -670,7 +664,7 @@ export function createNativeUpdateManager({
 export function unauthorizedUpdateState() {
   return frozenState({
     installedVersion: null,
-    installedBuildInfo: null,
+    installedBuildId: null,
     channel: 'stable',
     phase: 'unavailable',
     message: 'Native update controls are available only to a registered Ensync app window.',

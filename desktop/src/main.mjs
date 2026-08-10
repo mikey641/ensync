@@ -548,9 +548,6 @@ if (!singleInstance) {
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
     })
-    const installedBuildInfo = app.isPackaged
-      ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
-      : null
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
       installedBuildInfo,

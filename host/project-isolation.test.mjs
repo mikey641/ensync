@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -26,6 +27,11 @@ async function repositoryFixture(context) {
   await git(repository, ['add', 'tracked.txt'])
   await git(repository, ['commit', '-m', 'baseline'])
   return { root, repository, workspaceRoot: join(root, 'workspaces') }
+}
+
+function workspaceLockPath(repository, commonDirectory, key) {
+  const workspaceHash = createHash('sha256').update(key).digest('hex').slice(0, 24)
+  return join(repository, commonDirectory, 'ensync', 'workspace-write-locks', `${workspaceHash}.lock`)
 }
 
 test('a conversation receives a stable worktree without changing the shared checkout', async (context) => {
@@ -70,7 +76,48 @@ test('a dirty shared checkout seeds a protected workspace without changing the s
   await acquired.release()
 })
 
-test('separate Host instances serialize writes to linked worktrees of one repository', async (context) => {
+test('separate Host instances allow different conversation worktrees in one repository to run concurrently', async (context) => {
+  const fixture = await repositoryFixture(context)
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'shared dirty state\n')
+  await writeFile(join(fixture.repository, 'untracked.txt'), 'shared untracked state\n')
+  const firstService = new ProjectIsolationService({
+    rootPath: join(fixture.root, 'host-a'),
+    heartbeatMs: 20,
+    lockStaleMs: 500,
+    lockPollMs: 10,
+  })
+  const secondService = new ProjectIsolationService({
+    rootPath: join(fixture.root, 'host-b'),
+    heartbeatMs: 20,
+    lockStaleMs: 500,
+    lockPollMs: 10,
+  })
+  let firstWaiting = false
+  let secondWaiting = false
+  const [first, second] = await Promise.all([
+    firstService.acquire(fixture.repository, 'window-a:chat-a', {
+      onWait: () => { firstWaiting = true },
+    }),
+    secondService.acquire(fixture.repository, 'window-b:chat-b', {
+      onWait: () => { secondWaiting = true },
+    }),
+  ])
+
+  assert.equal(firstWaiting, false)
+  assert.equal(secondWaiting, false)
+  assert.notEqual(second.workspace.branch, first.workspace.branch)
+  assert.equal(first.workspace.seededFromSharedCheckout, true)
+  assert.equal(second.workspace.seededFromSharedCheckout, true)
+  assert.equal(await readFile(join(first.workspace.projectPath, 'tracked.txt'), 'utf8'), 'shared dirty state\n')
+  assert.equal(await readFile(join(second.workspace.projectPath, 'untracked.txt'), 'utf8'), 'shared untracked state\n')
+  assert.equal((await git(fixture.repository, ['status', '--porcelain'])).split('\n').filter(Boolean).length, 2)
+  first.assertHeld()
+  second.assertHeld()
+  await first.release()
+  await second.release()
+})
+
+test('separate Host instances serialize duplicate runs against the same conversation worktree', async (context) => {
   const fixture = await repositoryFixture(context)
   const firstService = new ProjectIsolationService({
     rootPath: join(fixture.root, 'host-a'),
@@ -84,10 +131,11 @@ test('separate Host instances serialize writes to linked worktrees of one reposi
     lockStaleMs: 500,
     lockPollMs: 10,
   })
-  const first = await firstService.acquire(fixture.repository, 'window-a:chat-a')
+  const key = 'window-a:chat-a'
+  const first = await firstService.acquire(fixture.repository, key)
   let waiting = false
   let secondResolved = false
-  const secondPromise = secondService.acquire(fixture.repository, 'window-b:chat-b', {
+  const secondPromise = secondService.acquire(fixture.repository, key, {
     onWait: () => { waiting = true },
   }).then((lease) => {
     secondResolved = true
@@ -103,7 +151,8 @@ test('separate Host instances serialize writes to linked worktrees of one reposi
   await first.release()
   const second = await secondPromise
   assert.equal(secondResolved, true)
-  assert.notEqual(second.workspace.branch, first.workspace.branch)
+  assert.equal(second.workspace.branch, first.workspace.branch)
+  assert.equal(second.workspace.projectPath, first.workspace.projectPath)
   await second.release()
 })
 
@@ -114,7 +163,7 @@ test('a cancelled lock waiter never starts or steals the active workspace', asyn
   const first = await firstService.acquire(fixture.repository, 'window-a:chat-a')
   const controller = new AbortController()
   let waiting = false
-  const pending = secondService.acquire(fixture.repository, 'window-b:chat-b', {
+  const pending = secondService.acquire(fixture.repository, 'window-a:chat-a', {
     signal: controller.signal,
     onWait: () => { waiting = true },
   })
@@ -130,13 +179,15 @@ test('a cancelled lock waiter never starts or steals the active workspace', asyn
 test('an abandoned stale lease is quarantined before a new Host proceeds', async (context) => {
   const fixture = await repositoryFixture(context)
   const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
-  const lockPath = join(fixture.repository, commonDirectory, 'ensync', 'project-write.lock')
+  const key = 'window-a:chat-a'
+  const lockPath = workspaceLockPath(fixture.repository, commonDirectory, key)
   const ownerPath = join(lockPath, 'owner.json')
   await mkdir(lockPath, { recursive: true })
   await writeFile(ownerPath, JSON.stringify({
-    version: 1,
+    version: 2,
     token: 'abandoned',
     pid: 999_999,
+    workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
     acquiredAt: '2020-01-01T00:00:00.000Z',
     heartbeatAt: '2020-01-01T00:00:00.000Z',
   }))
@@ -149,7 +200,7 @@ test('an abandoned stale lease is quarantined before a new Host proceeds', async
     lockStaleMs: 10,
     lockPollMs: 5,
   })
-  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  const lease = await isolation.acquire(fixture.repository, key)
   lease.assertHeld()
   await lease.release()
   await assert.rejects(stat(lockPath), { code: 'ENOENT' })
@@ -158,13 +209,15 @@ test('an abandoned stale lease is quarantined before a new Host proceeds', async
 test('a stale heartbeat is never stolen while its Host process is still alive', async (context) => {
   const fixture = await repositoryFixture(context)
   const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
-  const lockPath = join(fixture.repository, commonDirectory, 'ensync', 'project-write.lock')
+  const key = 'window-a:chat-a'
+  const lockPath = workspaceLockPath(fixture.repository, commonDirectory, key)
   const ownerPath = join(lockPath, 'owner.json')
   await mkdir(lockPath, { recursive: true })
   await writeFile(ownerPath, JSON.stringify({
-    version: 1,
+    version: 2,
     token: 'suspended-live-host',
     pid: process.pid,
+    workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
     acquiredAt: '2020-01-01T00:00:00.000Z',
     heartbeatAt: '2020-01-01T00:00:00.000Z',
   }))
@@ -178,34 +231,13 @@ test('a stale heartbeat is never stolen while its Host process is still alive', 
     lockStaleMs: 10,
     lockPollMs: 5,
   })
-  const pending = isolation.acquire(fixture.repository, 'window-a:chat-a', {
+  const pending = isolation.acquire(fixture.repository, key, {
     signal: controller.signal,
     onWait: () => controller.abort(),
   })
 
   await assert.rejects(pending, (error) => error.code === 'run_cancelled')
   assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'suspended-live-host')
-})
-
-test('heartbeat renewal keeps owner metadata atomically readable', async (context) => {
-  const fixture = await repositoryFixture(context)
-  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
-  const ownerPath = join(fixture.repository, commonDirectory, 'ensync', 'project-write.lock', 'owner.json')
-  const isolation = new ProjectIsolationService({
-    rootPath: fixture.workspaceRoot,
-    heartbeatMs: 2,
-    lockPollMs: 2,
-  })
-  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-a')
-
-  for (let attempt = 0; attempt < 100; attempt += 1) {
-    const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
-    assert.equal(owner.version, 1)
-    assert.equal(owner.pid, process.pid)
-    await new Promise((resolveWait) => setTimeout(resolveWait, 1))
-  }
-  lease.assertHeld()
-  await lease.release()
 })
 
 test('non-Git projects fail closed before provider execution', async (context) => {
@@ -216,6 +248,18 @@ test('non-Git projects fail closed before provider execution', async (context) =
   await assert.rejects(
     isolation.acquire(root, 'window-a:chat-a'),
     (error) => error instanceof ProjectIsolationError && error.code === 'project_isolation_required',
+  )
+})
+
+test('a stale renderer without a conversation key gets an actionable restart error', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  await assert.rejects(
+    isolation.acquire(fixture.repository, undefined),
+    (error) => error instanceof ProjectIsolationError
+      && error.code === 'client_upgrade_required'
+      && error.message.includes('Quit Ensync completely'),
   )
 })
 
@@ -283,7 +327,7 @@ test('ChatRunService binds provider cwd to the protected worktree and releases i
   await next.release()
 })
 
-test('ChatRunService queues same-repository providers before process start', async (context) => {
+test('ChatRunService runs different chats in the same repository concurrently', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({
     rootPath: fixture.workspaceRoot,
@@ -294,6 +338,8 @@ test('ChatRunService queues same-repository providers before process start', asy
   const firstGate = new Promise((resolveGate) => { releaseFirst = resolveGate })
   let firstStarted
   const firstStartedPromise = new Promise((resolveStarted) => { firstStarted = resolveStarted })
+  let secondStarted
+  const secondStartedPromise = new Promise((resolveStarted) => { secondStarted = resolveStarted })
   let activeProviders = 0
   let maximumActiveProviders = 0
   const providerPaths = []
@@ -319,6 +365,8 @@ test('ChatRunService queues same-repository providers before process start', asy
         if (providerPaths.length === 1) {
           firstStarted()
           await firstGate
+        } else if (providerPaths.length === 2) {
+          secondStarted()
         }
         return {
           exitCode: 0,
@@ -355,18 +403,16 @@ test('ChatRunService queues same-repository providers before process start', asy
     workspaceKey: 'window-b:chat-b',
     prompt: 'Second change',
   }, { onEvent: (event) => secondEvents.push(event) })
-  for (let attempts = 0; attempts < 100 && !secondEvents.some((event) => event.code === 'project_write_lock_waiting'); attempts += 1) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 5))
-  }
+  await secondStartedPromise
 
-  assert.equal(secondEvents.some((event) => event.code === 'project_write_lock_waiting'), true)
-  assert.equal(providerPaths.length, 1)
-  assert.equal(maximumActiveProviders, 1)
+  assert.equal(secondEvents.some((event) => event.code === 'workspace_write_lock_waiting'), false)
+  assert.equal(providerPaths.length, 2)
+  assert.equal(maximumActiveProviders, 2)
   releaseFirst()
   await Promise.all([first, second])
 
   assert.equal(providerPaths.length, 2)
   assert.notEqual(providerPaths[0], providerPaths[1])
-  assert.equal(maximumActiveProviders, 1)
+  assert.equal(maximumActiveProviders, 2)
   assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
 })

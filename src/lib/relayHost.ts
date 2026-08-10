@@ -62,7 +62,7 @@ export type ProviderUsage = {
   resetAt: string | null
   /** Exact provider-rendered reset schedule when no absolute timestamp is exposed. */
   resetLabel?: string | null
-  /** Provider-reported quota window associated with resetLabel. */
+  /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   checkedAt: string
   details: Array<{ label: string; value: string }>
@@ -274,7 +274,7 @@ export type ChatExecutionEvent =
   | {
       type: 'notice'
       message: string
-      code?: 'project_write_lock_waiting' | 'project_workspace_ready' | string
+      code?: 'project_write_lock_waiting' | 'workspace_write_lock_waiting' | 'project_workspace_ready' | string
       workspace?: {
         path: string
         branch: string
