@@ -8,10 +8,16 @@ const providerRunners = Object.freeze({
     Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
     Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
     Object.freeze({ id: 'droid', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
+    Object.freeze({ id: 'cursor', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
   ]),
   // Droid has no ssh runner: remote-ssh.mjs drives plain argv+stdin CLIs, while
   // droid needs its stream-jsonrpc session adapter. Listing it here before that
   // bridge exists would let Auto routing dispatch runs that can only fail.
+  //
+  // Cursor has no ssh runner either, for a different reason: its containment is
+  // the argv-pinned `--sandbox enabled` flag that host/cursor-agent.mjs adds, and
+  // the ssh bridge builds its own argv without those flags. Listing it here would
+  // ship a remote Cursor run with no recorded containment at all.
   ssh: Object.freeze([
     Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
     Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),

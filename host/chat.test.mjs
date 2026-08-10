@@ -16,6 +16,7 @@ import {
   validateProjectPath,
 } from './chat.mjs'
 import { createRelayHost } from './server.mjs'
+import { CursorAgentError } from './cursor-agent.mjs'
 import { ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
 
 async function projectFixture(context) {
@@ -35,8 +36,8 @@ function statusService(provider) {
 }
 
 function readyProvider(id) {
-  const labels = { codex: 'Codex', claude: 'Claude Code', droid: 'Factory Droid' }
-  const methods = { codex: 'ChatGPT login', claude: 'claude.ai OAuth', droid: 'Factory browser login' }
+  const labels = { codex: 'Codex', claude: 'Claude Code', droid: 'Factory Droid', cursor: 'Cursor Agent' }
+  const methods = { codex: 'ChatGPT login', claude: 'claude.ai OAuth', droid: 'Factory browser login', cursor: 'Cursor login' }
   return {
     id,
     name: labels[id] ?? id,
@@ -726,8 +727,18 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     },
   })
 
+  // Copilot is gated rather than unsupported: its runner is deliberately not
+  // built, so the refusal carries the exact outstanding requirement instead of a
+  // generic "not supported" message.
   await assert.rejects(
     service.run({ provider: 'copilot', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && error.status === 422
+      && /never puts a prompt in argv/.test(error.message),
+  )
+  await assert.rejects(
+    service.run({ provider: 'kiro', projectPath, prompt: 'Hello' }),
     (error) => error instanceof ChatRunError && error.code === 'unsupported_provider',
   )
   await assert.rejects(
@@ -741,6 +752,41 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     service.run({ provider: 'codex', projectPath, prompt: 'Hello', effort: 'ultra' }),
     (error) => error instanceof ChatRunError && error.code === 'invalid_effort',
   )
+  assert.equal(processCalls, 0)
+})
+
+test('codebuddy and ollama are refused with their own exact outstanding requirement', async (context) => {
+  const projectPath = await projectFixture(context)
+  let processCalls = 0
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    processRunner: async () => {
+      processCalls += 1
+      throw new Error('process must not run')
+    },
+  })
+
+  // CodeBuddy's runner is complete and its containment is recorded, but the CLI
+  // has never completed an authenticated turn, so the headless-approval
+  // behaviour is unverified. The refusal says exactly that.
+  await assert.rejects(
+    service.run({ provider: 'codebuddy', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && error.status === 422
+      && /not signed in/.test(error.message)
+      && /CodeBuddy Code/.test(error.message),
+  )
+
+  // Ollama is not an unfinished integration: it is an inference server with no
+  // tool execution, so it cannot carry out a task at all.
+  await assert.rejects(
+    service.run({ provider: 'ollama', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && /local model runtime, not a coding agent/.test(error.message),
+  )
+
   assert.equal(processCalls, 0)
 })
 
@@ -775,6 +821,76 @@ test('a supported droid run reaches the exec runner and returns its result', asy
   assert.equal(droidRuns, 1)
   assert.equal(result.provider, 'droid')
   assert.equal(result.response, 'pong')
+})
+
+test('a supported cursor run reaches the cursor runner with the contained cwd and the wrapped prompt', async (context) => {
+  const projectPath = await projectFixture(context)
+  const seen = []
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('cursor')),
+    environment: { PATH: '/usr/bin', CURSOR_API_KEY: 'must-not-reach-the-run' },
+    processRunner: async () => {
+      throw new Error('process must not run')
+    },
+    cursorAgentRunner: {
+      run: async (input) => {
+        seen.push(input)
+        return {
+          provider: 'cursor',
+          response: 'pong',
+          sessionId: '0f3b1d94-6a4e-4c2f-9a7d-2b8c5e1f0a63',
+          model: 'claude-opus-5',
+          requestedModel: null,
+          requestedEffort: null,
+          usage: null,
+          outputRecovery: null,
+          durationMs: 100,
+          completedAt: '2026-08-10T00:00:00.000Z',
+        }
+      },
+    },
+  })
+
+  const result = await service.run({ provider: 'cursor', projectPath, prompt: 'Hello' })
+  assert.equal(seen.length, 1)
+  assert.equal(result.provider, 'cursor')
+  assert.equal(result.response, 'pong')
+  assert.equal(seen[0].executable, '/test/bin/cursor')
+  assert.equal(seen[0].projectPath, await realpath(projectPath))
+  // The prompt reaches the runner already carrying the shared Ensync
+  // multi-agent contract, exactly as the droid path does.
+  assert.notEqual(seen[0].prompt, 'Hello')
+  assert.match(seen[0].prompt, /Hello/)
+  // A paid-credential override must never reach a subscription run.
+  assert.equal('CURSOR_API_KEY' in seen[0].env, false)
+})
+
+test('a cursor runner failure keeps its own code, status, and retry safety', async (context) => {
+  const projectPath = await projectFixture(context)
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('cursor')),
+    processRunner: async () => {
+      throw new Error('process must not run')
+    },
+    cursorAgentRunner: {
+      run: async () => {
+        throw new CursorAgentError(
+          'provider_containment_unverified',
+          'Cursor Agent could not apply the pinned sandbox.',
+          409,
+          false,
+        )
+      },
+    },
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'cursor', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_containment_unverified'
+      && error.status === 409
+      && error.safeToRetry === false,
+  )
 })
 
 test('chat timeout and malformed CLI output are explicit failures', async (context) => {

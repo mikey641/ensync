@@ -5,19 +5,99 @@ import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionE
 import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
+import { CodebuddyExecError, CodebuddyExecRunner, CODEBUDDY_PERMISSION_MODE } from './codebuddy-exec.mjs'
+import { CursorAgentError, CursorAgentRunner, CURSOR_SANDBOX_MODE } from './cursor-agent.mjs'
+import { KIMI_FORCED_PERMISSION_MODE, KIMI_PROMPT_TRANSPORT } from './kimi-exec.mjs'
+import { JUNIE_CONFIG_DEFAULT_LOCATIONS } from './junie-exec.mjs'
+import { AUGGIE_DENIED_TOOLS, AUGGIE_PROMPT_TRANSPORT } from './auggie-exec.mjs'
 import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionChannel } from './claude-questions.mjs'
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 import { withEnsyncMultiAgentInstructions } from './multi-agent-prompt.mjs'
 
-const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
+const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid', 'cursor'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
 // whose catalog entry is still `discovery_only`. They are refused at validation
 // with their exact outstanding requirement instead of a generic message, so the
 // runner cannot be reached by Auto routing, a fixed selection, or fallback until
 // the catalog is promoted.
-const GATED_CHAT_PROVIDERS = new Map([])
+const GATED_CHAT_PROVIDERS = new Map([
+  // GitHub Copilot CLI 1.0.79 maps cleanly onto every Ensync requirement except
+  // prompt delivery: its only non-interactive prompt input is `-p/--prompt <text>`,
+  // which puts the prompt in argv, and Ensync never does that. Its
+  // `--output-format json` stream is documented as "JSONL, one JSON object per
+  // line" but the CLI ships as a compiled single-file binary with no readable
+  // schema, so the exact terminal object that would prove a completed turn could
+  // not be verified without spending a real model turn. Both gaps are recorded in
+  // docs/providers/copilot.md; `copilot --acp` (Agent Client Protocol over stdio)
+  // is the candidate that would carry the prompt off argv.
+  ['copilot', 'Its only verified non-interactive prompt input is the --prompt argument, and Ensync never puts a prompt in argv. Ensync also has no verified terminal event from its JSON output stream, so it cannot confirm a run finished.'],
+  // CodeBuddy Code 2.133.1 maps onto every Ensync requirement and its runner is
+  // implemented in codebuddy-exec.mjs: prompt on stdin (verified by an EOF-wait
+  // timing test, no prompt content sent), a stream-json `result` terminal event,
+  // and — unusually — a `system.init` event that echoes the effective
+  // permissionMode and cwd back, which the runner checks before releasing the
+  // prompt. What is missing is evidence: the CLI is not signed in on this machine
+  // (`codebuddy help config` answers "Authentication required"; no Keychain item;
+  // numStartups is 0), so no authenticated turn has ever been observed. The
+  // headless approval question — deny, or block forever the way droid used to —
+  // is therefore unverified, and it is the exact defect that gating exists to
+  // prevent. See docs/providers/codebuddy.md.
+  ['codebuddy', 'Ensync has a complete CodeBuddy runner, but CodeBuddy is not signed in on this machine, so no authenticated turn has ever been verified. Until one is, Ensync cannot confirm that a permission request in a headless run is denied rather than left waiting forever. Sign in to CodeBuddy Code, then re-verify.'],
+  // Ollama is a local inference server, not a coding agent. Verified against
+  // 0.13.5: it cannot read or write files, run commands, hold a session, or
+  // constrain a working directory, because it has no tool-execution layer at all
+  // (`/api/chat` can emit tool-call JSON, but the CALLER must execute it). There
+  // is no containment record for it below, and that is deliberate — the question
+  // does not apply rather than being unanswered. Every Ensync prompt is wrapped
+  // in instructions to edit files and coordinate work, so a runtime that cannot
+  // act would report edits it never made. See docs/providers/ollama.md.
+  ['ollama', 'Ollama is a local model runtime, not a coding agent: it cannot read or write files, run commands, or hold a session, so it cannot carry out an Ensync task. Ensync uses it for local model discovery only. Use Codex, Claude Code, or Factory Droid to run work.'],
+  // Jules v0.1.42 is a thin client for a Google-hosted asynchronous agent, not a local
+  // CLI. `jules new` assigns a session to a Google VM working on a GitHub repository and
+  // returns once the session is ASSIGNED, not finished; results are collected later with
+  // `jules remote pull` or `jules teleport`. No subcommand has a JSON/stream flag, so
+  // there is no terminal event at all, and the protected worktree contains nothing the
+  // agent runs in. No runner module exists because Step 1 found nothing runnable under
+  // Ensync's contract. See docs/providers/jules.md.
+  ['jules', 'Jules runs its work in a Google-hosted VM against a GitHub repository rather than in this project’s protected worktree, and its CLI has no machine-readable output, so Ensync can neither contain the work nor confirm a run finished. Use Codex, Claude Code, or Factory Droid to run work.'],
+  // Kimi Code 0.34.0 has a complete runner in kimi-exec.mjs — verified argument
+  // construction, NDJSON parsing, and the `session.resume_hint` terminal frame — and it
+  // cannot hang on an approval, because prompt mode pins permission mode `auto` itself.
+  // Two independent gaps block promotion, both recorded in docs/providers/kimi.md.
+  ['kimi', 'Its only non-interactive prompt input is the --prompt argument, and Ensync never puts a prompt in argv. Its one-shot mode also pins its own fully autonomous permission mode, and the deny rules that could outrank it can only be read from the user-global config.toml, so Ensync cannot contain a single run without rewriting your global Kimi settings.'],
+  // Junie 26.8.3 has a complete runner in junie-exec.mjs and is the strongest candidate
+  // of the three: prompt on stdin, a single terminal CliOutput object with real token
+  // usage, model and effort flags, and a genuinely path-scoped allowlist defined
+  // relative to the project root. It is gated on the one question that cannot be
+  // answered without spending a real model turn — whether a headless run denies an
+  // approval request or waits on it forever, which is the exact defect that made droid
+  // hang on "Working". See docs/providers/junie.md.
+  ['junie', 'Its --brave approval control is documented as interactive-only, and its headless event stream still defines approval-request events, so Ensync cannot yet confirm that an approval in a headless run is denied rather than left waiting forever. Its allowlist also lives at a single user-global path with no per-run override.'],
+  // Auggie 0.34.0 has a complete runner in auggie-exec.mjs. Everything Ensync needs was
+  // verified by reading the CLI's own shipped ESM bundle (it is minified but not
+  // obfuscated): the prompt on stdin in `--print` mode, the single terminal
+  // `{"type":"result",...}` object, the `--permission tool:policy` engine, and — the
+  // droid question — the fact that a `--print` run installs NO approval handler, so an
+  // unapprovable tool is denied with an error tool-result and the loop continues rather
+  // than blocking. What is missing is evidence: the CLI is not signed in on this machine
+  // (`auggie account status` answers "You are not currently logged in to Augment"; there
+  // is no ~/.augment/session.json), so no authenticated turn has ever been observed and
+  // none of that reading has been watched actually happening. See docs/providers/auggie.md.
+  ['auggie', 'Ensync has a complete Auggie runner, but Auggie is not signed in on this machine, so no authenticated turn has ever been verified. Until one is, Ensync cannot confirm that a denied tool in a headless run really is refused and reported rather than left waiting forever. Sign in with auggie login, then re-verify.'],
+  // Warp Oz 0.2026.07.29.09.05 fails three independent Ensync requirements at once, so no
+  // runner module exists — writing one would mean inventing protocol Ensync has not seen.
+  // See docs/providers/oz.md.
+  ['oz', 'Its only non-interactive prompt inputs are the --prompt argument and server-stored prompt IDs, and Ensync never puts a prompt in argv. Its ndjson event union is also unpublished, so Ensync has no terminal event to confirm a run finished, and its agent permissions live in Warp-synced execution profiles that no CLI flag can pin for a single run.'],
+  // Amp 0.0.1786006377 is the strongest candidate on paper — a documented stdin prompt in
+  // `-x/--execute`, a Claude-Code-compatible `--stream-json` mode, and a per-run
+  // `--settings-file` override — but not one of those claims could be observed here: the
+  // binary produces no output at all, and it is not signed in. Its own log proves an
+  // unauthenticated invocation opens a browser and blocks for five minutes before failing,
+  // which is strictly worse than a hang. See docs/providers/amp.md.
+  ['amp', 'The Amp binary produces no output at all on this machine — even amp --version blocks indefinitely — so Ensync has verified none of its behaviour. Amp is also not signed in, and its own log shows an unauthenticated run opening a browser login and blocking for five minutes before failing. Sign in to Amp and get amp --version to answer, then re-verify.'],
+])
 // Verified containment levels per the catalog capability contract. A provider
 // with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
 const CHAT_PROVIDER_CONTAINMENT = {
@@ -37,6 +117,125 @@ const CHAT_PROVIDER_CONTAINMENT = {
   // instead of rejected; the runner therefore refuses to send the prompt unless the
   // CLI echoes the pinned level back in its effective settings.
   droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
+  // os_sandbox gap (verified against cursor-agent 2026.08.04-aaa8809 by reading
+  // its bundled sources, not by observing a live run): headless approval is
+  // all-or-nothing. The CLI picks an always-approve or an always-deny decision
+  // provider from `isHeadless ? (headlessAutoApprove ? AlwaysApprove : AlwaysDeny)`,
+  // and the persisted `permissions.deny` list is never consulted on that path.
+  // An always-deny run cannot edit a file or run a command, so a useful run has to
+  // pin the run-everything mode, which leaves NO permission-layer containment.
+  // Containment is therefore the OS sandbox alone: `--sandbox enabled` overrides
+  // both the persisted mode and the server default, is applied to the executor
+  // independently of the decision provider, and — the part Ensync relies on — a
+  // headless run exits non-zero rather than running unsandboxed when the host
+  // cannot support it. The runner maps that exit to provider_containment_unverified.
+  cursor: { level: 'os_sandbox', sandboxMode: CURSOR_SANDBOX_MODE },
+  // permission_config gap (verified against codebuddy 2.133.1 by running the
+  // headless stream with an EMPTY prompt, which the CLI bills as
+  // duration_api_ms 0 / total_cost_usd 0 — no model turn was spent):
+  //   * `--permission-mode` fails open. `--permission-mode __bogus__` is silently
+  //     discarded and the session reports "default", with no error and exit 0 —
+  //     the same trap as droid's `.optional().catch(void 0)` autonomy field.
+  //     Mitigated because `system.init` echoes the EFFECTIVE permissionMode and
+  //     cwd, so the runner withholds the prompt until the echo matches.
+  //   * `--settings` also fails open: a malformed payload (`'{{{not json'`) is
+  //     ignored with no error, so the deny rules are not self-proving. Same gap
+  //     already recorded for Claude Code.
+  //   * Deny rules are rule-engine entries evaluated by the agent process itself,
+  //     not an OS boundary, and shell tools are matched by command prefix rather
+  //     than the file globs used here — so Write(...)/Edit(...) rules do not
+  //     constrain commands run through a shell tool.
+  //   * No authenticated turn has ever been observed on this machine, so none of
+  //     the above has been watched actually blocking a write. This provider stays
+  //     in GATED_CHAT_PROVIDERS for exactly that reason.
+  codebuddy: { level: 'permission_config', permissionMode: CODEBUDDY_PERMISSION_MODE },
+  // cwd_only, and deliberately not permission_config (verified against Kimi Code 0.34.0
+  // by reading the CLI's own bundled JavaScript, which ships in plaintext inside the
+  // binary — no model turn was spent):
+  //   * Prompt mode pins the permission mode ITSELF, and Ensync does not get a say:
+  //     resolveNativeSession calls setMode("auto") for a fresh session and forceAuto()
+  //     for --session/--continue, regardless of -y/--yolo or --auto.
+  //   * AutoModeApprovePermissionPolicy is then literally
+  //     `if (mode !== "auto") return; return { kind: "approve" }` — every tool call.
+  //     The upside is that it cannot hang: AutoModeAskUserQuestionDeny denies the
+  //     AskUserQuestion tool outright while auto mode is active.
+  //   * Configured DENY rules do outrank it, because UserConfiguredDeny runs before
+  //     AutoModeApprove in createPermissionDecisionPolicies. But they can only be read
+  //     from the user-global config.toml under KIMI_CODE_HOME: the project-local file
+  //     <root>/.kimi-code/local.toml has schema `{workspace:{additional_dir:string[]}}`
+  //     and accepts nothing else, and no CLI flag installs a rule. Ensync will not
+  //     rewrite a user's global settings to contain one run, and pointing
+  //     KIMI_CODE_HOME elsewhere would also relocate credentials/ and very likely break
+  //     the stored subscription login.
+  //   * SensitiveFileAccessAsk and GitControlPathAccessAsk sit AFTER AutoModeApprove in
+  //     the chain, so Kimi's own built-in protections never fire in this mode.
+  // cwd is therefore the entire enforcement surface, which is why kimi stays gated.
+  kimi: { level: 'cwd_only', permissionMode: KIMI_FORCED_PERMISSION_MODE, promptTransport: KIMI_PROMPT_TRANSPORT },
+  // cwd_only, and deliberately not permission_config (verified against Junie 26.8.3
+  // from `junie --help`, the docs JetBrains ships inside the release jar, and constant
+  // strings extracted from that jar — no model turn was spent):
+  //   * Junie DOES have real path-scoped containment: ~/.junie/allowlist.json carries
+  //     `defaultBehavior`, `allowReadonlyCommands`, and prefix/glob rules across
+  //     fileEditing, executables, mcpTools, and readOutsideProject, with fileEditing
+  //     paths resolved RELATIVE TO THE PROJECT ROOT. That is stronger than droid's
+  //     risk-tier autonomy level.
+  //   * But that file has one fixed user-global location and no per-run override. The
+  //     documented config.json field list — which --config-location can point at — has
+  //     no allowlist field, so Ensync cannot scope a single run without rewriting a
+  //     user-global file.
+  //   * `--brave` is documented "(interactive only)", so no argv flag pins approval
+  //     behaviour headlessly, while the headless event union still defines
+  //     ApprovableBlockUpdated, AskRequestUpdated, AskAsyncRequestUpdated,
+  //     ChoiceRequestUpdated, and GoalPlanApprovalRequestUpdated events. Whether a
+  //     headless run denies one or waits on it forever could only be settled by
+  //     spending a real model turn, so it is recorded as unknown, not assumed.
+  //   * Mitigation the runner does apply: headless launches are "always trusted" per
+  //     JetBrains' own docs and would otherwise load project-supplied config, MCP
+  //     servers, and skills out of the worktree, so every run passes
+  //     --config-default-locations=false.
+  junie: { level: 'cwd_only', configDefaultLocations: JUNIE_CONFIG_DEFAULT_LOCATIONS },
+  // permission_config gap (verified against Auggie 0.34.0 by reading the CLI's own
+  // shipped ESM bundle at @augmentcode/auggie/augment.mjs — no instruction was sent to a
+  // model):
+  //   * The default with NO rules is ALLOW EVERYTHING. `b2e` opens with
+  //     `if (o.length === 0) return { allow: true }`, so an unpinned Auggie run has no
+  //     containment whatsoever. The runner therefore always sends explicit deny rules.
+  //   * `--permission` FAILS OPEN. Its argParser `AYo` catches a parse error, emits
+  //     `WARNING: Failed to parse permission rule "..."`, and returns the rule list
+  //     UNCHANGED — the run proceeds with weaker permissions rather than refusing to
+  //     start. There is no echo of the effective permission set (unlike CodeBuddy's
+  //     system.init), so that warning line is the only available signal; the runner
+  //     scans both streams for it and fails the run as provider_containment_unverified.
+  //   * Rules match on the EXACT tool name only. The one content-aware field,
+  //     shellInputRegex, exists solely in the settings.json rule schema, so from argv a
+  //     shell can be denied entirely or allowed entirely — nothing in between. Ensync
+  //     denies the five process tools and web-fetch outright for that reason.
+  //   * Nothing is path-scoped. `--workspace-root` bounds what Auggie INDEXES, not what
+  //     it may write, and denials are enforced by the agent process returning an error
+  //     tool-result to the model rather than by any OS boundary.
+  //   * No authenticated turn has ever been observed on this machine, so none of the
+  //     above has been watched actually blocking a write. This provider stays in
+  //     GATED_CHAT_PROVIDERS for exactly that reason.
+  auggie: {
+    level: 'permission_config',
+    deniedTools: AUGGIE_DENIED_TOOLS,
+    promptTransport: AUGGIE_PROMPT_TRANSPORT,
+  },
+  // Deliberately NO oz record: Warp Oz expresses agent permissions only as execution
+  // profiles authored in the Warp GUI/TUI and synced through Warp Cloud, and no
+  // `oz agent run` flag pins one for a single run (`oz agent profile` can only `list`).
+  // There is no level Ensync could honestly claim, so the absent record keeps it
+  // unrunnable — the same treatment as ollama and jules.
+  // Deliberately NO amp record either: the Amp binary produces no output at all on this
+  // machine, so its containment surface (`--settings-file` plus an `amp.permissions`
+  // block whose schema was never read) is entirely unverified. Claiming a level from an
+  // unverifiable binary would be a guess.
+  // Deliberately NO ollama record: it is an inference server with no tool
+  // execution, so there is nothing to contain and no containment level that
+  // could honestly be claimed. The absent record keeps it unrunnable.
+  // Deliberately NO jules record either, for the same shape of reason: its work runs in
+  // a Google-hosted VM against a GitHub repository, so there is no local process to
+  // contain and no honest level to claim. The absent record keeps it unrunnable.
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 // There is no absolute run ceiling by default; this conservative ceiling is
@@ -66,6 +265,16 @@ const PROVIDER_LABELS = new Map([
   ['codex', 'Codex'],
   ['claude', 'Claude Code'],
   ['droid', 'Factory Droid'],
+  ['cursor', 'Cursor Agent'],
+  ['copilot', 'GitHub Copilot CLI'],
+  ['codebuddy', 'CodeBuddy Code'],
+  ['ollama', 'Ollama'],
+  ['jules', 'Jules'],
+  ['kimi', 'Kimi Code'],
+  ['junie', 'Junie'],
+  ['auggie', 'Augment Auggie'],
+  ['oz', 'Warp Oz'],
+  ['amp', 'Amp'],
 ])
 
 function providerLabel(providerId) {
@@ -520,6 +729,10 @@ function subscriptionAuthenticationAllowed(provider) {
   // maps a `model_authentication_failed` turn back to `provider_not_authenticated`.
   // The probe reports the stored login as 'Factory browser login'.
   if (provider.id === 'droid') return method.includes('browser login')
+  // Cursor's stored browser login is the only subscription-eligible credential:
+  // `subscriptionEnvironment` already removes `CURSOR_API_KEY`, and the probe
+  // reports the stored login as 'Cursor login'.
+  if (provider.id === 'cursor') return method.includes('cursor login')
   return false
 }
 
@@ -879,6 +1092,8 @@ export class ChatRunService {
   #hardTimeoutMs
   #codexLiveTurns
   #droidExecRuns
+  #cursorAgentRuns
+  #codebuddyExecRuns
   /** Live Claude interactive channels, keyed by the retained job that owns them. */
   #claudeQuestionChannels = new Map()
   #projectIsolation
@@ -907,6 +1122,14 @@ export class ChatRunService {
       hardTimeoutMs: this.#hardTimeoutMs,
     })
     this.#droidExecRuns = options.droidExecRunner ?? new DroidExecRunner({
+      inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      hardTimeoutMs: this.#hardTimeoutMs,
+    })
+    this.#cursorAgentRuns = options.cursorAgentRunner ?? new CursorAgentRunner({
+      inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      hardTimeoutMs: this.#hardTimeoutMs,
+    })
+    this.#codebuddyExecRuns = options.codebuddyExecRunner ?? new CodebuddyExecRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
@@ -1100,6 +1323,98 @@ export class ChatRunService {
           )
         }
         if (error instanceof DroidExecError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+
+    if (request.provider === 'cursor') {
+      this.#activeRuns += 1
+      try {
+        // Cursor's containment is argv-pinned by the runner itself: the spawn cwd
+        // plus `--workspace`, and `--sandbox enabled`, which the CLI refuses to
+        // start without on a host that cannot apply it. There is no per-run
+        // permission surface to hand a person, so this runner takes no retained
+        // job ID: a headless Cursor turn answers every interactive request from a
+        // fixed table and never blocks on an answer.
+        const result = await this.#cursorAgentRuns.run({
+          executable: provider.executable,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: combinedSignal.signal,
+          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+        })
+        workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
+        return { ...result, projectPath, workspace: publicWorkspace }
+      } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
+        if (error instanceof CursorAgentError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+
+    if (request.provider === 'codebuddy') {
+      this.#activeRuns += 1
+      try {
+        // Unreachable while `codebuddy` sits in GATED_CHAT_PROVIDERS — validateRequest
+        // refuses it first. It is wired now so that promotion is a one-line catalog
+        // change once an authenticated turn has been verified, not a re-implementation.
+        //
+        // CodeBuddy's containment is the spawn cwd plus `--permission-mode` and
+        // `--settings` deny rules, none of which are self-proving: an unrecognised
+        // mode is silently discarded. The runner therefore holds stdin open, waits
+        // for `system.init` to echo the effective mode and cwd, and only then
+        // releases the prompt — the same verify-before-you-send contract droid uses.
+        const result = await this.#codebuddyExecRuns.run({
+          executable: provider.executable,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          containment,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: combinedSignal.signal,
+          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+        })
+        workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
+        return { ...result, projectPath, workspace: publicWorkspace }
+      } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
+        if (error instanceof CodebuddyExecError) {
           throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
         }
         throw error

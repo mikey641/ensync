@@ -314,10 +314,10 @@ const providerCatalog = {
   },
   cursor: {
     routeKind: 'subscription',
-    chatExecution: 'discovery_only',
+    chatExecution: 'supported',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.cursor.com/en/cli/installation',
-    catalogReason: 'Discovery and login are wired, but Ensync Host does not yet have a tested Cursor event runner.',
+    catalogReason: 'Chat runs headless through `--print --output-format stream-json` with the prompt on stdin and the stored Cursor login, and a turn counts as finished only when the CLI emits its terminal success result. Containment is the pinned `--sandbox enabled` OS sandbox, which a headless run refuses to start without. Verified against cursor-agent 2026.08.04 from its own bundled sources; no live end-to-end run was observed, because this machine reports the CLI as signed out.',
   },
   kiro: {
     routeKind: 'subscription',
@@ -338,7 +338,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://www.codebuddy.ai/docs/cli/quickstart',
-    catalogReason: 'Ensync can open CodeBuddy onboarding, but does not yet have a tested event runner or CLI quota adapter.',
+    catalogReason: 'Ensync has a complete CodeBuddy runner (stdin prompt, stream-json result event, permission mode and cwd verified from the session init echo before the prompt is sent), but CodeBuddy is not signed in on this machine, so no authenticated turn has been verified — in particular whether a headless permission request is denied rather than left waiting. Chat stays gated until it is. No CLI quota adapter exists; credits live in the web dashboard.',
   },
   droid: {
     routeKind: 'subscription',
@@ -352,14 +352,14 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli',
-    catalogReason: 'Discovery and account login are wired, but Ensync does not yet have a tested Auggie runner or provider-wide quota adapter.',
+    catalogReason: 'Ensync has a complete Auggie runner (prompt on stdin in --print mode, a single terminal type:"result" object, and per-tool deny rules pinned with --permission), but Auggie is not signed in on this machine, so no authenticated turn has been verified — in particular whether a denied tool in a headless run is refused and reported rather than left waiting. Chat stays gated until it is. No provider-wide quota adapter exists; credits live in auggie account status and per-session stats.',
   },
   amp: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://ampcode.com/manual',
-    catalogReason: 'Discovery and account login are wired, but Ensync does not yet have a tested Amp runner or paid-credit guard.',
+    catalogReason: 'Discovery and account login are wired, but the Amp binary produces no output at all on this machine — even amp --version blocks indefinitely — so no runner could be verified. Amp is also not signed in, and its own log shows an unauthenticated run opening a browser login and blocking for five minutes before failing, so Ensync will not launch it. No paid-credit guard exists either.',
   },
   gitlab_duo: {
     routeKind: 'subscription',
@@ -373,7 +373,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.warp.dev/reference/cli',
-    catalogReason: 'Discovery and browser login are wired, but Ensync does not yet have a tested local/cloud runner, quota adapter, or paid-credit guard.',
+    catalogReason: 'Discovery and browser login are wired, but Oz can only take a prompt as a command-line argument or a server-stored prompt ID, publishes no terminal event for its ndjson stream, and expresses agent permissions only as Warp-synced execution profiles that no run flag can pin — so Ensync has no runner, quota adapter, or paid-credit guard.',
   },
   junie: {
     routeKind: 'subscription',
@@ -387,7 +387,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'none',
     documentationUrl: 'https://ollama.com/download',
-    catalogReason: 'Ensync detects the local runtime, but no tested local-model chat adapter is available yet.',
+    catalogReason: 'Ensync detects the local runtime and reports server reachability plus installed models. Ollama is an inference server rather than a coding agent — it cannot read or write files, run commands, or hold a session — so it is not a chat provider and is not gated pending work; local model discovery is the whole supported surface.',
   },
 }
 
