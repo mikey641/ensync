@@ -21,9 +21,13 @@ function isSecureUrl(value) {
   }
 }
 
-export function resolveDownload(manifest, platform) {
+export function resolveDownload(manifest, platform, expectedChannel = 'stable') {
   if (!manifest || manifest.schemaVersion !== 1) {
     return unavailable('The release manifest is missing or unsupported.');
+  }
+  const manifestChannel = manifest.channel ?? 'stable';
+  if (!['stable', 'beta'].includes(expectedChannel) || manifestChannel !== expectedChannel) {
+    return unavailable('The release manifest does not match the selected channel.');
   }
 
   const release = manifest.platforms?.[platform];
@@ -42,6 +46,12 @@ export function resolveDownload(manifest, platform) {
   const latestVersion = manifest.latest?.version;
   if (typeof latestVersion !== 'string' || !latestVersion.trim()) {
     return unavailable('The latest release does not have a verified version.');
+  }
+  if (expectedChannel === 'stable' && latestVersion.includes('-')) {
+    return unavailable('The stable feed cannot publish a prerelease version.');
+  }
+  if (expectedChannel === 'beta' && !latestVersion.includes('-')) {
+    return unavailable('The beta feed must publish an explicit prerelease version.');
   }
 
   if (release.version !== latestVersion) {

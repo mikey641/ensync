@@ -14,6 +14,10 @@ export type NativeUpdatePhase =
 export type NativeUpdateState = {
   installedVersion: string | null
   installedBuildId: string | null
+  installedBuildChannel: 'dev' | 'beta' | 'stable' | null
+  installedSourceCommit: string | null
+  installedSourceDirty: boolean | null
+  installedBuiltAt: string | null
   channel: 'stable' | 'beta'
   phase: NativeUpdatePhase
   message: string

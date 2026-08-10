@@ -72,6 +72,7 @@ import {
   UPDATE_SET_CHANNEL_CHANNEL,
   UPDATE_STATE_CHANNEL,
 } from './native-updates.mjs'
+import { readBuildInfoFile } from './build-info.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
@@ -547,8 +548,12 @@ if (!singleInstance) {
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
     })
+    const installedBuildInfo = app.isPackaged
+      ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
+      : null
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
+      installedBuildInfo,
       platform: process.platform,
       storeManaged: process.windowsStore === true,
       isPackaged: app.isPackaged,

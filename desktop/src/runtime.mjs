@@ -231,6 +231,10 @@ export class HostProcessController {
     this.releasing = true
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
     this.heartbeatTimer = null
+    await Promise.allSettled([
+      this.leaseRefresh,
+      this.connectionRefresh,
+    ].filter(Boolean))
     const port = this.port
     const authToken = this.authToken
     this.child = null
@@ -257,7 +261,6 @@ export class HostProcessController {
    */
   async ensureLease({ force = false } = {}) {
     if (!this.options.stateFilePath) return null
-    if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
     if (!this.port || !this.authToken) throw new Error('Detached Ensync Host is not connected.')
     if (!force && this.leaseExpiresAtMs > Date.now() + 5_000) return null
     if (this.leaseRefresh) return this.leaseRefresh
@@ -280,15 +283,7 @@ export class HostProcessController {
       payload ??= await this.#daemonRequest(port, authToken, '/api/daemon/claim', {
         ownerId: this.ownerId,
       })
-      if (this.releasing || this.port !== port || this.authToken !== authToken) {
-        // A late claim must not recreate a lease after release() already
-        // returned. Drop the exact owner on the endpoint that accepted it.
-        await this.#daemonRequest(port, authToken, '/api/daemon/release', {
-          ownerId: this.ownerId,
-        }).catch(() => {})
-        if (this.releasing) throw new Error('The native shell released its Ensync Host lease.')
-        return payload
-      }
+      if (this.port !== port || this.authToken !== authToken) return payload
       const expiresAtMs = Date.parse(payload?.lease?.expiresAt ?? '')
       if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
         throw new Error('Detached Ensync Host returned an invalid shell lease.')
@@ -320,7 +315,6 @@ export class HostProcessController {
       await this.ensureLease({ force })
       return { port: this.port, authToken: this.authToken, ownerId: this.ownerId }
     } catch {
-      if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
       // Continue below. A dead endpoint is replaced before the renderer request
       // is proxied; a live-but-busy PID remains fenced by descriptor discovery.
     }
@@ -372,12 +366,10 @@ export class HostProcessController {
 
     const releaseLaunchLock = await this.#acquireLaunchLock(stateFilePath, startupTimeoutMs)
     try {
-      if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
       // A different native shell may have started the daemon while this one
       // waited on the cross-process launch fence.
       const raced = await this.#findExistingDescriptor(stateFilePath)
       if (raced) return this.#claimDescriptor(raced, true)
-      if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
       await rm(stateFilePath, { force: true })
 
       const token = randomBytes(32).toString('hex')
@@ -404,7 +396,6 @@ export class HostProcessController {
 
       const deadline = Date.now() + startupTimeoutMs
       while (Date.now() < deadline) {
-        if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
         if (spawnError) throw spawnError
         const descriptor = await this.#readHealthyDescriptor(stateFilePath)
         if (descriptor) return this.#claimDescriptor(descriptor, false)
@@ -522,16 +513,9 @@ export class HostProcessController {
   }
 
   async #claimDescriptor(descriptor, reused) {
-    if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
     const payload = await this.#daemonRequest(descriptor.port, descriptor.token, '/api/daemon/claim', {
       ownerId: this.ownerId,
     })
-    if (this.releasing) {
-      await this.#daemonRequest(descriptor.port, descriptor.token, '/api/daemon/release', {
-        ownerId: this.ownerId,
-      }).catch(() => {})
-      throw new Error('The native shell released its Ensync Host lease.')
-    }
     this.port = descriptor.port
     this.authToken = descriptor.token
     const expiresAtMs = Date.parse(payload?.lease?.expiresAt ?? '')

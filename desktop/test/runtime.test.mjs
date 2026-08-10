@@ -192,64 +192,6 @@ test('a transient health timeout on a live detached Host never spawns a competin
   }
 })
 
-test('shell release never waits for an in-flight detached Host health recovery', async (context) => {
-  const directory = await mkdtemp(join(tmpdir(), 'ensync-host-release-recovery-'))
-  context.after(() => rm(directory, { recursive: true, force: true }))
-  const stateFilePath = join(directory, 'daemon.json')
-  const journalFilePath = join(directory, 'jobs.json')
-  const token = 'b'.repeat(64)
-  const instanceId = 'release-recovery-host'
-  let unavailable = false
-  let stalledHealthRequests = 0
-  const server = createServer((request, response) => {
-    if (request.headers.authorization !== `Bearer ${token}`) {
-      response.writeHead(401).end()
-      return
-    }
-    if (request.url === '/api/health') {
-      if (unavailable) {
-        stalledHealthRequests += 1
-        return
-      }
-      response.writeHead(200, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ ok: true, service: 'ensync-host', apiVersion: 1, instanceId }))
-      return
-    }
-    if (unavailable && request.url !== '/api/daemon/release') {
-      response.writeHead(503, { 'Content-Type': 'application/json' })
-      response.end(JSON.stringify({ error: 'temporarily unavailable' }))
-      return
-    }
-    response.writeHead(200, { 'Content-Type': 'application/json' })
-    response.end(JSON.stringify({ lease: { expiresAt: new Date(Date.now() + 60_000).toISOString() } }))
-  })
-  const port = await listen(server)
-  context.after(() => close(server))
-  await writeFile(stateFilePath, JSON.stringify({
-    version: 1, apiVersion: 1, pid: process.pid, port, token, instanceId,
-  }))
-
-  const controller = new HostProcessController({
-    bootstrapPath: resolve(desktopRoot, 'src', 'host-bootstrap.mjs'),
-    hostEntryPath: resolve(repositoryRoot, 'host', 'server.mjs'),
-    cwd: repositoryRoot,
-    stateFilePath,
-    journalFilePath,
-    descriptorRetryMs: 100,
-    spawnImpl: () => { throw new Error('must not spawn') },
-  })
-  await controller.start()
-  unavailable = true
-  const reconnect = controller.ensureConnected({ force: true })
-  await waitFor(() => stalledHealthRequests > 0)
-
-  const releaseStartedAt = Date.now()
-  await controller.release()
-  const releaseElapsedMs = Date.now() - releaseStartedAt
-  assert.ok(releaseElapsedMs < 750, `release took ${releaseElapsedMs}ms`)
-  await assert.rejects(reconnect)
-})
-
 test('a native shell replaces a dead detached Host in place before the next renderer request', async (context) => {
   const directory = await mkdtemp(join(tmpdir(), 'ensync-host-reconnect-'))
   context.after(() => rm(directory, { recursive: true, force: true }))

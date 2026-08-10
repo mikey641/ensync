@@ -14,9 +14,16 @@ import {
   verifyInstalledNativeBuild,
 } from '../src/native-updates.mjs'
 
-function releaseManifest({ version = '1.2.3', notarized = true, signed = true, sha256 = 'a'.repeat(64) } = {}) {
+function releaseManifest({
+  version = '1.2.3',
+  channel = 'stable',
+  notarized = true,
+  signed = true,
+  sha256 = 'a'.repeat(64),
+} = {}) {
   return {
     schemaVersion: 1,
+    channel,
     latest: {
       version,
       publishedAt: '2026-08-06T00:00:00.000Z',
@@ -65,6 +72,13 @@ test('candidate resolution requires matching signed artifacts and macOS notariza
   assert.equal(current.available, false)
   assert.equal(current.current, true)
   assert.match(current.reason, /latest verified release/)
+})
+
+test('candidate resolution isolates stable and beta channels', () => {
+  const beta = releaseManifest({ version: '1.2.3-beta.2', channel: 'beta' })
+  assert.equal(resolveUpdateCandidate(beta, 'darwin', '1.2.3-beta.1', 'beta').available, true)
+  assert.match(resolveUpdateCandidate(beta, 'darwin', '1.2.2', 'stable').reason, /selected update channel/)
+  assert.match(resolveUpdateCandidate(releaseManifest({ version: '1.2.4-beta.1' }), 'darwin', '1.2.3').reason, /stable feed/)
 })
 
 test('development and unsigned packaged builds fail closed without checking the network', async () => {
@@ -292,13 +306,49 @@ test('every update IPC action rejects an unregistered sender before invoking nat
   assert.equal(invoked, 1)
 })
 
-test('desktop package includes the updater and production HTTPS manifest feeds', async () => {
+test('changing update channel persists the choice and checks only the selected feed', async () => {
+  const fetched = []
+  const persisted = []
+  const manager = createNativeUpdateManager({
+    installedVersion: '1.2.3-beta.1',
+    installedBuildInfo: {
+      buildId: 'a'.repeat(16),
+      channel: 'dev',
+      sourceCommit: '35642bfda02d82e007a1639dbd2c642b67c01b7d',
+      sourceDirty: true,
+      builtAt: '2026-08-07T10:00:00.000Z',
+    },
+    platform: 'darwin',
+    isPackaged: true,
+    executablePath: '/Applications/Ensync.app/Contents/MacOS/Ensync',
+    manifestUrls: {
+      stable: 'https://ensync.vercel.app/releases.json',
+      beta: 'https://ensync.vercel.app/releases-beta.json',
+    },
+    tempRoot: tmpdir(),
+    fetchImpl: async (url) => {
+      fetched.push(url)
+      return new Response(JSON.stringify(releaseManifest({ version: '1.2.3-beta.2', channel: 'beta' })))
+    },
+    verifyInstalledBuild: async () => ({ verified: true, signerIdentity: 'TEAM123456' }),
+    openInstaller: async () => '',
+    persistChannel: async (channel) => persisted.push(channel),
+  })
+  assert.equal((await manager.initialize()).channel, 'stable')
+  assert.equal((await manager.setChannel('beta')).channel, 'beta')
+  assert.deepEqual(persisted, ['beta'])
+  assert.equal((await manager.check()).phase, 'available')
+  assert.deepEqual(fetched, ['https://ensync.vercel.app/releases-beta.json'])
+  assert.equal(manager.getState().installedSourceDirty, true)
+})
+
+test('desktop package includes build identity and separate production HTTPS manifest feeds', async () => {
   const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'))
   assert.ok(manifest.build.files.includes('src/native-updates.mjs'))
-  assert.deepEqual(manifest.ensync.updateManifestUrls, {
-    stable: 'https://ensync.vercel.app/releases.json',
-    beta: 'https://ensync.vercel.app/releases-beta.json',
-  })
+  assert.ok(manifest.build.files.includes('src/build-info.mjs'))
+  assert.equal(manifest.ensync.updateManifestUrls.stable, 'https://ensync.vercel.app/releases.json')
+  assert.equal(manifest.ensync.updateManifestUrls.beta, 'https://ensync.vercel.app/releases-beta.json')
+  assert.equal(manifest.build.extraResources.some((entry) => entry.to === 'build-info.json'), true)
   assert.equal(manifest.build.dmg.sign, true)
   assert.equal(manifest.build.afterAllArtifactBuild, 'scripts/notarize-artifacts.cjs')
 })

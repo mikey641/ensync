@@ -68,6 +68,13 @@ export function NativeUpdatePreferences({ className = '' }: { className?: string
             Installed version <strong>{state.installedVersion ?? 'Browser or unverified build'}</strong>
             {state.installedBuildId && <> · build <strong>{state.installedBuildId}</strong></>}
           </p>
+          {state.installedSourceCommit && (
+            <p className="native-update-build-source">
+              {state.installedBuildChannel ?? 'unknown'} · source <code>{state.installedSourceCommit}</code>
+              {state.installedSourceDirty === true ? ' · dirty worktree' : state.installedSourceDirty === false ? ' · clean source' : ''}
+              {state.installedBuiltAt ? ` · built ${new Date(state.installedBuiltAt).toLocaleString()}` : ''}
+            </p>
+          )}
         </div>
         <span className={`native-update-status native-update-status--${state.phase}`}>
           {active ? <RotateCw className="spin" size={13} /> : state.phase === 'error' ? <XCircle size={13} /> : <CheckCircle2 size={13} />}

@@ -5,10 +5,6 @@ import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
-import {
-  supportsProviderRunner,
-  withProviderRunnerInstructions,
-} from './provider-runner-contract.mjs'
 
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
@@ -772,22 +768,22 @@ export class ChatRunService {
       )
     }
 
-    let workspaceLease = null
+    let projectLease = null
     let workspace = null
     let combinedSignal = { signal: options.signal, dispose() {} }
     if (this.#projectIsolation) {
       try {
-        workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
+        projectLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
           signal: options.signal,
           onWait: () => options.onEvent?.({
             type: 'notice',
-            code: 'workspace_write_lock_waiting',
-            message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
+            code: 'project_write_lock_waiting',
+            message: 'Waiting for another Ensync chat to release this project’s exclusive write lease. No provider process has started.',
             at: new Date().toISOString(),
           }),
         })
-        workspace = workspaceLease.workspace
-        combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
+        workspace = projectLease.workspace
+        combinedSignal = combinedAbortSignal(options.signal, projectLease.signal)
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
@@ -806,10 +802,7 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
-    const executionRequest = {
-      ...request,
-      prompt: isolatedPrompt(withProviderRunnerInstructions(request.provider, 'local', request.prompt), workspace),
-    }
+    const executionRequest = workspace ? { ...request, prompt: isolatedPrompt(request.prompt, workspace) } : request
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
       repositoryPath: workspace.repositoryPath,
@@ -840,14 +833,14 @@ export class ChatRunService {
             options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
           },
         })
-        workspaceLease?.assertHeld()
+        projectLease?.assertHeld()
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
-        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
-          const reason = workspaceLease.signal.reason
+        if (projectLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = projectLease.signal.reason
           throw new ChatRunError(
-            'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            'project_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the exclusive project write lease. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -901,11 +894,11 @@ export class ChatRunService {
       this.#statusService.invalidate?.()
     }
 
-    if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
-      const reason = workspaceLease.signal.reason
+    if (projectLease?.signal.aborted && !options.signal?.aborted) {
+      const reason = projectLease.signal.reason
       throw new ChatRunError(
-        'workspace_write_lock_lost',
-        reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+        'project_write_lock_lost',
+        reason instanceof Error ? reason.message : 'Ensync Host lost the exclusive project write lease. Partial work may exist in the protected worktree.',
         409,
         false,
       )
@@ -955,7 +948,7 @@ export class ChatRunService {
     }
 
     const parsed = parseResult(request.provider, processResult.stdout)
-    workspaceLease?.assertHeld()
+    projectLease?.assertHeld()
     return {
       provider: request.provider,
       projectPath,
@@ -972,7 +965,7 @@ export class ChatRunService {
     }
     } finally {
       combinedSignal.dispose()
-      await workspaceLease?.release()
+      await projectLease?.release()
     }
   }
 

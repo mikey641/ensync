@@ -1,6 +1,10 @@
 const BROWSER_UPDATE_STATE = Object.freeze({
   installedVersion: null,
   installedBuildId: null,
+  installedBuildChannel: null,
+  installedSourceCommit: null,
+  installedSourceDirty: null,
+  installedBuiltAt: null,
   channel: 'stable',
   phase: 'unavailable',
   message: 'Native updates are available only in a signed Ensync desktop installation.',

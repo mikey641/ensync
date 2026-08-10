@@ -56,6 +56,7 @@
       "src/device-preferences.mjs",
       "src/workspace-recovery.mjs",
       "src/codex-conversation-import.mjs",
+      "src/build-info.mjs",
       "src/native-updates.mjs",
       "src/runtime.mjs",
       "package.json"
@@ -80,6 +81,10 @@
       {
         "from": "src/host-bootstrap.mjs",
         "to": "desktop-host-bootstrap.mjs"
+      },
+      {
+        "from": "build/generated/build-info.json",
+        "to": "build-info.json"
       }
     ],
     "afterSign": "scripts/notarize.cjs",

@@ -274,7 +274,7 @@ export type ChatExecutionEvent =
   | {
       type: 'notice'
       message: string
-      code?: 'project_write_lock_waiting' | 'workspace_write_lock_waiting' | 'project_workspace_ready' | string
+      code?: 'project_write_lock_waiting' | 'project_workspace_ready' | string
       workspace?: {
         path: string
         branch: string

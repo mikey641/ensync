@@ -1260,6 +1260,11 @@ kbd {
   font-weight: 600;
 }
 
+.native-update-build-source code {
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
 .native-update-status {
   min-height: 27px;
   padding: 4px 8px;

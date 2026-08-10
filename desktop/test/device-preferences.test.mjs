@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +14,25 @@ const spoken = Object.freeze({
   mode: 'speech',
   speechText: 'Your Ensync task is finished.',
   voiceId: '["Samantha","en-US"]',
+})
+
+test('device preferences migrate the pre-channel v1 payload to stable without losing alerts', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-device-preferences-legacy-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'device-preferences-v1.json')
+  const payload = JSON.stringify({ completionNotifications: spoken })
+  await writeFile(filePath, JSON.stringify({
+    format: 'ensync-device-preferences',
+    version: 1,
+    revision: 3,
+    committedAt: '2026-08-06T12:00:00.000Z',
+    checksum: createHash('sha256').update(payload).digest('hex'),
+    payload,
+  }))
+
+  const store = createDevicePreferencesStore({ filePath })
+  assert.deepEqual(store.get(), { completionNotifications: spoken, updateChannel: 'stable' })
+  assert.deepEqual(store.setUpdateChannel('beta'), { completionNotifications: spoken, updateChannel: 'beta' })
 })
 
 test('device preferences persist spoken completion alerts across store restarts', async (t) => {

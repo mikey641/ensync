@@ -1,6 +1,7 @@
 {
   "schemaVersion": 1,
   "channel": "beta",
+  "feedUpdatedAt": null,
   "latest": {
     "version": null,
     "publishedAt": null,
@@ -19,7 +20,7 @@
     },
     "windows": {
       "status": "unavailable",
-      "reason": "The Microsoft Store beta package has not been certified for a package flight yet.",
+      "reason": "No signed Windows beta build has been published yet.",
       "version": null,
       "url": null,
       "sha256": null,
@@ -27,5 +28,6 @@
       "notarized": null,
       "architectures": []
     }
-  }
+  },
+  "history": []
 }

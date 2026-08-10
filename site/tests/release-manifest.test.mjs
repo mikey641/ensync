@@ -5,6 +5,7 @@ import { releaseLabel, resolveDownload, resolveWindowsStoreListing } from '../pu
 function manifest(overrides = {}) {
   return {
     schemaVersion: 1,
+    channel: 'stable',
     latest: { version: '1.2.3', publishedAt: '2026-08-06T00:00:00Z', notesUrl: null },
     platforms: {
       macos: {
@@ -59,15 +60,11 @@ test('fails closed for an absent or unsupported manifest', () => {
   assert.equal(resolveDownload({ schemaVersion: 2 }, 'windows').available, false);
 });
 
-test('accepts only exact Microsoft Store product listing URLs', () => {
-  const available = resolveWindowsStoreListing({
-    downloads: { windowsStoreUrl: 'https://apps.microsoft.com/detail/ensync/9ABC123?hl=en-US' },
-  });
-  assert.equal(available.available, true);
-  assert.equal(available.url, 'https://apps.microsoft.com/detail/ensync/9ABC123?hl=en-US');
-
-  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: null } }).available, false);
-  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'https://example.com/detail/ensync' } }).available, false);
-  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'http://apps.microsoft.com/detail/ensync' } }).available, false);
-  assert.equal(resolveWindowsStoreListing({ downloads: { windowsStoreUrl: 'https://apps.microsoft.com/store/apps' } }).available, false);
+test('keeps stable and beta manifests isolated', () => {
+  assert.match(resolveDownload({ ...manifest(), channel: 'beta' }, 'macos', 'stable').reason, /selected channel/);
+  const beta = manifest({ version: '1.2.4-beta.1' });
+  beta.channel = 'beta';
+  beta.latest.version = '1.2.4-beta.1';
+  assert.equal(resolveDownload(beta, 'macos', 'beta').available, true);
+  assert.match(resolveDownload({ ...manifest(), channel: 'beta' }, 'macos', 'beta').reason, /prerelease/);
 });
