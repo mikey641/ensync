@@ -1122,10 +1122,13 @@ test('ChatRunService passes cancellation to the exact process and never classifi
   const projectPath = await projectFixture(context)
   const controller = new AbortController()
   let receivedSignal
+  let processStarted
+  const started = new Promise((resolve) => { processStarted = resolve })
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
     processRunner: async (_executable, _args, options) => {
       receivedSignal = options.signal
+      processStarted()
       await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }))
       return { exitCode: null, signal: 'SIGTERM', error: null, timedOut: false, aborted: true, stdout: '', stderr: '' }
     },
@@ -1135,7 +1138,9 @@ test('ChatRunService passes cancellation to the exact process and never classifi
     { provider: 'codex', projectPath, prompt: 'Keep working' },
     { signal: controller.signal },
   )
-  setTimeout(() => controller.abort(), 10)
+  // Cancel only once the process is actually running: a wall-clock delay races the
+  // pre-spawn cancellation checks, which reject before any signal reaches the process.
+  void started.then(() => controller.abort())
 
   await assert.rejects(run, (error) =>
     error instanceof ChatRunError
