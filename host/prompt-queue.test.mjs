@@ -2,16 +2,18 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
+  activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
-  liveSteerReadyAfterEvent,
+  liveSteerWasSafelyRejected,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  queuedPromptCanSteerActiveTurn,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -133,6 +135,50 @@ test('execution context stops before its own prompt and replies precede future q
 test('predecessors chain through the active turn and then queued tail', () => {
   assert.equal(predecessorTurnIdForPrompt([], [], { turnId: 'active' }), 'active')
   assert.equal(predecessorTurnIdForPrompt([entry('queued')], [], { turnId: 'active' }), 'queued')
+})
+
+test('live steering is offered only for the exact Host-started local Codex turn', () => {
+  const queued = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      ...entry('turn-2', 'turn-1').preferences,
+      executionTargetKey: 'local',
+      projectId: 'project-1',
+      projectPath: '/repo',
+    },
+  }
+  const activeRun = {
+    turnId: 'turn-1',
+    provider: 'codex',
+    executionTarget: 'local',
+    providerProcessStarted: false,
+    jobId: 'job-turn-1-codex-1',
+    projectId: 'project-1',
+    projectPath: '/repo',
+  }
+
+  assert.equal(activeCodexTurnCanAcceptSteering(activeRun), false)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, activeRun), false)
+
+  const startedRun = { ...activeRun, providerProcessStarted: true }
+  assert.equal(activeCodexTurnCanAcceptSteering(startedRun), true)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, startedRun), true)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, { ...startedRun, projectPath: '/other' }), false)
+})
+
+test('only a confirmed unavailable live turn silently falls back to FIFO', () => {
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'live_steer_unavailable',
+    safeToRetry: true,
+  }), true)
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'live_steer_unconfirmed',
+    safeToRetry: false,
+  }), false)
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'invalid_prompt',
+    safeToRetry: true,
+  }), false)
 })
 
 test('normalization keeps only structurally complete persisted entries', () => {

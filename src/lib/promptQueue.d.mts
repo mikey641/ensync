@@ -30,6 +30,18 @@ export function removePromptFromQueue(queues: PromptQueues, chatId: string, entr
 export function promoteQueuedPromptToActiveTurn(queues: PromptQueues, chatId: string, entryId: string, activeTurnId: string): PromptQueues
 export function approveNextQueuedPrompt(queues: PromptQueues, chatId: string, approvedAt: string): PromptQueues
 export function predecessorTurnIdForPrompt(queue: QueuedPrompt[], messages: Message[], inFlightRun?: { turnId?: string } | null): string | null
+export type SteerableActiveRun = {
+  turnId?: string
+  provider?: string
+  executionTarget?: string
+  providerProcessStarted?: boolean
+  jobId?: string
+  projectId?: string
+  projectPath?: string
+}
+export function activeCodexTurnCanAcceptSteering(activeRun: SteerableActiveRun | null | undefined): boolean
+export function queuedPromptCanSteerActiveTurn(entry: QueuedPrompt | undefined, activeRun: SteerableActiveRun | null | undefined): boolean
+export function liveSteerWasSafelyRejected(error: unknown): boolean
 export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry: QueuedPrompt | undefined): {
   state: 'empty' | 'ready' | 'waiting' | 'paused'
   reason: string | null

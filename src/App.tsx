@@ -130,10 +130,6 @@ import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
-  conversationWorkspaceKey,
-  resolveConversationWorkspaceKey,
-} from './lib/conversationWorkspaceKey.mjs'
-import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -147,16 +143,18 @@ import {
   workingElapsedLabel,
 } from './lib/workingElapsed.mjs'
 import {
+  activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
-  liveSteerReadyAfterEvent,
+  liveSteerWasSafelyRejected,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  queuedPromptCanSteerActiveTurn,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -1829,12 +1827,11 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
-    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: agentWorkspaceKey,
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2390,11 +2387,7 @@ function App() {
       && (promptQueuesRef.current[chatId]?.length ?? 0) === 0
       && liveSteeringReadyChatIdsRef.current.has(chatId)
       && runTarget.kind === 'local'
-      && activeRun?.provider === 'codex'
-      && activeRun.executionTarget === 'local'
-      && typeof activeRun.jobId === 'string'
-      && Boolean(activeRun.jobId)
-      && activeRun.liveSteerReady === true
+      && activeCodexTurnCanAcceptSteering(activeRun)
     if (canTryLiveSteer && activeRun?.jobId) {
       if (steeringChatIdsRef.current.has(chatId)) return
       steeringChatIdsRef.current.add(chatId)
@@ -2704,7 +2697,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2713,7 +2706,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -2894,16 +2887,7 @@ function App() {
     const chat = chatsRef.current.find((item) => item.id === chatId)
     const queuedMessage = chat?.messages.find((item) =>
       item.id === entry?.messageId && item.role === 'user' && item.deliveryStatus === 'queued')
-    const exactActiveCodexTurn = entry
-      && activeRun
-      && entry.predecessorTurnId === activeRun.turnId
-      && entry.preferences.executionTargetKey === activeRun.executionTarget
-      && entry.preferences.projectId === activeRun.projectId
-      && entry.preferences.projectPath === activeRun.projectPath
-      && activeRun.provider === 'codex'
-      && activeRun.executionTarget === 'local'
-      && typeof activeRun.jobId === 'string'
-      && Boolean(activeRun.jobId)
+    const exactActiveCodexTurn = queuedPromptCanSteerActiveTurn(entry, activeRun)
     if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
       updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
       return
@@ -2958,7 +2942,12 @@ function App() {
       })
     } catch (steerError) {
       const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
-      if (safelyNotDelivered) {
+      if (liveSteerWasSafelyRejected(steerError)) {
+        // The turn finished between rendering Push now and Host delivery, or
+        // the started job is still finalizing. Its successful terminal path
+        // will release this unchanged FIFO head automatically.
+        updateChatError(chatId, null)
+      } else if (safelyNotDelivered) {
         updateChatError(chatId, `${steerError.message} It remains queued.`)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
@@ -3417,10 +3406,7 @@ function App() {
                   sendingChatIds.has(chat.id)
                   && liveSteeringReadyChatIds.has(chat.id)
                   && executionTarget.kind === 'local'
-                  && inFlightRuns[chat.id]?.provider === 'codex'
-                  && inFlightRuns[chat.id]?.executionTarget === 'local'
-                  && Boolean(inFlightRuns[chat.id]?.jobId)
-                  && inFlightRuns[chat.id]?.liveSteerReady === true
+                  && activeCodexTurnCanAcceptSteering(inFlightRuns[chat.id])
                   && (promptQueues[chat.id]?.length ?? 0) === 0
                 }
                 canPushQueuedNow={(() => {
@@ -3428,14 +3414,7 @@ function App() {
                   const entry = promptQueues[chat.id]?.[0]
                   return Boolean(
                     sendingChatIds.has(chat.id)
-                    && activeRun?.provider === 'codex'
-                    && activeRun.executionTarget === 'local'
-                    && activeRun.jobId
-                    && entry
-                    && entry.predecessorTurnId === activeRun.turnId
-                    && entry.preferences.executionTargetKey === activeRun.executionTarget
-                    && entry.preferences.projectId === activeRun.projectId
-                    && entry.preferences.projectPath === activeRun.projectPath,
+                    && queuedPromptCanSteerActiveTurn(entry, activeRun),
                   )
                 })()}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}

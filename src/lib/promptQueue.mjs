@@ -87,6 +87,28 @@ export function predecessorTurnIdForPrompt(queue, messages, inFlightRun) {
     message?.role === 'user' && message.deliveryStatus === 'pending')?.turnId ?? null
 }
 
+/** A Host job can exist while provider preflight or workspace setup is still running. */
+export function activeCodexTurnCanAcceptSteering(activeRun) {
+  return activeRun?.provider === 'codex'
+    && activeRun.executionTarget === 'local'
+    && activeRun.providerProcessStarted === true
+    && Boolean(nonEmptyString(activeRun.jobId))
+}
+
+/** Match Push now to the exact started turn and its captured project/target. */
+export function queuedPromptCanSteerActiveTurn(entry, activeRun) {
+  return activeCodexTurnCanAcceptSteering(activeRun)
+    && entry?.predecessorTurnId === activeRun.turnId
+    && entry?.preferences?.executionTargetKey === activeRun.executionTarget
+    && entry?.preferences?.projectId === activeRun.projectId
+    && entry?.preferences?.projectPath === activeRun.projectPath
+}
+
+/** This rejection proves the live instruction was not delivered and may remain FIFO. */
+export function liveSteerWasSafelyRejected(error) {
+  return error?.code === 'live_steer_unavailable' && error?.safeToRetry === true
+}
+
 /**
  * Automatic advancement is intentionally success-only. A persisted explicit
  * approval lets the user continue after reviewing an unsafe/failed predecessor;
