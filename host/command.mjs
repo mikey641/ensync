@@ -169,6 +169,19 @@ export class BoundedOutputCapture {
   }
 }
 
+const MIN_CONFIGURED_HARD_TIMEOUT_MS = 1_000
+
+// The hard ceiling is a runaway-process backstop. The inactivity watchdog is
+// responsible for detecting a hung provider, so operators may raise or lower
+// this limit explicitly without changing the normal hang-detection behavior.
+export function configuredHardTimeoutMs(environment, fallbackMs) {
+  const raw = environment?.ENSYNC_CHAT_HARD_TIMEOUT_MS
+  if (typeof raw !== 'string' || raw.trim() === '') return fallbackMs
+  const parsed = Number(raw.trim())
+  if (!Number.isSafeInteger(parsed) || parsed < MIN_CONFIGURED_HARD_TIMEOUT_MS) return fallbackMs
+  return parsed
+}
+
 export function subscriptionEnvironment(source = process.env) {
   const clean = {}
 
