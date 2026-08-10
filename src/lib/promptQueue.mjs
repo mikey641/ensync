@@ -215,21 +215,17 @@ export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurn
   ]
 }
 
-export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
+/** Active-run submissions enter FIFO; live delivery is only an explicit Push now action. */
+export function promptSubmissionMode({ hasActiveRun }) {
+  return hasActiveRun ? 'queue' : 'run'
+}
+
+export function promptQueueComposerState({ sending, draft, canRun }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
   return {
     sendEnabled: hasDraft && Boolean(canRun),
-    sendLabel: sending
-      ? liveSteering
-        ? 'Push message into the active Codex turn now'
-        : 'Queue message in this chat'
-      : 'Send message',
-    sendText: sending && liveSteering ? 'Push now' : null,
+    sendLabel: sending ? 'Queue message in this chat' : 'Send message',
     stopVisible: Boolean(sending),
-    hint: sending
-      ? liveSteering
-        ? '↵ Push now · stop ends turn'
-        : '↵ queue · stop ends current only'
-      : '↵ send · ⇧↵ new line',
+    hint: sending ? '↵ queue · stop ends current only' : '↵ send · ⇧↵ new line',
   }
 }

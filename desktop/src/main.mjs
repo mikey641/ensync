@@ -63,13 +63,6 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
-  createWindowStateStore,
-  MINIMUM_WINDOW_BOUNDS,
-  NATIVE_WINDOW_STATE_FILENAME,
-  readNativeWindowState,
-  resolveWindowPlacement,
-} from './window-state.mjs'
-import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -86,8 +79,6 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
-/** Coalesces the resize/move event storms macOS and Windows emit while dragging. */
-const WINDOW_STATE_PERSIST_DELAY_MS = 400
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -103,7 +94,6 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
-let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -198,6 +188,15 @@ async function openProjectWindow(project, sourceWorkspace) {
   }
 }
 
+async function reopenProjectWindow(identity, projectLaunch) {
+  projectLaunchByWorkspace.set(identity.id, projectLaunch)
+  try {
+    return await createWindow(identity)
+  } finally {
+    projectLaunchByWorkspace.delete(identity.id)
+  }
+}
+
 function installApplicationMenu() {
   const template = createNativeWindowMenuTemplate({
     appName: app.name,
@@ -243,6 +242,7 @@ function registerNativeBridge() {
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
     retainedIdentities: () => nativeWorkspaceStore?.list() ?? [],
     windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+    openWorkspaceWindow: reopenProjectWindow,
     focusWindow: (window) => showWindow(window),
     notifyProjectFocus: (window, project) => {
       window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)
@@ -601,7 +601,7 @@ if (!singleInstance) {
   app.on('activate', () => {
     if (nativeWindows.size > 0) showWindow()
     else {
-      const identity = nativeWorkspaceStore?.ensureCanonical()
+      const identity = nativeWorkspaceStore?.ensureRestorable()
       if (identity) void createWindow(identity).catch(handleStartupFailure)
     }
   })
@@ -617,9 +617,6 @@ if (!singleInstance) {
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
-    })
-    windowStateStore = createWindowStateStore({
-      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
@@ -639,7 +636,7 @@ if (!singleInstance) {
     // activate event may create a window while that async work is in flight.
     registerNativeBridge()
     installApplicationMenu()
-    nativeWorkspaceStore.ensureCanonical()
+    nativeWorkspaceStore.ensureRestorable()
     return updateManager.initialize()
   }).then(() => {
     const retainedIdentities = nativeWorkspaceStore.list()

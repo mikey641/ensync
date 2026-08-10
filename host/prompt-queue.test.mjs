@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import * as promptQueueContract from '../src/lib/promptQueue.mjs'
 import {
   activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
@@ -203,6 +204,10 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     hint: '↵ queue · stop ends current only',
   })
   assert.equal(promptQueueComposerState({ sending: true, draft: '   ', canRun: true }).sendEnabled, false)
+})
+
+test('active-run submissions always queue before an explicit Push now action', () => {
+  assert.equal(promptQueueContract.promptSubmissionMode?.({ hasActiveRun: true }), 'queue')
   assert.deepEqual(promptQueueComposerState({
     sending: true,
     draft: 'correct the active task',
@@ -210,10 +215,9 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     liveSteering: true,
   }), {
     sendEnabled: true,
-    sendLabel: 'Push message into the active Codex turn now',
-    sendText: 'Push now',
+    sendLabel: 'Queue message in this chat',
     stopVisible: true,
-    hint: '↵ Push now · stop ends turn',
+    hint: '↵ queue · stop ends current only',
   })
 })
 

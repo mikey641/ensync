@@ -158,6 +158,7 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  promptSubmissionMode,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -1715,9 +1716,14 @@ function App() {
             setProjectOpen(false)
             return
           }
+          setProjectError('Ensync could not reopen the saved project window. The current project remains open.')
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
+          setProjectError(error instanceof Error
+            ? error.message
+            : 'Ensync could not reopen the saved project window. The current project remains open.')
         }
+        return
       }
       if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
         return
@@ -2356,25 +2362,10 @@ function App() {
     const runPreferences = chatRunPreferences(chatToSend, runAutoFallback)
     const agentWorkspaceKey = resolveConversationWorkspaceKey(chatToSend)
     const automaticMode = runPreferences.automaticProvider
-    const enqueueBehindActiveRun = !queuedPrompt && chatRunRegistryRef.current.has(chatId)
-    let selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
-    if (
-      automaticMode
-      && !selectedAutomaticProvider
-      && !enqueueBehindActiveRun
-      && runTarget.kind === 'local'
-    ) {
-      selectedAutomaticProvider = await selectAutomaticProviderAfterRefresh(
-        runExecutionProviders,
-        runFallbackOrder,
-        async () => {
-          const online = await refreshProviders(true)
-          if (!online) return null
-          runExecutionProviders = providersForTarget(providersRef.current, runTarget)
-          return runExecutionProviders
-        },
-      )
-    }
+    const enqueueBehindActiveRun = promptSubmissionMode({
+      hasActiveRun: !queuedPrompt && chatRunRegistryRef.current.has(chatId),
+    }) === 'queue'
+    const selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
     if (automaticMode && !selectedAutomaticProvider && !enqueueBehindActiveRun) {
       setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex, Claude Code, or Factory Droid.' }))
       return
@@ -2385,87 +2376,6 @@ function App() {
     if (!supportsChat(provider) && !enqueueBehindActiveRun) {
       setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex, Claude Code, or Factory Droid.` }))
       return
-    }
-    const activeRun = inFlightRunsRef.current[chatId]
-    const canTryLiveSteer = enqueueBehindActiveRun
-      && (promptQueuesRef.current[chatId]?.length ?? 0) === 0
-      && liveSteeringReadyChatIdsRef.current.has(chatId)
-      && runTarget.kind === 'local'
-      && activeCodexTurnCanAcceptSteering(activeRun)
-    if (canTryLiveSteer && activeRun?.jobId) {
-      if (steeringChatIdsRef.current.has(chatId)) return
-      steeringChatIdsRef.current.add(chatId)
-      try {
-        await ensyncHost.steerChatJob(
-          activeRun.jobId,
-          providerPrompt,
-          attachments.map((attachment) => attachment.path),
-        )
-        const activeTurnId = activeRun.turnId
-        const messageId = `msg-${turnId}`
-        let replyAlreadyVisible = false
-        const nextChats = chatsRef.current.map((chat) => {
-          if (chat.id !== chatId) return chat
-          const replyIndex = chat.messages.findIndex((item) =>
-            item.role === 'agent' && item.turnId === activeTurnId)
-          replyAlreadyVisible = replyIndex >= 0
-          const steeredMessage = {
-            id: messageId,
-            role: 'user' as const,
-            content: visibleMessageText(message, attachments),
-            attachments,
-            time: timeNow(),
-            turnId: activeTurnId,
-            deliveryStatus: replyAlreadyVisible ? 'completed' as const : 'pending' as const,
-          }
-          return {
-            ...chat,
-            messages: replyIndex >= 0
-              ? [...chat.messages.slice(0, replyIndex), steeredMessage, ...chat.messages.slice(replyIndex)]
-              : [...chat.messages, steeredMessage],
-          }
-        })
-        chatsRef.current = nextChats
-        setChats(nextChats)
-        if (replyAlreadyVisible) {
-          const session = chatSessionsRef.current[chatId]
-          if (session?.provider === 'codex' && typeof session.syncedMessageCount === 'number') {
-            const nextSessions = {
-              ...chatSessionsRef.current,
-              [chatId]: { ...session, syncedMessageCount: session.syncedMessageCount + 1 },
-            }
-            chatSessionsRef.current = nextSessions
-            setChatSessions(nextSessions)
-          }
-        }
-        if ((draftsRef.current[chatId] ?? '').trim() === message) {
-          draftsRef.current = { ...draftsRef.current, [chatId]: '' }
-          setDrafts(draftsRef.current)
-        }
-        if ((draftAttachmentsRef.current[chatId] ?? []).every((attachment, index) =>
-          attachment.path === attachments[index]?.path)) {
-          draftAttachmentsRef.current = { ...draftAttachmentsRef.current, [chatId]: [] }
-          setDraftAttachments(draftAttachmentsRef.current)
-        }
-        setChatErrors((current) => ({ ...current, [chatId]: null }))
-        return
-      } catch (steerError) {
-        const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
-        if (safelyNotDelivered) {
-          updateInFlightRun(chatId, (current) => current ? { ...current, liveSteerReady: false } : current)
-        }
-        if (!safelyNotDelivered) {
-          setChatErrors((current) => ({
-            ...current,
-            [chatId]: steerError instanceof Error
-              ? steerError.message
-              : 'Ensync could not confirm whether Codex received the live instruction, so it was not queued again.',
-          }))
-          return
-        }
-      } finally {
-        steeringChatIdsRef.current.delete(chatId)
-      }
     }
     if (enqueueBehindActiveRun) {
       const queuedAt = new Date().toISOString()
@@ -3410,13 +3320,6 @@ function App() {
                 attachments={draftAttachments[chat.id] ?? []}
                 attachmentError={attachmentErrors[chat.id] ?? null}
                 sending={sendingChatIds.has(chat.id)}
-                liveSteering={
-                  sendingChatIds.has(chat.id)
-                  && liveSteeringReadyChatIds.has(chat.id)
-                  && executionTarget.kind === 'local'
-                  && activeCodexTurnCanAcceptSteering(inFlightRuns[chat.id])
-                  && (promptQueues[chat.id]?.length ?? 0) === 0
-                }
                 canPushQueuedNow={(() => {
                   const activeRun = inFlightRuns[chat.id]
                   const entry = promptQueues[chat.id]?.[0]
@@ -3536,7 +3439,6 @@ function ConversationPane({
   attachments,
   attachmentError,
   sending,
-  liveSteering,
   canPushQueuedNow,
   pushingQueued,
   runStartedAt,
@@ -3585,7 +3487,6 @@ function ConversationPane({
   attachments: FileAttachment[]
   attachmentError: string | null
   sending: boolean
-  liveSteering: boolean
   canPushQueuedNow: boolean
   pushingQueued: boolean
   runStartedAt: string | null
@@ -3639,7 +3540,6 @@ function ConversationPane({
   const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length)
   const composerQueueState = promptQueueComposerState({
     sending,
-    liveSteering,
     draft: draft || (attachments.length > 0 ? 'attached files' : ''),
     canRun: canRunChat,
   })
@@ -3927,16 +3827,7 @@ function ConversationPane({
             <div className="composer__submit-actions">
               <span className="shortcut">{composerQueueState.hint}</span>
               {composerQueueState.stopVisible && <button className="stop-button" type="button" onClick={onStop} aria-label={`Stop ${provider.name} in this chat`} title="Stop current run; queued prompts pause"><Square size={13} /></button>}
-              <button
-                className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''} ${composerQueueState.sendText ? 'send-button--labeled' : ''}`}
-                onClick={onSend}
-                disabled={!composerQueueState.sendEnabled}
-                aria-label={composerQueueState.sendLabel}
-                title={sending ? liveSteering ? 'Push this message into the active Codex turn now' : 'Queue after the current turn' : 'Send'}
-              >
-                {composerQueueState.sendText && <span>{composerQueueState.sendText}</span>}
-                <ArrowUp size={17} />
-              </button>
+              <button className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''}`} onClick={onSend} disabled={!composerQueueState.sendEnabled} aria-label={composerQueueState.sendLabel} title={sending ? 'Queue after the current turn' : 'Send'}><ArrowUp size={17} /></button>
             </div>
           </div>
         </div>

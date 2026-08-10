@@ -424,16 +424,9 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    if (message.method === 'turn/started' && params?.turn?.id && params?.threadId === this.#threadId) {
-      if (this.#turnId && this.#turnId !== params.turn.id) {
-        this.#fail(new CodexLiveTurnError(
-          'invalid_cli_output',
-          'Codex app-server activated a different turn than the one Ensync started.',
-          502,
-          false,
-        ))
-        return
-      }
+    if (message.method === 'turn/started'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id) {
       this.#turnId = params.turn.id
       this.#activatedTurnId = params.turn.id
       this.#turnStarted = true

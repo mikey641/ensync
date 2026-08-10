@@ -23,8 +23,8 @@ export function isNativeWorkspaceIdentity(value) {
 
 export function shouldRetainNativeWorkspaceOnClose({ identity, quitting, platform, openWindowCount }) {
   if (!isNativeWorkspaceIdentity(identity)) return false
-  return identity.kind === 'canonical'
-    || Boolean(quitting)
+  return Boolean(quitting)
+    || (identity.kind === 'canonical' && openWindowCount === 1)
     || (platform !== 'darwin' && openWindowCount === 1)
 }
 
@@ -125,6 +125,9 @@ export function createNativeWorkspaceStore({ filePath, createId = randomUUID } =
 
   return {
     list() { return workspaces.map((identity) => ({ ...identity })) },
+    ensureRestorable() {
+      return workspaces.at(-1) ?? create('canonical')
+    },
     ensureCanonical() {
       return workspaces.find((identity) => identity.kind === 'canonical') ?? create('canonical')
     },
@@ -225,6 +228,7 @@ export function createWorkspaceFocusHandler({
   identityForWebContents,
   retainedIdentities,
   windowForWorkspace,
+  openWorkspaceWindow,
   focusWindow,
   notifyProjectFocus,
 }) {
@@ -233,6 +237,7 @@ export function createWorkspaceFocusHandler({
     identityForWebContents,
     retainedIdentities,
     windowForWorkspace,
+    openWorkspaceWindow,
     focusWindow,
     notifyProjectFocus,
   })) {
@@ -255,6 +260,11 @@ export function createWorkspaceFocusHandler({
       .find((identity) => isNativeWorkspaceIdentity(identity) && identity.id === targetWorkspaceId)
     if (!targetIdentity) return false
     const targetWindow = windowForWorkspace(targetWorkspaceId)
+      ?? await openWorkspaceWindow(targetIdentity, {
+        projectId: request.projectId,
+        projectPath: request.projectPath,
+        sourceWorkspace: { id: source.id, kind: source.kind },
+      })
     if (!targetWindow || await focusWindow(targetWindow) === false) return false
     await notifyProjectFocus(targetWindow, {
       projectId: request.projectId,
