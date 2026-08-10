@@ -2,14 +2,12 @@
 /**
  * Auto-land all unlanded ensync/chat-* branches into main.
  *
- * Pulls origin/main, merges every ensync/chat-* branch that has unmerged
- * commits (using -X theirs for content conflicts, keeping branch files for
- * modify/delete conflicts), then pushes the result back to origin.
+ * Pulls origin/main (if a remote is configured), merges every ensync/chat-*
+ * branch that has unmerged commits (using -X theirs for content conflicts,
+ * keeping branch files for modify/delete conflicts), then pushes the result
+ * back to origin (if a remote is configured).
  *
- * Run manually after agent work sessions:
- *   node scripts/auto-land.mjs
- *
- * Or set up as a cron job / launchd task to run periodically.
+ * Safe to run on a schedule — exits cleanly when there is nothing to merge.
  */
 import { execFile as execFileCallback } from 'node:child_process'
 import { promisify } from 'node:util'
@@ -17,20 +15,39 @@ import { promisify } from 'node:util'
 const execFile = promisify(execFileCallback)
 
 async function git(args, opts = {}) {
-  const { stdout } = await execFile('git', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts })
-  return stdout.trim()
+  try {
+    const { stdout } = await execFile('git', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...opts })
+    return stdout.trim()
+  } catch (error) {
+    throw error
+  }
+}
+
+async function hasRemote() {
+  try {
+    const remotes = await git(['remote'])
+    return remotes.length > 0
+  } catch {
+    return false
+  }
 }
 
 async function run() {
-  console.log('Pulling origin/main...')
-  try {
-    await git(['pull', 'origin', 'main', '--no-edit', '--ff-only'])
-  } catch (error) {
-    console.error('Pull failed (may need manual rebase):', error.message)
-    process.exit(1)
+  const repoRoot = await git(['rev-parse', '--show-toplevel'])
+  const repoName = repoRoot.split('/').pop()
+  const remote = await hasRemote()
+
+  if (remote) {
+    console.log(`[${repoName}] Pulling origin/main...`)
+    try {
+      await git(['pull', 'origin', 'main', '--no-edit', '--ff-only'])
+    } catch (error) {
+      console.error(`[${repoName}] Pull failed: ${error.message}`)
+      // Continue anyway — we can still merge local branches.
+    }
   }
 
-  // List all ensync/chat-* branches with unmerged commits
+  // List all ensync/chat-* branches
   const branches = (await git(['branch', '--list', 'ensync/chat-*']))
     .split('\n')
     .map((line) => line.replace(/^\*?\s+/, '').trim())
@@ -46,34 +63,41 @@ async function run() {
       continue
     }
 
-    console.log(`\nMerging ${branch} (${ahead} commits ahead)...`)
+    console.log(`[${repoName}] Merging ${branch} (${ahead} commits ahead)...`)
     try {
       await git(['merge', branch, '--no-edit', '-X', 'theirs'], { stdio: 'pipe' })
-      console.log(`  OK`)
+      console.log(`[${repoName}]   OK`)
       merged++
     } catch {
       // Handle modify/delete conflicts by keeping the branch's files
-      console.log('  Resolving modify/delete conflicts...')
-      await git(['add', '-A'])
-      await git(['commit', '--no-edit', '-m', `Merge ${branch}`], { stdio: 'pipe' })
-      console.log(`  RESOLVED`)
-      merged++
+      console.log(`[${repoName}]   Resolving conflicts...`)
+      try {
+        await git(['add', '-A'])
+        await git(['commit', '--no-edit', '-m', `Merge ${branch}`], { stdio: 'pipe' })
+        console.log(`[${repoName}]   RESOLVED`)
+        merged++
+      } catch {
+        console.error(`[${repoName}]   FAILED to resolve ${branch}`)
+        try { await git(['merge', '--abort']) } catch {}
+      }
     }
   }
 
-  console.log(`\n${merged} branch(es) merged, ${skipped} already up to date.`)
-
   if (merged > 0) {
-    console.log('Pushing to origin...')
-    try {
-      await git(['push', 'origin', 'main'])
-      console.log('Pushed.')
-    } catch (error) {
-      console.error('Push failed:', error.message)
-      process.exit(1)
+    console.log(`[${repoName}] ${merged} merged, ${skipped} already up to date.`)
+    if (remote) {
+      console.log(`[${repoName}] Pushing to origin...`)
+      try {
+        await git(['push', 'origin', 'main'])
+        console.log(`[${repoName}] Pushed.`)
+      } catch (error) {
+        console.error(`[${repoName}] Push failed: ${error.message}`)
+      }
+    } else {
+      console.log(`[${repoName}] No remote configured — merged locally only.`)
     }
   } else {
-    console.log('Nothing to push.')
+    console.log(`[${repoName}] Nothing to merge (${skipped} already up to date).`)
   }
 }
 
