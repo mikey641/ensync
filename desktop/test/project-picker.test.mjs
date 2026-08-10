@@ -126,7 +126,6 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'getPathForFile',
     'getWorkspaceIdentity',
     'focusWorkspace',
-    'openProjectWorkspace',
     'onWorkspaceProjectFocus',
     'getWorkspaceRecoveryCandidate',
     'getCodexConversationImport',
@@ -155,10 +154,6 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     projectId: 'relay',
     projectPath: '/work/relay',
   })
-  await exposed[0].value.openProjectWorkspace({
-    projectId: 'nadlan-desk',
-    projectPath: '/work/nadlan-desk',
-  })
   await exposed[0].value.getWorkspaceRecoveryCandidate()
   await exposed[0].value.getCodexConversationImport()
   await exposed[0].value.getRecentProjects()
@@ -173,10 +168,6 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
       workspaceId: '11111111-1111-4111-8111-111111111111',
       projectId: 'relay',
       projectPath: '/work/relay',
-    }],
-    ['ensync:workspace:open-project', {
-      projectId: 'nadlan-desk',
-      projectPath: '/work/nadlan-desk',
     }],
     ['ensync:workspace:get-recovery-candidate'],
     ['ensync:workspace:get-codex-conversation-import'],
@@ -193,7 +184,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
   await exposed[0].value.setUpdateChannel('beta')
-  assert.deepEqual(invocations.slice(11), [
+  assert.deepEqual(invocations.slice(10), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
