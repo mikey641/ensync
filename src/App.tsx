@@ -1819,12 +1819,11 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
-    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: agentWorkspaceKey,
+      workspaceKey: conversationWorkspaceKey(chatId),
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
