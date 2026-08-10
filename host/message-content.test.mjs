@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import test from 'node:test'
-import { isLongMessageContent, parseMessageContent } from '../src/lib/messageContent.mjs'
+import { isLongMessageContent, parseInline, parseInlineSegments, parseMessageContent } from '../src/lib/messageContent.mjs'
 
 test('message content preserves alternating prose and fenced code in order', () => {
   const content = [

@@ -17,6 +17,15 @@ export type MessageInlineNode =
   | { type: 'em'; children: MessageInlineNode[] }
   | { type: 'strike'; children: MessageInlineNode[] }
 
+export type MessageInlineLink =
+  | { type: 'link'; kind: 'external'; label: string; href: string }
+  | { type: 'link'; kind: 'file'; label: string; href: string; path: string }
+
+export type MessageInlineSegment =
+  | { type: 'text'; text: string }
+  | MessageInlineLink
+
 export function isLongMessageContent(value: unknown): boolean
 export function parseMessageContent(value: unknown): MessageContentBlock[]
 export function parseInline(value: unknown): MessageInlineNode[]
+export function parseInlineSegments(value: unknown): MessageInlineSegment[]

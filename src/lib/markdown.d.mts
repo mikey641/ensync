@@ -27,5 +27,6 @@ export type LinkTarget =
 
 export function parseMarkdown(value: unknown): MarkdownBlock[]
 export function parseInline(value: unknown): InlineNode[]
+export function safeMarkdownHref(value: unknown): string | null
 export function classifyLinkTarget(href: unknown): LinkTarget
 export function filePathFromText(value: unknown): { path: string; line: number | null } | null

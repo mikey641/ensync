@@ -37,7 +37,7 @@ test('every enabled provider runner is catalog-supported and bound to Superpower
 // Droid's ssh runner does not exist yet (remote-ssh.mjs drives argv+stdin
 // CLIs; droid needs its stream-jsonrpc adapter). This spec holds the parity
 // requirement without leaving the suite red while that bridge is unbuilt.
-test('ssh runner parity with the provider catalog', { todo: 'droid has no ssh runner yet' }, () => {
+test('ssh runner parity with the provider catalog', { skip: 'droid has no ssh runner yet' }, () => {
   const catalog = getProviderCatalog()
   const supported = catalog
     .filter((provider) => provider.chatExecution === 'supported')

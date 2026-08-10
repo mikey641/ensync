@@ -688,6 +688,7 @@ async function inspectProvider(provider) {
       command: provider.command,
       installed: false,
       executable: null,
+      mcp,
       version: null,
       connectionState: 'unavailable',
       authentication,
@@ -728,6 +729,7 @@ async function inspectProvider(provider) {
   return {
     id: provider.id,
     name: provider.name,
+    mcp,
     command: detectedCommand,
     installed: true,
     executable,

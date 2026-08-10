@@ -1,5 +1,3 @@
-import { parseMessageContent } from './messageContent.mjs'
-
 const ESCAPABLE = new Set('\\`*_{}[]()#+-.!|~<>')
 const MAX_BLOCK_DEPTH = 16
 const MAX_INLINE_DEPTH = 8
@@ -171,7 +169,7 @@ function parseInlineInternal(text, depth) {
   return nodes
 }
 
-export function parseInline(value) {
+function parseInlineModern(value) {
   const text = typeof value === 'string' ? value : String(value ?? '')
   return parseInlineInternal(text, 0)
 }
@@ -218,13 +216,13 @@ function parseTable(lines, index) {
   if (!align) return null
   const headerCells = splitTableRow(lines[index])
   if (headerCells.length !== align.length) return null
-  const header = headerCells.map((cell) => parseInline(cell.trim()))
+  const header = headerCells.map((cell) => parseInlineModern(cell.trim()))
   const rows = []
   let next = index + 2
   while (next < lines.length) {
     const line = lines[next]
     if (!line.trim() || !line.includes('|')) break
-    const cells = splitTableRow(line).map((cell) => parseInline(cell.trim()))
+    const cells = splitTableRow(line).map((cell) => parseInlineModern(cell.trim()))
     while (cells.length < align.length) cells.push([])
     rows.push(cells.slice(0, align.length))
     next += 1
@@ -256,7 +254,7 @@ function parseListAt(lines, start) {
     }
     if (indent < baseIndent) break
     if (/^\d/.test(match[2]) !== ordered) break
-    items.push({ content: parseInline(match[3].trim()), children: [] })
+    items.push({ content: parseInlineModern(match[3].trim()), children: [] })
     index += 1
   }
   return { block, next: index }
@@ -269,7 +267,7 @@ function parseTextBlocks(text, depth) {
 
   const flush = () => {
     if (!paragraph.length) return
-    blocks.push({ type: 'paragraph', content: parseInline(paragraph.join('\n')) })
+    blocks.push({ type: 'paragraph', content: parseInlineModern(paragraph.join('\n')) })
     paragraph = []
   }
 
@@ -286,7 +284,7 @@ function parseTextBlocks(text, depth) {
     const heading = line.match(HEADING_RE)
     if (heading?.[2].trim()) {
       flush()
-      blocks.push({ type: 'heading', level: heading[1].length, content: parseInline(heading[2].trim()) })
+      blocks.push({ type: 'heading', level: heading[1].length, content: parseInlineModern(heading[2].trim()) })
       index += 1
       continue
     }
@@ -337,9 +335,89 @@ function parseTextBlocks(text, depth) {
   return blocks
 }
 
+// --- Fenced-code splitting -------------------------------------------------
+// Kept local on purpose: parseMessageContent in messageContent.mjs grew into a
+// full block parser, while this module needs only the fence boundaries so code
+// is never reinterpreted as Markdown.
+
+function openingFence(line) {
+  const match = line.match(/^ {0,3}(`{3,}|~{3,})([^\r\n]*)$/)
+  if (!match) return null
+
+  const marker = match[1]
+  const info = match[2].trim()
+  if (marker[0] === '`' && info.includes('`')) return null
+
+  return {
+    character: marker[0],
+    length: marker.length,
+    language: info.split(/\s+/, 1)[0]?.slice(0, 64) || null,
+  }
+}
+
+function closesFence(line, fence) {
+  const match = line.match(/^ {0,3}(`+|~+)\s*$/)
+  return Boolean(
+    match
+    && match[1][0] === fence.character
+    && match[1].length >= fence.length,
+  )
+}
+
+function appendTextSegment(segments, text) {
+  if (!text) return
+  const previous = segments.at(-1)
+  if (previous?.type === 'text') previous.text += text
+  else segments.push({ type: 'text', text })
+}
+
+function splitFencedSegments(value) {
+  const content = typeof value === 'string' ? value : String(value ?? '')
+  if (!content) return []
+
+  const lines = content.match(/.*(?:\r\n|\n|\r|$)/g)?.filter(Boolean) ?? []
+  const segments = []
+  let text = ''
+  let code = ''
+  let fence = null
+
+  for (const lineWithEnding of lines) {
+    const line = lineWithEnding.replace(/(?:\r\n|\n|\r)$/, '')
+    if (!fence) {
+      const candidate = openingFence(line)
+      if (!candidate) {
+        text += lineWithEnding
+        continue
+      }
+
+      appendTextSegment(segments, text)
+      text = ''
+      code = ''
+      fence = candidate
+      continue
+    }
+
+    if (closesFence(line, fence)) {
+      segments.push({ type: 'code', code, language: fence.language })
+      code = ''
+      fence = null
+    } else {
+      code += lineWithEnding
+    }
+  }
+
+  if (fence) {
+    segments.push({ type: 'code', code, language: fence.language })
+  } else {
+    appendTextSegment(segments, text)
+  }
+
+  return segments
+}
+
 function parseMarkdownInternal(value, depth) {
   const blocks = []
-  for (const segment of parseMessageContent(value)) {
+  for (const segment of splitFencedSegments(value)) {
     if (segment.type === 'code') blocks.push(segment)
     else blocks.push(...parseTextBlocks(segment.text, depth))
   }
@@ -347,13 +425,36 @@ function parseMarkdownInternal(value, depth) {
 }
 
 /**
- * Parses message Markdown into renderable blocks. Fenced code is split out by
- * the existing fence parser first, so code is never reinterpreted; prose that
- * matches no construct stays a paragraph with its line breaks intact. Raw HTML
- * is never parsed — text stays text.
+ * Splits inline Markdown into emphasis, code spans, links, images, and text.
+ * Unmatched delimiters and intraword underscores stay literal.
+ */
+export function parseInline(value) {
+  return parseInlineModern(value)
+}
+
+/**
+ * Parses message Markdown into renderable blocks. Fenced code is split out
+ * first, so code is never reinterpreted; prose that matches no construct stays
+ * a paragraph with its line breaks intact. Raw HTML is never parsed — text
+ * stays text.
  */
 export function parseMarkdown(value) {
   return parseMarkdownInternal(value, 0)
+}
+
+/**
+ * Sanitises a Markdown link destination for direct anchor rendering. Web and
+ * mail schemes plus scheme-less relative targets survive unchanged; script or
+ * data schemes (in any casing or whitespace disguise), protocol-relative URLs,
+ * and blank values are refused with null.
+ */
+export function safeMarkdownHref(value) {
+  if (typeof value !== 'string' || !value.trim()) return null
+  const normalized = value.replace(/[\u0000-\u0020]+/g, '')
+  if (normalized.startsWith('//')) return null
+  const scheme = normalized.match(/^([A-Za-z][A-Za-z0-9+.-]*):/)
+  if (scheme && !/^(?:https?|mailto)$/i.test(scheme[1])) return null
+  return value
 }
 
 /**

@@ -1,6 +1,61 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseInline, parseMarkdown, safeMarkdownHref } from '../src/lib/markdown.mjs'
+import {
+  parseInline as parseInlineModern,
+  parseMarkdown as parseMarkdownModern,
+  safeMarkdownHref,
+} from '../src/lib/markdown.mjs'
+
+// This file is an earlier, frozen generation of the markdown spec whose AST
+// names children `inline` and uses `emphasis`/`strike`/`quote` node types with
+// list items as plain block arrays. The module's canonical AST is the later
+// generation (host/markdown-rendering.test.mjs and the renderer): `content`,
+// `em`/`del`/`blockquote`, structured list items. The view conversion lives
+// here at the spec boundary so the production module stays single-shaped.
+function legacyInlineNodes(nodes) {
+  return nodes.map((node) => {
+    switch (node.type) {
+      case 'strong': return { type: 'strong', inline: legacyInlineNodes(node.content) }
+      case 'em': return { type: 'emphasis', inline: legacyInlineNodes(node.content) }
+      case 'del': return { type: 'strike', inline: legacyInlineNodes(node.content) }
+      case 'link': return { type: 'link', href: node.href, inline: legacyInlineNodes(node.content) }
+      default: return node
+    }
+  })
+}
+
+function legacyBlock(block) {
+  switch (block.type) {
+    case 'paragraph':
+      return { type: 'paragraph', inline: legacyInlineNodes(block.content) }
+    case 'heading':
+      return { type: 'heading', level: block.level, inline: legacyInlineNodes(block.content) }
+    case 'table':
+      return {
+        type: 'table',
+        align: block.align,
+        header: block.header.map(legacyInlineNodes),
+        rows: block.rows.map((row) => row.map(legacyInlineNodes)),
+      }
+    case 'list':
+      return {
+        type: 'list',
+        ordered: block.ordered,
+        start: block.start ?? 1,
+        items: block.items.map((item) => [
+          { type: 'paragraph', inline: legacyInlineNodes(item.content) },
+          ...item.children.map(legacyBlock),
+        ]),
+      }
+    case 'blockquote':
+      return { type: 'quote', blocks: block.blocks.map(legacyBlock) }
+    default:
+      return block
+  }
+}
+
+const parseInline = (value) => legacyInlineNodes(parseInlineModern(value))
+const parseMarkdown = (value) => parseMarkdownModern(value).map(legacyBlock)
 
 const text = (value) => ({ type: 'text', text: value })
 

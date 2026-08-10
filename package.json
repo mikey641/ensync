@@ -11,7 +11,7 @@
     "test:host": "node --test host/*.test.mjs",
     "test:release-compatibility": "node --test host/workspace-persistence.test.mjs host/host-job-recovery.test.mjs host/chat-jobs.test.mjs desktop/test/device-preferences.test.mjs desktop/test/native-workspaces.test.mjs desktop/test/workspace-recovery.test.mjs desktop/test/crash-recovery.test.mjs desktop/test/recent-projects.test.mjs",
     "build": "tsc --noEmit -p tsconfig.app.json && vite build",
-    "land:check": "tsc --noEmit -p tsconfig.app.json",
+    "land:check": "npm run lint && tsc --noEmit -p tsconfig.app.json && npm run test:host",
     "build:mobile": "npm --prefix mobile run build",
     "sync:mobile": "npm --prefix mobile run sync",
     "lint": "eslint .",
