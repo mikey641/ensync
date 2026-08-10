@@ -2050,16 +2050,47 @@ kbd {
   line-height: 1.65;
 }
 
-.message-content ul,
-.message-content ol,
-.message-table td {
-  color: var(--text-secondary);
-  line-height: 1.65;
+.message-content a {
+  color: var(--accent-ui);
 }
 
-.message--user li,
-.message--user td {
-  color: var(--text-primary);
+.message-content ul,
+.message-content ol,
+.message-content table {
+  color: var(--text-secondary);
+}
+
+.message-content blockquote {
+  border-inline-start-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+.message-content hr {
+  border-top-color: var(--border-default);
+}
+
+.message-content__table,
+.message-content th,
+.message-content td {
+  border-color: var(--border-default);
+}
+
+.message-content th {
+  background: var(--surface-subtle);
+}
+
+.message-inline-code,
+.message-file-chip code {
+  border-color: var(--border-default);
+  background: var(--surface-subtle);
+}
+
+.message-file-chip code {
+  color: var(--accent-ui);
+}
+
+.message-file-chip:hover code {
+  border-color: var(--accent-ui);
 }
 
 .message-actions button {

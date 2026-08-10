@@ -1,7 +1,7 @@
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { existsSync, readFileSync } from 'node:fs'
+import { homedir } from 'node:os'
 
 import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
 
@@ -198,6 +198,31 @@ function installApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
+
+// Resolves a message file reference to something that exists on disk: the raw
+// text first, then with a trailing :line[:column] stripped; ~ expands to the
+// home directory and relative paths resolve against the chat's project.
+function resolveOpenablePath(request) {
+  const raw = typeof request?.path === 'string' ? request.path.trim() : ''
+  if (!raw) return null
+  const withoutLine = raw.replace(/:\d+(?::\d+)?$/, '')
+  const candidates = withoutLine === raw ? [raw] : [raw, withoutLine]
+  const projectPath = typeof request?.projectPath === 'string' && isAbsolute(request.projectPath)
+    ? request.projectPath
+    : null
+  for (const candidate of candidates) {
+    const expanded = candidate === '~'
+      ? homedir()
+      : candidate.startsWith('~/') ? join(homedir(), candidate.slice(2)) : candidate
+    const absolute = isAbsolute(expanded)
+      ? expanded
+      : projectPath ? join(projectPath, expanded) : null
+    if (absolute && existsSync(absolute)) return absolute
+  }
+  return null
+}
+
 function registerNativeBridge() {
   // Identity is the renderer bootstrap prerequisite. Keep it independent from
   // the rest of the bridge so a later native feature cannot leave it missing.
@@ -218,6 +243,13 @@ function registerNativeBridge() {
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
     openProjectWindow,
   }))
+  ipcMain.handle(WORKSPACE_OPEN_PATH_CHANNEL, async (event, request) => {
+    if (!isAuthorizedNativeEvent(event)) return { ok: false, error: 'unauthorized' }
+    const target = resolveOpenablePath(request)
+    if (!target) return { ok: false, error: 'not-found' }
+    const failure = await shell.openPath(target)
+    return failure ? { ok: false, error: failure } : { ok: true }
+  })
   ipcMain.handle(WORKSPACE_RECOVERY_CHANNEL, createWorkspaceRecoveryHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -306,6 +338,7 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
+  ipcMain.removeHandler(WORKSPACE_OPEN_PATH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
   ipcMain.removeHandler(LOCAL_FILE_OPEN_CHANNEL)

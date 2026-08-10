@@ -19,8 +19,10 @@ test('runtime conversation text uses automatic isolated direction without changi
     readFile(splitWorkspacePath, 'utf8'),
   ])
 
-  assert.equal(app.match(/<MessageContent content=\{message\.content\} \/>/g)?.length, 2)
-  assert.match(messageContent, /<p dir="auto"><InlineText text=\{block\.text\} \/><\/p>/)
+  assert.equal(app.match(/<MessageContent content=\{message\.content\} projectPath=\{projectPath\} \/>/g)?.length, 2)
+  assert.match(messageContent, /<p key=\{key\} dir="auto">/)
+  assert.match(messageContent, /<blockquote key=\{key\} dir="auto">/)
+  assert.match(messageContent, /<li key=\{itemKey\} dir="auto">/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
   assert.match(messageContent, /<th key=\{index\} scope="col" dir="auto"/)
   assert.match(messageContent, /<td key=\{index\} dir="auto"/)
