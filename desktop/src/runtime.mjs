@@ -231,10 +231,6 @@ export class HostProcessController {
     this.releasing = true
     if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
     this.heartbeatTimer = null
-    await Promise.allSettled([
-      this.leaseRefresh,
-      this.connectionRefresh,
-    ].filter(Boolean))
     const port = this.port
     const authToken = this.authToken
     this.child = null
@@ -501,7 +497,7 @@ export class HostProcessController {
       }
 
       let ownerPid = null
-      let createdAt = NaN
+      let createdAt
       try {
         const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
         ownerPid = owner?.pid

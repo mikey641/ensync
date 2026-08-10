@@ -13,7 +13,7 @@ const tag = option('--tag')
 const repository = option('--repository')
 const channel = option('--channel')
 const sourceCommit = option('--source-commit')
-if (!tag || !/^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
+if (!tag || !/^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
   throw new Error('--tag must be a semantic release tag such as v1.2.3.')
 }
 if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
@@ -22,8 +22,13 @@ if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
 if (!['stable', 'beta'].includes(channel)) throw new Error('--channel must be stable or beta.')
 if (!/^[a-f0-9]{40,64}$/i.test(sourceCommit ?? '')) throw new Error('--source-commit must be the exact source revision.')
 const version = tag.replace(/^v/, '')
-if (channel === 'stable' && version.includes('-')) throw new Error('A prerelease tag cannot publish the stable feed.')
-if (channel === 'beta' && !version.includes('-')) throw new Error('The beta feed requires an explicit prerelease tag.')
+const prerelease = version.split('+')[0].includes('-')
+if (channel === 'stable' && prerelease) {
+  throw new Error('A prerelease tag may publish only to the beta channel.')
+}
+if (channel === 'beta' && !prerelease) {
+  throw new Error('The beta channel requires a semantic prerelease tag.')
+}
 
 async function walk(root) {
   const files = []
@@ -44,9 +49,9 @@ const artifactExtensions = new Set(['.dmg', '.zip'])
 const artifacts = inputFiles.filter((file) => artifactExtensions.has(extname(file).toLowerCase()))
 const attestations = new Map()
 
-for (const file of inputFiles.filter((item) => basename(item) === 'attestation-macos.json')) {
+for (const file of inputFiles.filter((item) => /^attestation-(macos|windows)\.json$/.test(basename(item)))) {
   const attestation = JSON.parse(await readFile(file, 'utf8'))
-  if (attestation.schemaVersion !== 1 || attestation.platform !== 'macos') {
+  if (attestation.schemaVersion !== 1 || !['macos', 'windows'].includes(attestation.platform)) {
     throw new Error(`Invalid build attestation: ${relative(inputRoot, file)}`)
   }
   if (attestation.version !== version) {

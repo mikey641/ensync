@@ -22,6 +22,7 @@ const RECENT_PROJECTS_GET_CHANNEL = 'ensync:recent-projects:get'
 const RECENT_PROJECTS_MIGRATE_CHANNEL = 'ensync:recent-projects:migrate'
 const RECENT_PROJECTS_REMEMBER_CHANNEL = 'ensync:recent-projects:remember'
 const RECENT_PROJECTS_CHANGED_CHANNEL = 'ensync:recent-projects:changed'
+const LOCAL_FILE_OPEN_CHANNEL = 'ensync:shell:open-local-file'
 const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
 
@@ -42,6 +43,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getRecentProjects: () => ipcRenderer.invoke(RECENT_PROJECTS_GET_CHANNEL),
   migrateRecentProjects: (projects) => ipcRenderer.invoke(RECENT_PROJECTS_MIGRATE_CHANNEL, projects),
   rememberRecentProject: (project) => ipcRenderer.invoke(RECENT_PROJECTS_REMEMBER_CHANNEL, project),
+  openLocalFile: (path) => ipcRenderer.invoke(LOCAL_FILE_OPEN_CHANNEL, path),
   getDevicePreferences: () => ipcRenderer.invoke(DEVICE_PREFERENCES_GET_CHANNEL),
   setCompletionNotificationPreferences: (settings) => ipcRenderer.invoke(
     COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
@@ -11,7 +11,13 @@ const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const generator = resolve(desktopRoot, 'scripts/generate-release.mjs')
 const sourceCommit = '35642bfda02d82e007a1639dbd2c642b67c01b7d'
 
-async function fixture({ macSigned = true, macNotarized = true, includePrivateStorePackage = false, version = '1.2.3' } = {}) {
+async function fixture({
+  macSigned = true,
+  macNotarized = true,
+  windowsSigned = true,
+  includePrivateStorePackage = false,
+  version = '1.2.3',
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-release-'))
   const input = join(root, 'input')
   const output = join(root, 'output')
@@ -33,13 +39,14 @@ async function fixture({ macSigned = true, macNotarized = true, includePrivateSt
     })
   }
 
+  const channel = version.includes('-') ? 'beta' : 'stable'
   const attestations = [
     {
       schemaVersion: 1,
       platform: 'macos',
-      version: '1.2.3',
+      version,
       buildId: 'a'.repeat(16),
-      channel: 'stable',
+      channel,
       sourceCommit,
       sourceDirty: false,
       builtAt: '2026-08-07T10:00:00.000Z',
@@ -51,9 +58,9 @@ async function fixture({ macSigned = true, macNotarized = true, includePrivateSt
     {
       schemaVersion: 1,
       platform: 'windows',
-      version: '1.2.3',
+      version,
       buildId: 'b'.repeat(16),
-      channel: 'stable',
+      channel,
       sourceCommit,
       sourceDirty: false,
       builtAt: '2026-08-07T10:01:00.000Z',
@@ -77,9 +84,9 @@ function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
     generator,
     '--input', input,
     '--output', output,
-    '--tag', 'v1.2.3',
+    '--tag', tag,
     '--repository', 'ensync/ensync-downloads',
-    '--channel', 'stable',
+    '--channel', channel,
     '--source-commit', sourceCommit,
   ], { encoding: 'utf8' })
 }
@@ -92,7 +99,8 @@ test('release generation publishes signed macOS artifacts and leaves Windows to 
   const manifest = JSON.parse(await readFile(join(output, 'releases.json'), 'utf8'))
   assert.equal(manifest.channel, 'stable')
   assert.equal(manifest.platforms.macos.status, 'available')
-  assert.equal(manifest.platforms.windows.status, 'available')
+  assert.equal(manifest.platforms.windows.status, 'unavailable')
+  assert.match(manifest.platforms.windows.reason, /Microsoft Store/)
   assert.equal(manifest.channel, 'stable')
   assert.equal(manifest.sourceRevision, sourceCommit)
   assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\/ensync\/ensync-downloads\//)

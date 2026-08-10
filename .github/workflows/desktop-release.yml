@@ -107,15 +107,10 @@ jobs:
     needs: preflight
     runs-on: windows-2025
     env:
-      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
-      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
-      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
-      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
-      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
-      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
+      ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
+      GITHUB_RUN_NUMBER: ${{ github.run_number }}
       ENSYNC_BUILD_CHANNEL: ${{ needs.preflight.outputs.channel }}
       ENSYNC_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
       ENSYNC_SOURCE_DIRTY: 'false'
@@ -137,8 +132,8 @@ jobs:
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
       - run: npm run test:release-compatibility
-      - name: Build, test, sign when configured, and attest Windows artifacts
-        run: npm --prefix desktop run package:win
+      - name: Build and attest the private Partner Center upload package
+        run: npm --prefix desktop run package:win-store
       - uses: actions/upload-artifact@v4
         with:
           name: ensync-windows-store-${{ github.ref_name }}
@@ -149,7 +144,7 @@ jobs:
             desktop/release/attestation-windows-store.json
 
   publish:
-    needs: [preflight, macos, windows]
+    needs: [preflight, macos, windows-store]
     runs-on: ubuntu-24.04
     env:
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}

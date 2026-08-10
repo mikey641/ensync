@@ -4,6 +4,7 @@ import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { basename, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readBuildInfoFile } from '../src/build-info.mjs'
+import { resolveWindowsStorePackageConfig, verifyWindowsStoreManifest } from './windows-store.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const releaseRoot = resolve(desktopRoot, 'release')

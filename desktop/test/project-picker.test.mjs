@@ -229,12 +229,14 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'getWorkspaceIdentity',
     'focusWorkspace',
     'openProjectWorkspace',
+    'openPath',
     'onWorkspaceProjectFocus',
     'getWorkspaceRecoveryCandidate',
     'getCodexConversationImport',
     'getRecentProjects',
     'migrateRecentProjects',
     'rememberRecentProject',
+    'openLocalFile',
     'getDevicePreferences',
     'setCompletionNotificationPreferences',
     'onRecentProjectsChanged',
@@ -298,7 +300,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
   await exposed[0].value.setUpdateChannel('beta')
-  assert.deepEqual(invocations.slice(11), [
+  assert.deepEqual(invocations.slice(12), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
