@@ -503,3 +503,45 @@ test('a successful run whose land check fails is repaired by a provider agent ru
   const landed = (await git(['show', 'HEAD:restored-declaration.txt'], { cwd: f.seed })).stdout
   assert.equal(landed, 'const viewedFilePath = null\n')
 })
+
+test('a landed branch is pushed to the configured remote automatically', async (context) => {
+  const f = await fixture(context)
+  if (!f) return
+  const remote = join(f.root, 'remote.git')
+  await git(['init', '--bare', remote])
+  await git(['symbolic-ref', 'HEAD', 'refs/heads/main'], { cwd: remote })
+  await git(['remote', 'add', 'origin', remote], { cwd: f.seed })
+  await git(['push', '--set-upstream', 'origin', 'main'], { cwd: f.seed })
+  await commitBranchWork(f)
+  const { notices, onNotice } = noticeCollector()
+
+  const result = await autoLandWorkspace(workspaceFor(f), {
+    allowedRoots: [f.root],
+    onNotice,
+    autoPush: true,
+  })
+
+  assert.equal(result.landed, true)
+  assert.equal(result.pushed, true)
+  assert.deepEqual(notices.map((notice) => notice.code), ['agent_work_landed', 'agent_work_pushed'])
+  const seedHead = (await git(['rev-parse', 'HEAD'], { cwd: f.seed })).stdout.trim()
+  const remoteHead = (await git(['rev-parse', 'refs/heads/main'], { cwd: remote })).stdout.trim()
+  assert.equal(seedHead, remoteHead)
+})
+
+test('a repository without a remote lands silently without a push notice', async (context) => {
+  const f = await fixture(context)
+  if (!f) return
+  await commitBranchWork(f)
+  const { notices, onNotice } = noticeCollector()
+
+  const result = await autoLandWorkspace(workspaceFor(f), {
+    allowedRoots: [f.root],
+    onNotice,
+    autoPush: true,
+  })
+
+  assert.equal(result.landed, true)
+  assert.equal(result.pushed, false)
+  assert.deepEqual(notices.map((notice) => notice.code), ['agent_work_landed'])
+})

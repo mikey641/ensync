@@ -1,4 +1,4 @@
-import { landAgentBranch, runGit } from './git.mjs'
+import { landAgentBranch, pushLandedBaseline, runGit } from './git.mjs'
 
 const AGENT_MERGE_IDENTITY = {
   GIT_AUTHOR_NAME: 'Ensync Agent',
@@ -186,6 +186,25 @@ async function tryLand(landInput, landOptions) {
   }
 }
 
+/**
+ * Publishing after a verified land is best-effort: a repository without a
+ * remote lands silently, and any push failure becomes a notice so the finished
+ * run and the land itself are never affected.
+ */
+async function pushLandedWork(workspace, options, notify) {
+  if (options.autoPush !== true) return { pushed: false }
+  const result = await pushLandedBaseline(workspace.canonicalProjectPath, {
+    allowedRoots: options.allowedRoots,
+    gitExecutable: options.gitExecutable,
+  })
+  if (result.pushed) {
+    notify('agent_work_pushed', `Pushed ${result.branch} to ${result.remote} after landing.`)
+  } else if (result.code !== 'git_remote_not_found') {
+    notify('auto_push_failed', `The landed work could not be pushed automatically: ${result.reason ?? result.code} Push manually when ready.`)
+  }
+  return result
+}
+
 async function commitWorktreeLeftovers(worktreePath, message, options) {
   const status = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { ...options, cwd: worktreePath })
   if (status.stdout.split('\0').filter(Boolean).length === 0) return
@@ -225,7 +244,8 @@ export async function autoLandWorkspace(workspace, options = {}) {
   const first = await tryLand(landInput, landOptions)
   if (first.landed) {
     notify('agent_work_landed', `Automatically landed ${branch} into ${first.result.land.mergedInto} as merge ${first.result.land.mergeHead.slice(0, 12)}.`)
-    return { landed: true, resolvedConflicts: false, land: first.result.land }
+    const push = await pushLandedWork(workspace, options, notify)
+    return { landed: true, resolvedConflicts: false, pushed: push.pushed === true, land: first.result.land }
   }
   if (first.code === 'agent_branch_already_landed') {
     return { landed: false, code: first.code }
@@ -294,7 +314,8 @@ export async function autoLandWorkspace(workspace, options = {}) {
   const second = await tryLand(landInput, landOptions)
   if (second.landed) {
     notify('agent_work_landed', `Automatically landed ${branch} into ${second.result.land.mergedInto} after resolving baseline conflicts in the protected worktree.`)
-    return { landed: true, resolvedConflicts: true, land: second.result.land }
+    const push = await pushLandedWork(workspace, options, notify)
+    return { landed: true, resolvedConflicts: true, pushed: push.pushed === true, land: second.result.land }
   }
   notify('auto_land_failed', `Automatic landing of ${branch} still did not complete after conflict resolution: ${second.message} The work stays on ${branch} for explicit review and landing.`)
   return { landed: false, code: second.code }
@@ -358,7 +379,8 @@ async function autoRepairFailedLandCheck(workspace, first, context) {
   const second = await tryLand(landInput, landOptions)
   if (second.landed) {
     notify('agent_work_landed', `Automatically landed ${branch} into ${second.result.land.mergedInto} after repairing the failed land check in the protected worktree.`)
-    return { landed: true, resolvedConflicts: false, repairedLandCheck: true, land: second.result.land }
+    const push = await pushLandedWork(workspace, context, notify)
+    return { landed: true, resolvedConflicts: false, repairedLandCheck: true, pushed: push.pushed === true, land: second.result.land }
   }
   notify('auto_land_failed', `Automatic landing of ${branch} still did not complete after the land-check repair: ${second.message} The work stays on ${branch} for explicit review and landing.`)
   return { landed: false, code: second.code }
