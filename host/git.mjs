@@ -647,6 +647,30 @@ export async function landAgentBranch(input, options = {}) {
       status: 409,
     })
   }
+  if (typeof options.verifyLand === 'function') {
+    // A textually clean merge can still drop code one side depends on, so the
+    // land is verified semantically after the merge commit exists. A failed
+    // verification rolls the checkout back to its pre-merge state exactly; the
+    // checkout was verified clean above, so the reset cannot destroy user work.
+    let verification
+    try {
+      verification = await options.verifyLand({ repositoryPath, branch, mergedInto })
+    } catch (error) {
+      verification = { ok: false, reason: error instanceof Error ? error.message : 'The land verification could not run.' }
+    }
+    if (verification && verification.ok === false) {
+      await checkedGit(['reset', '--hard', 'ORIG_HEAD'], {
+        cwd: repositoryPath,
+        gitExecutable: options.gitExecutable,
+      })
+      const verificationError = new GitWorkflowError(
+        `Landing ${branch} was rolled back because the land verification failed: ${verification.reason ?? 'no reason was reported'}`,
+        { code: 'agent_branch_verification_failed', status: 409 },
+      )
+      verificationError.verification = verification
+      throw verificationError
+    }
+  }
   const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
     cwd: repositoryPath,
     gitExecutable: options.gitExecutable,
@@ -666,10 +690,11 @@ export class GitWorkflowService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
     this.gitExecutable = options.gitExecutable
+    this.verifyLand = options.verifyLand
   }
 
   options() {
-    return { allowedRoots: this.allowedRoots, gitExecutable: this.gitExecutable }
+    return { allowedRoots: this.allowedRoots, gitExecutable: this.gitExecutable, verifyLand: this.verifyLand }
   }
 
   status(projectPath) {

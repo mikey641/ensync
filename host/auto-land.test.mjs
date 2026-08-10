@@ -397,3 +397,109 @@ test('automatic landing can be disabled per service', async (context) => {
   assert.equal(codes.includes('agent_work_landed'), false)
   assert.equal(await subjectOf(f.seed), 'Initial commit')
 })
+
+test('a land that fails the land check is repaired by an agent run and relanded', async (context) => {
+  const f = await fixture(context)
+  if (!f) return
+  await commitBranchWork(f)
+  const { notices, onNotice } = noticeCollector()
+  const checks = []
+  const repairs = []
+
+  const result = await autoLandWorkspace(workspaceFor(f), {
+    allowedRoots: [f.root],
+    onNotice,
+    verifyLand: async (details) => {
+      checks.push(details)
+      if (checks.length === 1) {
+        return { ok: false, reason: 'the land check failed', output: "error TS2304: Cannot find name 'viewedFilePath'" }
+      }
+      return { ok: true }
+    },
+    runRepairAgent: async (details) => {
+      repairs.push(details)
+      await writeFile(join(f.worktree, 'restored-declaration.txt'), 'const viewedFilePath = null\n')
+    },
+  })
+
+  assert.equal(result.landed, true)
+  assert.equal(result.repairedLandCheck, true)
+  assert.equal(checks.length, 2)
+  assert.equal(repairs.length, 1)
+  assert.equal(repairs[0].worktreePath, f.worktree)
+  assert.match(repairs[0].reason, /land check failed/)
+  assert.match(repairs[0].output, /TS2304/)
+  assert.deepEqual(notices.map((notice) => notice.code), ['auto_land_check_failed', 'agent_work_landed'])
+  assert.equal(await subjectOf(f.seed), `Ensync land: ${BRANCH}`)
+  const landed = (await git(['show', 'HEAD:restored-declaration.txt'], { cwd: f.seed })).stdout
+  assert.equal(landed, 'const viewedFilePath = null\n')
+  assert.equal(await mergeHeadExists(f.worktree), false)
+})
+
+test('a repair that still fails the land check leaves the branch unlanded', async (context) => {
+  const f = await fixture(context)
+  if (!f) return
+  await commitBranchWork(f)
+  const { notices, onNotice } = noticeCollector()
+
+  const result = await autoLandWorkspace(workspaceFor(f), {
+    allowedRoots: [f.root],
+    onNotice,
+    verifyLand: async () => ({ ok: false, reason: 'the land check still fails' }),
+    runRepairAgent: async () => {
+      await writeFile(join(f.worktree, 'attempted-fix.txt'), 'not enough\n')
+    },
+  })
+
+  assert.equal(result.landed, false)
+  assert.equal(result.code, 'agent_branch_verification_failed')
+  assert.deepEqual(notices.map((notice) => notice.code), ['auto_land_check_failed', 'auto_land_failed'])
+  assert.equal(await subjectOf(f.seed), 'Initial commit')
+  assert.equal((await git(['status', '--porcelain'], { cwd: f.seed })).stdout.trim(), '')
+  assert.equal(await mergeHeadExists(f.worktree), false)
+})
+
+test('a successful run whose land check fails is repaired by a provider agent run and landed', async (context) => {
+  const f = await isolationFixture(context)
+  if (!f) return
+  let landChecks = 0
+  const providerRuns = []
+  const service = new ChatRunService({
+    statusService: statusServiceFor(readyClaude()),
+    allowedRoots: [f.root],
+    projectIsolation: f.isolation,
+    landCheck: async () => {
+      landChecks += 1
+      return landChecks === 1
+        ? { ok: false, reason: 'the land check failed', output: 'error TS2304' }
+        : { ok: true }
+    },
+    processRunner: async (_executable, _args, options) => {
+      providerRuns.push(options)
+      if (providerRuns.length === 1) {
+        await writeFile(join(options.cwd, 'agent-note.txt'), 'from agent\n')
+        return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: claudeStdout('done') }
+      }
+      // The repair run happens inside the protected worktree.
+      await writeFile(join(options.cwd, 'restored-declaration.txt'), 'const viewedFilePath = null\n')
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: claudeStdout('repaired') }
+    },
+  })
+  const events = []
+
+  const result = await service.run(
+    { provider: 'claude', projectPath: f.seed, prompt: 'do work', workspaceKey: 'conversation:autoland-repair' },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  assert.equal(result.response, 'done')
+  assert.equal(providerRuns.length, 2)
+  assert.match(providerRuns[1].input, /ENSYNC HOST LAND CHECK REPAIR/)
+  assert.match(providerRuns[1].input, /error TS2304/)
+  assert.equal(landChecks, 2)
+  const codes = events.filter((event) => event.type === 'notice').map((event) => event.code)
+  assert.equal(codes.includes('auto_land_check_failed'), true)
+  assert.equal(codes.includes('agent_work_landed'), true)
+  const landed = (await git(['show', 'HEAD:restored-declaration.txt'], { cwd: f.seed })).stdout
+  assert.equal(landed, 'const viewedFilePath = null\n')
+})

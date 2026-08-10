@@ -181,8 +181,21 @@ async function tryLand(landInput, landOptions) {
       code: typeof error?.code === 'string' ? error.code : 'agent_branch_land_failed',
       message: error instanceof Error ? error.message : 'Git could not land the agent branch.',
       files: Array.isArray(error?.files) ? error.files : [],
+      verification: error?.verification ?? null,
     }
   }
+}
+
+async function commitWorktreeLeftovers(worktreePath, message, options) {
+  const status = await git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { ...options, cwd: worktreePath })
+  if (status.stdout.split('\0').filter(Boolean).length === 0) return
+  const env = {
+    ...AGENT_MERGE_IDENTITY,
+    GIT_AUTHOR_DATE: new Date().toISOString(),
+    GIT_COMMITTER_DATE: new Date().toISOString(),
+  }
+  await git(['add', '-A', '--', '.'], { ...options, cwd: worktreePath, env })
+  await git(['-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-m', message], { ...options, cwd: worktreePath, env })
 }
 
 /**
@@ -203,7 +216,11 @@ export async function autoLandWorkspace(workspace, options = {}) {
   }
   const gitOptions = { gitExecutable: options.gitExecutable }
   const landInput = { projectPath: workspace.canonicalProjectPath, branch }
-  const landOptions = { allowedRoots: options.allowedRoots, gitExecutable: options.gitExecutable }
+  const landOptions = {
+    allowedRoots: options.allowedRoots,
+    gitExecutable: options.gitExecutable,
+    verifyLand: options.verifyLand,
+  }
 
   const first = await tryLand(landInput, landOptions)
   if (first.landed) {
@@ -216,6 +233,9 @@ export async function autoLandWorkspace(workspace, options = {}) {
   if (first.code === 'shared_checkout_dirty') {
     notify('auto_land_skipped', `Automatic landing skipped: ${first.message} The work stays on ${branch} for explicit review and landing.`)
     return { landed: false, code: first.code }
+  }
+  if (first.code === 'agent_branch_verification_failed') {
+    return autoRepairFailedLandCheck(workspace, first, { ...options, gitOptions, landInput, landOptions, notify })
   }
   if (first.code !== 'agent_branch_conflicts') {
     notify('auto_land_failed', `Automatic landing of ${branch} did not complete: ${first.message} The work stays on ${branch} for explicit review and landing.`)
@@ -277,5 +297,69 @@ export async function autoLandWorkspace(workspace, options = {}) {
     return { landed: true, resolvedConflicts: true, land: second.result.land }
   }
   notify('auto_land_failed', `Automatic landing of ${branch} still did not complete after conflict resolution: ${second.message} The work stays on ${branch} for explicit review and landing.`)
+  return { landed: false, code: second.code }
+}
+
+/**
+ * A land that merged cleanly but failed the repository's land check was rolled
+ * back by landAgentBranch. The failure is handed to a repair agent run inside
+ * the protected worktree — with the baseline already merged in so the agent
+ * sees exactly the tree that failed — and the land is retried exactly once;
+ * the retry re-verifies, so an unrepaired failure stays unlanded.
+ */
+async function autoRepairFailedLandCheck(workspace, first, context) {
+  const branch = workspace.branch
+  const { gitOptions, landInput, landOptions, notify } = context
+  if (typeof context.runRepairAgent !== 'function') {
+    notify('auto_land_failed', `Automatic landing of ${branch} did not complete: ${first.message}`)
+    return { landed: false, code: first.code }
+  }
+
+  notify(
+    'auto_land_check_failed',
+    `${first.message} Ensync is starting a land-check repair agent run in the protected worktree.`,
+  )
+  const worktreePath = workspace.repositoryPath
+  const sharedHead = await git(['rev-parse', '--verify', 'HEAD'], { ...gitOptions, cwd: workspace.shared.repositoryPath })
+  if (sharedHead.exitCode !== 0) {
+    notify('auto_land_failed', `Automatic landing of ${branch} did not complete: Git could not read the shared checkout's baseline commit.`)
+    return { landed: false, code: 'agent_branch_land_failed' }
+  }
+  const baselineSha = firstLine(sharedHead.stdout)
+
+  const merge = await startBaselineMerge(worktreePath, baselineSha, branch, gitOptions)
+  if (!merge.completed) {
+    // The land pre-check found no conflicts moments ago, so a conflicted or
+    // failed baseline merge here means the baseline moved; stay bounded and
+    // leave the branch for the next run's ordinary conflict path.
+    await abortMergeInProgress(worktreePath, gitOptions)
+    notify('auto_land_failed', `Automatic landing of ${branch} did not complete: the protected worktree could not be prepared for the land-check repair. The work stays on ${branch} for explicit review and landing.`)
+    return { landed: false, code: first.code }
+  }
+
+  try {
+    if (context.signal?.aborted) throw new Error('The run was cancelled before the land-check repair started.')
+    await context.runRepairAgent({
+      worktreePath,
+      branch,
+      baselineSha,
+      reason: first.message,
+      output: first.verification?.output ?? null,
+    })
+  } catch (error) {
+    notify(
+      'auto_land_failed',
+      `The land-check repair agent run did not succeed: ${error instanceof Error ? error.message : 'unknown error'} ${branch} stays unlanded for review; its committed work is unchanged.`,
+    )
+    return { landed: false, code: 'land_check_repair_failed' }
+  }
+  await commitWorktreeLeftovers(worktreePath, `Ensync land check repair: ${branch}`, gitOptions)
+
+  const second = await tryLand(landInput, landOptions)
+  if (second.landed) {
+    notify('agent_work_landed', `Automatically landed ${branch} into ${second.result.land.mergedInto} after repairing the failed land check in the protected worktree.`)
+    return { landed: true, resolvedConflicts: false, repairedLandCheck: true, land: second.result.land }
+  }
+  notify('auto_land_failed', `Automatic landing of ${branch} still did not complete after the land-check repair: ${second.message} The work stays on ${branch} for explicit review and landing.`)
   return { landed: false, code: second.code }
 }

@@ -9,6 +9,7 @@ import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
+import { runLandCheck } from './land-check.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
 import { ProjectInspectionService } from './projects.mjs'
@@ -222,6 +223,7 @@ export function createEnsyncHost(options = {}) {
   })
   const git = options.gitService ?? new GitWorkflowService({
     allowedRoots: options.allowedProjectRoots,
+    verifyLand: (details) => runLandCheck(details.repositoryPath),
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
   const chatJobJournal = options.chatJobJournal ?? (options.chatJobJournalPath

@@ -2,6 +2,7 @@ import { open, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
 import { autoLandWorkspace } from './auto-land.mjs'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
@@ -145,6 +146,16 @@ Ensync merged baseline commit ${baselineSha} into this conversation's protected 
 Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
 Conflicted files:
 ${conflictFiles.map((file) => `- ${file}`).join('\n')}`
+}
+
+function landCheckRepairPrompt({ branch, baselineSha, reason, output }) {
+  return `[ENSYNC HOST LAND CHECK REPAIR]
+Ensync merged this conversation's branch ${branch} into the baseline and ran the repository's land check (npm run land:check). The check failed, so the merge was rolled back. Baseline commit ${baselineSha} is already merged into the protected worktree that is the current working directory. Your only task is to make the land check pass here:
+1. Reproduce the failure if possible (npm run land:check) or work from the failure output below.
+2. This failure usually means the merge silently dropped code one side depends on — for example a declaration or import whose usages survived. Compare this branch with the baseline (git log, git show, git diff) and restore the missing code. Do not delete working features just to silence the check.
+3. Commit the fix with git add and git commit --no-verify.
+Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
+Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -798,6 +809,7 @@ export class ChatRunService {
   #projectIsolation
   #autoLand
   #gitExecutable
+  #landCheck
   #activeRuns = 0
 
   constructor(options = {}) {
@@ -812,6 +824,7 @@ export class ChatRunService {
     this.#projectIsolation = options.projectIsolation ?? null
     this.#autoLand = options.autoLand !== false
     this.#gitExecutable = options.gitExecutable
+    this.#landCheck = options.landCheck ?? runLandCheck
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -1203,6 +1216,14 @@ export class ChatRunService {
           onEvent: options.onEvent,
           signal: landSignal.signal,
         }),
+        verifyLand: (details) => this.#landCheck(details.repositoryPath, {
+          environment: this.#environment,
+          signal: landSignal.signal,
+        }),
+        runRepairAgent: (details) => this.#runLandCheckRepairAgent(provider, request, workspace, containment, details, {
+          onEvent: options.onEvent,
+          signal: landSignal.signal,
+        }),
       })
     } catch (error) {
       options.onEvent?.({
@@ -1223,7 +1244,21 @@ export class ChatRunService {
    * timeout, and a parseable completed provider result.
    */
   async #runConflictResolutionAgent(provider, request, workspace, containment, details, runtime) {
-    const prompt = conflictResolutionPrompt(details)
+    await this.#runWorktreeAgentRun(provider, request, workspace, containment, conflictResolutionPrompt(details), {
+      code: 'conflict_resolution_failed',
+      label: 'conflict-resolution',
+    }, runtime)
+  }
+
+  /** Same contained provider run, prompted to repair a rolled-back land check. */
+  async #runLandCheckRepairAgent(provider, request, workspace, containment, details, runtime) {
+    await this.#runWorktreeAgentRun(provider, request, workspace, containment, landCheckRepairPrompt(details), {
+      code: 'land_check_repair_failed',
+      label: 'land-check repair',
+    }, runtime)
+  }
+
+  async #runWorktreeAgentRun(provider, request, workspace, containment, prompt, failure, runtime) {
     const subRequest = {
       provider: request.provider,
       prompt,
@@ -1252,7 +1287,7 @@ export class ChatRunService {
       this.#statusService.invalidate?.()
     }
     if (processResult.aborted || runtime.signal?.aborted) {
-      throw new ChatRunError('run_cancelled', 'The conflict-resolution agent run was cancelled.', 499)
+      throw new ChatRunError('run_cancelled', `The ${failure.label} agent run was cancelled.`, 499)
     }
     if (processResult.timedOut) {
       throw new ChatRunError('run_timed_out', timeoutMessage(provider.name, processResult.timeoutReason), 504)
@@ -1260,7 +1295,7 @@ export class ChatRunService {
     if (processResult.error || processResult.exitCode !== 0) {
       const output = processResult.stderr || processResult.stdout
       const reason = output ? ` ${redactTerminalText(output.slice(0, 300)).text}` : ''
-      throw new ChatRunError('conflict_resolution_failed', `${describeProcessExit(provider.name, processResult)}.${reason}`, 502)
+      throw new ChatRunError(failure.code, `${describeProcessExit(provider.name, processResult)}.${reason}`, 502)
     }
     parseResult(request.provider, processResult.stdout)
   }
