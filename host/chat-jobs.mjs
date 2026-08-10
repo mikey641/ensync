@@ -59,7 +59,15 @@ function outputRecoveryNotice(result) {
   return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
 }
 
-function publicJob(job) {
+function publicJob(job, canSteerLocal) {
+  let steerable = false
+  if (job.state === 'running' && job.kind === 'local' && job.request?.provider === 'codex') {
+    try {
+      steerable = canSteerLocal?.(job.id) === true
+    } catch {
+      steerable = false
+    }
+  }
   return {
     id: job.id,
     kind: job.kind,
@@ -69,6 +77,7 @@ function publicJob(job) {
     firstSequence: job.events[0]?.sequence ?? job.sequence + 1,
     lastSequence: job.sequence,
     providerProcessStarted: job.providerProcessStarted,
+    steerable,
   }
 }
 
@@ -92,6 +101,7 @@ export class ChatJobService {
   #runLocal
   #runRemote
   #steerLocal
+  #canSteerLocal
   #normalizeError
   #now
   #maxJobs
@@ -108,6 +118,7 @@ export class ChatJobService {
     this.#runLocal = options.runLocal
     this.#runRemote = options.runRemote
     this.#steerLocal = options.steerLocal
+    this.#canSteerLocal = options.canSteerLocal
     this.#normalizeError = options.normalizeError ?? defaultErrorPayload
     this.#now = options.now ?? (() => new Date().toISOString())
     this.#maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS
@@ -134,7 +145,7 @@ export class ChatJobService {
       if (existing.requestHash !== hash) {
         throw new ChatJobError('chat_job_conflict', 'That chat job ID already belongs to another request.', 409)
       }
-      return publicJob(existing)
+      return publicJob(existing, this.#canSteerLocal)
     }
 
     this.#trimFinishedJobs()
@@ -176,20 +187,20 @@ export class ChatJobService {
     queueMicrotask(() => {
       job.completion = this.#execute(job)
     })
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   get(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   cancel(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
     if (job.state === 'running' && !job.controller.signal.aborted) job.controller.abort()
-    return publicJob(job)
+    return publicJob(job, this.#canSteerLocal)
   }
 
   hasRunningJobs() {
@@ -225,6 +236,14 @@ export class ChatJobService {
       throw new ChatJobError(
         'live_steer_unavailable',
         'This provider or execution target cannot accept a live instruction. The message was not delivered.',
+        409,
+        true,
+      )
+    }
+    if (typeof this.#canSteerLocal !== 'function' || this.#canSteerLocal(job.id) !== true) {
+      throw new ChatJobError(
+        'live_steer_unavailable',
+        'Codex does not currently have an active turn that can accept this message. It was not delivered.',
         409,
         true,
       )

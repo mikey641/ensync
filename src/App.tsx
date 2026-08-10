@@ -150,6 +150,7 @@ import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerReadyAfterEvent,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
@@ -328,6 +329,8 @@ type PersistedInFlightRun = {
   lastEventSequence?: number
   projectId?: string
   projectPath?: string
+  /** True only while Ensync Host has observed an active Codex provider turn. */
+  liveSteerReady?: boolean
   continuityStateRequired?: boolean
   gitReason?: string
 }
@@ -2379,6 +2382,7 @@ function App() {
       && activeRun.executionTarget === 'local'
       && typeof activeRun.jobId === 'string'
       && Boolean(activeRun.jobId)
+      && activeRun.liveSteerReady === true
     if (canTryLiveSteer && activeRun?.jobId) {
       if (steeringChatIdsRef.current.has(chatId)) return
       steeringChatIdsRef.current.add(chatId)
@@ -2438,6 +2442,9 @@ function App() {
         return
       } catch (steerError) {
         const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
+        if (safelyNotDelivered) {
+          updateInFlightRun(chatId, (current) => current ? { ...current, liveSteerReady: false } : current)
+        }
         if (!safelyNotDelivered) {
           setChatErrors((current) => ({
             ...current,
@@ -2525,6 +2532,7 @@ function App() {
         gitBefore: continuationGit(null),
         projectId: runProject.id,
         projectPath: runProject.path,
+        liveSteerReady: false,
         continuityStateRequired: runAutoContext || runPreferences.fallbackEnabled,
         gitReason: runTarget.kind === 'ssh'
           ? 'the current SSH probe verifies Git availability but does not report branch/worktree status'
@@ -2571,6 +2579,7 @@ function App() {
         gitBefore: continuationGit(handoffGitStatus),
         projectId: runProject.id,
         projectPath: runProject.path,
+        liveSteerReady: false,
         continuityStateRequired: runAutoContext || fallbackReason !== null,
         gitReason: handoffGitStatusReason,
       }))
@@ -2666,6 +2675,7 @@ function App() {
           lastEventSequence: 0,
           projectId: runProject.id,
           projectPath: runProject.path,
+          liveSteerReady: false,
           continuityStateRequired: continuityCapsuleRequired,
           gitReason: handoffGitStatusReason,
         }))
@@ -2703,6 +2713,7 @@ function App() {
           updateInFlightRun(chatId, (current) => current ? {
             ...current,
             providerProcessStarted: providerProcessStarted || current.providerProcessStarted,
+            liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
             lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
           } : current)
         }
@@ -2864,7 +2875,7 @@ function App() {
     const chat = chatsRef.current.find((item) => item.id === chatId)
     const queuedMessage = chat?.messages.find((item) =>
       item.id === entry?.messageId && item.role === 'user' && item.deliveryStatus === 'queued')
-    const exactActiveCodexTurn = entry
+    const exactActiveCodexJob = entry
       && activeRun
       && entry.predecessorTurnId === activeRun.turnId
       && entry.preferences.executionTargetKey === activeRun.executionTarget
@@ -2874,8 +2885,12 @@ function App() {
       && activeRun.executionTarget === 'local'
       && typeof activeRun.jobId === 'string'
       && Boolean(activeRun.jobId)
-    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
+    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexJob) {
       updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
+      return
+    }
+    if (activeRun.liveSteerReady !== true) {
+      updateChatError(chatId, null)
       return
     }
     if (steeringChatIdsRef.current.has(chatId)) return
@@ -2929,7 +2944,8 @@ function App() {
     } catch (steerError) {
       const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
       if (safelyNotDelivered) {
-        updateChatError(chatId, `${steerError.message} It remains queued.`)
+        updateInFlightRun(chatId, (current) => current ? { ...current, liveSteerReady: false } : current)
+        updateChatError(chatId, null)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -3013,6 +3029,7 @@ function App() {
           updateInFlightRun(chatId, (current) => current ? {
             ...current,
             providerProcessStarted: current.providerProcessStarted || job.providerProcessStarted,
+            liveSteerReady: job.steerable,
           } : current)
           const cursor = inFlightRunsRef.current[chatId]?.lastEventSequence ?? 0
           const result = await ensyncHost.attachChatJob(initialRun.jobId, (event) => {
@@ -3020,6 +3037,7 @@ function App() {
               updateInFlightRun(chatId, (current) => current ? {
                 ...current,
                 providerProcessStarted: current.providerProcessStarted || event.type === 'started',
+                liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
                 lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
               } : current)
             }
@@ -3376,6 +3394,7 @@ function App() {
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
                   && Boolean(inFlightRuns[chat.id]?.jobId)
+                  && inFlightRuns[chat.id]?.liveSteerReady === true
                   && (promptQueues[chat.id]?.length ?? 0) === 0
                 }
                 canPushQueuedNow={(() => {
@@ -3386,6 +3405,7 @@ function App() {
                     && activeRun?.provider === 'codex'
                     && activeRun.executionTarget === 'local'
                     && activeRun.jobId
+                    && activeRun.liveSteerReady === true
                     && entry
                     && entry.predecessorTurnId === activeRun.turnId
                     && entry.preferences.executionTargetKey === activeRun.executionTarget
@@ -3888,7 +3908,16 @@ function ConversationPane({
             <div className="composer__submit-actions">
               <span className="shortcut">{composerQueueState.hint}</span>
               {composerQueueState.stopVisible && <button className="stop-button" type="button" onClick={onStop} aria-label={`Stop ${provider.name} in this chat`} title="Stop current run; queued prompts pause"><Square size={13} /></button>}
-              <button className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''}`} onClick={onSend} disabled={!composerQueueState.sendEnabled} aria-label={composerQueueState.sendLabel} title={sending ? liveSteering ? 'Steer the active Codex turn now' : 'Queue after the current turn' : 'Send'}><ArrowUp size={17} /></button>
+              <button
+                className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''} ${composerQueueState.sendText ? 'send-button--labeled' : ''}`}
+                onClick={onSend}
+                disabled={!composerQueueState.sendEnabled}
+                aria-label={composerQueueState.sendLabel}
+                title={sending ? liveSteering ? 'Push this message into the active Codex turn now' : 'Queue after the current turn' : 'Send'}
+              >
+                {composerQueueState.sendText && <span>{composerQueueState.sendText}</span>}
+                <ArrowUp size={17} />
+              </button>
             </div>
           </div>
         </div>

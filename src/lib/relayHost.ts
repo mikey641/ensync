@@ -394,6 +394,8 @@ export type ChatJobSnapshot = {
   firstSequence: number
   lastSequence: number
   providerProcessStarted: boolean
+  /** Host-observed active Codex turn readiness; never inferred from job state. */
+  steerable: boolean
 }
 
 export type ChatSteerResponse = {

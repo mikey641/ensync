@@ -16,13 +16,11 @@ test('renderer state loss probes only deterministic recent Host job identities',
     ],
   }]
 
-  assert.deepEqual(runningHostJobCandidates(chats, { maximumAttempts: 2 }), [
+  assert.deepEqual(runningHostJobCandidates(chats), [
     { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'codex', attempt: 1, jobId: 'job-turn-12345678-codex-1' },
     { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'codex', attempt: 2, jobId: 'job-turn-12345678-codex-2' },
     { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'claude', attempt: 1, jobId: 'job-turn-12345678-claude-1' },
     { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'claude', attempt: 2, jobId: 'job-turn-12345678-claude-2' },
-    { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'droid', attempt: 1, jobId: 'job-turn-12345678-droid-1' },
-    { chatId: 'chat-a', turnId: 'turn-12345678', provider: 'droid', attempt: 2, jobId: 'job-turn-12345678-droid-2' },
   ])
 })
 

@@ -5,6 +5,7 @@ import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerReadyAfterEvent,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
@@ -152,6 +153,7 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
   assert.deepEqual(promptQueueComposerState({ sending: true, draft: 'next prompt', canRun: true }), {
     sendEnabled: true,
     sendLabel: 'Queue message in this chat',
+    sendText: null,
     stopVisible: true,
     hint: '↵ queue · stop ends current only',
   })
@@ -163,8 +165,17 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     liveSteering: true,
   }), {
     sendEnabled: true,
-    sendLabel: 'Steer the active Codex turn',
+    sendLabel: 'Push message into the active Codex turn now',
+    sendText: 'Push now',
     stopVisible: true,
-    hint: '↵ steer now · stop ends turn',
+    hint: '↵ Push now · stop ends turn',
   })
+})
+
+test('live push readiness follows only Host-authored ready and closed events', () => {
+  assert.equal(liveSteerReadyAfterEvent(false, { type: 'started' }), false)
+  assert.equal(liveSteerReadyAfterEvent(false, { type: 'notice', code: 'live_steer_ready' }), true)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'note' }), true)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'notice', code: 'live_steer_closed' }), false)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'finished' }), false)
 })

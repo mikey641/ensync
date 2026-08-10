@@ -193,19 +193,28 @@ export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurn
   ]
 }
 
+/** Apply only Host-authored live-turn readiness transitions. */
+export function liveSteerReadyAfterEvent(current, event) {
+  if (event?.type === 'notice' && event.code === 'live_steer_ready') return true
+  if (event?.type === 'notice' && event.code === 'live_steer_closed') return false
+  if (event?.type === 'finished') return false
+  return current === true
+}
+
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
   return {
     sendEnabled: hasDraft && Boolean(canRun),
     sendLabel: sending
       ? liveSteering
-        ? 'Steer the active Codex turn'
+        ? 'Push message into the active Codex turn now'
         : 'Queue message in this chat'
       : 'Send message',
+    sendText: sending && liveSteering ? 'Push now' : null,
     stopVisible: Boolean(sending),
     hint: sending
       ? liveSteering
-        ? '↵ steer now · stop ends turn'
+        ? '↵ Push now · stop ends turn'
         : '↵ queue · stop ends current only'
       : '↵ send · ⇧↵ new line',
   }

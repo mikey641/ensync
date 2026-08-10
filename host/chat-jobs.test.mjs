@@ -133,6 +133,7 @@ test('job starts are idempotent only for the same request', () => {
 test('a running local Codex job accepts steering while unsupported jobs reject it safely', async () => {
   let releaseCodex
   let codexStarted = false
+  let codexSteerReady = false
   const steered = []
   const service = new ChatJobService({
     runLocal: async (_request, options) => {
@@ -145,12 +146,21 @@ test('a running local Codex job accepts steering while unsupported jobs reject i
       steered.push({ jobId, input })
       return { turnId: 'provider-turn-1' }
     },
+    canSteerLocal: (jobId) => codexSteerReady && jobId === JOB_A,
   })
 
   service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'start' } })
   service.start({ jobId: JOB_B, kind: 'ssh', request: { provider: 'codex', prompt: 'remote' } })
   await waitFor(() => codexStarted)
 
+  assert.equal(service.get(JOB_A).steerable, false)
+  await assert.rejects(
+    service.steer(JOB_A, { prompt: 'too early' }),
+    (error) => error instanceof ChatJobError && error.code === 'live_steer_unavailable' && error.safeToRetry,
+  )
+  codexSteerReady = true
+  assert.equal(service.get(JOB_A).steerable, true)
+  assert.equal(service.get(JOB_B).steerable, false)
   assert.deepEqual(await service.steer(JOB_A, { prompt: 'change direction' }), { turnId: 'provider-turn-1' })
   assert.deepEqual(steered, [{ jobId: JOB_A, input: { prompt: 'change direction' } }])
   await assert.rejects(

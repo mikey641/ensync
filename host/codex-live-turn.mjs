@@ -74,6 +74,7 @@ class CodexLiveSession {
   #turnId = null
   #activatedTurnId = null
   #turnStarted = false
+  #steerReady = false
   #settled = false
   #readySettled = false
   #agentMessages = []
@@ -231,7 +232,14 @@ class CodexLiveSession {
       }
       this.#turnId = startedTurnId
       this.#turnStarted = true
-      this.#resolveReadyIfActive()
+      this.#steerReady = true
+      this.onEvent?.({
+        type: 'notice',
+        code: 'live_steer_ready',
+        message: 'Codex is ready to accept messages pushed into this active turn.',
+        at: new Date().toISOString(),
+      })
+      this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
       const completedTurn = await this.#done
       if (completedTurn?.status !== 'completed') {
         throw new CodexLiveTurnError(
@@ -288,7 +296,7 @@ class CodexLiveSession {
       )
     }
     await this.#ready
-    if (this.#settled || !this.#threadId || !this.#turnId) {
+    if (this.#settled || !this.#steerReady || !this.#threadId || !this.#turnId) {
       throw new CodexLiveTurnError(
         'live_steer_unavailable',
         'There is no active Codex turn to steer. The message was not delivered.',
@@ -325,6 +333,10 @@ class CodexLiveSession {
         false,
       )
     }
+  }
+
+  canSteer() {
+    return this.#steerReady && !this.#settled && Boolean(this.#threadId) && Boolean(this.#turnId)
   }
 
   #abort = () => {
@@ -444,7 +456,8 @@ class CodexLiveSession {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
       this.#model = params.toModel
-    } else if (message.method === 'turn/completed' && params?.turn?.id === this.#turnId) {
+    } else if (message.method === 'turn/completed' && params?.threadId === this.#threadId) {
+      this.#closeSteering('Codex finished the active turn; new messages will use the persistent queue.')
       this.#settled = true
       this.#rejectReadyOnce(new CodexLiveTurnError(
         'live_steer_unavailable',
@@ -509,12 +522,24 @@ class CodexLiveSession {
 
   #fail(error) {
     if (this.#settled) return
+    this.#closeSteering('Codex can no longer accept messages in this active turn.')
     this.#settled = true
     this.#rejectReadyOnce(error)
     this.#rejectDone(error)
     for (const pending of this.#requests.values()) pending.reject(error)
     this.#requests.clear()
     this.#terminate()
+  }
+
+  #closeSteering(message) {
+    if (!this.#steerReady) return
+    this.#steerReady = false
+    this.onEvent?.({
+      type: 'notice',
+      code: 'live_steer_closed',
+      message,
+      at: new Date().toISOString(),
+    })
   }
 
   #finishProcess() {
@@ -596,5 +621,9 @@ export class CodexLiveTurnRunner {
       )
     }
     return session.steer(prompt, attachmentPaths)
+  }
+
+  canSteer(id) {
+    return this.#sessions.get(id)?.canSteer() === true
   }
 }

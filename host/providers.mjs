@@ -170,7 +170,9 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: [],
     updateArgs: ['update'],
-    authentication: probeDroidAuthentication,
+    authentication: unsupportedAuthentication(
+      'Factory Droid uses browser account sign-in during first-run onboarding, but does not document a non-interactive subscription authentication-status command.',
+    ),
     usageKind: 'subscription_quota',
     usageReason:
       'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
@@ -700,7 +702,6 @@ async function inspectProvider(provider) {
       canUpdate: false,
       updateStrategy: providerUpdateStrategy(provider),
       updateReason: providerUpdateReason(provider, false),
-      mcp,
       ...catalog,
       checkedAt,
     }
@@ -750,7 +751,6 @@ async function inspectProvider(provider) {
     canUpdate: Array.isArray(provider.updateArgs),
     updateStrategy: providerUpdateStrategy(provider),
     updateReason: providerUpdateReason(provider, true),
-    mcp,
     ...catalog,
     checkedAt,
   }

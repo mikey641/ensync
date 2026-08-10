@@ -233,6 +233,7 @@ export function createEnsyncHost(options = {}) {
     runLocal: (request, runOptions) => chats.run(request, runOptions),
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
+    canSteerLocal: (jobId) => chats.canSteer(jobId),
     normalizeError: chatJobErrorPayload,
     journal: chatJobJournal,
   })

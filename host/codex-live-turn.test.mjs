@@ -167,7 +167,9 @@ test('Codex live turns accept a steering instruction before one verified complet
 
   fake.child.stdout.write('Codex app-server startup diagnostic\n')
 
+  assert.equal(runner.canSteer('job_1111111111111111'), false)
   await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  await waitFor(() => runner.canSteer('job_1111111111111111'))
   const delivery = await runner.steer('job_1111111111111111', 'Use the compact layout', [])
   const result = await run
 
@@ -175,6 +177,7 @@ test('Codex live turns accept a steering instruction before one verified complet
   assert.equal(result.response, 'Applied the correction.')
   assert.equal(result.sessionId, '01900000-0000-7000-8000-000000000001')
   assert.equal(result.model, 'gpt-test')
+  assert.equal(runner.canSteer('job_1111111111111111'), false)
   assert.deepEqual(result.usage, {
     source: 'cli', inputTokens: 12, outputTokens: 4, cachedInputTokens: 3,
   })
@@ -186,6 +189,10 @@ test('Codex live turns accept a steering instruction before one verified complet
     'Use the compact layout',
   )
   assert.ok(events.some((event) => event.type === 'notice' && event.message.includes('delivered')))
+  assert.deepEqual(
+    events.filter((event) => event.type === 'notice' && event.code?.startsWith('live_steer_')).map((event) => event.code),
+    ['live_steer_ready', 'live_steer_closed'],
+  )
   assert.deepEqual(
     events.find((event) => event.type === 'note'),
     {

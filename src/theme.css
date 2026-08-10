@@ -921,9 +921,7 @@ kbd {
 .agent-update-reminder {
   position: fixed;
   z-index: 140;
-  /* Stays centred on the window instead of growing away from the right edge. */
-  inset-inline: 0;
-  margin-inline: auto;
+  right: 22px;
   bottom: 190px;
   width: min(610px, calc(100vw - 44px));
   min-height: 76px;
@@ -2179,6 +2177,17 @@ kbd {
   border-radius: 50%;
   background: var(--text-primary);
   color: var(--surface-main);
+}
+
+.composer__toolbar .send-button.send-button--labeled {
+  width: auto;
+  min-width: 96px;
+  padding-inline: 13px;
+  gap: 6px;
+  border-radius: 999px;
+  font-size: var(--font-label);
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 .composer__toolbar .send-button--ready,
