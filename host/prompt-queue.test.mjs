@@ -12,7 +12,6 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
-  queuedPromptCanPushNow,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -117,44 +116,6 @@ test('queue status explains the safety pause and the exact action in plain langu
     detail: 'It will run automatically after the current turn finishes successfully.',
     actionLabel: null,
   })
-})
-
-test('Push now requires a Host-confirmed active Codex process, not only a retained job', () => {
-  const queued = {
-    ...entry('turn-2', 'turn-1'),
-    preferences: {
-      executionTargetKey: 'local',
-      projectId: 'project-a',
-      projectPath: '/project-a',
-    },
-  }
-  const activeRun = {
-    turnId: 'turn-1',
-    provider: 'codex',
-    executionTarget: 'local',
-    jobId: 'job-turn-1-codex-1',
-    projectId: 'project-a',
-    projectPath: '/project-a',
-  }
-
-  assert.equal(queuedPromptCanPushNow({
-    sending: true,
-    liveSteeringReady: false,
-    activeRun,
-    entry: queued,
-  }), false)
-  assert.equal(queuedPromptCanPushNow({
-    sending: true,
-    liveSteeringReady: true,
-    activeRun,
-    entry: queued,
-  }), true)
-  assert.equal(queuedPromptCanPushNow({
-    sending: false,
-    liveSteeringReady: true,
-    activeRun,
-    entry: queued,
-  }), false)
 })
 
 test('execution context stops before its own prompt and replies precede future queued prompts', () => {

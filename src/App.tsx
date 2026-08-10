@@ -130,6 +130,10 @@ import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
+  conversationWorkspaceKey,
+  resolveConversationWorkspaceKey,
+} from './lib/conversationWorkspaceKey.mjs'
+import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -153,7 +157,6 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
-  queuedPromptCanPushNow,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -188,6 +191,7 @@ import {
   getRetainedNativeWorkspaceIds,
   getRetainedNativeWorkspaces,
   isCanonicalWorkspace,
+  isNativeWorkspaceIdentity,
   refreshRetainedNativeWorkspaces,
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
@@ -198,7 +202,10 @@ import {
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
 import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
-import { recoverOpenedProjectHistory } from './lib/openedProjectHistory.mjs'
+import {
+  recoverFocusedProjectHistory,
+  recoverOpenedProjectHistory,
+} from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -791,8 +798,6 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
-  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
-  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -1577,6 +1582,100 @@ function App() {
     setActiveTabId('')
   }
 
+  const recoverProjectIntoCurrentWorkspace = (project: RelayProject) => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return false
+    const result = recoverFocusedProjectHistory(workspaceSnapshot, window.localStorage, {
+      project,
+      currentWorkspace: nativeWorkspaceIdentity,
+    })
+    if (!result.summary.recovered) return false
+
+    const recovered = result.state as Partial<StoredState>
+    const nextChats = (recovered.chats ?? []).map(normalizeChatModelChoice)
+    const nextTabs = [...(recovered.tabs ?? [])]
+    if (nextTabs.length === 0 && nextChats[0]) {
+      nextTabs.push({ id: `restored-tab-${nextChats[0].id}`, chatId: nextChats[0].id })
+    }
+    const nextTabIds = new Set(nextTabs.map((tab) => tab.id))
+    const nextActiveTabId = nextTabIds.has(recovered.activeTabId ?? '')
+      ? recovered.activeTabId ?? ''
+      : nextTabs[0]?.id ?? ''
+    const nextDrafts = recovered.drafts ?? {}
+    const nextDraftAttachments = Object.fromEntries(
+      Object.entries(recovered.draftAttachments ?? {}).map(([chatId, attachments]) => [
+        chatId,
+        normalizeFileAttachments(attachments),
+      ]),
+    )
+    const nextChatSessions = recovered.chatSessions ?? {}
+    const nextReadCompletionByChat = recovered.readCompletionByChat ?? {}
+    const nextExecutionPanelOpenByChat = normalizeExecutionPanelOpenByChat(
+      recovered.executionPanelOpenByChat,
+    )
+    const nextChatErrors = recovered.chatErrors ?? {}
+    const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
+    const nextInFlightRuns = recovered.inFlightRuns ?? {}
+    const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
+
+    chatsRef.current = nextChats
+    tabsRef.current = nextTabs
+    activeTabIdRef.current = nextActiveTabId
+    draftsRef.current = nextDrafts
+    draftAttachmentsRef.current = nextDraftAttachments
+    projectsRef.current = [project]
+    chatSessionsRef.current = nextChatSessions
+    chatErrorsRef.current = nextChatErrors
+    chatExecutionEventsRef.current = nextChatExecutionEvents
+    inFlightRunsRef.current = nextInFlightRuns
+    promptQueuesRef.current = nextPromptQueues
+
+    setProjects([project])
+    setActiveProjectId(project.id)
+    setChats(nextChats)
+    setTabs(nextTabs)
+    setActiveTabId(nextActiveTabId)
+    setDrafts(nextDrafts)
+    setDraftAttachments(nextDraftAttachments)
+    setChatSessions(nextChatSessions)
+    setReadCompletionByChat(nextReadCompletionByChat)
+    setExecutionPanelOpenByChat(nextExecutionPanelOpenByChat)
+    setChatErrors(nextChatErrors)
+    setChatExecutionEvents(nextChatExecutionEvents)
+    setInFlightRuns(nextInFlightRuns)
+    setPromptQueues(nextPromptQueues)
+    setSplitLayout(recovered.splitLayout)
+    if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
+      setPlacement(recovered.placement)
+    }
+    if (recovered.conversationLayout === 'tabs' || recovered.conversationLayout === 'split') {
+      setConversationLayout(recovered.conversationLayout)
+    }
+    setSearch('')
+    setProjectOpen(false)
+
+    commitWorkspace({
+      projects: [project],
+      activeProjectId: project.id,
+      chats: nextChats,
+      tabs: nextTabs,
+      activeTabId: nextActiveTabId,
+      drafts: nextDrafts,
+      draftAttachments: nextDraftAttachments,
+      chatSessions: nextChatSessions,
+      readCompletionByChat: nextReadCompletionByChat,
+      executionPanelOpenByChat: nextExecutionPanelOpenByChat,
+      chatErrors: nextChatErrors,
+      chatExecutionEvents: nextChatExecutionEvents,
+      inFlightRuns: nextInFlightRuns,
+      promptQueues: nextPromptQueues,
+      splitLayout: recovered.splitLayout,
+      ...(recovered.placement ? { placement: recovered.placement } : {}),
+      ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
+    })
+    void rememberNativeRecentProject(project).catch((error) => console.error('[ensync-recent-projects]', error))
+    return true
+  }
+
   const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
     const workspaceHistory = {
       projects,
@@ -1618,6 +1717,9 @@ function App() {
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
         }
+      }
+      if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
+        return
       }
       if (activeProjectHistoryScore > 0) {
         if (typeof window.ensyncDesktop.openProjectWorkspace !== 'function') {
@@ -1727,11 +1829,12 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
+    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+      workspaceKey: agentWorkspaceKey,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2601,7 +2704,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2610,7 +2713,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -2801,22 +2904,8 @@ function App() {
       && activeRun.executionTarget === 'local'
       && typeof activeRun.jobId === 'string'
       && Boolean(activeRun.jobId)
-    if (!entry || !queuedMessage) return
-    if (!activeRun || !activeRun.jobId) {
-      queueMicrotask(() => drainPromptQueueRef.current(chatId))
-      return
-    }
-    if (!exactActiveCodexTurn) {
+    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
       updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
-      return
-    }
-    if (!queuedPromptCanPushNow({
-      sending: chatRunRegistryRef.current.has(chatId),
-      liveSteeringReady: liveSteeringReadyChatIdsRef.current.has(chatId),
-      activeRun,
-      entry,
-    })) {
-      queueMicrotask(() => drainPromptQueueRef.current(chatId))
       return
     }
     if (steeringChatIdsRef.current.has(chatId)) return
@@ -2870,15 +2959,7 @@ function App() {
     } catch (steerError) {
       const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
       if (safelyNotDelivered) {
-        // The provider can finish between the last Host lifecycle event and
-        // the steering request. Keep the prompt in FIFO without surfacing a
-        // stale "no active turn" error, hide Push now, and retry queue drain
-        // in case the verified completion has already reached the renderer.
-        updateLiveSteeringReadiness(chatId, false)
-        if (promptQueuesRef.current[chatId]?.[0]?.id === entry.id) {
-          updateChatError(chatId, null)
-          queueMicrotask(() => drainPromptQueueRef.current(chatId))
-        }
+        updateChatError(chatId, `${steerError.message} It remains queued.`)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -3345,12 +3426,17 @@ function App() {
                 canPushQueuedNow={(() => {
                   const activeRun = inFlightRuns[chat.id]
                   const entry = promptQueues[chat.id]?.[0]
-                  return queuedPromptCanPushNow({
-                    sending: sendingChatIds.has(chat.id),
-                    liveSteeringReady: liveSteeringReadyChatIds.has(chat.id),
-                    activeRun,
-                    entry,
-                  })
+                  return Boolean(
+                    sendingChatIds.has(chat.id)
+                    && activeRun?.provider === 'codex'
+                    && activeRun.executionTarget === 'local'
+                    && activeRun.jobId
+                    && entry
+                    && entry.predecessorTurnId === activeRun.turnId
+                    && entry.preferences.executionTargetKey === activeRun.executionTarget
+                    && entry.preferences.projectId === activeRun.projectId
+                    && entry.preferences.projectPath === activeRun.projectPath,
+                  )
                 })()}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}

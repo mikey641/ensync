@@ -149,27 +149,6 @@ export function promptQueueStatusPresentation(gate, count) {
   return { headline, detail: '', actionLabel: null }
 }
 
-/**
- * Offer live delivery only while the renderer has observed the exact local
- * Codex process start and has not yet observed its terminal event. A retained
- * Host job also covers provider startup and terminal cleanup, neither of which
- * has an active turn that can accept `turn/steer`.
- */
-export function queuedPromptCanPushNow({ sending, liveSteeringReady, activeRun, entry }) {
-  return Boolean(
-    sending
-    && liveSteeringReady
-    && activeRun?.provider === 'codex'
-    && activeRun.executionTarget === 'local'
-    && activeRun.jobId
-    && entry
-    && entry.predecessorTurnId === activeRun.turnId
-    && entry.preferences?.executionTargetKey === activeRun.executionTarget
-    && entry.preferences?.projectId === activeRun.projectId
-    && entry.preferences?.projectPath === activeRun.projectPath,
-  )
-}
-
 /** Only prior messages belong in the prompt/session cursor for this turn. */
 export function transcriptMessagesBeforeTurn(messages, turnId) {
   const index = messages.findIndex((message) => message.role === 'user' && message.turnId === turnId)

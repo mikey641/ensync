@@ -264,57 +264,6 @@ export function createWorkspaceFocusHandler({
   }
 }
 
-function absoluteLocalPath(value) {
-  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return false
-  if (value.startsWith('/')) return value !== '/' && !/^\/+$/u.test(value)
-  if (/^[a-z]:[\\/]/i.test(value)) return !/^[a-z]:[\\/]*$/i.test(value)
-  return /^\\\\[^\\]+\\[^\\]+/.test(value)
-}
-
-export function createWorkspaceFocusHandler({
-  isAuthorized,
-  identityForWebContents,
-  retainedIdentities,
-  windowForWorkspace,
-  focusWindow,
-  notifyProjectFocus,
-}) {
-  for (const [name, value] of Object.entries({
-    isAuthorized,
-    identityForWebContents,
-    retainedIdentities,
-    windowForWorkspace,
-    focusWindow,
-    notifyProjectFocus,
-  })) {
-    if (typeof value !== 'function') throw new TypeError(`${name} must be a function.`)
-  }
-  return async (event, request) => {
-    if (!isAuthorized(event) || !request || typeof request !== 'object') return false
-    const source = identityForWebContents(event.sender)
-    const targetWorkspaceId = typeof request.workspaceId === 'string'
-      ? request.workspaceId.toLowerCase()
-      : ''
-    if (!isNativeWorkspaceIdentity(source)
-      || !NATIVE_WORKSPACE_ID_PATTERN.test(targetWorkspaceId)
-      || source.id === targetWorkspaceId
-      || typeof request.projectId !== 'string'
-      || request.projectId.length === 0
-      || request.projectId.length > 256
-      || !absoluteLocalPath(request.projectPath)) return false
-    const targetIdentity = retainedIdentities()
-      .find((identity) => isNativeWorkspaceIdentity(identity) && identity.id === targetWorkspaceId)
-    if (!targetIdentity) return false
-    const targetWindow = windowForWorkspace(targetWorkspaceId)
-    if (!targetWindow || await focusWindow(targetWindow) === false) return false
-    await notifyProjectFocus(targetWindow, {
-      projectId: request.projectId,
-      projectPath: request.projectPath,
-    })
-    return true
-  }
-}
-
 /**
  * Owns the single workspace-identity IPC handler for the lifetime of the native
  * window registry. Registration is synchronous and idempotent so startup,

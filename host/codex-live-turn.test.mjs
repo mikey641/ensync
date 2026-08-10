@@ -142,7 +142,7 @@ function fakeCodexAppServer(options = {}) {
     return true
   }
   queueMicrotask(() => child.emit('spawn'))
-  return { child, requests, send }
+  return { child, requests, activateTurn }
 }
 
 test('Codex live turns accept a steering instruction before one verified completion', async () => {
@@ -198,6 +198,35 @@ test('Codex live turns accept a steering instruction before one verified complet
       at: events.find((event) => event.type === 'note').at,
     },
   )
+})
+
+test('steering waits for the authoritative active-turn event after turn/start responds', async () => {
+  const fake = fakeCodexAppServer({ deferTurnStarted: true })
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+  })
+  const run = runner.run({
+    id: 'job_4444444444444444',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  })
+
+  await waitFor(() => fake.requests.some((request) => request.method === 'turn/start'))
+  const delivery = runner.steer('job_4444444444444444', 'Use the compact layout', [])
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(fake.requests.some((request) => request.method === 'turn/steer'), false)
+
+  fake.activateTurn()
+  assert.deepEqual(await delivery, { turnId: '01900000-0000-7000-8000-000000000002' })
+  assert.equal((await run).response, 'Applied the correction.')
 })
 
 test('steering a missing live turn is explicitly safe to fall back to FIFO', async () => {

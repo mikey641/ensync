@@ -232,14 +232,7 @@ class CodexLiveSession {
       }
       this.#turnId = startedTurnId
       this.#turnStarted = true
-      this.#steerReady = true
-      this.onEvent?.({
-        type: 'notice',
-        code: 'live_steer_ready',
-        message: 'Codex is ready to accept messages pushed into this active turn.',
-        at: new Date().toISOString(),
-      })
-      this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
+      this.#resolveReadyIfActive()
       const completedTurn = await this.#done
       if (completedTurn?.status !== 'completed') {
         throw new CodexLiveTurnError(
@@ -431,10 +424,18 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    if (message.method === 'turn/started'
-      && params?.threadId === this.#threadId
-      && params?.turn?.id) {
+    if (message.method === 'turn/started' && params?.turn?.id && params?.threadId === this.#threadId) {
+      if (this.#turnId && this.#turnId !== params.turn.id) {
+        this.#fail(new CodexLiveTurnError(
+          'invalid_cli_output',
+          'Codex app-server activated a different turn than the one Ensync started.',
+          502,
+          false,
+        ))
+        return
+      }
       this.#turnId = params.turn.id
+      this.#activatedTurnId = params.turn.id
       this.#turnStarted = true
       this.#resolveReadyIfActive()
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
@@ -456,8 +457,9 @@ class CodexLiveSession {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
       this.#model = params.toModel
-    } else if (message.method === 'turn/completed' && params?.threadId === this.#threadId) {
-      this.#closeSteering('Codex finished the active turn; new messages will use the persistent queue.')
+    } else if (message.method === 'turn/completed'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id === this.#turnId) {
       this.#settled = true
       this.#rejectReadyOnce(new CodexLiveTurnError(
         'live_steer_unavailable',
@@ -501,9 +503,6 @@ class CodexLiveSession {
     this.#inactivityTimer.unref?.()
   }
 
-  // Steering readiness requires the turn identity to be fully established:
-  // the turn/start response and the turn/started activation notification must
-  // both have arrived and agree before any turn/steer can be trusted.
   #resolveReadyIfActive() {
     if (this.#readySettled
       || this.#settled
