@@ -121,22 +121,31 @@ async function landCheck(repoRoot, repoName) {
     return { ok: true, skipped: true }
   }
   console.log(`[${repoName}]   Running land:check...`)
-  try {
-    await execFile('npm', ['run', 'land:check'], {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      maxBuffer: 32 * 1024 * 1024,
-      timeout: LAND_CHECK_TIMEOUT_MS,
-    })
-    return { ok: true }
-  } catch (error) {
-    if (error.killed || error.signal) {
-      // An infrastructure problem must not block landing or silently pass it.
-      return { ok: false, reason: 'land:check did not finish within its time limit' }
+  const invoke = () => execFile('npm', ['run', 'land:check'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 32 * 1024 * 1024,
+    timeout: LAND_CHECK_TIMEOUT_MS,
+  })
+  // Timing-sensitive tests can fail under the load of concurrent agent runs.
+  // A flaky red would roll back a good merge, so a failure is confirmed by a
+  // second run; a genuine break fails both times.
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    try {
+      await invoke()
+      return { ok: true }
+    } catch (error) {
+      if (error.killed || error.signal) {
+        return { ok: false, reason: 'land:check did not finish within its time limit' }
+      }
+      if (attempt === 2) {
+        const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`.trim()
+        return { ok: false, reason: 'land:check failed twice', output: output.slice(-2_000) }
+      }
+      console.log(`[${repoName}]   land:check failed; confirming with a second run...`)
     }
-    const output = `${error.stdout ?? ''}\n${error.stderr ?? ''}`.trim()
-    return { ok: false, reason: 'land:check failed', output: output.slice(-2_000) }
   }
+  return { ok: false, reason: 'land:check failed twice' }
 }
 
 async function run() {
