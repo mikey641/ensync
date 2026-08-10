@@ -479,13 +479,11 @@ function quotaError(provider, safeToRetry) {
   )
 }
 
-export function parseCodexChatResult(stdout, options = {}) {
-  const truncation = options.outputTruncated ?? null
+export function parseCodexChatResult(stdout) {
   let decoded
   try {
     decoded = decodeJsonEventStream(stdout, { allowRepair: true })
   } catch {
-    if (truncation) throw truncatedOutputError('Codex')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Codex output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
@@ -494,7 +492,6 @@ export function parseCodexChatResult(stdout, options = {}) {
   }
   const { events, recovery } = decoded
   if (events.length === 0) {
-    if (truncation) throw truncatedOutputError('Codex')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Codex output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
@@ -552,16 +549,14 @@ export function parseCodexChatResult(stdout, options = {}) {
       502,
     )
   }
-  return { response, sessionId, model, usage, outputRecovery: recovery, outputTruncation: truncation }
+  return { response, sessionId, model, usage, outputRecovery: recovery }
 }
 
-export function parseClaudeChatResult(stdout, options = {}) {
-  const truncation = options.outputTruncated ?? null
+export function parseClaudeChatResult(stdout) {
   let decoded
   try {
     decoded = decodeJsonEventStream(stdout, { allowRepair: true })
   } catch {
-    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Claude Code output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
@@ -570,7 +565,6 @@ export function parseClaudeChatResult(stdout, options = {}) {
   }
   const { events, recovery } = decoded
   if (events.length === 0) {
-    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Claude Code output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
@@ -629,7 +623,6 @@ export function parseClaudeChatResult(stdout, options = {}) {
     model: modelUsage.length === 1 ? modelUsage[0] : initModel ?? null,
     usage: usageFrom(result.usage),
     outputRecovery: recovery,
-    outputTruncation: truncation,
   }
 }
 
@@ -966,7 +959,7 @@ export class ChatRunService {
       )
     }
 
-    const parsed = parseResult(request.provider, processResult.stdout, { outputTruncated })
+    const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
     return {
       provider: request.provider,
@@ -979,7 +972,6 @@ export class ChatRunService {
       requestedEffort: request.effort ?? null,
       usage: parsed.usage,
       outputRecovery: parsed.outputRecovery,
-      outputTruncation: parsed.outputTruncation ?? null,
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }

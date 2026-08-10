@@ -251,11 +251,6 @@ export type ChatOutputRecovery = {
   discardedLineCount: number
 }
 
-export type ChatOutputTruncation = {
-  droppedLineCount: number
-  droppedCharacterCount: number
-}
-
 export type ChatRunWorkspace = {
   path: string
   repositoryPath: string
@@ -288,8 +283,6 @@ export type ChatRunResponse = {
   usage: ChatRunUsage | null
   /** Bounded Host repair of provider protocol framing; never a replay of the task. */
   outputRecovery?: ChatOutputRecovery | null
-  /** Whole intermediate output lines the Host dropped to stay inside its capture limit. */
-  outputTruncation?: ChatOutputTruncation | null
   durationMs: number
   completedAt: string
 }

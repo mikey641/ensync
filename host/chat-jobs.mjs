@@ -59,13 +59,6 @@ function outputRecoveryNotice(result) {
   return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
 }
 
-function outputTruncationNotice(result) {
-  const truncation = result?.outputTruncation
-  const droppedLines = Number.isSafeInteger(truncation?.droppedLineCount) ? truncation.droppedLineCount : 0
-  if (droppedLines < 1) return null
-  return `This turn produced more provider output than Ensync Host retains, so ${droppedLines.toLocaleString()} intermediate output ${droppedLines === 1 ? 'line was' : 'lines were'} dropped from the execution log. The final response and its terminal completion event were still verified.`
-}
-
 function publicJob(job) {
   return {
     id: job.id,
@@ -297,8 +290,9 @@ export class ChatJobService {
       }
       job.state = 'completed'
       job.finishedAt = this.#now()
-      for (const message of [outputTruncationNotice(result), outputRecoveryNotice(result)]) {
-        if (message) this.#record(job, { type: 'notice', message, at: job.finishedAt })
+      const recoveryNotice = outputRecoveryNotice(result)
+      if (recoveryNotice) {
+        this.#record(job, { type: 'notice', message: recoveryNotice, at: job.finishedAt })
       }
       this.#record(job, { type: 'completed', result, at: job.finishedAt })
     } catch (error) {
