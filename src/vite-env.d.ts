@@ -8,9 +8,18 @@ interface Window {
       kind: 'canonical' | 'isolated'
       retainedWorkspaceIds: string[]
       retainedWorkspaces: Array<{ id: string; kind: 'canonical' | 'isolated' }>
+      projectLaunch?: {
+        projectId: string
+        projectPath: string
+        sourceWorkspace: { id: string; kind: 'canonical' | 'isolated' }
+      }
     } | null>
     focusWorkspace?: (request: {
       workspaceId: string
+      projectId: string
+      projectPath: string
+    }) => Promise<boolean>
+    openProjectWorkspace?: (request: {
       projectId: string
       projectPath: string
     }) => Promise<boolean>

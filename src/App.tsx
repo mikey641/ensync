@@ -90,6 +90,7 @@ import {
 } from './lib/accountWorkspaceSync.mjs'
 import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
+  conversationProviderId,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
   selectAutomaticFallbackProviderAfterRefresh,
@@ -123,6 +124,10 @@ import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
+import {
+  conversationWorkspaceKey,
+  resolveConversationWorkspaceKey,
+} from './lib/conversationWorkspaceKey.mjs'
 import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
@@ -180,6 +185,7 @@ import {
   getRetainedNativeWorkspaceIds,
   getRetainedNativeWorkspaces,
   isCanonicalWorkspace,
+  isNativeWorkspaceIdentity,
   refreshRetainedNativeWorkspaces,
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
@@ -190,6 +196,10 @@ import {
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
 import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
+import {
+  recoverFocusedProjectHistory,
+  recoverOpenedProjectHistory,
+} from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -343,10 +353,14 @@ function readInitialStoredState(): StoredState | null {
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
       legacyStates,
     }).state
-    return recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
+    const withArchivedProjects = recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
       identity,
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
     }).state
+    const projectLaunch = getInitialNativeProjectLaunch()
+    return projectLaunch
+      ? recoverOpenedProjectHistory(withArchivedProjects, window.localStorage, { projectLaunch }).state
+      : withArchivedProjects
   } catch {
     return null
   }
@@ -573,11 +587,29 @@ function automaticProvider(providers: Provider[], priorityOrder: readonly Provid
     ?? defaultProviders[0]
 }
 
-function providerForChat(providers: Provider[], chat: Chat | undefined, priorityOrder: readonly ProviderId[]) {
+/**
+ * Display resolution for a conversation. `activeRun` pins the name to the provider
+ * that actually owns the running turn, so a mid-run usage refresh can no longer
+ * rename it. Routing call sites pass no run: they must resolve the next turn.
+ */
+function providerForChat(
+  providers: Provider[],
+  chat: Chat | undefined,
+  priorityOrder: readonly ProviderId[],
+  activeRun?: PersistedInFlightRun,
+) {
   if (!chat) return providers[0] ?? defaultProviders[0]
+  const displayedId = conversationProviderId({ chat, activeRun, providers, priorityOrder })
+  const displayed = displayedId ? providers.find((provider) => provider.id === displayedId) : undefined
+  if (displayed) return displayed
   return chat.providerMode === 'fixed'
     ? providers.find((provider) => provider.id === chat.provider) ?? providers[0] ?? defaultProviders[0]
     : automaticProvider(providers, priorityOrder, chat.provider)
+}
+
+/** True only when an executing run actually determines the displayed provider. */
+function runPinsDisplayedProvider(providers: Provider[], activeRun: PersistedInFlightRun | undefined) {
+  return Boolean(activeRun) && providers.some((provider) => provider.id === activeRun?.provider)
 }
 
 function ProviderMark({ provider, small = false }: { provider: Provider; small?: boolean }) {
@@ -1035,11 +1067,12 @@ function App() {
     && agentUpdatePreferences.mode === 'remind'
     && installedAgentProviders.length > 0
     && agentUpdateDue(agentUpdatePreferences)
-  const displayProjectChats = projectChats.map((chat) => ({
-    ...chat,
-    provider: providerForChat(executionProviders, chat, fallbackProviderOrder).id,
-  }))
-  const activeProvider = providerForChat(executionProviders, activeChat, fallbackProviderOrder)
+  const activeProvider = providerForChat(
+    executionProviders,
+    activeChat,
+    fallbackProviderOrder,
+    activeChat ? inFlightRuns[activeChat.id] : undefined,
+  )
   const fallbackProviders = orderedAutomaticProviders(executionProviders, fallbackProviderOrder)
     .filter((provider) => provider.connected && supportsChat(provider) && (provider.usage === null || provider.usage < 100))
   const supportProvider = automaticProvider(executionProviders, fallbackProviderOrder, activeProvider.id)
@@ -1540,8 +1573,102 @@ function App() {
     setActiveTabId('')
   }
 
+  const recoverProjectIntoCurrentWorkspace = (project: RelayProject) => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return false
+    const result = recoverFocusedProjectHistory(workspaceSnapshot, window.localStorage, {
+      project,
+      currentWorkspace: nativeWorkspaceIdentity,
+    })
+    if (!result.summary.recovered) return false
+
+    const recovered = result.state as Partial<StoredState>
+    const nextChats = (recovered.chats ?? []).map(normalizeChatModelChoice)
+    const nextTabs = [...(recovered.tabs ?? [])]
+    if (nextTabs.length === 0 && nextChats[0]) {
+      nextTabs.push({ id: `restored-tab-${nextChats[0].id}`, chatId: nextChats[0].id })
+    }
+    const nextTabIds = new Set(nextTabs.map((tab) => tab.id))
+    const nextActiveTabId = nextTabIds.has(recovered.activeTabId ?? '')
+      ? recovered.activeTabId ?? ''
+      : nextTabs[0]?.id ?? ''
+    const nextDrafts = recovered.drafts ?? {}
+    const nextDraftAttachments = Object.fromEntries(
+      Object.entries(recovered.draftAttachments ?? {}).map(([chatId, attachments]) => [
+        chatId,
+        normalizeFileAttachments(attachments),
+      ]),
+    )
+    const nextChatSessions = recovered.chatSessions ?? {}
+    const nextReadCompletionByChat = recovered.readCompletionByChat ?? {}
+    const nextExecutionPanelOpenByChat = normalizeExecutionPanelOpenByChat(
+      recovered.executionPanelOpenByChat,
+    )
+    const nextChatErrors = recovered.chatErrors ?? {}
+    const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
+    const nextInFlightRuns = recovered.inFlightRuns ?? {}
+    const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
+
+    chatsRef.current = nextChats
+    tabsRef.current = nextTabs
+    activeTabIdRef.current = nextActiveTabId
+    draftsRef.current = nextDrafts
+    draftAttachmentsRef.current = nextDraftAttachments
+    projectsRef.current = [project]
+    chatSessionsRef.current = nextChatSessions
+    chatErrorsRef.current = nextChatErrors
+    chatExecutionEventsRef.current = nextChatExecutionEvents
+    inFlightRunsRef.current = nextInFlightRuns
+    promptQueuesRef.current = nextPromptQueues
+
+    setProjects([project])
+    setActiveProjectId(project.id)
+    setChats(nextChats)
+    setTabs(nextTabs)
+    setActiveTabId(nextActiveTabId)
+    setDrafts(nextDrafts)
+    setDraftAttachments(nextDraftAttachments)
+    setChatSessions(nextChatSessions)
+    setReadCompletionByChat(nextReadCompletionByChat)
+    setExecutionPanelOpenByChat(nextExecutionPanelOpenByChat)
+    setChatErrors(nextChatErrors)
+    setChatExecutionEvents(nextChatExecutionEvents)
+    setInFlightRuns(nextInFlightRuns)
+    setPromptQueues(nextPromptQueues)
+    setSplitLayout(recovered.splitLayout)
+    if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
+      setPlacement(recovered.placement)
+    }
+    if (recovered.conversationLayout === 'tabs' || recovered.conversationLayout === 'split') {
+      setConversationLayout(recovered.conversationLayout)
+    }
+    setSearch('')
+    setProjectOpen(false)
+
+    commitWorkspace({
+      projects: [project],
+      activeProjectId: project.id,
+      chats: nextChats,
+      tabs: nextTabs,
+      activeTabId: nextActiveTabId,
+      drafts: nextDrafts,
+      draftAttachments: nextDraftAttachments,
+      chatSessions: nextChatSessions,
+      readCompletionByChat: nextReadCompletionByChat,
+      executionPanelOpenByChat: nextExecutionPanelOpenByChat,
+      chatErrors: nextChatErrors,
+      chatExecutionEvents: nextChatExecutionEvents,
+      inFlightRuns: nextInFlightRuns,
+      promptQueues: nextPromptQueues,
+      splitLayout: recovered.splitLayout,
+      ...(recovered.placement ? { placement: recovered.placement } : {}),
+      ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
+    })
+    void rememberNativeRecentProject(project).catch((error) => console.error('[ensync-recent-projects]', error))
+    return true
+  }
+
   const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
-    const localHistoryScore = workspaceProjectHistoryScore({
+    const workspaceHistory = {
       projects,
       chats,
       drafts,
@@ -1550,8 +1677,12 @@ function App() {
       chatExecutionEvents,
       inFlightRuns,
       promptQueues,
-    }, project)
-    if (allowNativeRoute && localHistoryScore === 0 && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
+    }
+    const sameProject = project.id === activeProject.id
+      || (nativeProjectPathKey(project.path)
+        && nativeProjectPathKey(project.path) === nativeProjectPathKey(activeProject.path))
+    const activeProjectHistoryScore = workspaceProjectHistoryScore(workspaceHistory, activeProject)
+    if (allowNativeRoute && !sameProject && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
       let retainedWorkspaces = getRetainedNativeWorkspaces()
       try {
         retainedWorkspaces = await refreshRetainedNativeWorkspaces(window)
@@ -1576,6 +1707,33 @@ function App() {
           }
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
+        }
+      }
+      if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
+        return
+      }
+      if (activeProjectHistoryScore > 0) {
+        if (typeof window.ensyncDesktop.openProjectWorkspace !== 'function') {
+          setProjectError('Quit Ensync completely and reopen it before opening another project window.')
+          return
+        }
+        try {
+          const opened = await window.ensyncDesktop.openProjectWorkspace({
+            projectId: project.id,
+            projectPath: project.path,
+          })
+          if (opened) {
+            setProjectOpen(false)
+          } else {
+            setProjectError('Ensync could not open another project window. The current project remains open.')
+          }
+          return
+        } catch (error) {
+          console.error('[ensync-workspace-open-project]', error)
+          setProjectError(error instanceof Error
+            ? error.message
+            : 'Ensync could not open another project window. The current project remains open.')
+          return
         }
       }
     }
@@ -1662,11 +1820,12 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
+    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+      workspaceKey: agentWorkspaceKey,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2430,7 +2589,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2439,7 +2598,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
+            workspaceKey: agentWorkspaceKey,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -3055,7 +3214,7 @@ function App() {
               <section className="history-group" key={group}>
                 <div className="history-group__label">{group}</div>
                 {groupChats.map((chat) => {
-                  const provider = providerForChat(executionProviders, chat, fallbackProviderOrder)
+                  const provider = providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])
                   return (
                     <button className={`history-item ${activeChat?.id === chat.id ? 'history-item--active' : ''}`} key={chat.id} onClick={() => openChat(chat.id)}>
                       <ProviderMark provider={provider} small />
@@ -3081,7 +3240,7 @@ function App() {
         <main className="main-area">
           <SplitWorkspace
             tabs={projectTabs}
-            chats={displayProjectChats}
+            chats={projectChats}
             providers={executionProviders}
             completedTabIds={completedTabIds}
             completionIndicator={completionIndicator}
@@ -3105,7 +3264,9 @@ function App() {
               <ConversationPane
                 chat={chat}
                 isActive={isActive}
-                provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
+                provider={providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])}
+                autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
+                runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
                 providers={executionProviders}
                 projectPath={executionTarget.kind === 'ssh' ? `${executionTarget.connection.username}@${executionTarget.connection.hostname}:${executionTarget.connection.projectPath}` : activeProject.path}
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
@@ -3229,6 +3390,8 @@ function ConversationPane({
   chat,
   isActive,
   provider,
+  autoProvider,
+  runningProviderPinned,
   providers,
   projectPath,
   projectContextAvailable,
@@ -3269,7 +3432,12 @@ function ConversationPane({
 }: {
   chat: Chat
   isActive: boolean
+  /** Provider this conversation is actually on: the running turn, else its last verified turn. */
   provider: Provider
+  /** Provider Auto would choose for the next turn from current verified usage. */
+  autoProvider: Provider
+  /** True while a Host-owned run pins `provider` to the executing turn. */
+  runningProviderPinned: boolean
   providers: Provider[]
   projectPath: string
   projectContextAvailable: boolean
@@ -3455,6 +3623,17 @@ function ConversationPane({
         : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.')
     }
   }
+  const automaticMode = chat.providerMode !== 'fixed'
+  const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
+  // The face of this control is a fact, so say which fact it is and, for Auto,
+  // where the next turn would go when that differs from what is shown.
+  const providerPickerTitle = runningProviderPinned
+    ? `${provider.name} is running this turn.`
+    : automaticMode
+      ? provider.id === autoProvider.id
+        ? `Auto would run the next turn on ${provider.name}.`
+        : `${provider.name} ran this conversation's last turn. Auto would run the next turn on ${autoProvider.name}.`
+      : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
   const modelPickerLabel = selectedSize?.label ?? 'Provider default'
@@ -3483,9 +3662,9 @@ function ConversationPane({
         </div>
         <div className="conversation-header__actions">
           <div className="provider-picker-wrap">
-            <button ref={providerButtonRef} className="provider-picker" onClick={onProviderMenu} aria-haspopup="dialog" aria-expanded={providerMenuOpen} aria-controls={providerMenuId}>
+            <button ref={providerButtonRef} className="provider-picker" onClick={onProviderMenu} aria-haspopup="dialog" aria-expanded={providerMenuOpen} aria-controls={providerMenuId} title={providerPickerTitle}>
               <ProviderMark provider={provider} small />
-              <span><small>{chat.providerMode === 'fixed' ? 'Provider · Fixed' : 'Provider · Auto'}</small><strong>{provider.name}</strong></span>
+              <span><small>{providerPickerMode}</small><strong>{provider.name}</strong></span>
               <ChevronDown size={14} />
             </button>
             {providerMenuOpen && createPortal(
@@ -3494,17 +3673,17 @@ function ConversationPane({
                 <button onClick={onProviderAuto}>
                   <Bot size={16} />
                   <span><strong>Auto provider</strong><small>Chooses by your Automatic fallback priority</small></span>
-                  <em className={`model-usage-badge ${provider.usage === null ? 'model-usage-badge--unknown' : ''}`} title={provider.usageReason}>
-                    {provider.usage === null ? provider.name : `${provider.name} · ${provider.usage}%`}
+                  <em className={`model-usage-badge ${autoProvider.usage === null ? 'model-usage-badge--unknown' : ''}`} title={autoProvider.usageReason}>
+                    {autoProvider.usage === null ? autoProvider.name : `${autoProvider.name} · ${autoProvider.usage}%`}
                   </em>
-                  {chat.providerMode !== 'fixed' && <Check size={15} />}
+                  {automaticMode && <Check size={15} />}
                 </button>
                 <div className="menu-separator" />
                 {providers.map((item) => (
                   <button key={item.id} disabled={!item.connected || !supportsChat(item)} onClick={() => onProviderChange(item.id)} title={supportsChat(item) ? item.status : `${item.name} chat execution is not supported yet.`}>
                     <ProviderMark provider={item} />
                     <span><strong>{item.name}</strong><small>{item.connected && supportsChat(item) ? `${item.usage === null ? 'Usage not reported' : `${item.usage}% used`} · Provider default model` : supportsChat(item) ? item.status : 'Chat execution not supported'}</small></span>
-                    {chat.providerMode === 'fixed' && provider.id === item.id && <Check size={15} />}
+                    {!automaticMode && chat.provider === item.id && <Check size={15} />}
                   </button>
                 ))}
                 <div className="menu-separator" />

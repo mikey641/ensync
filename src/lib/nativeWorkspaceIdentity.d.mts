@@ -19,5 +19,10 @@ export function getNativeWorkspaceIdentity(): NativeWorkspaceIdentity
 export function getRetainedNativeWorkspaceIds(): string[]
 export function getRetainedNativeWorkspaces(): Array<{ id: string; kind: NativeWorkspaceIdentity['kind'] }>
 export function refreshRetainedNativeWorkspaces(target?: unknown): Promise<Array<{ id: string; kind: NativeWorkspaceIdentity['kind'] }>>
+export function getInitialNativeProjectLaunch(): {
+  projectId: string
+  projectPath: string
+  sourceWorkspace: { id: string; kind: NativeWorkspaceIdentity['kind'] }
+} | null
 export function isCanonicalWorkspace(identity?: NativeWorkspaceIdentity): boolean
 export function workspaceStorageKey(baseKey: string, identity?: NativeWorkspaceIdentity): string

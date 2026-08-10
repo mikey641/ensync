@@ -57,39 +57,23 @@ export function selectAutomaticProvider(providers, priorityOrder, attemptedProvi
 }
 
 /**
- * Provider telemetry can become stale while a renderer is suspended. Re-probe
- * once before declaring Auto unavailable, then select from the returned
- * snapshot so the caller does not have to wait for a React render cycle.
+ * The provider a conversation displays must be a fact whenever one exists, never
+ * a forecast re-derived on every render. An executing run owns the current turn,
+ * and once it ends the last Host-verified turn still owns the conversation's
+ * resumable session. Only a fixed preference or a conversation that has never run
+ * falls back to the live automatic selection.
+ *
+ * Re-resolving automatic routing on each render is what let a mid-run usage
+ * refresh rename a streaming Codex turn to Claude Code in the header.
+ *
+ * Returns null when nothing is resolvable so callers keep their own last resort.
  */
-export async function selectAutomaticProviderAfterRefresh(providers, priorityOrder, refreshProviders) {
-  const selected = selectAutomaticProvider(providers, priorityOrder)
-  if (selected || typeof refreshProviders !== 'function') return selected
-  const refreshed = await refreshProviders()
-  return Array.isArray(refreshed)
-    ? selectAutomaticProvider(refreshed, priorityOrder)
-    : null
-}
-
-/**
- * A provider run can invalidate the renderer snapshot that existed when the
- * turn started. Refresh local provider facts before choosing a safe runtime
- * fallback, while retaining the last verified snapshot if that refresh fails.
- */
-export async function selectAutomaticFallbackProviderAfterRefresh(
-  providers,
-  priorityOrder,
-  attemptedProviderIds,
-  refreshProviders,
-) {
-  const current = selectAutomaticProvider(providers, priorityOrder, attemptedProviderIds)
-  if (typeof refreshProviders !== 'function') return current
-  let refreshed
-  try {
-    refreshed = await refreshProviders()
-  } catch {
-    return current
-  }
-  return Array.isArray(refreshed)
-    ? selectAutomaticProvider(refreshed, priorityOrder, attemptedProviderIds)
-    : current
+export function conversationProviderId({ chat, activeRun, providers, priorityOrder }) {
+  const available = new Set((providers ?? []).map((provider) => provider.id))
+  const running = activeRun?.provider
+  if (typeof running === 'string' && available.has(running)) return running
+  if (chat?.providerMode === 'fixed') return typeof chat.provider === 'string' ? chat.provider : null
+  const lastVerified = chat?.continuation?.provider
+  if (typeof lastVerified === 'string' && available.has(lastVerified)) return lastVerified
+  return selectAutomaticProvider(providers ?? [], priorityOrder)?.id ?? null
 }
