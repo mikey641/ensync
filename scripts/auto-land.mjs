@@ -21,7 +21,7 @@
  *   - Push only what was verified, never with force.
  */
 import { execFile as execFileCallback } from 'node:child_process'
-import { readFile } from 'node:fs/promises'
+import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 
@@ -54,20 +54,55 @@ async function hasRemote() {
   }
 }
 
-/** Branches checked out in any worktree — an agent may still be writing there. */
-async function activeWorktreeBranches() {
+/**
+ * Conversations whose workspace write lease is currently held, meaning a run
+ * is genuinely in flight. Every Ensync conversation keeps a permanent
+ * worktree, so worktree existence proves nothing — using it as the "busy"
+ * signal meant no chat branch could ever land. The Host heartbeats this lease
+ * every 5s and treats it as abandoned after 30s, so a lease whose heartbeat
+ * has gone quiet belongs to a finished or crashed run.
+ */
+async function leasedWorkspaceHashes(repoRoot, staleMs = 30_000) {
+  const commonDir = await git(['rev-parse', '--git-common-dir'], { cwd: repoRoot })
+  const lockRoot = join(commonDir.startsWith('/') ? commonDir : join(repoRoot, commonDir), 'ensync', 'workspace-write-locks')
+  const held = new Set()
+  let entries
   try {
-    const list = await git(['worktree', 'list', '--porcelain'])
-    const active = new Set()
-    for (const line of list.split('\n')) {
-      if (!line.startsWith('branch ')) continue
-      const branch = line.slice('branch '.length).replace(/^refs\/heads\//, '')
-      if (branch) active.add(branch)
-    }
-    return active
+    entries = await readdir(lockRoot)
   } catch {
-    return new Set()
+    return held
   }
+  for (const entry of entries) {
+    if (!entry.endsWith('.lock')) continue
+    try {
+      const owner = JSON.parse(await readFile(join(lockRoot, entry, 'owner.json'), 'utf8'))
+      const heartbeat = Date.parse(owner?.heartbeatAt ?? '')
+      if (Number.isFinite(heartbeat) && Date.now() - heartbeat < staleMs) {
+        held.add(entry.slice(0, -'.lock'.length))
+      }
+    } catch {
+      // An unreadable or half-written lease is not proof of an active run.
+    }
+  }
+  return held
+}
+
+/** A worktree with uncommitted changes may hold work no commit has captured. */
+async function worktreePathsByBranch(repoRoot) {
+  const paths = new Map()
+  try {
+    const list = await git(['worktree', 'list', '--porcelain'], { cwd: repoRoot })
+    let current = null
+    for (const line of list.split('\n')) {
+      if (line.startsWith('worktree ')) current = line.slice('worktree '.length)
+      else if (line.startsWith('branch ') && current) {
+        paths.set(line.slice('branch '.length).replace(/^refs\/heads\//, ''), current)
+      }
+    }
+  } catch {
+    // Without the list every branch is simply treated as having no worktree.
+  }
+  return paths
 }
 
 async function checkoutIsClean(repoRoot) {
@@ -108,7 +143,8 @@ async function run() {
   const repoRoot = await git(['rev-parse', '--show-toplevel'])
   const repoName = repoRoot.split('/').pop()
   const remote = await hasRemote()
-  const activeBranches = await activeWorktreeBranches()
+  const leased = await leasedWorkspaceHashes(repoRoot)
+  const worktrees = await worktreePathsByBranch(repoRoot)
 
   if (!(await checkoutIsClean(repoRoot))) {
     console.log(`[${repoName}] Checkout is dirty — skipping this sweep so nothing merges over local work.`)
@@ -135,7 +171,15 @@ async function run() {
       upToDate += 1
       continue
     }
-    if (activeBranches.has(branch)) {
+    const workspaceHash = /^ensync\/chat-([0-9a-f]{24})$/.exec(branch)?.[1] ?? null
+    if (workspaceHash && leased.has(workspaceHash)) {
+      console.log(`[${repoName}] Skipping ${branch} — a run holds its workspace lease.`)
+      active += 1
+      continue
+    }
+    const worktreePath = worktrees.get(branch)
+    if (worktreePath && !(await checkoutIsClean(worktreePath))) {
+      console.log(`[${repoName}] Skipping ${branch} — its worktree has uncommitted changes.`)
       active += 1
       continue
     }
