@@ -4,6 +4,7 @@ import {
   FALLBACK_PROVIDER_ORDER_KEY,
   readStoredFallbackProviderOrder,
   resolveFallbackProviderOrder,
+  subscribeStoredFallbackProviderOrder,
   writeStoredFallbackProviderOrder,
 } from '../src/lib/automaticRoutingPreferences.mjs'
 import {
@@ -84,6 +85,50 @@ test('a second window ranking change reroutes Auto to Claude Code in every windo
     selectAutomaticProvider(installed, resolveFallbackProviderOrder(nadlanDeskWindow, ['codex', 'claude'])).id,
     'claude',
   )
+})
+
+test('an already-open project adopts a ranking saved by another window', () => {
+  const storage = fakeStorage()
+  let storageListener = null
+  const target = {
+    addEventListener: (type, listener) => {
+      if (type === 'storage') storageListener = listener
+    },
+    removeEventListener: (type, listener) => {
+      if (type === 'storage' && storageListener === listener) storageListener = null
+    },
+  }
+  const observed = []
+  const unsubscribe = subscribeStoredFallbackProviderOrder(
+    target,
+    storage,
+    (order) => observed.push(order),
+  )
+
+  writeStoredFallbackProviderOrder(storage, ['claude', 'codex'])
+  storageListener?.({ storageArea: storage, key: FALLBACK_PROVIDER_ORDER_KEY })
+
+  assert.deepEqual(observed, [['claude', 'codex']])
+  unsubscribe()
+  assert.equal(storageListener, null)
+})
+
+test('subscription reconciles a ranking changed after startup read but before listener setup', () => {
+  const storage = fakeStorage()
+  assert.deepEqual(
+    resolveFallbackProviderOrder(storage, ['codex', 'claude']),
+    ['codex', 'claude'],
+  )
+  writeStoredFallbackProviderOrder(storage, ['claude', 'codex'])
+
+  const target = {
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  }
+  const observed = []
+  subscribeStoredFallbackProviderOrder(target, storage, (order) => observed.push(order))
+
+  assert.deepEqual(observed, [['claude', 'codex']])
 })
 
 test('a read-only or full device store never breaks routing', () => {

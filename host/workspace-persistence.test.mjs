@@ -177,6 +177,23 @@ test('execution-event compaction never drops core workspace state', () => {
   assert.match(compacted.chatExecutionEvents['chat-a'].at(-1).text, /^19:/)
 })
 
+test('legacy snapshots remain readable while new commits omit the device-wide fallback ranking', () => {
+  const storage = createStorage()
+  const state = {
+    chats: [{ id: 'chat-a', messages: [] }],
+    fallbackProviderOrder: ['claude', 'codex'],
+  }
+
+  commitWorkspaceSnapshot(storage, state)
+  assert.deepEqual(readWorkspaceSnapshot(storage)?.state, state)
+  commitWorkspaceSnapshot(storage, compactWorkspaceSnapshot(state))
+
+  assert.deepEqual(readWorkspaceSnapshot(storage)?.state, {
+    chats: [{ id: 'chat-a', messages: [] }],
+  })
+  assert.deepEqual(state.fallbackProviderOrder, ['claude', 'codex'])
+})
+
 test('concurrent pending chats restore as interrupted reconciliation-required runs', () => {
   const state = {
     chats: [

@@ -34,6 +34,19 @@ export function writeStoredFallbackProviderOrder(storage, order) {
   return normalized
 }
 
+/** Keeps an already-open window aligned when another window changes the ranking. */
+export function subscribeStoredFallbackProviderOrder(target, storage, onChange) {
+  const synchronize = (event) => {
+    if (event?.storageArea !== storage || event?.key !== FALLBACK_PROVIDER_ORDER_KEY) return
+    const stored = readStoredFallbackProviderOrder(storage)
+    if (stored) onChange(stored)
+  }
+  target?.addEventListener?.('storage', synchronize)
+  const stored = readStoredFallbackProviderOrder(storage)
+  if (stored) onChange(stored)
+  return () => target?.removeEventListener?.('storage', synchronize)
+}
+
 /**
  * Resolves the ranking for a starting window. The device-wide choice always wins over
  * a workspace snapshot written before this preference moved out of workspace state.

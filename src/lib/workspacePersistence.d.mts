@@ -25,7 +25,7 @@ export function commitWorkspaceSnapshot<T extends object>(
 export function compactWorkspaceSnapshot<T extends object>(
   state: T,
   options?: { maxExecutionEventCharacters?: number },
-): T
+): Omit<T, 'fallbackProviderOrder'>
 
 export function reconcileInterruptedWorkspaceState<T extends object>(
   state: T,
