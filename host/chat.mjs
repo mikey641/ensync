@@ -1,7 +1,7 @@
 import { open, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
 import { autoLandWorkspace } from './auto-land.mjs'
-import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
@@ -35,6 +35,7 @@ const CHAT_PROVIDER_CONTAINMENT = {
   droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -743,6 +744,7 @@ export class ChatRunService {
   #inactivityTimeoutMs
   #hardTimeoutMs
   #codexLiveTurns
+  #droidExecRuns
   #projectIsolation
   #activeRuns = 0
 

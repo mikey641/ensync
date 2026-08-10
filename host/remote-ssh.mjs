@@ -6,7 +6,7 @@ import {
   parseCodexChatResult,
   quotaFailureIsSafe,
 } from './chat.mjs'
-import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
+import { describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
   supportsProviderRunner,
   withProviderRunnerInstructions,
