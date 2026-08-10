@@ -176,23 +176,34 @@ function providerNoteFromEvent(provider, event) {
     return event.item.text.trim()
   }
 
-  if (provider !== 'claude' || event.type !== 'assistant') return null
-  const content = event.message?.content ?? event.content
-  if (!Array.isArray(content)) return null
-  // Claude has no commentary/final phase marker. Only surface assistant text
-  // when the same message also starts provider work; a text-only assistant
-  // message is the final response and should not briefly appear as a note.
-  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
-  const text = content
-    .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
-    .map((block) => block.text.trim())
-    .filter(Boolean)
-    .join('\n\n')
-  return text || null
+  return null
 }
 
 function createProviderNoteReader(provider) {
-  return (event) => providerNoteFromEvent(provider, event)
+  if (provider !== 'claude') return (event) => providerNoteFromEvent(provider, event)
+  // Claude has no commentary/final phase marker, and its CLI streams one
+  // content block per assistant event, so commentary text and the tool_use it
+  // precedes never share a message. Hold assistant text until tool work
+  // follows it: text released by a tool_use is provider commentary; text never
+  // followed by tool work is the final response and must not appear as a note.
+  const pendingText = []
+  return (event) => {
+    if (!event || typeof event !== 'object' || Array.isArray(event)) return null
+    if (event.type !== 'assistant') return null
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return null
+    const text = content
+      .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
+      .map((block) => block.text.trim())
+      .filter(Boolean)
+      .join('\n\n')
+    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    if (text) pendingText.push(text)
+    if (!startsToolWork) return null
+    const note = pendingText.join('\n\n')
+    pendingText.length = 0
+    return note || null
+  }
 }
 
 function outputForwarder(onEvent, provider) {
@@ -218,7 +229,7 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = providerNoteFromEvent(provider, structured)
+    const note = readNote(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({

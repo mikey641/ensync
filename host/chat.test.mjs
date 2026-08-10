@@ -565,6 +565,47 @@ test('Claude chat resumes a verified session without putting the prompt in argum
   )
 })
 
+test('claude pre-tool commentary becomes notes even when text and tool_use arrive as separate events', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  // The live CLI streams one content block per assistant event; commentary text
+  // and the tool_use that follows it never share a message.
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'thinking', thinking: 'planning' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'Let me read the failing test first.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'ok' }] } }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'text', text: 'The final answer.' }] } }),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: 'The final answer.',
+      session_id: sessionId,
+      usage: { input_tokens: 3, output_tokens: 2 },
+    }),
+  ].join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      options.onStdout(stdout)
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Fix the test' },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  assert.equal(result.response, 'The final answer.')
+  assert.deepEqual(
+    events.filter((event) => event.type === 'note').map((event) => ({ provider: event.provider, text: event.text })),
+    [{ provider: 'claude', text: 'Let me read the failing test first.' }],
+  )
+})
+
 test('chat refuses unsupported providers and non-subscription authentication', async (context) => {
   const projectPath = await projectFixture(context)
   let processCalls = 0
