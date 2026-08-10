@@ -266,3 +266,40 @@ test('Droid limits probe degrades to null without expect or with a rejected exec
     null,
   )
 })
+
+test('an empty capture is retried once before reporting no usage', async () => {
+  const captures = []
+  const panel = [
+    '│ ◉ Standard | ○ Droid Core | ○ Extra Usage │',
+    '│ 5-hour   0%                  Use Droid to start │',
+    '│ Weekly   15%                          ↻ 6 days │',
+    '│ Monthly  4%                          ↻ 29 days │',
+  ].join('\n')
+
+  const result = await probeDroidLimits('/test/bin/droid', '2026-08-10T18:00:00.000Z', {
+    findExecutable: async () => '/usr/bin/expect',
+    runProcess: async () => {
+      captures.push(1)
+      return captures.length === 1
+        ? { exitCode: 0, error: null, timedOut: false, stdout: '', stderr: '' }
+        : { exitCode: 0, error: null, timedOut: false, stdout: panel, stderr: '' }
+    },
+  })
+
+  assert.equal(captures.length, 2)
+  assert.equal(result?.usedPercent, 15)
+  assert.equal(result?.resetWindow, 'Weekly')
+})
+
+test('two empty captures report no usage without a third probe', async () => {
+  let captures = 0
+  const result = await probeDroidLimits('/test/bin/droid', '2026-08-10T18:00:00.000Z', {
+    findExecutable: async () => '/usr/bin/expect',
+    runProcess: async () => {
+      captures += 1
+      return { exitCode: 0, error: null, timedOut: false, stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(captures, 2)
+  assert.equal(result, null)
+})

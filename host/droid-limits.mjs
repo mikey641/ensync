@@ -152,6 +152,17 @@ export async function probeDroidLimits(executable, checkedAt, options = {}) {
   const locate = options.findExecutable ?? findExecutable
   const expectExecutable = await locate('expect')
   if (!expectExecutable) return null
+  const capture = async () => runCapture(expectExecutable, script, checkedAt, options)
+  const first = await capture()
+  if (first) return first
+  // Two probes racing (a manual refresh landing on a scheduled one) leave the
+  // second TUI without the panel, and one empty capture would blank reported
+  // usage until the next poll. A single retry costs one more panel read and
+  // never consumes quota, since the panel is a billing read, not a model turn.
+  return options.retryOnEmptyCapture === false ? null : capture()
+}
+
+async function runCapture(expectExecutable, script, checkedAt, options) {
   const run = options.runProcess ?? runProcess
   const result = await run(expectExecutable, ['-f', '-'], {
     input: script,
