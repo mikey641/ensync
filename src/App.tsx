@@ -2875,7 +2875,7 @@ function App() {
     const chat = chatsRef.current.find((item) => item.id === chatId)
     const queuedMessage = chat?.messages.find((item) =>
       item.id === entry?.messageId && item.role === 'user' && item.deliveryStatus === 'queued')
-    const exactActiveCodexJob = entry
+    const exactActiveCodexTurn = entry
       && activeRun
       && entry.predecessorTurnId === activeRun.turnId
       && entry.preferences.executionTargetKey === activeRun.executionTarget
@@ -2885,12 +2885,8 @@ function App() {
       && activeRun.executionTarget === 'local'
       && typeof activeRun.jobId === 'string'
       && Boolean(activeRun.jobId)
-    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexJob) {
+    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
       updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
-      return
-    }
-    if (activeRun.liveSteerReady !== true) {
-      updateChatError(chatId, null)
       return
     }
     if (steeringChatIdsRef.current.has(chatId)) return
@@ -2944,8 +2940,7 @@ function App() {
     } catch (steerError) {
       const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
       if (safelyNotDelivered) {
-        updateInFlightRun(chatId, (current) => current ? { ...current, liveSteerReady: false } : current)
-        updateChatError(chatId, null)
+        updateChatError(chatId, `${steerError.message} It remains queued.`)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -3405,7 +3400,6 @@ function App() {
                     && activeRun?.provider === 'codex'
                     && activeRun.executionTarget === 'local'
                     && activeRun.jobId
-                    && activeRun.liveSteerReady === true
                     && entry
                     && entry.predecessorTurnId === activeRun.turnId
                     && entry.preferences.executionTargetKey === activeRun.executionTarget

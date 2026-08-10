@@ -243,8 +243,6 @@ test('retained Codex jobs use the live runner and validate steering through the 
   await started
 
   assert.equal(service.hasRunningRuns(), true)
-  assert.equal(service.canSteer('job_1111111111111111'), true)
-  assert.equal(service.canSteer('job_2222222222222222'), false)
   assert.equal(liveInput.id, 'job_1111111111111111')
   assert.match(liveInput.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
   assert.match(liveInput.prompt, /Start live$/)
