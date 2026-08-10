@@ -2,6 +2,13 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { extname } from 'node:path'
 import { commandInvocation } from './command.mjs'
+import {
+  ProviderQuestionRegistry,
+  droidAskUserResult,
+  normalizeDroidQuestions,
+  providerQuestionEvent,
+  providerQuestionResolvedEvent,
+} from './provider-questions.mjs'
 
 // Pinned per Step 0 verification against the installed Factory Droid CLI
 // (droid 0.190.0, reporting factoryProtocolVersion 1.154.0) driven over
@@ -211,6 +218,8 @@ class DroidExecSession {
   #hardTimer = null
   #inactivityTimer = null
   #forceKillTimer = null
+  #inactivityHeld = false
+  #questions
   #resolveDone
   #rejectDone
   #done
@@ -219,6 +228,11 @@ class DroidExecSession {
     this.input = input
     this.onEvent = options.onEvent
     this.signal = options.signal
+    // Questions need a retained job to route the answer back to, so a run
+    // without one keeps the original decline-safely behaviour.
+    this.#questions = options.questionsEnabled === true
+      ? new ProviderQuestionRegistry({ idPrefix: 'droid' })
+      : null
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
     this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
@@ -503,6 +517,10 @@ class DroidExecSession {
     }
 
     if (message.type === 'request') {
+      if (message.method === 'droid.ask_user' && this.#questions) {
+        this.#askUser(message)
+        return
+      }
       this.#declineServerRequest(message)
       return
     }
@@ -512,9 +530,48 @@ class DroidExecSession {
     }
   }
 
+  /**
+   * Puts a `droid.ask_user` questionnaire to the person and answers Droid with
+   * their words. The turn is genuinely blocked meanwhile, so the inactivity
+   * watchdog is held: waiting on a human is not a hung CLI. If the run ends
+   * first, the registry resolves the question as cancelled and Droid still gets
+   * the documented `{ cancelled: true, answers: [] }` outcome.
+   */
+  #askUser(message) {
+    const normalized = normalizeDroidQuestions(message.params)
+    if (!normalized) {
+      this.#declineServerRequest(message)
+      return
+    }
+    const askedAt = new Date().toISOString()
+    const { id, questions, answered } = this.#questions.ask({
+      provider: 'droid',
+      questions: normalized.questions,
+      toolCallId: normalized.toolCallId,
+      askedAt,
+    })
+    this.onEvent?.(providerQuestionEvent('droid', id, questions, askedAt))
+    this.#holdInactivity()
+    void answered.then((resolution) => {
+      this.#releaseInactivity()
+      this.onEvent?.(providerQuestionResolvedEvent('droid', id, resolution, new Date().toISOString()))
+      this.#respond(message.id, droidAskUserResult(resolution))
+    })
+  }
+
+  answerQuestion(questionId, input) {
+    if (!this.#questions) return null
+    return this.#questions.answer(questionId, input)
+  }
+
+  pendingQuestions() {
+    return this.#questions ? this.#questions.list() : []
+  }
+
   // Droid asks the client to resolve tool permissions and questionnaires.
-  // Ensync cannot review them safely yet, so it declines with the provider's
-  // own documented outcome values rather than leaving the turn hanging.
+  // Ensync cannot review permissions safely yet, so it declines them with the
+  // provider's own documented outcome values rather than leaving the turn
+  // hanging. Questionnaires reach the person instead; see #askUser.
   #declineServerRequest(message) {
     if (message.method === 'droid.request_permission') {
       this.#respond(message.id, { selectedOption: 'cancel' })
@@ -598,8 +655,19 @@ class DroidExecSession {
     this.#pendingAssistantText = []
   }
 
+  #holdInactivity() {
+    this.#inactivityHeld = true
+    if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
+    this.#inactivityTimer = null
+  }
+
+  #releaseInactivity() {
+    this.#inactivityHeld = false
+    this.#touch()
+  }
+
   #touch() {
-    if (this.#settled || !Number.isFinite(this.inactivityTimeoutMs)) return
+    if (this.#settled || this.#inactivityHeld || !Number.isFinite(this.inactivityTimeoutMs)) return
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.#inactivityTimer = setTimeout(() => this.#fail(new DroidExecError(
       'run_timed_out',
@@ -613,6 +681,7 @@ class DroidExecSession {
   #fail(error) {
     if (this.#settled) return
     this.#settled = true
+    this.#questions?.closeAll()
     this.#rejectDone(error)
     for (const pending of this.#requests.values()) pending.reject(error)
     this.#requests.clear()
@@ -620,6 +689,7 @@ class DroidExecSession {
   }
 
   #finishProcess() {
+    this.#questions?.closeAll()
     clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.signal?.removeEventListener('abort', this.#abort)
@@ -654,6 +724,7 @@ class DroidExecSession {
 }
 
 export class DroidExecRunner {
+  #sessions = new Map()
   #spawnProcess
   #inactivityTimeoutMs
   #hardTimeoutMs
@@ -667,10 +738,48 @@ export class DroidExecRunner {
   async run(input, options = {}) {
     const session = new DroidExecSession(input, {
       ...options,
+      // Only a run bound to a retained job can be answered later, so only that
+      // run is allowed to ask.
+      questionsEnabled: typeof input?.id === 'string' && Boolean(input.id),
       spawnProcess: this.#spawnProcess,
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
-    return session.run()
+    if (typeof input?.id !== 'string' || !input.id) return session.run()
+    if (this.#sessions.has(input.id)) {
+      throw new DroidExecError(
+        'chat_job_conflict',
+        'That retained job already owns a Factory Droid session.',
+        409,
+        true,
+      )
+    }
+    this.#sessions.set(input.id, session)
+    try {
+      return await session.run()
+    } finally {
+      this.#sessions.delete(input.id)
+    }
+  }
+
+  hasSession(id) {
+    return this.#sessions.has(id)
+  }
+
+  answerQuestion(id, questionId, input) {
+    const session = this.#sessions.get(id)
+    if (!session) {
+      throw new DroidExecError(
+        'question_not_found',
+        'That retained job has no active Factory Droid session, so the answer was not delivered.',
+        409,
+        false,
+      )
+    }
+    return session.answerQuestion(questionId, input)
+  }
+
+  pendingQuestions(id) {
+    return this.#sessions.get(id)?.pendingQuestions() ?? []
   }
 }

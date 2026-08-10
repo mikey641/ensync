@@ -5,6 +5,8 @@ import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionE
 import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
+import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionChannel } from './claude-questions.mjs'
+import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 import { withEnsyncMultiAgentInstructions } from './multi-agent-prompt.mjs'
@@ -195,9 +197,9 @@ function quoteTerminalArgument(argument) {
   return `'${argument.replaceAll("'", "'\\''")}'`
 }
 
-function visibleArguments(request, attachmentPaths, containment = null) {
+function visibleArguments(request, attachmentPaths, containment = null, options = {}) {
   const imagePaths = new Set(codexImagePaths(attachmentPaths))
-  return argumentsFor(request, attachmentPaths, containment).map((argument, index, argumentsList) => {
+  return argumentsFor(request, attachmentPaths, containment, options).map((argument, index, argumentsList) => {
     if (request.sessionId && argument === request.sessionId) return '<session-id>'
     if (index > 0 && argumentsList[index - 1] === '--resume') return '<session-id>'
     if (imagePaths.has(argument)) return '<attached-image>'
@@ -260,14 +262,43 @@ function providerNoteExtractor(provider) {
   }
 }
 
-function outputForwarder(onEvent, provider) {
-  if (typeof onEvent !== 'function') {
+/**
+ * Provider-authored text is redacted before it leaves the Host, including the
+ * text of a question. A person's own answer is not: it is their words, echoed
+ * back into the transcript exactly as a prompt would be.
+ */
+function redactedRunEvent(event) {
+  if (event?.type === 'question') {
+    return {
+      ...event,
+      questions: event.questions.map((question) => ({
+        ...question,
+        header: redactTerminalText(question.header).text,
+        question: redactTerminalText(question.question).text,
+        options: question.options.map((option) => ({
+          label: redactTerminalText(option.label).text,
+          description: option.description === null ? null : redactTerminalText(option.description).text,
+        })),
+      })),
+    }
+  }
+  if (!['output', 'note'].includes(event?.type)) return event
+  const safe = redactTerminalText(event.text)
+  return { ...event, text: safe.text, redacted: safe.redacted }
+}
+
+function outputForwarder(onEvent, provider, { onStdoutLine } = {}) {
+  if (typeof onEvent !== 'function' && typeof onStdoutLine !== 'function') {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
   const noteFromEvent = providerNoteExtractor(provider)
   const emit = (stream, text) => {
     if (!text) return
+    // The interactive channel sees every stdout line before it is redacted:
+    // it answers protocol frames rather than displaying them.
+    if (stream === 'stdout') onStdoutLine?.(text)
+    if (typeof onEvent !== 'function') return
     const safe = redactTerminalText(text)
     onEvent({
       type: 'output',
@@ -296,9 +327,11 @@ function outputForwarder(onEvent, provider) {
     })
   }
   const append = (stream, chunk) => {
-    buffers[stream] += chunk
-    const lines = buffers[stream].split(/(?<=\n)/)
-    buffers[stream] = lines.pop() ?? ''
+    const lines = (buffers[stream] + chunk).split(/(?<=\n)/)
+    // Only a line still missing its newline is held back. Retaining the last
+    // *complete* line until the next chunk would strand the CLI's terminal
+    // frame — the one that ends the stream, so no next chunk ever arrives.
+    buffers[stream] = lines.at(-1).endsWith('\n') ? '' : lines.pop()
     for (const line of lines) emit(stream, line)
   }
   return {
@@ -808,19 +841,22 @@ function claudeContainmentArguments(containment) {
   return ['--settings', JSON.stringify(settings)]
 }
 
-function claudeArguments(request, containment = null) {
+function claudeArguments(request, containment = null, { questions = false } = {}) {
   const args = ['--print', '--verbose', '--output-format', 'stream-json']
   if (request.model) args.push('--model', request.model)
   if (request.effort) args.push('--effort', request.effort)
   if (request.sessionId) args.push('--resume', request.sessionId)
   args.push(...claudeContainmentArguments(containment))
+  // Only a run that can carry an answer back opens the interactive channel;
+  // see claude-questions.mjs for why these two flags travel together.
+  if (questions) args.push(...claudeQuestionArguments())
   return args
 }
 
-export function argumentsFor(request, attachmentPaths = [], containment = null) {
+export function argumentsFor(request, attachmentPaths = [], containment = null, options = {}) {
   return request.provider === 'codex'
     ? codexArguments(request, attachmentPaths, containment)
-    : claudeArguments(request, containment)
+    : claudeArguments(request, containment, options)
 }
 
 function parseResult(provider, stdout, options = {}) {
@@ -838,6 +874,8 @@ export class ChatRunService {
   #hardTimeoutMs
   #codexLiveTurns
   #droidExecRuns
+  /** Live Claude interactive channels, keyed by the retained job that owns them. */
+  #claudeQuestionChannels = new Map()
   #projectIsolation
   #autoLand
   #autoPushLanded
@@ -995,11 +1033,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => {
-            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
-            const safe = redactTerminalText(event.text)
-            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
-          },
+          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1031,6 +1065,9 @@ export class ChatRunService {
         // autonomy level is the whole enforcement surface, and the runner verifies
         // the CLI echoed that level back before it sends the prompt.
         const result = await this.#droidExecRuns.run({
+          // The retained job ID is what lets a `droid.ask_user` questionnaire
+          // be answered from the renderer instead of declined.
+          id: typeof options.liveTurnId === 'string' && options.liveTurnId ? options.liveTurnId : null,
           executable: provider.executable,
           projectPath: executionProjectPath,
           prompt: executionRequest.prompt,
@@ -1041,11 +1078,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => {
-            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
-            const safe = redactTerminalText(event.text)
-            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
-          },
+          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1077,8 +1110,27 @@ export class ChatRunService {
     const inactivityTimeoutMs = hardTimeoutMs == null
       ? this.#inactivityTimeoutMs
       : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths, containment)
-    const forwarder = outputForwarder(options.onEvent, request.provider)
+    // Claude only opens its interactive question channel for a retained job:
+    // a run nobody can answer must keep behaving exactly as it does today.
+    const jobId = typeof options.liveTurnId === 'string' && options.liveTurnId ? options.liveTurnId : null
+    const questionsEnabled = request.provider === 'claude' && Boolean(jobId)
+    let session = null
+    const questionChannel = questionsEnabled
+      ? createClaudeQuestionChannel({
+          write: (chunk) => session?.write(chunk),
+          endInput: () => session?.endInput(),
+          hold: () => session?.holdInactivity(),
+          release: () => session?.releaseInactivity(),
+          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+        })
+      : null
+    const args = argumentsFor(executionRequest, attachmentPaths, containment, { questions: questionsEnabled })
+    const forwarder = outputForwarder(options.onEvent, request.provider, {
+      onStdoutLine: questionChannel ? (line) => questionChannel.handleLine(line) : undefined,
+    })
+    // Registered last, so nothing between here and the try/finally that
+    // removes it can leave a channel stranded in the map.
+    if (questionChannel) this.#claudeQuestionChannels.set(jobId, questionChannel)
     this.#activeRuns += 1
     let processResult
     try {
@@ -1086,7 +1138,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment, { questions: questionsEnabled })].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(
@@ -1095,7 +1147,9 @@ export class ChatRunService {
         {
           cwd: executionProjectPath,
           env: subscriptionEnvironment(this.#environment),
-          input: executionRequest.prompt,
+          input: questionsEnabled ? claudeUserMessageLine(executionRequest.prompt) : executionRequest.prompt,
+          keepStdinOpen: questionsEnabled,
+          onSession: questionsEnabled ? (handle) => { session = handle } : undefined,
           inactivityTimeoutMs,
           hardTimeoutMs,
           maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
@@ -1106,6 +1160,10 @@ export class ChatRunService {
       )
     } finally {
       this.#activeRuns -= 1
+      if (questionChannel) {
+        questionChannel.close()
+        this.#claudeQuestionChannels.delete(jobId)
+      }
       forwarder.flush()
       // A completed, failed, or cancelled CLI process may have changed the account's real
       // usage window. Drop the shared Host cache so every renderer's next non-forced read
@@ -1361,6 +1419,61 @@ export class ChatRunService {
 
   canSteer(jobId) {
     return this.#codexLiveTurns.canSteer(jobId)
+  }
+
+  /** Questions a live run is currently blocked on, for a renderer that reconnects mid-turn. */
+  pendingQuestions(jobId) {
+    if (typeof jobId !== 'string' || !jobId) return []
+    const claude = this.#claudeQuestionChannels.get(jobId)
+    if (claude) return claude.registry.list()
+    return this.#droidExecRuns.pendingQuestions(jobId)
+  }
+
+  /**
+   * Delivers a person's answer to whichever live runner asked. The answer is
+   * never invented: an unanswered or malformed payload is refused so the
+   * provider hears the person's words or an explicit cancellation, nothing else.
+   */
+  answerQuestion(jobId, input) {
+    if (typeof jobId !== 'string' || !jobId) {
+      throw new ChatRunError('invalid_chat_job', 'A retained chat job ID is required.', 400, true)
+    }
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new ChatRunError('invalid_request', 'An answer payload is required.', 400, true)
+    }
+    if (typeof input.questionId !== 'string' || !input.questionId) {
+      throw new ChatRunError('invalid_question_answer', 'The question being answered must be identified.', 400, true)
+    }
+    const claude = this.#claudeQuestionChannels.get(jobId)
+    // Only a provider that can be asked a question can be answered; anything
+    // else is refused by name rather than blamed on one provider's runner.
+    if (!claude && !this.#droidExecRuns.hasSession(jobId)) {
+      throw new ChatRunError(
+        'question_not_found',
+        'That run is not waiting on a question, so the answer was not delivered.',
+        409,
+        false,
+      )
+    }
+    try {
+      const resolution = claude
+        ? claude.registry.answer(input.questionId, input)
+        : this.#droidExecRuns.answerQuestion(jobId, input.questionId, input)
+      if (!resolution) {
+        throw new ChatRunError(
+          'question_not_found',
+          'That run is not waiting on a question, so the answer was not delivered.',
+          409,
+          false,
+        )
+      }
+      return resolution
+    } catch (error) {
+      if (error instanceof ProviderQuestionError || error instanceof DroidExecError) {
+        throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+      }
+      throw error
+    }
   }
 
   async steer(liveTurnId, input) {

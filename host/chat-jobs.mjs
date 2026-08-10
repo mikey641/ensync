@@ -59,7 +59,7 @@ function outputRecoveryNotice(result) {
   return `Ensync Host automatically repaired ${repairedLines.toLocaleString()} malformed provider output ${repairedLines === 1 ? 'line' : 'lines'} and verified the completed turn.`
 }
 
-function publicJob(job, canSteerLocal) {
+function publicJob(job, canSteerLocal, pendingQuestionsLocal) {
   return {
     id: job.id,
     kind: job.kind,
@@ -70,6 +70,11 @@ function publicJob(job, canSteerLocal) {
     lastSequence: job.sequence,
     providerProcessStarted: job.providerProcessStarted,
     steerable: typeof canSteerLocal === 'function' && canSteerLocal(job.id) === true,
+    // A renderer that reconnects mid-turn learns what the provider is blocked
+    // on from the job itself, not only from the event it may have missed.
+    pendingQuestions: job.state === 'running' && typeof pendingQuestionsLocal === 'function'
+      ? pendingQuestionsLocal(job.id)
+      : [],
   }
 }
 
@@ -94,6 +99,8 @@ export class ChatJobService {
   #runRemote
   #steerLocal
   #canSteerLocal
+  #answerLocal
+  #pendingQuestionsLocal
   #normalizeError
   #now
   #maxJobs
@@ -111,6 +118,8 @@ export class ChatJobService {
     this.#runRemote = options.runRemote
     this.#steerLocal = options.steerLocal
     this.#canSteerLocal = options.canSteerLocal
+    this.#answerLocal = options.answerLocal
+    this.#pendingQuestionsLocal = options.pendingQuestionsLocal
     this.#normalizeError = options.normalizeError ?? defaultErrorPayload
     this.#now = options.now ?? (() => new Date().toISOString())
     this.#maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS
@@ -137,7 +146,7 @@ export class ChatJobService {
       if (existing.requestHash !== hash) {
         throw new ChatJobError('chat_job_conflict', 'That chat job ID already belongs to another request.', 409)
       }
-      return publicJob(existing, this.#canSteerLocal)
+      return this.#publicJob(existing)
     }
 
     this.#trimFinishedJobs()
@@ -179,20 +188,20 @@ export class ChatJobService {
     queueMicrotask(() => {
       job.completion = this.#execute(job)
     })
-    return publicJob(job, this.#canSteerLocal)
+    return this.#publicJob(job)
   }
 
   get(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
-    return publicJob(job, this.#canSteerLocal)
+    return this.#publicJob(job)
   }
 
   cancel(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
     if (job.state === 'running' && !job.controller.signal.aborted) job.controller.abort()
-    return publicJob(job, this.#canSteerLocal)
+    return this.#publicJob(job)
   }
 
   hasRunningJobs() {
@@ -241,6 +250,37 @@ export class ChatJobService {
       )
     }
     return this.#steerLocal(job.id, input)
+  }
+
+  /**
+   * Answers a question the live provider run is blocked on. SSH runs buffer
+   * their provider output through a one-shot bridge with no channel back, so
+   * they are refused here rather than silently dropped.
+   */
+  answer(jobId, input) {
+    const job = this.#jobs.get(assertJobId(jobId))
+    if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
+    if (job.state !== 'running') {
+      throw new ChatJobError(
+        'question_not_found',
+        'That run already finished, so the answer was not delivered to it.',
+        409,
+        false,
+      )
+    }
+    if (job.kind !== 'local' || typeof this.#answerLocal !== 'function') {
+      throw new ChatJobError(
+        'question_unavailable',
+        'This execution target cannot receive an answer. The message was not delivered.',
+        409,
+        false,
+      )
+    }
+    return this.#answerLocal(job.id, input)
+  }
+
+  #publicJob(job) {
+    return publicJob(job, this.#canSteerLocal, this.#pendingQuestionsLocal)
   }
 
   subscribe(jobId, options = {}) {

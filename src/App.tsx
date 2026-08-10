@@ -162,6 +162,11 @@ import {
   type QueuedPrompt,
 } from './lib/promptQueue.mjs'
 import {
+  pendingQuestionsFromEvents,
+  type ProviderQuestionAnswerPayload,
+} from './lib/providerQuestions.mjs'
+import { ProviderQuestionCard } from './components/ProviderQuestionCard'
+import {
   activeTabIdAfterClose,
   insertNewConversationTab,
 } from './lib/newConversationPlacement.mjs'
@@ -1115,7 +1120,11 @@ function App() {
         ? candidate.text.length
         : candidate.type === 'started'
           ? candidate.command.length + candidate.cwd.length
-          : candidate.message.length
+          : candidate.type === 'question'
+            ? candidate.questions.reduce((total, question) => total + question.question.length, 0)
+            : candidate.type === 'question_resolved'
+              ? candidate.answers.reduce((total, answer) => total + answer.answer.length, 0)
+              : candidate.message.length
       if (retained.length > 0 && retainedCharacters + size > 1024 * 1024) break
       retained.unshift(candidate)
       retainedCharacters += size
@@ -1155,6 +1164,24 @@ function App() {
     setChatErrors(next)
     return next
   }, [])
+
+  /**
+   * Delivers an answer to the provider run this conversation is blocked on.
+   * The run keeps its own event stream, so the resolved question arrives back
+   * as a Host event rather than being assumed here.
+   */
+  const handleAnswerQuestion = useCallback(async (
+    chatId: string,
+    answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true },
+  ) => {
+    const activeRun = inFlightRunsRef.current[chatId]
+    if (!activeRun?.jobId || activeRun.executionTarget !== 'local') {
+      updateChatError(chatId, 'This conversation has no live local run waiting on an answer, so it was not delivered.')
+      return
+    }
+    updateChatError(chatId, null)
+    await ensyncHost.answerChatQuestion(activeRun.jobId, answer)
+  }, [updateChatError])
 
   const updateLiveSteeringReadiness = useCallback((chatId: string, ready: boolean) => {
     const current = liveSteeringReadyChatIdsRef.current
@@ -3372,6 +3399,7 @@ function App() {
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
+                onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
                 onAttachmentRemove={(path) => setDraftAttachments((current) => ({
                   ...current,
@@ -3480,6 +3508,7 @@ function ConversationPane({
   fallbackProviders,
   executionEvents,
   executionPanelOpen,
+  onAnswerQuestion,
   onDraftChange,
   onAttachmentRemove,
   onSend,
@@ -3531,6 +3560,7 @@ function ConversationPane({
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
   executionPanelOpen: boolean
+  onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
   onDraftChange: (value: string) => void
   onAttachmentRemove: (path: string) => void
   onSend: () => void
@@ -3582,6 +3612,24 @@ function ConversationPane({
   const providerNotes = executionEvents
     .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
     .slice(-6)
+  // Derived from the same replayed event buffer the panel reads, so a window
+  // that reconnects mid-turn still sees the question the provider is blocked on.
+  const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
+  const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null)
+  const [questionError, setQuestionError] = useState<string | null>(null)
+  const submitQuestionAnswer = useCallback(async (
+    answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true },
+  ) => {
+    setAnsweringQuestionId(answer.questionId)
+    setQuestionError(null)
+    try {
+      await onAnswerQuestion(answer)
+    } catch (error) {
+      setQuestionError(error instanceof Error ? error.message : 'Ensync Host could not deliver that answer.')
+    } finally {
+      setAnsweringQuestionId(null)
+    }
+  }, [onAnswerQuestion])
   const scrollContentRevision = useMemo(() => chatAutoScrollContentRevision({
     messages: chat.messages,
     executionEvents,
@@ -3847,6 +3895,16 @@ function ConversationPane({
         />
       )}
 
+      {pendingQuestion && (
+        <ProviderQuestionCard
+          pending={pendingQuestion}
+          disabled={answeringQuestionId === pendingQuestion.questionId}
+          error={questionError}
+          onAnswer={(payload) => void submitQuestionAnswer(payload)}
+          onSkip={(questionId) => void submitQuestionAnswer({ questionId, cancelled: true })}
+        />
+      )}
+
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
         <div className="composer">
           {attachments.length > 0 && (
@@ -3973,6 +4031,22 @@ function ExecutionPanel({
             }
             if (event.type === 'output') {
               return <span className={`execution-panel__${event.stream}`} key={`${event.at}-${index}`}>{event.text}{event.redacted ? '\n[Ensync Host] Possible secret redacted from this output.\n' : ''}</span>
+            }
+            if (event.type === 'question') {
+              return (
+                <span className="execution-panel__host" key={`${event.at}-${index}`}>
+                  {'\n'}[{event.provider} question] {event.questions.map((question) => question.question).join(' ')}{'\n'}
+                </span>
+              )
+            }
+            if (event.type === 'question_resolved') {
+              return (
+                <span className="execution-panel__host" key={`${event.at}-${index}`}>
+                  [Ensync Host] {event.cancelled
+                    ? 'The question was not answered; the provider was told so.'
+                    : `Answer sent: ${event.answers.map((answer) => answer.answer).join(' · ')}`}{'\n'}
+                </span>
+              )
             }
             return (
               <span className={`execution-panel__host execution-panel__host--${event.outcome}`} key={`${event.at}-${index}`}>
