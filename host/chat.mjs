@@ -160,9 +160,12 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function codexNoteFromEvent(event) {
+function providerNoteFromEvent(provider, event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
+
   if (
-    event.type === 'item.completed'
+    provider === 'codex'
+    && event.type === 'item.completed'
     && event.item?.type === 'agent_message'
     && event.item.phase === 'commentary'
     && typeof event.item.text === 'string'
@@ -170,65 +173,20 @@ function codexNoteFromEvent(event) {
   ) {
     return event.item.text.trim()
   }
-  return null
-}
 
-function assistantTextBlocks(content) {
-  return content
+  if (provider !== 'claude' || event.type !== 'assistant') return null
+  const content = event.message?.content ?? event.content
+  if (!Array.isArray(content)) return null
+  // Claude has no commentary/final phase marker. Only surface assistant text
+  // when the same message also starts provider work; a text-only assistant
+  // message is the final response and should not briefly appear as a note.
+  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
+  const text = content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-}
-
-// Claude has no commentary/final phase marker, and its stream emits one event per
-// assistant content block, so progress text and the tool call that justifies showing it
-// arrive as separate events sharing a message id. Text is therefore held until that same
-// message is proven to start provider work; a message that only ever produces text is the
-// final response and must not briefly appear as a note. Thinking blocks are never read.
-function createClaudeNoteReader() {
-  const messages = new Map()
-  const trackedMessage = (id) => {
-    let state = messages.get(id)
-    if (!state) {
-      state = { text: '', startedWork: false }
-      messages.set(id, state)
-      while (messages.size > CLAUDE_TRACKED_NOTE_MESSAGES) messages.delete(messages.keys().next().value)
-    }
-    return state
-  }
-
-  return (event) => {
-    if (event.type !== 'assistant') return null
-    const message = event.message && typeof event.message === 'object' ? event.message : event
-    const content = Array.isArray(message.content) ? message.content : event.content
-    if (!Array.isArray(content)) return null
-    const text = assistantTextBlocks(content)
-    const startsWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
-    const id = typeof message.id === 'string' && message.id ? message.id : null
-    if (!id) return startsWork ? text || null : null
-
-    const state = trackedMessage(id)
-    if (state.startedWork) return text || null
-    if (!startsWork) {
-      if (text) state.text = (state.text ? `${state.text}\n\n${text}` : text).slice(0, TERMINAL_EVENT_TEXT_LIMIT)
-      return null
-    }
-    state.startedWork = true
-    const pending = state.text
-    state.text = ''
-    return [pending, text].filter(Boolean).join('\n\n') || null
-  }
-}
-
-function createProviderNoteReader(provider) {
-  const readNote = provider === 'codex'
-    ? codexNoteFromEvent
-    : provider === 'claude' ? createClaudeNoteReader() : () => null
-  return (event) => {
-    if (!event || typeof event !== 'object' || Array.isArray(event)) return null
-    return readNote(event)
-  }
+  return text || null
 }
 
 function outputForwarder(onEvent, provider) {
@@ -254,7 +212,7 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = readNote(structured)
+    const note = providerNoteFromEvent(provider, structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
