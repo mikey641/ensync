@@ -242,6 +242,19 @@ export function promptSubmissionMode({ hasActiveRun }) {
   return hasActiveRun ? 'queue' : 'run'
 }
 
+/**
+ * Providers that cannot accept a live mid-turn instruction still have an honest
+ * way to run a queued message immediately: stop the turn, then run it. This is
+ * deliberately NOT offered when live delivery is possible, so "Push now" never
+ * silently becomes a destructive action.
+ */
+export function queuedPromptCanStopAndRun({ sending, queuedCount, canPushNow }) {
+  return Boolean(sending)
+    && Number.isSafeInteger(queuedCount)
+    && queuedCount > 0
+    && !canPushNow
+}
+
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
   const state = {

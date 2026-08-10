@@ -63,6 +63,11 @@ export function liveSteerReadyAfterEvent(
   event: { type?: string; code?: string | null } | undefined,
 ): boolean
 export function promptSubmissionMode(input: { hasActiveRun: boolean }): 'queue' | 'run'
+export function queuedPromptCanStopAndRun(input: {
+  sending: boolean
+  queuedCount: number
+  canPushNow: boolean
+}): boolean
 export function promptQueueComposerState(input: { sending: boolean; draft: string; canRun: boolean; liveSteering?: boolean }): {
   sendEnabled: boolean
   sendLabel: string

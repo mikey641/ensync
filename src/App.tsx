@@ -155,6 +155,7 @@ import {
   promptQueueComposerState,
   promptQueueStatusPresentation,
   promptSubmissionMode,
+  queuedPromptCanStopAndRun,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -805,6 +806,7 @@ function App() {
   const steeringChatIdsRef = useRef(new Set<string>())
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
+  const runQueuedAfterStopRef = useRef<ReadonlySet<string>>(new Set())
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
@@ -2214,6 +2216,20 @@ function App() {
     chatRunCancellationRef.current.stop(chatId)
   }
 
+  /**
+   * The honest alternative to live steering for providers that cannot take a
+   * mid-turn instruction: end the turn, then run the queued message. The head
+   * is approved first so the stop this user just asked for does not pause the
+   * queue behind its own cancelled predecessor.
+   */
+  const handleStopAndRunQueued = (chatId: string) => {
+    if (!promptQueuesRef.current[chatId]?.length) return
+    updatePromptQueues(approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString()))
+    setChatErrors((current) => ({ ...current, [chatId]: null }))
+    runQueuedAfterStopRef.current = new Set(runQueuedAfterStopRef.current).add(chatId)
+    chatRunCancellationRef.current.stop(chatId)
+  }
+
   const handleFilesDrop = (chatId: string, files: FileList) => {
     if (executionTargetRef.current.kind !== 'local') {
       setAttachmentErrors((current) => ({
@@ -2937,6 +2953,19 @@ function App() {
   }
   drainPromptQueueRef.current = drainPromptQueue
 
+  // A stop resolves asynchronously; drainPromptQueue refuses while the run is
+  // still registered, so the queued head runs when the registry clears.
+  useEffect(() => {
+    const pending = runQueuedAfterStopRef.current
+    if (pending.size === 0) return
+    const settled = [...pending].filter((chatId) => !sendingChatIds.has(chatId))
+    if (settled.length === 0) return
+    const remaining = new Set(pending)
+    for (const chatId of settled) remaining.delete(chatId)
+    runQueuedAfterStopRef.current = remaining
+    for (const chatId of settled) queueMicrotask(() => drainPromptQueueRef.current(chatId))
+  }, [sendingChatIds])
+
   const recoverDetachedRun = useCallback(async (chatId: string, initialRun: PersistedInFlightRun) => {
     if (!initialRun.jobId || recoveringChatIdsRef.current.has(chatId)) return
     if (!chatRunRegistryRef.current.begin(chatId)) return
@@ -3386,6 +3415,7 @@ function App() {
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
                 onPushQueuedNow={() => void handlePushQueuedNow(chat.id)}
+                onStopAndRunQueued={() => handleStopAndRunQueued(chat.id)}
                 onProviderMenu={() => {
                   setModelMenuChatId(null)
                   setProviderMenuChatId((current) => current === chat.id ? null : chat.id)
@@ -3492,6 +3522,7 @@ function ConversationPane({
   onStop,
   onResumeQueue,
   onPushQueuedNow,
+  onStopAndRunQueued,
   onProviderMenu,
   onModelMenu,
   onProviderAuto,
@@ -3544,6 +3575,7 @@ function ConversationPane({
   onStop: () => void
   onResumeQueue: () => void
   onPushQueuedNow: () => void
+  onStopAndRunQueued: () => void
   onProviderMenu: () => void
   onModelMenu: () => void
   onProviderAuto: () => void
@@ -3579,6 +3611,13 @@ function ConversationPane({
   const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length, {
     liveDeliverySupported,
     activeProviderName: activeRunProviderName,
+  })
+  // Live delivery is Codex-only; every other provider gets the honest
+  // stop-then-run path rather than a silently missing control.
+  const canStopAndRunQueued = queuedPromptCanStopAndRun({
+    sending,
+    queuedCount: queuedPrompts.length,
+    canPushNow: canPushQueuedNow,
   })
   const composerQueueState = promptQueueComposerState({
     sending,
@@ -3828,6 +3867,7 @@ function ConversationPane({
               <History size={13} />
               <span className="prompt-queue-status__copy"><strong>{queueStatus.headline}</strong><span>{queueStatus.detail}</span></span>
               {canPushQueuedNow && <button type="button" className="prompt-queue-status__push" onClick={onPushQueuedNow} disabled={pushingQueued} title="Deliver the first queued message to the active Codex turn now">{pushingQueued ? 'Pushing…' : 'Push now'}</button>}
+              {canStopAndRunQueued && <button type="button" className="prompt-queue-status__push" onClick={onStopAndRunQueued} title={`Stop ${provider.name}'s current turn and run the first queued message now. Work in progress on the current turn is discarded.`}>Stop &amp; send now</button>}
               {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
             </div>
           )}
