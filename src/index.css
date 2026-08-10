@@ -352,6 +352,20 @@ kbd { font: 500 10px/1 'DM Sans', sans-serif; border: 1px solid #383c38; border-
 .account-sync-actions .button { height: 30px; padding: 0 9px; white-space: nowrap; }
 .account-sync-session-note { display: block; padding: 0 11px 10px; color: #5e685e; font-size: 7px; line-height: 1.45; }
 .account-sync-message { margin-top: 9px; padding: 8px 10px; border: 1px solid #345039; border-radius: 7px; background: rgba(105,171,114,.05); color: #89b88e; font-size: 8px; }
+.sync-broker-panel { margin: 0 11px 10px; padding: 10px; display: grid; gap: 9px; border: 1px solid #304f47; border-radius: 8px; background: rgba(47,102,91,.08); }
+.sync-broker-panel > div:first-child { display: flex; align-items: center; gap: 9px; }
+.sync-broker-panel > div:first-child > svg { flex: 0 0 auto; color: #82c4b2; }
+.sync-broker-panel > div:first-child > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.sync-broker-panel > div:first-child strong { color: #cbded7; font-size: 9px; }
+.sync-broker-panel > div:first-child small { color: #70847d; font-size: 7px; line-height: 1.4; }
+.sync-broker-panel > div:first-child > i { padding: 3px 6px; border-radius: 99px; background: #292d2b; color: #777f7b; font-size: 6px; font-style: normal; text-transform: uppercase; }
+.sync-broker-panel > div:first-child > i.connected { background: rgba(91,170,131,.16); color: #82c99a; }
+.sync-broker-panel > div:first-child > i.degraded { background: rgba(195,152,62,.14); color: #d0a956; }
+.sync-broker-panel__actions { display: flex; justify-content: flex-end; gap: 7px; }
+.sync-broker-panel__actions .button { height: 29px; }
+.sync-broker-pairing { padding: 9px; display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 3px 10px; border: 1px dashed #4a7468; border-radius: 7px; background: #111815; }
+.sync-broker-pairing span, .sync-broker-pairing small { color: #6f827b; font-size: 7px; }
+.sync-broker-pairing strong { grid-row: 1 / 3; grid-column: 2; color: #a9dfca; font: 700 16px/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: 2px; }
 .auto-context-summary { margin-top: 13px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--line); opacity: .62; transition: opacity .15s, border-color .15s; }
 .auto-context-summary--active { opacity: 1; border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
 .auto-context-summary > div { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 10px; background: var(--panel); }
@@ -634,6 +648,8 @@ kbd { font: 500 10px/1 'DM Sans', sans-serif; border: 1px solid #383c38; border-
   .account-sync-actions { align-items: stretch; flex-direction: column; }
   .account-sync-actions > p { width: 100%; }
   .account-sync-actions .button { width: 100%; justify-content: center; }
+  .sync-broker-panel__actions { flex-direction: column; }
+  .sync-broker-panel__actions .button { width: 100%; justify-content: center; }
   .fallback-row > span:nth-child(3) { width: 100px; }
   .fallback-row em { display: none; }
   .context-map { padding: 18px; }

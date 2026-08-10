@@ -98,6 +98,60 @@ test('account sync routes expose only status and encrypted-service workflow resu
   ])
 })
 
+test('account sync broker routes control only the outbound Host worker', async (context) => {
+  const calls = []
+  const accountSyncService = {
+    status: () => ({ configured: true, authenticated: true, username: 'remote-user' }),
+    logout: async () => ({ configured: true, authenticated: false, username: null }),
+  }
+  const syncBrokerHostService = {
+    status: () => ({ state: 'disconnected', running: false, host: null, activeJobs: 0 }),
+    connect: async (input) => {
+      calls.push(['connect', input])
+      return { state: 'connected', running: true, host: { id: input.deviceId, label: input.label }, activeJobs: 0 }
+    },
+    createPairing: async () => {
+      calls.push(['pairing'])
+      return { pairing: { id: 'pair_000000000000001' }, code: 'ABCDEFGH' }
+    },
+    pollOnce: async () => ({ state: 'connected', running: true, activeJobs: 1 }),
+    disconnect: async (input) => {
+      calls.push(['disconnect', input])
+      return { state: 'disconnected', running: false, host: null, activeJobs: 0 }
+    },
+    stop: async () => {
+      calls.push(['stop'])
+    },
+  }
+  const baseUrl = await withHost(context, { accountSyncService, syncBrokerHostService })
+
+  const connected = await fetch(`${baseUrl}/api/account-sync/broker/connect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ deviceId: 'host_device_00000001', label: 'This computer' }),
+  }).then((response) => response.json())
+  assert.equal(connected.running, true)
+
+  const pairing = await fetch(`${baseUrl}/api/account-sync/broker/pairing`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  }).then((response) => response.json())
+  assert.equal(pairing.code, 'ABCDEFGH')
+
+  const disconnected = await fetch(`${baseUrl}/api/account-sync/broker/disconnect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ revoke: true }),
+  }).then((response) => response.json())
+  assert.equal(disconnected.running, false)
+  assert.deepEqual(calls.slice(0, 3), [
+    ['connect', { deviceId: 'host_device_00000001', label: 'This computer' }],
+    ['pairing'],
+    ['disconnect', { revoke: true }],
+  ])
+})
+
 test('support repair route preserves explicit non-automatic retry policy', async (context) => {
   const supportRepairService = {
     async run() {

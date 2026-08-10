@@ -127,7 +127,8 @@ async function stop(exitCode = 0) {
 let idleSince = null
 const cleanupTimer = detachedMode ? setInterval(() => {
   server.ensyncServices.chatJobs.sweep()
-  const idle = !shouldKeepDaemonAlive(
+  const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
+  const idle = !brokerConnected && !shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )

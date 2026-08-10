@@ -1,6 +1,6 @@
 ---
 name: Ensync Auto Context skill
-description: Opt-in provider-neutral task continuity across local and SSH subscription CLIs.
+description: Opt-in provider-neutral task continuity across local, Sync-paired, and SSH subscription CLIs.
 ---
 
 # Ensync Auto Context skill
@@ -9,7 +9,7 @@ Auto Context is off until the user enables it from Settings or the composer chip
 
 The reusable skill source is `skills/ensync-auto-context/SKILL.md`. Its runtime contract is implemented in the app instead of relying on prompt text alone.
 
-For every Auto Context run, Ensync keeps the currently focused canonical project and the selected execution target. A chat may use Auto or pin a connected tested Codex/Claude runner. The vendor model remains `null`, so each destination CLI uses its own current default model, while the provider-neutral Model size effort is preserved. A fallback never changes an SSH/VM task to the local computer.
+For every Auto Context run, Ensync keeps the currently focused canonical project and the selected execution target. A chat may use Auto or pin a connected tested Codex/Claude runner. The vendor model remains `null`, so each destination CLI uses its own current default model, while the provider-neutral Model size effort is preserved. A fallback never changes a Sync-paired, SSH, or VM task to another computer.
 
 When the same provider session, execution target, and synchronized message count still match, Ensync resumes that native session and sends the new request with the Auto Context rules. When any of those facts differ, Ensync starts a fresh provider session and sends the retained conversation plus the focused project's verified `.relay` and instruction-file names. The provider is told to read applicable project, architecture, feature, `AGENTS.md`, and `CLAUDE.md` contents from the verified working directory before editing.
 
@@ -19,7 +19,7 @@ Every successful response is required to end with a concise semantic `Ensync con
 
 Fallback runs only when the separate Automatic fallback setting is enabled and follows the host's structured `safeToRetry` proof. Preflight unavailability can switch providers. A provider quota/capacity failure can switch only when the complete structured event stream ends in failure and proves that no tool, command, file, or unknown work item ran. Timeouts, malformed or incomplete streams, missing completion, and any observed or unknown activity stop without replaying the task. Before choosing a safe local fallback, Ensync refreshes the Host-owned provider status so a stale pre-run renderer snapshot cannot hide a newly available destination; if that refresh fails, it retains the last verified snapshot. Safe attempts advance through the saved ranking without repeating a provider. A fixed provider remains pinned after a one-turn safe fallback, and the selected Model size follows the fallback attempt.
 
-The same provider-neutral capsule is a baseline requirement for every actual provider fallback, even if the workspace Auto Context toggle is off. This does not silently enable Auto Context for normal same-provider turns; it only prevents a quota handoff from losing the focused project, prior transcript or synchronized destination session, relevant feature/instruction file names, available verified Git state, continuation metadata, and exact local or SSH execution target.
+The same provider-neutral capsule is a baseline requirement for every actual provider fallback, even if the workspace Auto Context toggle is off. This does not silently enable Auto Context for normal same-provider turns; it only prevents a quota handoff from losing the focused project, prior transcript or synchronized destination session, relevant feature/instruction file names, available verified Git state, continuation metadata, and exact local, Sync-paired, or SSH execution target.
 
 Successful sessions record the synchronized transcript count. A missing session ID deletes the older session record, and legacy session records without a transcript cursor must receive one full handoff before they may resume. This prevents a chat from resuming a stale Claude or Codex session that missed another provider's work.
 

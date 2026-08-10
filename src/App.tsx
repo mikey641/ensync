@@ -83,6 +83,8 @@ import { supportRepairHost } from './lib/supportRepairHost'
 import {
   accountSyncHost,
   type AccountSyncStatus,
+  type SyncBrokerHostStatus,
+  type SyncBrokerPairing,
 } from './lib/accountSyncHost'
 import {
   mergeAccountWorkspace,
@@ -219,6 +221,7 @@ const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
+const SYNC_BROKER_HOST_ID_KEY = 'ensync-sync-broker-host-id-v1'
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   configured: false,
   authenticated: false,
@@ -227,6 +230,18 @@ const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   lastSyncedAt: null,
   encryption: 'aes-256-gcm',
   credentialStorage: 'host_memory_only',
+  brokerDevice: null,
+}
+
+function syncBrokerHostDeviceId() {
+  const existing = window.localStorage.getItem(SYNC_BROKER_HOST_ID_KEY)
+  if (existing && /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(existing)) return existing
+  const random = typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : `${Date.now()}_${Math.random().toString(36).slice(2)}_${Math.random().toString(36).slice(2)}`
+  const deviceId = `host_${random}`
+  window.localStorage.setItem(SYNC_BROKER_HOST_ID_KEY, deviceId)
+  return deviceId
 }
 
 function useWorkingElapsedLabel(running: boolean, startedAt: string | null) {
@@ -1067,12 +1082,11 @@ function App() {
     && agentUpdatePreferences.mode === 'remind'
     && installedAgentProviders.length > 0
     && agentUpdateDue(agentUpdatePreferences)
-  const activeProvider = providerForChat(
-    executionProviders,
-    activeChat,
-    fallbackProviderOrder,
-    activeChat ? inFlightRuns[activeChat.id] : undefined,
-  )
+  const displayProjectChats = projectChats.map((chat) => ({
+    ...chat,
+    provider: providerForChat(executionProviders, chat, fallbackProviderOrder).id,
+  }))
+  const activeProvider = providerForChat(executionProviders, activeChat, fallbackProviderOrder)
   const fallbackProviders = orderedAutomaticProviders(executionProviders, fallbackProviderOrder)
     .filter((provider) => provider.connected && supportsChat(provider) && (provider.usage === null || provider.usage < 100))
   const supportProvider = automaticProvider(executionProviders, fallbackProviderOrder, activeProvider.id)
@@ -4093,6 +4107,10 @@ function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onR
 function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [brokerStatus, setBrokerStatus] = useState<SyncBrokerHostStatus | null>(null)
+  const [brokerPairing, setBrokerPairing] = useState<SyncBrokerPairing | null>(null)
+  const [brokerBusy, setBrokerBusy] = useState(false)
+  const [brokerError, setBrokerError] = useState<string | null>(null)
   const busy = phase === 'checking' || phase === 'syncing'
   const lastSynced = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString()
@@ -4105,6 +4123,73 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
       setPassword('')
     } catch {
       // The parent owns the durable, user-visible error state.
+    }
+  }
+
+  useEffect(() => {
+    let cancelled = false
+    if (!status.authenticated) {
+      setBrokerStatus(null)
+      setBrokerPairing(null)
+      setBrokerError(null)
+      return () => { cancelled = true }
+    }
+    const refresh = () => {
+      void accountSyncHost.brokerStatus().then((next) => {
+        if (!cancelled) setBrokerStatus(next)
+      }).catch((error: unknown) => {
+        if (!cancelled) setBrokerError(error instanceof Error ? error.message : 'Remote execution status is unavailable.')
+      })
+    }
+    refresh()
+    const timer = window.setInterval(refresh, 5_000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [status.authenticated])
+
+  const enableBroker = async () => {
+    if (brokerBusy) return
+    setBrokerBusy(true)
+    setBrokerError(null)
+    try {
+      const platform = navigator.platform?.trim()
+      setBrokerStatus(await accountSyncHost.connectBrokerHost(
+        syncBrokerHostDeviceId(),
+        platform ? `${platform} Ensync Host` : 'This computer',
+      ))
+    } catch (error) {
+      setBrokerError(error instanceof Error ? error.message : 'Remote execution could not be enabled.')
+    } finally {
+      setBrokerBusy(false)
+    }
+  }
+
+  const createPairing = async () => {
+    if (brokerBusy) return
+    setBrokerBusy(true)
+    setBrokerError(null)
+    try {
+      setBrokerPairing(await accountSyncHost.createBrokerPairing())
+    } catch (error) {
+      setBrokerError(error instanceof Error ? error.message : 'A mobile pairing code could not be created.')
+    } finally {
+      setBrokerBusy(false)
+    }
+  }
+
+  const disableBroker = async () => {
+    if (brokerBusy) return
+    setBrokerBusy(true)
+    setBrokerError(null)
+    try {
+      setBrokerStatus(await accountSyncHost.disconnectBrokerHost(true))
+      setBrokerPairing(null)
+    } catch (error) {
+      setBrokerError(error instanceof Error ? error.message : 'Remote execution could not be disabled.')
+    } finally {
+      setBrokerBusy(false)
     }
   }
 
@@ -4122,9 +4207,26 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
         <div className="account-sync-connected">
           <div className="account-sync-profile"><span><UserRound size={18} /></span><p><strong>{status.username}</strong><small>{chatCount} {chatCount === 1 ? 'conversation' : 'conversations'} · last sync {lastSynced}</small></p><span className="account-sync-encryption"><LockKeyhole size={13} /> AES-256</span></div>
           <div className="account-sync-actions">
-            <p><ShieldCheck size={14} /><span>Chats are encrypted before upload. CLI logins, provider sessions, terminal output, queued work, and local attachments stay on this computer.</span></p>
+            <p><ShieldCheck size={14} /><span>Chats and remote job payloads are encrypted before upload. Provider credentials and decryption keys stay on your devices.</span></p>
             <button type="button" className="button button--ghost" onClick={() => void onSync().catch(() => {})} disabled={busy}><RotateCw className={busy ? 'spin' : ''} size={14} /> {busy ? 'Syncing…' : 'Sync now'}</button>
             <button type="button" className="button button--ghost" onClick={() => void onLogout()} disabled={busy}><LogOut size={14} /> Sign out</button>
+          </div>
+          <div className="sync-broker-panel">
+            <div>
+              <Smartphone size={16} />
+              <span><strong>Remote agent execution</strong><small>{brokerStatus?.running ? `${brokerStatus.host?.label ?? 'This Host'} is accepting encrypted mobile jobs.` : 'Let paired iPhone and Android clients run agents on this Host.'}</small></span>
+              <i className={brokerStatus?.state === 'connected' ? 'connected' : brokerStatus?.state === 'degraded' ? 'degraded' : ''}>{brokerStatus?.state ?? 'checking'}</i>
+            </div>
+            <div className="sync-broker-panel__actions">
+              {brokerStatus?.running ? <>
+                <button type="button" className="button button--ghost" onClick={() => void createPairing()} disabled={brokerBusy}>{brokerBusy ? 'Working…' : 'Pair phone'}</button>
+                <button type="button" className="button button--ghost" onClick={() => void disableBroker()} disabled={brokerBusy}>Disable &amp; revoke</button>
+              </> : (
+                <button type="button" className="button button--primary" onClick={() => void enableBroker()} disabled={brokerBusy}>{brokerBusy ? 'Connecting…' : 'Enable remote execution'}</button>
+              )}
+            </div>
+            {brokerPairing && <div className="sync-broker-pairing" role="status"><span>Enter this one-time code in the mobile app</span><strong>{brokerPairing.code}</strong><small>Expires {new Date(brokerPairing.pairing.expiresAt).toLocaleTimeString()}</small></div>}
+            {(brokerError || brokerStatus?.lastError) && <div className="connection-error" role="alert">{brokerError ?? brokerStatus?.lastError?.message}</div>}
           </div>
           <small className="account-sync-session-note">For now, login stays only in Ensync Host memory. Restarting the Host requires signing in again; synchronized chats remain in your account.</small>
         </div>

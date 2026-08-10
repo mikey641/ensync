@@ -17,6 +17,7 @@ import {
 } from './support-repair.mjs'
 import { RemoteSshError, RemoteSshService } from './remote-ssh.mjs'
 import { SupportService, SupportValidationError } from './support.mjs'
+import { SyncBrokerHostWorker } from './sync-broker-host.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
 import { TelegramChatRouter } from './telegram-router.mjs'
 import { displayCommand, launchTerminalCommand } from './terminal.mjs'
@@ -210,6 +211,11 @@ export function createEnsyncHost(options = {}) {
     normalizeError: chatJobErrorPayload,
     journal: chatJobJournal,
   })
+  const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({
+    accountSyncService: accountSync,
+    chatJobService: chatJobs,
+    pollIntervalMs: options.syncBrokerPollIntervalMs,
+  })
   const daemonLeases = options.daemonLeaseService ?? null
   const authToken = typeof options.authToken === 'string' && options.authToken.length >= 32
     ? options.authToken
@@ -298,6 +304,7 @@ export function createEnsyncHost(options = {}) {
       }
 
       if (request.method === 'POST' && url.pathname === '/api/account-sync/logout') {
+        await syncBrokerHost.stop()
         return sendJson(response, 200, await accountSync.logout(), origin)
       }
 
@@ -308,6 +315,32 @@ export function createEnsyncHost(options = {}) {
       if (request.method === 'PUT' && url.pathname === '/api/account-sync/workspace') {
         const body = await readJsonBody(request, MAX_SYNC_BODY_BYTES)
         return sendJson(response, 200, await accountSync.push(body.state, body.baseRevision), origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/broker/status') {
+        return sendJson(response, 200, syncBrokerHost.status(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/broker/connect') {
+        const body = await readJsonBody(request)
+        const status = await syncBrokerHost.connect({
+          deviceId: body.deviceId,
+          label: body.label,
+        })
+        return sendJson(response, 200, status, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/broker/pairing') {
+        return sendJson(response, 201, await syncBrokerHost.createPairing(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/broker/poll') {
+        return sendJson(response, 200, await syncBrokerHost.pollOnce(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/broker/disconnect') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await syncBrokerHost.disconnect({ revoke: body.revoke === true }), origin)
       }
 
       if (request.method === 'GET' && url.pathname === '/api/providers') {
@@ -871,8 +904,9 @@ export function createEnsyncHost(options = {}) {
   })
   server.once('close', () => {
     void telegram.stopPolling?.()
+    void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation, syncBrokerHost }
   return server
 }
 
