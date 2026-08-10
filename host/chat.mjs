@@ -161,33 +161,71 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function providerNoteFromEvent(provider, event) {
-  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
-
-  if (
-    provider === 'codex'
-    && event.type === 'item.completed'
-    && event.item?.type === 'agent_message'
-    && event.item.phase === 'commentary'
-    && typeof event.item.text === 'string'
-    && event.item.text.trim()
-  ) {
-    return event.item.text.trim()
-  }
-
-  if (provider !== 'claude' || event.type !== 'assistant') return null
-  const content = event.message?.content ?? event.content
-  if (!Array.isArray(content)) return null
-  // Claude has no commentary/final phase marker. Only surface assistant text
-  // when the same message also starts provider work; a text-only assistant
-  // message is the final response and should not briefly appear as a note.
-  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
-  const text = content
+function assistantTextBlocks(content) {
+  return content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-  return text || null
+}
+
+/**
+ * Claude has no commentary/final phase marker. Only surface assistant text when
+ * the same message also starts provider work; a text-only assistant message is
+ * the final response and must not briefly appear as a note.
+ *
+ * Claude Code streams one assistant event per content block, so that message's
+ * text and its tool call arrive as separate events sharing `message.id`. Text is
+ * therefore held until the same message ID starts tool work, and dropped when it
+ * never does. Older combined-content events still resolve within one event.
+ */
+function claudeNoteExtractor() {
+  const pending = new Map()
+
+  const remember = (id, text) => {
+    const held = pending.get(id) ?? { text: '', toolStarted: false }
+    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
+    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
+    pending.set(id, held)
+    // Blocks of one message stream contiguously; a small bound keeps interleaved
+    // subagent messages working without retaining a whole run's commentary.
+    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
+    return held
+  }
+
+  return (event) => {
+    if (event.type !== 'assistant') return null
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return null
+    const text = assistantTextBlocks(content)
+    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
+    if (!id) return startsToolWork ? text || null : null
+
+    const held = remember(id, text)
+    if (!startsToolWork && !held.toolStarted) return null
+    held.toolStarted = true
+    const note = held.text
+    held.text = ''
+    return note || null
+  }
+}
+
+function providerNoteExtractor(provider) {
+  if (provider === 'claude') return claudeNoteExtractor()
+  return (event) => {
+    if (
+      provider === 'codex'
+      && event.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && event.item.phase === 'commentary'
+      && typeof event.item.text === 'string'
+      && event.item.text.trim()
+    ) {
+      return event.item.text.trim()
+    }
+    return null
+  }
 }
 
 function outputForwarder(onEvent, provider) {
@@ -213,7 +251,8 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = providerNoteFromEvent(provider, structured)
+    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
+    const note = noteFromEvent(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
@@ -845,11 +884,23 @@ export class ChatRunService {
       reused: workspace.reused,
       gitBefore: workspace.gitBefore,
     } : null
+    // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
+    // canonical shared checkout that provider processes must not write to directly.
+    const containment = workspace ? {
+      worktreePath: workspace.repositoryPath,
+      canonicalRepositoryPath: workspace.shared.repositoryPath,
+    } : null
 
+    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
       try {
+        // Live-turn containment is pinned in codex-live-turn session configuration; verify
+        // separately before enabling sandbox there. Step 0 verification for this task found a
+        // `sandboxPolicy` field on `TurnStartParams` in the app-server v2 protocol schema, but
+        // could not confirm it applies under the non-experimental `initialize` handshake this
+        // runner uses (no `experimentalApi: true`), so it was not pinned here. Do not guess.
         const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
@@ -869,6 +920,7 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -893,7 +945,7 @@ export class ChatRunService {
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
     const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths)
+    const args = argumentsFor(executionRequest, attachmentPaths, containment)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1
     let processResult
@@ -902,7 +954,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(
@@ -990,6 +1042,7 @@ export class ChatRunService {
 
     const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
+    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -1004,8 +1057,54 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } catch (error) {
+      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
+      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
+      throw error
     } finally {
       combinedSignal.dispose()
+      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
+        try {
+          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
+            outcome: runOutcome,
+            provider: request.provider,
+            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
+          })
+          if (workCommit.committed) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'agent_work_committed',
+              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch (commitError) {
+          options.onEvent?.({
+            type: 'notice',
+            code: 'agent_work_commit_failed',
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            at: new Date().toISOString(),
+          })
+        }
+        try {
+          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+          if (sharedCheck.available && sharedCheck.changed) {
+            const message = sharedCheck.destructive
+              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+              : sharedCheck.landed
+                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
+                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
+            options.onEvent?.({
+              type: 'notice',
+              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+              message,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch {
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+        }
+      }
       await workspaceLease?.release()
     }
   }

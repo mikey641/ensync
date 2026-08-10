@@ -536,6 +536,39 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
     }
   }
 
+  async function snapshotSharedCheckoutState(gitExecutable, root, environment) {
+    const head = firstLine((await runGit(gitExecutable, root, ['rev-parse', '--verify', 'HEAD'], { environment })).stdout)
+    const status = await runGit(gitExecutable, root, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { environment })
+    const statusEntries = status.stdout.split('\0').filter(Boolean)
+    return { head, statusEntries }
+  }
+
+  async function diffSharedCheckout(gitExecutable, root, environment, before, after) {
+    const headMoved = after.head !== before.head
+    const statusMoved = after.statusEntries.join('\n') !== before.statusEntries.join('\n')
+    let landed = false
+    if (headMoved) {
+      const log = await runGit(gitExecutable, root, ['log', '--format=%s', `${before.head}..${after.head}`], {
+        environment,
+        allowFailure: true,
+      })
+      const subjects = log.exitCode === 0 ? log.stdout.split(/\r?\n/).filter(Boolean) : []
+      landed = subjects.length > 0 && subjects.every((subject) => subject.startsWith('Ensync land: '))
+    }
+    // git checkout . shape: same head, a previously-dirty path is no longer dirty.
+    const afterPaths = new Set(after.statusEntries.map((entry) => entry.slice(3)))
+    const rawDestructive = !headMoved && before.statusEntries.some((entry) => !afterPaths.has(entry.slice(3)))
+    const changed = landed ? statusMoved : (headMoved || statusMoved)
+    return {
+      root,
+      changed,
+      destructive: changed && rawDestructive,
+      landed,
+      before: { head: before.head, changedFiles: before.statusEntries.length },
+      after: { head: after.head, changedFiles: after.statusEntries.length },
+    }
+  }
+
   async function prepareRemoteWorkspace(projectPath, rawWorkspaceKey, environment) {
     const key = validateWorkspaceKey(rawWorkspaceKey)
     const git = findExecutable(['git'])
@@ -661,6 +694,12 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       const status = await runGit(git.executable, worktreePath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { environment })
       const changedFiles = status.stdout.split('\0').filter(Boolean).length
       const head = await runGit(git.executable, worktreePath, ['rev-parse', '--verify', 'HEAD'], { environment })
+      let shared = null
+      try {
+        shared = { root: repositoryPath, ...(await snapshotSharedCheckoutState(git.executable, repositoryPath, environment)) }
+      } catch {
+        shared = null
+      }
       return {
         lease,
         workspace: {
@@ -677,6 +716,8 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
             checkedAt: new Date().toISOString(),
           },
         },
+        git,
+        shared,
       }
     } catch (error) {
       await lease.release()
@@ -904,6 +945,15 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       })
     } finally {
       await isolated.lease.release()
+    }
+    let sharedCheckout = null
+    if (isolated.shared) {
+      try {
+        const after = await snapshotSharedCheckoutState(isolated.git.executable, isolated.shared.root, environment)
+        sharedCheckout = await diffSharedCheckout(isolated.git.executable, isolated.shared.root, environment, isolated.shared, after)
+      } catch {
+        sharedCheckout = null
+      }
     }
     return {
       operation: 'chat',

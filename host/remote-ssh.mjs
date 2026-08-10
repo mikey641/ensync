@@ -571,6 +571,7 @@ export class RemoteSshService {
       workspace: { path: workspace.path, branch: workspace.branch },
       at: new Date().toISOString(),
     })
+    emitSharedCheckoutNotice(result?.sharedCheckout, options)
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)
