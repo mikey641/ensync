@@ -896,6 +896,48 @@ export class ChatRunService {
       }
     }
 
+    if (request.provider === 'droid') {
+      this.#activeRuns += 1
+      try {
+        const result = await this.#droidExecRuns.run({
+          executable: provider.executable,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
+          attachmentPaths,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: combinedSignal.signal,
+          onEvent: (event) => {
+            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
+            const safe = redactTerminalText(event.text)
+            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
+          },
+        })
+        workspaceLease?.assertHeld()
+        return { ...result, projectPath, workspace: publicWorkspace }
+      } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
+        if (error instanceof DroidExecError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
     const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
