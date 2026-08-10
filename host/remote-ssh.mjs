@@ -6,7 +6,7 @@ import {
   parseCodexChatResult,
   quotaFailureIsSafe,
 } from './chat.mjs'
-import { describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
+import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
   supportsProviderRunner,
   withProviderRunnerInstructions,
@@ -18,6 +18,7 @@ import {
 
 const DEFAULT_SSH_TIMEOUT_MS = 30_000
 const DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+const DEFAULT_CHAT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const CHAT_TRANSPORT_TIMEOUT_GRACE_MS = 30_000
 const MAX_CHAT_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
@@ -435,7 +436,8 @@ export class RemoteSshService {
   constructor(options = {}) {
     this.#adapter = options.adapter ?? new RemoteSshProcessAdapter(options)
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? null
+    this.#hardTimeoutMs = options.hardTimeoutMs
+      ?? configuredHardTimeoutMs(options.environment ?? process.env, DEFAULT_CHAT_HARD_TIMEOUT_MS)
   }
 
   async probe(input) {
@@ -507,10 +509,11 @@ export class RemoteSshService {
     const inactivityTimeoutMs = hardTimeoutMs == null
       ? this.#inactivityTimeoutMs
       : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const transportHardTimeoutMs = hardTimeoutMs == null
-      ? null
-      : hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS
     const startedAt = Date.now()
+    // The remote bridge enforces both the provider inactivity window and the
+    // hard ceiling itself, and its transport progress markers keep the SSH
+    // watchdog fresh, so the transport carries only a generous inactivity
+    // watchdog and no hard deadline of its own.
     const execution = await this.#adapter.execute(
       connection,
       {
@@ -518,7 +521,7 @@ export class RemoteSshService {
         provider: request.provider,
         projectPath: connection.projectPath,
         workspaceKey: request.workspaceKey,
-        prompt: request.prompt,
+        prompt: withProviderRunnerInstructions(request.provider, 'ssh', request.prompt),
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
         effort: request.effort ?? null,
@@ -526,9 +529,8 @@ export class RemoteSshService {
         hardTimeoutMs,
       },
       {
-        timeoutMs: transportHardTimeoutMs ?? DEFAULT_SSH_TIMEOUT_MS,
-        inactivityTimeoutMs: inactivityTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
-        hardTimeoutMs: transportHardTimeoutMs,
+        inactivityTimeoutMs: this.#inactivityTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
+        hardTimeoutMs: null,
         signal: options.signal,
       },
     )
@@ -571,6 +573,7 @@ export class RemoteSshService {
       workspace: { path: workspace.path, branch: workspace.branch },
       at: new Date().toISOString(),
     })
+    emitSharedCheckoutNotice(result?.sharedCheckout, options)
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)

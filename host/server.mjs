@@ -3,13 +3,19 @@ import { timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
-import { ChatImageError } from './chat-images.mjs'
+import {
+  ChatAttachmentStore,
+  MAX_STORED_ATTACHMENT_BYTES,
+  probeAttachmentPaths,
+} from './chat-attachments.mjs'
+import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
 import { runLandCheck } from './land-check.mjs'
+import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
 import { ProjectInspectionService } from './projects.mjs'
@@ -201,10 +207,16 @@ export function createEnsyncHost(options = {}) {
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
   })
+  const chatImages = options.chatImageService ?? new ChatImageService({
+    workspaceRoot: options.projectIsolationRoot,
+  })
   const chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
+  })
+  const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
+    rootPath: options.chatAttachmentsRoot,
   })
   const projects = options.projectService ?? new ProjectInspectionService({
     allowedRoots: options.allowedProjectRoots,
@@ -928,7 +940,7 @@ export function createEnsyncHost(options = {}) {
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
   return server
 }
 
