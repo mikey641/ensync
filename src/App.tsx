@@ -220,6 +220,7 @@ import {
   resolveDroppedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
+import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
 
 const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
@@ -3232,7 +3233,9 @@ function App() {
   return (
     <div className="app-shell">
       <header className="titlebar" {...getSectionProps('titleBar')}>
-        <div className="traffic-lights" aria-hidden="true"><span /><span /><span /></div>
+        {decorativeTrafficLightsVisible(window.ensyncDesktop) && (
+          <div className="traffic-lights" aria-hidden="true"><span /><span /><span /></div>
+        )}
         <div className="wordmark"><span className="wordmark__mark" aria-hidden="true"><span /><span /></span><span>ensync</span></div>
         <button
           className={`project-switcher ${activeProject.id ? 'project-switcher--selected' : ''}`}
