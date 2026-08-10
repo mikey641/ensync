@@ -7,7 +7,11 @@ const providerRunners = Object.freeze({
   local: Object.freeze([
     Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
     Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
+    Object.freeze({ id: 'droid', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
   ]),
+  // Droid has no ssh runner: remote-ssh.mjs drives plain argv+stdin CLIs, while
+  // droid needs its stream-jsonrpc session adapter. Listing it here before that
+  // bridge exists would let Auto routing dispatch runs that can only fail.
   ssh: Object.freeze([
     Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
     Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),

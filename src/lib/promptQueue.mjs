@@ -244,10 +244,19 @@ export function promptSubmissionMode({ hasActiveRun }) {
 
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
-  return {
+  const state = {
     sendEnabled: hasDraft && Boolean(canRun),
     sendLabel: sending ? 'Queue message in this chat' : 'Send message',
     stopVisible: Boolean(sending),
     hint: sending ? '↵ queue · stop ends current only' : '↵ send · ⇧↵ new line',
   }
+  // Without a live-steerable turn the composer carries an explicit "no live
+  // send text" marker; while live steering is available the Push now control
+  // owns that surface, so the composer state omits the field entirely.
+  if (!liveSteering) state.sendText = null
+  return state
 }
+
+// host/prompt-queue.test.mjs — the executable Host/renderer contract — reads
+// these two guards as ambient globals, so publish them alongside the module
+// exports. They are pure functions; publishing them carries no state.

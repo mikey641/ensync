@@ -66,7 +66,7 @@ export function promptSubmissionMode(input: { hasActiveRun: boolean }): 'queue' 
 export function promptQueueComposerState(input: { sending: boolean; draft: string; canRun: boolean; liveSteering?: boolean }): {
   sendEnabled: boolean
   sendLabel: string
-  sendText: string | null
+  sendText?: string | null
   stopVisible: boolean
   hint: string
 }
