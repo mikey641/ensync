@@ -4,9 +4,12 @@ export type QuestionSelection = Record<number, { options: string[]; text: string
 
 export type ProviderQuestionAnswerPayload = {
   questionId: string
-  answers: { index: number; answer: string }[]
+  /** `value` accompanies a permission choice: the provider's own outcome, not a label. */
+  answers: { index: number; answer: string; value?: string }[]
 }
 
+export function isPermissionQuestion(question: ProviderQuestion | null | undefined): boolean
+export function isPermissionRequest(pending: PendingProviderQuestion | null | undefined): boolean
 export function initialQuestionSelection(pending: PendingProviderQuestion | null | undefined): QuestionSelection
 export function toggleQuestionOption(selection: QuestionSelection, question: ProviderQuestion, label: string): QuestionSelection
 export function setQuestionText(selection: QuestionSelection, question: ProviderQuestion, text: string): QuestionSelection

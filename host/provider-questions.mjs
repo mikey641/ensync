@@ -42,6 +42,74 @@ const MAX_QUESTIONS = 8
 const MAX_OPTIONS = 16
 const MAX_TEXT_CHARACTERS = 2_000
 const MAX_ANSWER_CHARACTERS = 4_000
+const MAX_PERMISSION_TOOL_USES = 8
+
+/**
+ * Factory Droid asks the client to approve a tool call with
+ * `droid.request_permission`. Schema pinned from the published
+ * `@factory/droid-sdk` 0.7.0 type surface (`RequestPermissionRequestParamsSchema`,
+ * `RequestPermissionResultSchema`) and captured live from droid 0.191.1 asking
+ * to run `git push origin main` at the pinned `medium` autonomy level:
+ *   params: { toolUses: [{ toolUse: { type, id, name, input },
+ *                          confirmationType,
+ *                          details: <discriminated union on `type`> }],
+ *             options: [{ value: ToolConfirmationOutcome, label, selectedColor?,
+ *                         selectedPrefix? }],
+ *             associatedSessionIds?: string[] }
+ *   result: { selectedOption: ToolConfirmationOutcome,
+ *             comment?: string, editedSpecContent?: string }
+ * The outcome must be one Droid itself offered — anything else is treated as a
+ * failed handler and cancelled — so Ensync only ever answers with a value it
+ * read out of that `options` list.
+ */
+export const DROID_DECLINE_OUTCOME = 'cancel'
+/**
+ * The only outcome Ensync offers as approval, and it is an allow-list on
+ * purpose. Every other `ToolConfirmationOutcome` Droid lists decides more than
+ * the call in front of the person:
+ *
+ * - `proceed_always*` (live label: "Yes, and always allow high impact commands
+ *   (all commands)") persists an allow rule in the shared Factory config, so it
+ *   would pre-approve later runs — including the unattended ones that have no
+ *   question channel at all and decline everything today.
+ * - `proceed_auto_run*` and `proceed_new_session*` raise autonomy for the rest
+ *   of the session, which would quietly falsify the pinned level the Host
+ *   verifies before it sends a prompt (`#assertContainmentPinned`).
+ * - `proceed_edit` is refused by Droid's own result schema unless the client
+ *   also sends `editedSpecContent`, which Ensync has no surface to collect.
+ *
+ * Declining is never listed either: it is the card's own "Don't allow" action,
+ * which resolves to `cancel` — the same outcome Ensync has always sent.
+ */
+const DROID_OFFERED_OUTCOMES = new Set(['proceed_once'])
+
+// One line per `ToolConfirmationType`, phrased as the thing being permitted.
+const PERMISSION_ACTIONS = {
+  exec: 'run this command',
+  edit: 'edit this file',
+  create: 'create this file',
+  apply_patch: 'apply this patch',
+  mcp_tool: 'call this MCP tool',
+  sandbox_violation: 'do this, which the sandbox blocked',
+  droid_shield_violation: 'run this command, which Droid Shield flagged',
+  exit_spec_mode: 'leave spec mode and start building',
+  propose_mission: 'start this mission',
+  start_mission_run: 'start another mission run',
+  ask_user: 'ask you a question',
+}
+const PERMISSION_HEADERS = {
+  exec: 'Run command',
+  edit: 'Edit file',
+  create: 'Create file',
+  apply_patch: 'Apply patch',
+  mcp_tool: 'MCP tool',
+  sandbox_violation: 'Sandbox rule',
+  droid_shield_violation: 'Droid Shield',
+  exit_spec_mode: 'Spec mode',
+  propose_mission: 'Mission',
+  start_mission_run: 'Mission run',
+  ask_user: 'Question',
+}
 
 /** Ensync never invents an approval: an unanswered question is a refusal to answer, not consent. */
 export const CLAUDE_NON_QUESTION_DENIAL =
@@ -87,12 +155,13 @@ export function normalizeDroidQuestions(params) {
     if (!prompt) return null
     return {
       index: Number.isSafeInteger(question.index) ? question.index : position,
+      kind: 'question',
       header: text(question.topic),
       question: prompt,
       multiSelect: question.multiSelect === true,
       options: optionList(question.options, (option) => {
         const label = text(option)
-        return label ? { label, description: null } : null
+        return label ? { label, description: null, value: null } : null
       }),
     }
   }).filter(Boolean)
@@ -112,18 +181,149 @@ export function normalizeClaudeQuestions(input) {
     if (!prompt) return null
     return {
       index: position,
+      kind: 'question',
       header: text(question.header),
       question: prompt,
       multiSelect: question.multiSelect === true,
       options: optionList(question.options, (option) => {
         if (!option || typeof option !== 'object') return null
         const label = text(option.label)
-        return label ? { label, description: text(option.description) || null } : null
+        return label ? { label, description: text(option.description) || null, value: null } : null
       }),
     }
   }).filter(Boolean)
   if (questions.length === 0) return null
   return { questions }
+}
+
+/**
+ * What is actually being permitted, in the person's terms. Only fields that
+ * describe the call are used: patch bodies and file contents are left out
+ * because a decision card is not a diff viewer, and the full command is
+ * preferred over Droid's shortened `command` ("git push" for a live
+ * `git push origin main`).
+ */
+function permissionDetail(details, toolUse) {
+  if (!details || typeof details !== 'object') return text(toolUse?.name)
+  const lines = (...values) => values.map((value) => text(value)).filter(Boolean).join('\n')
+  switch (details.type) {
+    case 'exec':
+      // The command first and on its own line: it is the one part of this
+      // payload that is always exact. `impactLevel` is Droid's own enum, and
+      // `riskLevelReason` is model prose that has been observed arriving with
+      // its spaces collapsed, so neither is what the decision rests on.
+      return lines(
+        details.fullCommand || details.command,
+        details.impactLevel ? `Impact: ${text(details.impactLevel)}` : '',
+        details.riskLevelReason,
+      )
+    case 'edit':
+    case 'create':
+    case 'apply_patch':
+      return lines(details.filePath || details.fileName)
+    case 'mcp_tool':
+      return lines(
+        [text(details.serverName), text(details.actualToolName) || text(details.toolName)].filter(Boolean).join(' · '),
+        details.impactLevel ? `Impact: ${text(details.impactLevel)}` : '',
+      )
+    case 'sandbox_violation':
+      return lines(
+        [text(details.violatingToolName), text(details.target)].filter(Boolean).join(' → '),
+        details.reason,
+      )
+    case 'droid_shield_violation':
+      return lines(details.command, details.reason)
+    case 'exit_spec_mode':
+      return lines(details.title || details.plan)
+    case 'propose_mission':
+      return lines(details.title || details.proposal)
+    case 'start_mission_run':
+      return Number.isSafeInteger(details.runningMissionCount)
+        ? `${details.runningMissionCount} mission run${details.runningMissionCount === 1 ? '' : 's'} already active`
+        : ''
+    case 'ask_user':
+      return lines(details.questionnaire)
+    default:
+      return text(toolUse?.name)
+  }
+}
+
+function permissionEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const type = text(entry.details?.type) || text(entry.confirmationType)
+  if (!type) return null
+  return {
+    header: PERMISSION_HEADERS[type] ?? 'Permission',
+    action: PERMISSION_ACTIONS[type] ?? `use ${text(entry.toolUse?.name) || 'a tool'}`,
+    detail: permissionDetail(entry.details, entry.toolUse),
+  }
+}
+
+function permissionOptions(options) {
+  if (!Array.isArray(options)) return []
+  const seen = new Set()
+  const offered = []
+  for (const option of options.slice(0, MAX_OPTIONS)) {
+    if (!option || typeof option !== 'object') continue
+    const value = text(option.value)
+    if (!value || seen.has(value) || !DROID_OFFERED_OUTCOMES.has(value)) continue
+    seen.add(value)
+    offered.push({ label: text(option.label) || value, description: null, value })
+  }
+  return offered
+}
+
+/**
+ * A `droid.request_permission` request as one provider-neutral question: the
+ * approval is a single decision over the whole request, because Droid's result
+ * is a single `selectedOption` for every tool use it listed.
+ *
+ * Returns null — meaning "decline it the way Ensync always has" — when the
+ * request names no tool use Ensync can describe, or when Droid offered no
+ * outcome Ensync is willing to present. Never approving something the person
+ * cannot see is the point: an unreadable request is not consent material.
+ */
+export function normalizeDroidPermission(params) {
+  if (!params || typeof params !== 'object') return null
+  const options = permissionOptions(params.options)
+  if (options.length === 0) return null
+  const source = Array.isArray(params.toolUses) ? params.toolUses.slice(0, MAX_PERMISSION_TOOL_USES) : []
+  const entries = source.map(permissionEntry).filter(Boolean)
+  if (entries.length === 0) return null
+  const body = entries.length === 1
+    ? `Allow Factory Droid to ${entries[0].action}?${entries[0].detail ? `\n\n${entries[0].detail}` : ''}`
+    : `Allow Factory Droid to do all of this?\n\n${entries
+      .map((entry) => `• ${entry.action}${entry.detail ? `\n${entry.detail}` : ''}`)
+      .join('\n\n')}`
+  // A card that silently cut off half the request would be asking for consent
+  // to something the person cannot see, so a clipped description says so.
+  const shown = text(body)
+  const complete = shown.length >= body.trim().length
+  return {
+    toolCallId: text(source[0]?.toolUse?.id) || null,
+    question: {
+      index: 0,
+      kind: 'permission',
+      header: entries.length === 1 ? entries[0].header : 'Permission',
+      question: complete
+        ? shown
+        : `${shown}\n\n… Ensync could not show all of this request. Decline it if you cannot see what you would be approving.`,
+      multiSelect: false,
+      options,
+    },
+  }
+}
+
+/**
+ * The `droid.request_permission` result. Anything other than a chosen approval
+ * is the documented decline, so a cancelled, malformed, or run-ended question
+ * lands on exactly the outcome Ensync sent before this surface existed.
+ */
+export function droidPermissionResult(resolution) {
+  const chosen = resolution?.cancelled === true
+    ? null
+    : (resolution?.answers ?? []).find((answer) => typeof answer?.value === 'string' && answer.value)
+  return { selectedOption: chosen ? chosen.value : DROID_DECLINE_OUTCOME }
 }
 
 /** The exact `droid.ask_user` result shape, built from the questions Droid asked. */
@@ -154,6 +354,27 @@ export function claudeAnswerMessage(resolution) {
   return `The person answered your questions in Ensync. These are their real answers — treat them as the AskUserQuestion result and do not ask again.\n\n${answers}\n\nContinue the task with these answers.`
 }
 
+/**
+ * An approval is an enum, not prose: the provider only accepts an outcome it
+ * offered, so a typed sentence can never be turned into one. The chosen option
+ * is matched by its value, or by an exact label match for a client that only
+ * has the label.
+ */
+function matchPermissionOption(question, entry) {
+  const value = typeof entry.value === 'string' ? entry.value.trim() : ''
+  const label = typeof entry.answer === 'string' ? entry.answer.trim() : ''
+  const chosen = question.options.find((option) => (value ? option.value === value : option.label === label))
+  if (!chosen) {
+    throw new ProviderQuestionError(
+      'invalid_question_answer',
+      'Choose one of the options the provider offered, or decline the request.',
+      400,
+      true,
+    )
+  }
+  return { index: question.index, question: question.question, answer: chosen.label, value: chosen.value }
+}
+
 function normalizeAnswers(questions, input) {
   if (!Array.isArray(input) || input.length === 0) {
     throw new ProviderQuestionError('invalid_question_answer', 'Answer every question before sending it to the provider.', 400, true)
@@ -167,6 +388,10 @@ function normalizeAnswers(questions, input) {
     const question = byIndex.get(entry.index)
     if (!question) {
       throw new ProviderQuestionError('invalid_question_answer', 'That answer does not match any question the provider asked.', 400, true)
+    }
+    if (question.kind === 'permission') {
+      answers.set(question.index, matchPermissionOption(question, entry))
+      continue
     }
     const answer = typeof entry.answer === 'string' ? entry.answer.trim() : ''
     if (!answer) {

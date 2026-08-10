@@ -10,6 +10,7 @@ import { ChatRunService } from './chat.mjs'
 
 import {
   initialQuestionSelection,
+  isPermissionRequest,
   pendingQuestionsAfterEvent,
   pendingQuestionsFromEvents,
   questionAnswerPayload,
@@ -26,7 +27,9 @@ import {
   ProviderQuestionRegistry,
   claudeAnswerMessage,
   droidAskUserResult,
+  droidPermissionResult,
   normalizeClaudeQuestions,
+  normalizeDroidPermission,
   normalizeDroidQuestions,
 } from './provider-questions.mjs'
 
@@ -43,6 +46,40 @@ const DROID_ASK_PARAMS = {
       options: ['SQLite', 'Redis'],
       multiSelect: false,
     },
+  ],
+}
+
+// Captured verbatim from droid 0.191.1 asking to run `git push origin main` at
+// the `medium` autonomy level Ensync pins — the exact frame that used to end a
+// run with "finished without a verifiable final agent response".
+const DROID_PERMISSION_PARAMS = {
+  toolUses: [
+    {
+      toolUse: {
+        type: 'tool_use',
+        id: 'chatcmpl-tool-f219ef973e1b463281baf045c849b658',
+        name: 'Execute',
+        input: {
+          summary: 'Push main branch to origin',
+          command: 'git push origin main',
+          riskLevel: 'high',
+        },
+      },
+      confirmationType: 'exec',
+      details: {
+        type: 'exec',
+        fullCommand: 'git push origin main',
+        command: 'git push',
+        extractedCommands: ['git push'],
+        impactLevel: 'high',
+        riskLevelReason: 'This git push modifies the remote repository, which could affect other developers and CI/CD pipelines.',
+      },
+    },
+  ],
+  options: [
+    { label: 'Yes, allow', value: 'proceed_once', selectedColor: '#d78700' },
+    { label: 'Yes, and always allow high impact commands (all commands)', value: 'proceed_always', selectedColor: '#d78700' },
+    { label: 'No, cancel', value: 'cancel', selectedColor: '#d75f5f', selectedPrefix: '✕ ' },
   ],
 }
 
@@ -79,12 +116,13 @@ test('droid ask_user params normalize into the provider-neutral question shape',
   assert.equal(normalized.toolCallId, 'tool-call-1')
   assert.deepEqual(normalized.questions, [{
     index: 0,
+    kind: 'question',
     header: 'Storage',
     question: 'Which store should the cache use?',
     multiSelect: false,
     options: [
-      { label: 'SQLite', description: null },
-      { label: 'Redis', description: null },
+      { label: 'SQLite', description: null, value: null },
+      { label: 'Redis', description: null, value: null },
     ],
   }])
 })
@@ -93,14 +131,167 @@ test('claude AskUserQuestion input normalizes into the same shape with per-optio
   const normalized = normalizeClaudeQuestions(CLAUDE_ASK_INPUT)
   assert.deepEqual(normalized.questions, [{
     index: 0,
+    kind: 'question',
     header: 'Color',
     question: 'Which color do you prefer?',
     multiSelect: false,
     options: [
-      { label: 'Red', description: 'The color red' },
-      { label: 'Blue', description: 'The color blue' },
+      { label: 'Red', description: 'The color red', value: null },
+      { label: 'Blue', description: 'The color blue', value: null },
     ],
   }])
+})
+
+test('a droid permission request becomes one decision that shows the real command', () => {
+  const normalized = normalizeDroidPermission(DROID_PERMISSION_PARAMS)
+  assert.equal(normalized.toolCallId, 'chatcmpl-tool-f219ef973e1b463281baf045c849b658')
+  assert.equal(normalized.question.kind, 'permission')
+  assert.equal(normalized.question.header, 'Run command')
+  assert.equal(normalized.question.multiSelect, false)
+  // Droid's `command` is the shortened "git push"; the person must see what
+  // actually runs, plus why the model itself called it risky.
+  assert.match(normalized.question.question, /Allow Factory Droid to run this command\?/)
+  assert.match(normalized.question.question, /git push origin main/)
+  assert.match(normalized.question.question, /Impact: high/)
+  assert.match(normalized.question.question, /modifies the remote repository/)
+  // The command is what the decision rests on, so it leads.
+  assert.equal(
+    normalized.question.question.indexOf('git push origin main')
+      < normalized.question.question.indexOf('Impact: high'),
+    true,
+  )
+})
+
+test('an approval only offers outcomes that decide the call in front of the person', () => {
+  const normalized = normalizeDroidPermission(DROID_PERMISSION_PARAMS)
+  // "always allow ... (all commands)" writes a rule into the shared Factory
+  // config that would pre-approve later runs, including unattended ones, and
+  // declining is the card's own action rather than a choice among approvals.
+  assert.deepEqual(normalized.question.options, [
+    { label: 'Yes, allow', description: null, value: 'proceed_once' },
+  ])
+})
+
+test('a permission request Ensync cannot present is declined rather than approved', () => {
+  // No outcome that decides only this call.
+  assert.equal(normalizeDroidPermission({
+    ...DROID_PERMISSION_PARAMS,
+    options: [
+      { label: 'Yes, and always allow', value: 'proceed_always' },
+      { label: 'Yes, and auto-run from now on', value: 'proceed_auto_run_high' },
+      { label: 'No, cancel', value: 'cancel' },
+    ],
+  }), null)
+  // Nothing the person could read as the thing being permitted.
+  assert.equal(normalizeDroidPermission({ ...DROID_PERMISSION_PARAMS, toolUses: [] }), null)
+  assert.equal(normalizeDroidPermission({ options: DROID_PERMISSION_PARAMS.options }), null)
+  assert.equal(normalizeDroidPermission(null), null)
+})
+
+test('every confirmation type is described as the thing being permitted', () => {
+  const decision = (toolUse) => normalizeDroidPermission({
+    ...DROID_PERMISSION_PARAMS,
+    toolUses: [toolUse],
+  }).question
+  const edit = decision({
+    toolUse: { id: 'tool-2', name: 'Edit' },
+    confirmationType: 'edit',
+    details: { type: 'edit', filePath: '/repo/src/app.ts', fileName: 'app.ts', newContent: 'x'.repeat(5_000) },
+  })
+  assert.equal(edit.header, 'Edit file')
+  assert.match(edit.question, /Allow Factory Droid to edit this file\?\n\n\/repo\/src\/app\.ts/)
+  // A decision card is not a diff viewer: file bodies never reach it.
+  assert.equal(edit.question.includes('xxxx'), false)
+
+  const mcp = decision({
+    toolUse: { id: 'tool-3', name: 'mcp__github__create_pr' },
+    confirmationType: 'mcp_tool',
+    details: { type: 'mcp_tool', serverName: 'github', toolName: 'create_pr', impactLevel: 'medium' },
+  })
+  assert.equal(mcp.header, 'MCP tool')
+  assert.match(mcp.question, /github · create_pr/)
+
+  // An unknown confirmation type still names the tool instead of asking the
+  // person to approve something unnamed.
+  const future = decision({
+    toolUse: { id: 'tool-4', name: 'SomethingNew' },
+    confirmationType: 'invented_later',
+    details: { type: 'invented_later' },
+  })
+  assert.equal(future.header, 'Permission')
+  assert.match(future.question, /Allow Factory Droid to use SomethingNew\?/)
+})
+
+test('two tool uses in one request are approved as the single decision droid asked for', () => {
+  const normalized = normalizeDroidPermission({
+    ...DROID_PERMISSION_PARAMS,
+    toolUses: [
+      DROID_PERMISSION_PARAMS.toolUses[0],
+      {
+        toolUse: { id: 'tool-5', name: 'Create' },
+        confirmationType: 'create',
+        details: { type: 'create', filePath: '/repo/NOTES.md', fileName: 'NOTES.md', content: 'hello' },
+      },
+    ],
+  })
+  assert.equal(normalized.question.header, 'Permission')
+  assert.match(normalized.question.question, /Allow Factory Droid to do all of this\?/)
+  assert.match(normalized.question.question, /• run this command\ngit push origin main/)
+  assert.match(normalized.question.question, /• create this file\n\/repo\/NOTES\.md/)
+})
+
+test('a request too large to show says so instead of quietly clipping it', () => {
+  const normalized = normalizeDroidPermission({
+    ...DROID_PERMISSION_PARAMS,
+    toolUses: Array.from({ length: 8 }, (_, index) => ({
+      toolUse: { id: `tool-${index}`, name: 'Execute' },
+      confirmationType: 'exec',
+      details: { type: 'exec', fullCommand: `rm -rf /tmp/${'x'.repeat(400)}-${index}` },
+    })),
+  })
+  assert.match(normalized.question.question, /could not show all of this request/)
+  // The person still gets a way out that does not require seeing the rest.
+  assert.deepEqual(normalized.question.options.map((option) => option.value), ['proceed_once'])
+})
+
+test('an approval names an outcome droid offered and never a typed sentence', async () => {
+  const registry = new ProviderQuestionRegistry({ idPrefix: 'droid' })
+  const { question } = normalizeDroidPermission(DROID_PERMISSION_PARAMS)
+  const { id, answered } = registry.ask({
+    provider: 'droid',
+    questions: [question],
+    askedAt: '2026-08-10T00:00:00.000Z',
+  })
+  assert.throws(
+    () => registry.answer(id, { answers: [{ index: 0, answer: 'yes go ahead' }] }),
+    (error) => error instanceof ProviderQuestionError
+      && error.code === 'invalid_question_answer'
+      && /Choose one of the options/.test(error.message),
+  )
+  // An outcome Ensync did not offer is not an approval either, even though
+  // Droid itself listed it.
+  assert.throws(() => registry.answer(id, { answers: [{ index: 0, value: 'proceed_always' }] }), /Choose one of the options/)
+  assert.equal(registry.size, 1)
+
+  registry.answer(id, { answers: [{ index: 0, value: 'proceed_once', answer: 'Yes, allow' }] })
+  const resolution = await answered
+  assert.deepEqual(resolution.answers, [{
+    index: 0,
+    question: question.question,
+    answer: 'Yes, allow',
+    value: 'proceed_once',
+  }])
+  assert.deepEqual(droidPermissionResult(resolution), { selectedOption: 'proceed_once' })
+})
+
+test('anything short of a chosen approval is droid’s own decline', () => {
+  assert.deepEqual(droidPermissionResult({ cancelled: true, answers: [] }), { selectedOption: 'cancel' })
+  assert.deepEqual(droidPermissionResult({ cancelled: false, answers: [] }), { selectedOption: 'cancel' })
+  // A resolution carrying no outcome cannot be turned into one.
+  assert.deepEqual(
+    droidPermissionResult({ cancelled: false, answers: [{ index: 0, answer: 'Yes, allow' }] }),
+    { selectedOption: 'cancel' },
+  )
 })
 
 test('a questionnaire with no readable question is not turned into an empty prompt', () => {
@@ -317,10 +508,11 @@ test('a closed registry still hands the runner a settled question rather than th
 })
 
 /**
- * Speaks the droid 0.190.0 wire protocol and sends a `droid.ask_user` request
- * the way the CLI does: a server-to-client request in the middle of the turn.
+ * Speaks the droid 0.190.0 wire protocol and sends a `droid.ask_user` or
+ * `droid.request_permission` request the way the CLI does: a server-to-client
+ * request in the middle of the turn.
  */
-function fakeDroidExec({ askUser = true } = {}) {
+function fakeDroidExec({ askUser = true, permission = null } = {}) {
   const child = new EventEmitter()
   child.stdin = new PassThrough()
   child.stdout = new PassThrough()
@@ -382,6 +574,17 @@ function fakeDroidExec({ askUser = true } = {}) {
         respond(message.id, { settings })
       } else if (message.method === 'droid.add_user_message') {
         respond(message.id, {})
+        if (permission) {
+          send({
+            jsonrpc: '2.0',
+            type: 'request',
+            factoryApiVersion: '1.0.0',
+            id: 'server-permission-1',
+            method: 'droid.request_permission',
+            params: permission,
+          })
+          continue
+        }
         if (!askUser) return finish()
         send({
           jsonrpc: '2.0',
@@ -451,6 +654,102 @@ test('a droid run with no retained job still declines questionnaires safely', as
     events.some((event) => event.type === 'notice' && event.code === 'provider_request_declined'),
     true,
   )
+})
+
+test('a droid permission request reaches the person and their approval completes the turn', async () => {
+  const server = fakeDroidExec({ permission: DROID_PERMISSION_PARAMS })
+  const runner = new DroidExecRunner({ spawnProcess: () => server.child })
+  const events = []
+  const run = runner.run(droidInput('job-droid-permission-0001'), {
+    onEvent: (event) => events.push(event),
+  })
+
+  const asked = await waitFor(() => events.find((event) => event.type === 'question'))
+  assert.equal(asked.provider, 'droid')
+  assert.equal(asked.questions[0].kind, 'permission')
+  assert.match(asked.questions[0].question, /git push origin main/)
+
+  runner.answerQuestion('job-droid-permission-0001', asked.questionId, {
+    answers: [{ index: 0, value: 'proceed_once' }],
+  })
+
+  const result = await run
+  assert.equal(result.response, 'done')
+  // The wire result is Droid's own permission shape carrying the outcome the
+  // person picked — nothing else is a valid answer to this request.
+  assert.deepEqual(server.responses[0].result, { selectedOption: 'proceed_once' })
+  const resolved = events.find((event) => event.type === 'question_resolved')
+  assert.equal(resolved.cancelled, false)
+  assert.equal(resolved.answers[0].value, 'proceed_once')
+  assert.equal(events.some((event) => event.code === 'provider_request_declined'), false)
+})
+
+test('declining a permission sends droid’s documented cancel and the run continues', async () => {
+  const server = fakeDroidExec({ permission: DROID_PERMISSION_PARAMS })
+  const runner = new DroidExecRunner({ spawnProcess: () => server.child })
+  const events = []
+  const run = runner.run(droidInput('job-droid-permission-0002'), {
+    onEvent: (event) => events.push(event),
+  })
+
+  const asked = await waitFor(() => events.find((event) => event.type === 'question'))
+  runner.answerQuestion('job-droid-permission-0002', asked.questionId, { cancelled: true })
+
+  await run
+  assert.deepEqual(server.responses[0].result, { selectedOption: 'cancel' })
+})
+
+test('a permission with no outcome Ensync offers is declined exactly as before', async () => {
+  const server = fakeDroidExec({
+    permission: {
+      ...DROID_PERMISSION_PARAMS,
+      options: [
+        { label: 'Yes, and always allow high impact commands (all commands)', value: 'proceed_always' },
+        { label: 'No, cancel', value: 'cancel' },
+      ],
+    },
+  })
+  const runner = new DroidExecRunner({ spawnProcess: () => server.child })
+  const events = []
+  const result = await runner.run(droidInput('job-droid-permission-0003'), {
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.equal(result.response, 'done')
+  assert.equal(events.some((event) => event.type === 'question'), false)
+  assert.deepEqual(server.responses[0].result, { selectedOption: 'cancel' })
+  assert.equal(
+    events.some((event) => event.code === 'provider_request_declined' && /no approval it could safely offer/.test(event.message)),
+    true,
+  )
+})
+
+test('a droid run with no retained job still declines permission requests safely', async () => {
+  const server = fakeDroidExec({ permission: DROID_PERMISSION_PARAMS })
+  const runner = new DroidExecRunner({ spawnProcess: () => server.child })
+  const events = []
+  const result = await runner.run(droidInput(null), { onEvent: (event) => events.push(event) })
+  assert.equal(result.response, 'done')
+  assert.equal(events.some((event) => event.type === 'question'), false)
+  assert.deepEqual(server.responses[0].result, { selectedOption: 'cancel' })
+})
+
+test('a permission left open when the run ends is declined, never granted', async () => {
+  const server = fakeDroidExec({ permission: DROID_PERMISSION_PARAMS })
+  const runner = new DroidExecRunner({ spawnProcess: () => server.child })
+  const events = []
+  const controller = new AbortController()
+  const run = runner.run(droidInput('job-droid-permission-0004'), {
+    onEvent: (event) => events.push(event),
+    signal: controller.signal,
+  })
+
+  await waitFor(() => events.find((event) => event.type === 'question'))
+  controller.abort()
+
+  await assert.rejects(run, (error) => error.code === 'run_cancelled')
+  const resolved = events.find((event) => event.type === 'question_resolved')
+  assert.equal(resolved.cancelled, true)
 })
 
 test('an answer for a job with no live droid session is refused rather than dropped', () => {
@@ -616,15 +915,23 @@ const PENDING = {
   questions: [
     {
       index: 0,
+      kind: 'question',
       header: 'Color',
       question: 'Which color do you prefer?',
       multiSelect: false,
       options: [
-        { label: 'Red', description: 'The color red' },
-        { label: 'Blue', description: 'The color blue' },
+        { label: 'Red', description: 'The color red', value: null },
+        { label: 'Blue', description: 'The color blue', value: null },
       ],
     },
   ],
+}
+
+const PENDING_PERMISSION = {
+  questionId: 'droid-1',
+  provider: 'droid',
+  askedAt: '2026-08-10T00:00:00.000Z',
+  questions: [normalizeDroidPermission(DROID_PERMISSION_PARAMS).question],
 }
 
 test('a single-select choice replaces the previous one and clicking it again clears it', () => {
@@ -669,6 +976,30 @@ test('a complete answer is sent by question index, never by re-sending question 
     questionId: 'claude-1',
     answers: [{ index: 0, answer: 'Blue' }],
   })
+})
+
+test('a permission card sends the provider’s outcome, not the label it displayed', () => {
+  const question = PENDING_PERMISSION.questions[0]
+  assert.equal(isPermissionRequest(PENDING_PERMISSION), true)
+  assert.equal(isPermissionRequest(PENDING), false)
+
+  let selection = initialQuestionSelection(PENDING_PERMISSION)
+  assert.equal(questionAnswersReady(PENDING_PERMISSION, selection), false)
+  // There is no text input on an approval, so typing cannot make one ready.
+  selection = setQuestionText(selection, question, 'yes but only this once')
+  assert.equal(questionAnswersReady(PENDING_PERMISSION, selection), false)
+
+  selection = toggleQuestionOption(selection, question, 'Yes, allow')
+  assert.equal(questionAnswerText(selection, question), 'Yes, allow')
+  assert.deepEqual(questionAnswerPayload(PENDING_PERMISSION, selection), {
+    questionId: 'droid-1',
+    answers: [{ index: 0, answer: 'Yes, allow', value: 'proceed_once' }],
+  })
+
+  // Unchoosing it puts the decision back to nothing rather than leaving a
+  // stale approval behind.
+  selection = toggleQuestionOption(selection, question, 'Yes, allow')
+  assert.equal(questionAnswerPayload(PENDING_PERMISSION, selection), null)
 })
 
 test('pending questions are rebuilt from a replayed event buffer and cleared when resolved', () => {
