@@ -3307,7 +3307,7 @@ function App() {
                 chat={chat}
                 isActive={isActive}
                 onOpenFile={setViewedFilePath}
-                provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
+                provider={providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])}
                 autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
                 runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
                 providers={executionProviders}
@@ -3640,14 +3640,15 @@ function ConversationPane({
 
   const automaticMode = chat.providerMode !== 'fixed'
   const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
-  // The face of this control is a fact, so say which fact it is and, for Auto,
-  // where the next turn would go when that differs from what is shown.
+  // The face of this control is a fact, so say which fact it is. Idle Auto names
+  // the provider the next turn would actually run on; the names only differ when
+  // automatic routing has no candidate and the last verified turn is all we know.
   const providerPickerTitle = runningProviderPinned
     ? `${provider.name} is running this turn.`
     : automaticMode
       ? provider.id === autoProvider.id
         ? `Auto would run the next turn on ${provider.name}.`
-        : `${provider.name} ran this conversation's last turn. Auto would run the next turn on ${autoProvider.name}.`
+        : `${provider.name} ran this conversation's last turn. No connected provider reports verified remaining subscription usage right now.`
       : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
