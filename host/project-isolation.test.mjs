@@ -257,8 +257,11 @@ test('ChatRunService binds provider cwd to the protected worktree and releases i
   const events = []
   let providerCwd
   let providerPrompt
+  // Automatic landing is off so the assertions observe pure isolation:
+  // nothing may reach the shared checkout, not even a guarded land merge.
   const service = new ChatRunService({
     projectIsolation: isolation,
+    autoLand: false,
     statusService: {
       async get() {
         return {
@@ -403,4 +406,609 @@ test('ChatRunService runs different chats in the same repository concurrently', 
   assert.notEqual(providerPaths[0], providerPaths[1])
   assert.equal(maximumActiveProviders, 2)
   assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
+})
+
+test('commitAgentWork commits worktree changes to the conversation branch with the Ensync Agent identity', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-commit')
+  context.after(() => lease.release())
+
+  await writeFile(join(lease.workspace.projectPath, 'agent-file.txt'), 'work\n')
+  const result = await isolation.commitAgentWork(lease.workspace, {
+    outcome: 'succeeded',
+    provider: 'codex',
+    jobId: 'job-1',
+  })
+
+  assert.equal(result.committed, true)
+  assert.equal(result.changedFiles, 1)
+  assert.match(result.head, /^[a-f0-9]{40}$/)
+  const author = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%an <%ae>'])
+  assert.equal(author, 'Ensync Agent <agent@ensync.local>')
+  const committer = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%cn <%ce>'])
+  assert.equal(committer, 'Ensync Agent <agent@ensync.local>')
+  const subject = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'Ensync agent work (succeeded)')
+  const body = await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%b'])
+  assert.match(body, /Provider: codex/)
+  assert.match(body, /Job: job-1/)
+  assert.equal(await git(lease.workspace.repositoryPath, ['status', '--porcelain']), '')
+  // Shared checkout untouched.
+  assert.equal(await git(fixture.repository, ['status', '--porcelain']), '')
+})
+
+test('a chat run auto-commits agent work at run end, on success and on failure', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  for (const [key, exitCode, outcome] of [
+    ['window-a:chat-autocommit-ok', 0, 'succeeded'],
+    ['window-a:chat-autocommit-fail', 1, 'failed'],
+  ]) {
+    const events = []
+    let worktreeProjectPath = null
+    // Automatic landing is off so the second iteration's fresh worktree does not
+    // already contain the first iteration's landed file, which would make its
+    // identical agent write a no-op and suppress the auto-commit under test.
+    const chats = new ChatRunService({
+      projectIsolation: isolation,
+      autoLand: false,
+      statusService: {
+        async get() {
+          return {
+            id: 'codex',
+            name: 'Codex',
+            installed: true,
+            executable: '/test/bin/codex',
+            authentication: { state: 'authenticated', method: 'chatgpt' },
+          }
+        },
+        invalidate() {},
+      },
+      processRunner: async (_executable, _args, options) => {
+        worktreeProjectPath = options.cwd
+        await writeFile(join(options.cwd, 'made-by-agent.txt'), 'partial or complete work\n')
+        return {
+          exitCode,
+          stdout: exitCode === 0
+            ? '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}\n'
+            : '',
+          stderr: exitCode === 0 ? '' : 'provider exploded',
+          aborted: false,
+          timedOut: false,
+          error: null,
+        }
+      },
+    })
+
+    const run = chats.run(
+      { provider: 'codex', prompt: 'do work', projectPath: fixture.repository, workspaceKey: key },
+      { onEvent: (event) => events.push(event) },
+    )
+    if (exitCode === 0) await run
+    else await assert.rejects(run)
+
+    const committed = events.find((event) => event.code === 'agent_work_committed')
+    assert.ok(committed, `expected agent_work_committed event for exit ${exitCode}`)
+    assert.match(committed.message, /made-by-agent|1 changed file/i)
+    const branchLog = await git(worktreeProjectPath, ['log', '-1', '--format=%s'])
+    assert.equal(branchLog, `Ensync agent work (${outcome})`)
+    assert.equal(await git(worktreeProjectPath, ['status', '--porcelain']), '')
+  }
+})
+
+test('a chat run skips auto-commit when the workspace write lease is lost', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const headBefore = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await writeFile(join(fixture.repository, 'agent-in-worktree.txt'), 'work left behind by another owner\n')
+
+  const leaseController = new AbortController()
+  leaseController.abort(new Error('Ensync Host lost the protected workspace write lease: lease stolen by another Host.'))
+  let commitCalls = 0
+  const fakeIsolation = {
+    async acquire() {
+      return {
+        workspace: {
+          projectPath: fixture.repository,
+          repositoryPath: fixture.repository,
+          branch: 'ensync/chat-lease-lost',
+          reused: false,
+          shared: { repositoryPath: fixture.repository, head: headBefore, statusEntries: [] },
+          gitBefore: { branch: 'ensync/chat-lease-lost', head: headBefore, changedFiles: 0, dirty: false },
+        },
+        signal: leaseController.signal,
+        assertHeld() {
+          if (leaseController.signal.aborted) throw leaseController.signal.reason
+        },
+        release: async () => {},
+      }
+    },
+    async commitAgentWork() {
+      commitCalls += 1
+      return { committed: true, changedFiles: 1, head: 'deadbeef' }
+    },
+  }
+
+  const events = []
+  const chats = new ChatRunService({
+    projectIsolation: fakeIsolation,
+    statusService: {
+      async get() {
+        return {
+          id: 'codex',
+          name: 'Codex',
+          installed: true,
+          executable: '/test/bin/codex',
+          authentication: { state: 'authenticated', method: 'chatgpt' },
+        }
+      },
+      invalidate() {},
+    },
+    processRunner: async () => ({
+      exitCode: 0,
+      stdout: '{"type":"item.completed","item":{"type":"agent_message","text":"done"}}\n{"type":"turn.completed","usage":{}}\n',
+      stderr: '',
+      aborted: false,
+      timedOut: false,
+      error: null,
+    }),
+  })
+
+  await assert.rejects(
+    chats.run(
+      { provider: 'codex', prompt: 'do work', projectPath: fixture.repository, workspaceKey: 'window-a:chat-lease-lost' },
+      { onEvent: (event) => events.push(event) },
+    ),
+    (error) => error.code === 'workspace_write_lock_lost',
+  )
+
+  assert.equal(commitCalls, 0)
+  assert.equal(events.some((event) => event.code === 'agent_work_committed'), false)
+  assert.equal(events.some((event) => event.code === 'agent_work_commit_failed'), false)
+})
+
+test('acquire merges new baseline commits into a reused conversation branch', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-sync')
+  await writeFile(join(first.workspace.projectPath, 'agent-work.txt'), 'agent side\n')
+  await first.release()
+
+  // Baseline advances (as if another chat landed work).
+  await writeFile(join(fixture.repository, 'landed.txt'), 'landed by another chat\n')
+  await git(fixture.repository, ['add', 'landed.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-other'])
+
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-sync')
+  context.after(() => resumed.release())
+  const landed = await git(resumed.workspace.repositoryPath, ['show', 'HEAD:landed.txt'])
+  assert.equal(landed, 'landed by another chat')
+  // Recovery-committed agent work survives the merge.
+  const agentSide = await git(resumed.workspace.repositoryPath, ['show', 'HEAD:agent-work.txt'])
+  assert.equal(agentSide, 'agent side')
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+})
+
+test('acquire fails closed with the conflicting files when baseline sync conflicts', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  await writeFile(join(first.workspace.projectPath, 'tracked.txt'), 'agent version\n')
+  await first.release()
+
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'baseline version\n')
+  await git(fixture.repository, ['add', 'tracked.txt'])
+  await git(fixture.repository, ['commit', '-m', 'baseline change'])
+
+  await assert.rejects(
+    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
+    (error) => error instanceof ProjectIsolationError
+      && error.code === 'workspace_baseline_conflict'
+      && /tracked\.txt/.test(error.message),
+  )
+
+  // The aborted merge leaves no merge in progress, so a retry fails the same
+  // clean way instead of erroring on a half-merged worktree.
+  await assert.rejects(
+    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
+    (error) => error instanceof ProjectIsolationError && error.code === 'workspace_baseline_conflict',
+  )
+})
+
+test('commitAgentWork on a clean worktree commits nothing', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-clean')
+  context.after(() => lease.release())
+
+  const headBefore = await git(lease.workspace.repositoryPath, ['rev-parse', 'HEAD'])
+  const result = await isolation.commitAgentWork(lease.workspace, { outcome: 'failed' })
+  assert.equal(result.committed, false)
+  assert.equal(result.changedFiles, 0)
+  assert.equal(result.head, headBefore)
+})
+
+test('checkSharedCheckout reports user-style changes without attribution and reverts as destructive', async (context) => {
+  const fixture = await repositoryFixture(context)
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'dirty before run\n')
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect')
+  context.after(() => lease.release())
+
+  // Unchanged.
+  const same = await isolation.checkSharedCheckout(lease.workspace)
+  assert.deepEqual({ available: same.available, changed: same.changed }, { available: true, changed: false })
+
+  // Additive edit: changed, not destructive.
+  await writeFile(join(fixture.repository, 'new-user-file.txt'), 'user typing during run\n')
+  const edited = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(edited.changed, true)
+  assert.equal(edited.destructive, false)
+
+  // git checkout . shape: the pre-run dirty file reverts with no commit — destructive.
+  await rm(join(fixture.repository, 'new-user-file.txt'))
+  await git(fixture.repository, ['checkout', '--', 'tracked.txt'])
+  const reverted = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(reverted.changed, true)
+  assert.equal(reverted.destructive, true)
+})
+
+test('checkSharedCheckout treats an Ensync land commit as landed, not changed', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect-land')
+  context.after(() => lease.release())
+
+  await writeFile(join(fixture.repository, 'other-chat.txt'), 'landed content\n')
+  await git(fixture.repository, ['add', 'other-chat.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-feedbeeffeedbeeffeedbeef'])
+
+  const result = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(result.landed, true)
+  assert.equal(result.changed, false)
+})
+
+test('checkSharedCheckout reports a landed commit plus a concurrent user edit as changed, landed, and not destructive', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const lease = await isolation.acquire(fixture.repository, 'window-a:chat-detect-land-mixed')
+  context.after(() => lease.release())
+
+  await writeFile(join(fixture.repository, 'other-chat.txt'), 'landed content\n')
+  await git(fixture.repository, ['add', 'other-chat.txt'])
+  await git(fixture.repository, ['commit', '-m', 'Ensync land: ensync/chat-feedbeeffeedbeeffeedbeef'])
+  await writeFile(join(fixture.repository, 'concurrent-user-edit.txt'), 'typed during run\n')
+
+  const result = await isolation.checkSharedCheckout(lease.workspace)
+  assert.equal(result.changed, true)
+  assert.equal(result.landed, true)
+  assert.equal(result.destructive, false)
+})
+
+test('recoverStrandedWorktrees commits dirty stranded worktrees and skips active leases', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+
+  const stranded = await isolation.acquire(fixture.repository, 'window-a:chat-stranded')
+  await writeFile(join(stranded.workspace.projectPath, 'stranded.txt'), 'never committed\n')
+  const strandedPath = stranded.workspace.repositoryPath
+  await stranded.release()
+
+  const active = await isolation.acquire(fixture.repository, 'window-a:chat-active')
+  context.after(() => active.release())
+  await writeFile(join(active.workspace.projectPath, 'active.txt'), 'in flight\n')
+
+  const summary = await isolation.recoverStrandedWorktrees()
+  assert.equal(summary.recovered.length, 1)
+  assert.equal(summary.recovered[0].worktreePath, strandedPath)
+  assert.equal(summary.recovered[0].changedFiles, 1)
+  assert.ok(summary.skipped.some((entry) => entry.reason === 'active_lease'))
+  const subject = await git(strandedPath, ['log', '-1', '--format=%s'])
+  assert.equal(subject, 'Ensync agent work (recovered)')
+  // The active worktree was not touched.
+  assert.match(await git(active.workspace.repositoryPath, ['status', '--porcelain']), /active\.txt/)
+})
+
+test('a new conversation workspace is seeded from the fetched canonical remote base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const staleHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  assert.notEqual(canonical, staleHead)
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.gitBefore.head, canonical)
+  assert.equal(acquired.workspace.base.sha, canonical)
+  assert.equal(acquired.workspace.base.source, 'remote_default_branch')
+  assert.equal(acquired.workspace.base.remote, 'origin')
+  assert.equal(acquired.workspace.base.branch, 'main')
+  assert.equal(
+    await readFile(join(acquired.workspace.projectPath, 'combined-offer.txt'), 'utf8'),
+    'rent and sale\n',
+  )
+  assert.equal(await git(fixture.repository, ['rev-parse', 'HEAD']), staleHead)
+  await acquired.release()
+})
+
+test('uncommitted shared-checkout work is replayed on top of the refreshed canonical base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'user edit\n')
+  await writeFile(join(fixture.repository, 'untracked.txt'), 'user note\n')
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.gitBefore.head, canonical)
+  assert.equal(acquired.workspace.seededFromSharedCheckout, true)
+  assert.equal(acquired.workspace.gitBefore.dirty, true)
+  const workspacePath = acquired.workspace.projectPath
+  assert.equal(await readFile(join(workspacePath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(workspacePath, 'tracked.txt'), 'utf8'), 'user edit\n')
+  assert.equal(await readFile(join(workspacePath, 'untracked.txt'), 'utf8'), 'user note\n')
+  const changed = (await git(workspacePath, ['status', '--porcelain'])).split('\n').filter(Boolean)
+  assert.equal(changed.length, 2)
+  assert.equal(await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'), 'user edit\n')
+  await acquired.release()
+})
+
+test('a resumed conversation worktree receives newly integrated canonical work', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  await writeFile(join(first.workspace.projectPath, 'agent-work.txt'), 'in progress\n')
+  await first.release()
+
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.reused, true)
+  assert.equal(resumed.workspace.base.sha, canonical)
+  assert.equal(resumed.workspace.base.refreshed, true)
+  assert.equal(
+    await readFile(join(resumed.workspace.projectPath, 'combined-offer.txt'), 'utf8'),
+    'rent and sale\n',
+  )
+  assert.equal(await readFile(join(resumed.workspace.projectPath, 'agent-work.txt'), 'utf8'), 'in progress\n')
+  await resumed.release()
+})
+
+test('uncommitted work that conflicts with the canonical base is preserved on the local commit', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await fixture.publish('tracked.txt', 'canonical edit\n', 'canonical edit')
+  await writeFile(join(fixture.repository, 'tracked.txt'), 'conflicting user edit\n')
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'local_changes_conflict')
+  assert.equal(acquired.workspace.base.sha, localHead)
+  assert.equal(acquired.workspace.base.refreshed, false)
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.equal(
+    await readFile(join(acquired.workspace.projectPath, 'tracked.txt'), 'utf8'),
+    'conflicting user edit\n',
+  )
+  assert.equal(await git(acquired.workspace.repositoryPath, ['status', '--porcelain']), 'M tracked.txt')
+  assert.equal(await readFile(join(fixture.repository, 'tracked.txt'), 'utf8'), 'conflicting user edit\n')
+  await acquired.release()
+})
+
+test('a resumed conversation keeps its own commits when the canonical base advances', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  const worktree = first.workspace.repositoryPath
+  await writeFile(join(worktree, 'agent-work.txt'), 'agent commit\n')
+  await git(worktree, ['add', 'agent-work.txt'])
+  await git(worktree, ['commit', '-m', 'agent work'])
+  await first.release()
+
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.base.refreshed, true)
+  assert.equal(await readFile(join(worktree, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(worktree, 'agent-work.txt'), 'utf8'), 'agent commit\n')
+  await git(worktree, ['merge-base', '--is-ancestor', canonical, 'HEAD'])
+  assert.equal(resumed.workspace.integration.integrated, false)
+  assert.equal(resumed.workspace.integration.unintegratedCommits > 0, true)
+  await resumed.release()
+})
+
+test('a resumed conversation that conflicts with the canonical base is left untouched and reported', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  const worktree = first.workspace.repositoryPath
+  await writeFile(join(worktree, 'tracked.txt'), 'agent version\n')
+  await git(worktree, ['add', 'tracked.txt'])
+  await git(worktree, ['commit', '-m', 'agent edit'])
+  const agentHead = await git(worktree, ['rev-parse', 'HEAD'])
+  await first.release()
+
+  await fixture.publish('tracked.txt', 'canonical version\n', 'canonical edit')
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(resumed.workspace.base.refreshed, false)
+  assert.equal(resumed.workspace.base.source, 'base_refresh_deferred')
+  assert.equal(resumed.workspace.base.sha, agentHead)
+  assert.ok(resumed.workspace.base.reason)
+  assert.equal(resumed.workspace.gitBefore.head, agentHead)
+  assert.equal(await readFile(join(worktree, 'tracked.txt'), 'utf8'), 'agent version\n')
+  assert.equal(await git(worktree, ['status', '--porcelain']), '')
+  await resumed.release()
+})
+
+test('a divergent local history keeps the local base and reports the exact reason', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  await writeFile(join(fixture.repository, 'local-only.txt'), 'local work\n')
+  await git(fixture.repository, ['add', 'local-only.txt'])
+  await git(fixture.repository, ['commit', '-m', 'local only'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'divergent_local_history')
+  assert.equal(acquired.workspace.base.sha, localHead)
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.match(acquired.workspace.base.reason, /diverged/i)
+  await assert.rejects(readFile(join(acquired.workspace.projectPath, 'combined-offer.txt')), { code: 'ENOENT' })
+  await acquired.release()
+})
+
+test('a local checkout ahead of the canonical branch keeps its own head', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await writeFile(join(fixture.repository, 'local-only.txt'), 'local work\n')
+  await git(fixture.repository, ['add', 'local-only.txt'])
+  await git(fixture.repository, ['commit', '-m', 'local only'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'local_head_ahead')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  await acquired.release()
+})
+
+test('an unsafe configured remote never runs Git fetch and never blocks the run', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await git(fixture.repository, ['remote', 'set-url', 'origin', 'ext::sh -c whoami'])
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  const attempted = []
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    gitRunner: (args, options) => {
+      attempted.push(args[0])
+      return runGit(args, options)
+    },
+  })
+
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(attempted.includes('fetch'), false)
+  assert.equal(acquired.workspace.base.source, 'unsafe_remote')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.match(acquired.workspace.base.reason, /unsupported/i)
+  await acquired.release()
+})
+
+test('an unreachable canonical remote reports the failure and still starts the workspace', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const localHead = await git(fixture.repository, ['rev-parse', 'HEAD'])
+  await rm(fixture.remote, { recursive: true, force: true })
+
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const acquired = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+
+  assert.equal(acquired.workspace.base.source, 'stale_remote_ref')
+  assert.equal(acquired.workspace.gitBefore.head, localHead)
+  assert.ok(acquired.workspace.base.reason)
+  await acquired.release()
+})
+
+test('concurrent conversations in one repository share a single canonical fetch', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  let fetches = 0
+  const gitRunner = (args, options) => {
+    if (args[0] === 'fetch') fetches += 1
+    return runGit(args, options)
+  }
+  const first = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), gitRunner, lockPollMs: 10 })
+  const second = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), gitRunner, lockPollMs: 10 })
+
+  const [a, b] = await Promise.all([
+    first.acquire(fixture.repository, 'window-a:chat-a'),
+    second.acquire(fixture.repository, 'window-b:chat-b'),
+  ])
+
+  assert.equal(fetches, 1)
+  assert.equal(a.workspace.base.sha, b.workspace.base.sha)
+  assert.equal(await readFile(join(a.workspace.projectPath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  assert.equal(await readFile(join(b.workspace.projectPath, 'combined-offer.txt'), 'utf8'), 'rent and sale\n')
+  await a.release()
+  await b.release()
+})
+
+test('a chat branch reports how much of its work is not yet contained in the canonical base', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, baseFetchTtlMs: 0 })
+
+  const first = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  assert.equal(first.workspace.integration.integrated, true)
+  assert.equal(first.workspace.integration.unintegratedCommits, 0)
+  const workspacePath = first.workspace.repositoryPath
+  await writeFile(join(workspacePath, 'agent-work.txt'), 'finished\n')
+  await git(workspacePath, ['add', 'agent-work.txt'])
+  await git(workspacePath, ['commit', '-m', 'agent work'])
+  await first.release()
+
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+  assert.equal(resumed.workspace.integration.integrated, false)
+  assert.equal(resumed.workspace.integration.unintegratedCommits, 1)
+  await resumed.release()
+})
+
+test('ChatRunService reports the canonical base to the user and the provider', async (context) => {
+  const fixture = await remoteRepositoryFixture(context)
+  const canonical = await fixture.publish('combined-offer.txt', 'rent and sale\n', 'combined offer')
+  const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
+  const events = []
+  let providerPrompt
+  const service = new ChatRunService({
+    projectIsolation: isolation,
+    statusService: {
+      async get() {
+        return {
+          id: 'claude',
+          name: 'Claude Code',
+          installed: true,
+          executable: '/test/bin/claude',
+          authentication: { state: 'authenticated', method: 'claude.ai OAuth' },
+        }
+      },
+      invalidate() {},
+    },
+    processRunner: async (_executable, _args, options) => {
+      providerPrompt = options.input
+      return {
+        exitCode: 0,
+        error: null,
+        timedOut: false,
+        aborted: false,
+        stderr: '',
+        stdout: JSON.stringify({
+          type: 'result',
+          is_error: false,
+          result: 'completed safely',
+          session_id: null,
+          usage: {},
+        }),
+      }
+    },
+  })
+
+  const result = await service.run({
+    provider: 'claude',
+    projectPath: fixture.repository,
+    workspaceKey: 'window-a:chat-a',
+    prompt: 'Continue the combined offer work',
+  }, { onEvent: (event) => events.push(event) })
+
+  const ready = events.find((event) => event.code === 'project_workspace_ready')
+  assert.equal(ready.workspace.base.sha, canonical)
+  assert.equal(ready.workspace.base.source, 'remote_default_branch')
+  assert.match(ready.message, /origin\/main/)
+  assert.equal(result.workspace.base.sha, canonical)
+  assert.match(providerPrompt, new RegExp(`Base: origin/main at ${canonical}`))
 })
