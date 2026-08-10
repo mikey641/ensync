@@ -29,13 +29,17 @@ const MAX_CAPTURE_BYTES = 512 * 1024
 const TCL_UNSAFE_PATTERN = /[{}[\]$"\\]|[\u0000-\u001f\u007f]/
 
 // One entry per Standard window line, matched against the whole cleaned
-// capture. The reset arrow and duration are optional because a fully consumed
-// window may drop its countdown.
-const WINDOW_PATTERNS = [
-  { label: '5-hour', pattern: /^\s*│\s*5-hour\s+([0-9]+(?:\.[0-9]+)?)%(?:\s+↻\s+(.+?))?\s*│\s*$/ },
-  { label: 'Weekly', pattern: /^\s*│\s*Weekly\s+([0-9]+(?:\.[0-9]+)?)%(?:\s+↻\s+(.+?))?\s*│\s*$/ },
-  { label: 'Monthly', pattern: /^\s*│\s*Monthly\s+([0-9]+(?:\.[0-9]+)?)%(?:\s+↻\s+(.+?))?\s*│\s*$/ },
-]
+// capture. Everything between the percentage and the right border is a free
+// annotation column, so the row stays readable whichever copy droid puts
+// there: `↻ 3h 21min` while the window counts down, "Use Droid to start" once
+// it has reset to 0%, or nothing at all. Only a `↻` annotation is a reset
+// countdown; any other copy leaves the reset unreported rather than voiding
+// the whole panel.
+const WINDOW_PATTERNS = ['5-hour', 'Weekly', 'Monthly'].map((label) => ({
+  label,
+  pattern: new RegExp(`^\\s*│\\s*${label}\\s+([0-9]+(?:\\.[0-9]+)?)%\\s*([^│]*?)\\s*│\\s*$`),
+}))
+const RESET_ANNOTATION_PATTERN = /^↻\s+(.+)$/
 // The filled radio glyph proves which billing pool the percentages belong to.
 const STANDARD_TAB_PATTERN = /^\s*│\s*◉ Standard\s*\|/
 const EXTRA_USAGE_PATTERN = /\(\$([0-9][0-9,]*\.[0-9]{2}) remaining\)/
@@ -57,7 +61,8 @@ function windowReadings(lines, { label, pattern }) {
   const readings = lines.flatMap((line) => {
     const match = line.match(pattern)
     if (!match) return []
-    return [{ usedPercent: numericPercent(match[1]), resetLabel: match[2]?.trim() || null }]
+    const countdown = match[2].match(RESET_ANNOTATION_PATTERN)
+    return [{ usedPercent: numericPercent(match[1]), resetLabel: countdown?.[1].trim() || null }]
   })
   if (readings.length === 0) return null
   if (readings.some((reading) => reading.usedPercent === null)) return null

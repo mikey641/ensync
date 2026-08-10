@@ -92,6 +92,37 @@ test('Droid limits parser accepts decimal percentages and a missing reset arrow'
   assert.equal(usage.details[2].value, '100% used')
 })
 
+// Verbatim from a live droid 0.191.1 capture once the 5-hour window had reset:
+// at 0% the panel replaces the ↻ countdown with a call to action, and treating
+// that row as unreadable used to void the whole panel.
+test('Droid limits parser reads a window whose countdown is replaced by a call to action', () => {
+  const fiveHour = '5-hour   0%                                  Use Droid to start'
+  const stdout = [limitsFrame({ fiveHour }), limitsFrame({ fiveHour })].join('\n')
+  const usage = parseDroidLimitsCapture(captureResult(stdout), CHECKED_AT)
+
+  assert.equal(usage.usedPercent, 14)
+  assert.equal(usage.remainingPercent, 86)
+  assert.equal(usage.resetWindow, 'Weekly')
+  assert.equal(usage.resetLabel, '6 days')
+  assert.deepEqual(usage.details, [
+    { label: 'Quota type', value: 'Subscription quota (Standard)' },
+    { label: '5-hour', value: '0% used' },
+    { label: 'Weekly', value: '14% used · resets in 6 days' },
+    { label: 'Monthly', value: '4% used · resets in 29 days' },
+    { label: 'Extra Usage', value: '$0.00 remaining' },
+  ])
+})
+
+test('Droid limits parser still rejects a window row without a readable percentage', () => {
+  assert.equal(
+    parseDroidLimitsCapture(
+      captureResult(limitsFrame({ fiveHour: '5-hour   --   Use Droid to start' })),
+      CHECKED_AT,
+    ),
+    null,
+  )
+})
+
 test('Droid limits parser rejects frames that disagree on a percentage', () => {
   const stdout = [
     limitsFrame(),
