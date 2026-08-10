@@ -36,7 +36,12 @@ if (projectIsolationRoot && !isAbsolute(projectIsolationRoot)) {
 }
 await access(hostEntry)
 
-const [{ startEnsyncHost }, { DaemonLeaseService, shouldKeepDaemonAlive }] = await Promise.all([
+const [{ startEnsyncHost }, {
+  DaemonLeaseService,
+  hostSourceStamp,
+  shouldKeepDaemonAlive,
+  shouldRetireForStaleSource,
+}] = await Promise.all([
   import(pathToFileURL(hostEntry).href),
   // Source and packaged builds both keep the daemon module beside server.mjs.
   import(new URL('./daemon-lifecycle.mjs', pathToFileURL(hostEntry)).href),
@@ -44,6 +49,11 @@ const [{ startEnsyncHost }, { DaemonLeaseService, shouldKeepDaemonAlive }] = awa
 if (typeof startEnsyncHost !== 'function') {
   throw new Error('The bundled Ensync Host does not export startEnsyncHost().')
 }
+
+// Node caches these modules for the life of the process, so stamp the directory
+// they were just imported from: a later build shipped over it will not match.
+const hostDirectory = dirname(hostEntry)
+const loadedSourceStamp = detachedMode ? await hostSourceStamp(hostDirectory) : null
 
 const daemonLeaseService = detachedMode ? new DaemonLeaseService() : null
 const instanceId = randomUUID()
@@ -124,18 +134,41 @@ async function stop(exitCode = 0) {
   process.exit(exitCode)
 }
 
-let idleSince = null
-const cleanupTimer = detachedMode ? setInterval(() => {
-  server.ensyncServices.chatJobs.sweep()
+function daemonBusy() {
   const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
-  const idle = !brokerConnected && !shouldKeepDaemonAlive(
+  return brokerConnected || shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )
-  if (!idle) {
+}
+
+// Retiring is checked while idle instead of waiting out the idle timeout, so a
+// freshly shipped build takes over on the app's next request. Re-reading the
+// busy state after the stamp resolves keeps work that started meanwhile safe.
+let retireCheckRunning = false
+async function retireIfSourceChanged() {
+  if (retireCheckRunning || stopping || !loadedSourceStamp) return
+  retireCheckRunning = true
+  try {
+    const currentStamp = await hostSourceStamp(hostDirectory)
+    if (!shouldRetireForStaleSource(loadedSourceStamp, currentStamp, daemonBusy())) return
+    if (process.stderr.writable) {
+      process.stderr.write('[ensync-host] retiring: bundled host code changed\n')
+    }
+    await stop(0)
+  } finally {
+    retireCheckRunning = false
+  }
+}
+
+let idleSince = null
+const cleanupTimer = detachedMode ? setInterval(() => {
+  server.ensyncServices.chatJobs.sweep()
+  if (daemonBusy()) {
     idleSince = null
     return
   }
+  void retireIfSourceChanged()
   idleSince ??= Date.now()
   if (Date.now() - idleSince >= idleShutdownMs) void stop(0)
 }, Math.min(5_000, Math.max(100, Math.floor(idleShutdownMs / 4)))) : null
