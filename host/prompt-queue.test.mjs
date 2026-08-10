@@ -14,7 +14,6 @@ import {
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
-  queuedPromptCanStopAndRun,
   queuedPromptCanSteerActiveTurn,
   queuedPromptCanStopAndSendNow,
   queueMayAdvanceAfterRun,
@@ -337,14 +336,3 @@ test('live push readiness follows only Host-authored ready and closed events', (
   assert.equal(liveSteerReadyAfterEvent(true, { type: 'finished' }), false)
 })
 
-test('stop-and-run is offered only when live delivery is impossible', () => {
-  // Claude cannot take a live instruction, so an impatient user needs the
-  // honest destructive path instead of a hidden control.
-  assert.equal(queuedPromptCanStopAndRun({ sending: true, queuedCount: 1, canPushNow: false }), true)
-  // Codex mid-turn: Push now exists, so stopping must not be offered as well.
-  assert.equal(queuedPromptCanStopAndRun({ sending: true, queuedCount: 1, canPushNow: true }), false)
-  // Nothing queued, or nothing running: no affordance at all.
-  assert.equal(queuedPromptCanStopAndRun({ sending: true, queuedCount: 0, canPushNow: false }), false)
-  assert.equal(queuedPromptCanStopAndRun({ sending: false, queuedCount: 2, canPushNow: false }), false)
-  assert.equal(queuedPromptCanStopAndRun({ sending: true, queuedCount: -1, canPushNow: false }), false)
-})

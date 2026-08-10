@@ -24,6 +24,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
+import { installApp } from './install-app.mjs'
 
 const execFile = promisify(execFileCallback)
 const LAND_CHECK_TIMEOUT_MS = 15 * 60 * 1_000
@@ -221,6 +222,16 @@ async function run() {
   console.log(`[${repoName}] ${merged} landed, ${refused} refused, ${upToDate} up to date, ${active} active.`)
   if (merged > 0 && remote) {
     console.log(`[${repoName}] ${await gitOk(['push', 'origin', 'main'], { cwd: repoRoot }) ? 'Pushed.' : 'Push failed; landed locally.'}`)
+  }
+  // Installing is a consequence of landing, never something a conversation
+  // does from its own branch — that is how unlanded work kept replacing
+  // landed work in the installed app.
+  if (merged > 0) {
+    try {
+      await installApp({ repoRoot, log: (line) => console.log(`[${repoName}] ${line}`) })
+    } catch (error) {
+      console.error(`[${repoName}] [install] skipped: ${error.message}`)
+    }
   }
 }
 
