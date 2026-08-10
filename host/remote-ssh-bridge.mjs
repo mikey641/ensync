@@ -330,9 +330,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
   }
 
   function validateWorkspaceKey(value) {
-    if (value === undefined || value === null) {
-      throw bridgeError('client_upgrade_required', 'This Ensync bridge is older than the requesting Host. Update Ensync on both computers before starting another remote agent run.')
-    }
     if (typeof value !== 'string' || !value.trim() || value.length > 512 || /[\u0000-\u001f\u007f]/.test(value)) {
       throw bridgeError('invalid_workspace_key', 'A stable Ensync conversation workspace key is required for remote agent execution.')
     }
