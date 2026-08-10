@@ -175,7 +175,7 @@ const providerDefinitions = [
     ),
     usageKind: 'subscription_quota',
     usageReason:
-      'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
+      'Factory Droid exposes plan windows, Droid Core, and Extra Usage only in its interactive /limits view. Verified against droid 0.191.1: no exec or daemon JSON-RPC method returns billing limits, and sending /limits through droid exec consumes a real model turn instead of opening the panel.',
   },
   {
     id: 'auggie',
@@ -342,7 +342,7 @@ const providerCatalog = {
     chatExecution: 'supported',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Ensync still has no /limits quota adapter, so remaining capacity is unknown.',
+    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. The /limits usage view has no machine-readable equivalent (verified against droid 0.191.1), so remaining capacity stays unknown until Factory ships one.',
   },
   auggie: {
     routeKind: 'subscription',

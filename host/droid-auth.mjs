@@ -50,8 +50,10 @@ export function parseDroidCredentialState(credential, checkedAt) {
     reason: 'A Factory CLI browser login is stored on this machine. Droid revalidates the credential itself when a run starts.',
     source: 'cli',
     checkedAt,
-    // Droid reports plan windows only in its interactive /limits view, so
-    // Ensync has no exact plan name to publish here.
+    // Droid reports plan windows only in its interactive /limits view (no
+    // machine-readable equivalent — verified 2026-08-10 against droid
+    // 0.191.1; the research ledger records the evidence), so Ensync has no
+    // exact plan name to publish here.
     exactPlan: null,
   }
 }
