@@ -127,19 +127,51 @@ export function parseClaudeUsageProbe(result, checkedAt = new Date().toISOString
   }
 }
 
-export async function probeClaudeUsage(executable, checkedAt, plan) {
-  const result = await runProcess(executable, [
-    '--print',
-    '--verbose',
-    '--output-format',
-    'stream-json',
-    '--safe-mode',
-    '--tools',
-    '',
-    '--no-session-persistence',
-  ], {
+// `claude --print /usage` boots the whole CLI and performs a billing round trip
+// before it prints anything, measured at 4-7s idle and up to 13s while the rest
+// of the provider sweep runs its own CLIs alongside it. The former 8s ceiling
+// sat inside that range, so a busy refresh killed the read mid-flight, left an
+// empty capture, and blanked a percentage the previous refresh had shown. The
+// ceiling is now a runaway backstop well clear of the measured worst case.
+const PROBE_TIMEOUT_MS = 30_000
+
+const PROBE_ARGS = Object.freeze([
+  '--print',
+  '--verbose',
+  '--output-format',
+  'stream-json',
+  '--safe-mode',
+  '--tools',
+  '',
+  '--no-session-persistence',
+])
+
+// Only a run that never delivered an answer is worth repeating. A CLI that
+// exited cleanly and simply did not report subscription quota — an API-key
+// account, say — would answer the same way every time, so retrying it would
+// double the probe cost of every refresh for nothing.
+function answeredCleanly(result) {
+  return Boolean(result)
+    && !result.timedOut
+    && !result.error
+    && result.exitCode === 0
+    && typeof result.stdout === 'string'
+    && result.stdout.trim() !== ''
+}
+
+export async function probeClaudeUsage(executable, checkedAt, plan, options = {}) {
+  const run = options.runProcess ?? runProcess
+  const attempt = () => run(executable, [...PROBE_ARGS], {
     input: '/usage',
-    timeoutMs: 8_000,
+    timeoutMs: PROBE_TIMEOUT_MS,
   })
-  return parseClaudeUsageProbe(result, checkedAt, plan)
+
+  const first = await attempt()
+  const usage = parseClaudeUsageProbe(first, checkedAt, plan)
+  if (usage || answeredCleanly(first)) return usage
+  // The retry covers the residue the higher ceiling cannot: a probe racing a
+  // manual refresh, or a CLI that dies on startup. /usage consumes no quota and
+  // no model turn, so a second read costs only time.
+  if (options.retryOnFailedRead === false) return null
+  return parseClaudeUsageProbe(await attempt(), checkedAt, plan)
 }

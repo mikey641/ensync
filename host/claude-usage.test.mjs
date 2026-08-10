@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { parseClaudeUsageProbe } from './claude-usage.mjs'
+import { parseClaudeUsageProbe, probeClaudeUsage } from './claude-usage.mjs'
 
 function probeResult(terminal) {
   return {
@@ -107,4 +107,91 @@ test('Claude usage parser rejects output that consumed a model turn', () => {
     usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
     result: 'You are currently using your subscription\nCurrent week (all models): 50% used',
   })), null)
+})
+
+const subscriptionReport = () => probeResult({
+  type: 'result',
+  is_error: false,
+  num_turns: 0,
+  duration_api_ms: 0,
+  total_cost_usd: 0,
+  usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+  result: 'You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 12% used\nCurrent week (all models): 74% used',
+})
+
+const killedByTimeout = () => ({
+  exitCode: 143,
+  error: null,
+  timedOut: true,
+  timeoutReason: 'hard_limit',
+  stdout: '',
+  stderr: '',
+})
+
+test('Claude usage probe gives the /usage read more time than a plain CLI call', async () => {
+  const calls = []
+  const usage = await probeClaudeUsage('/opt/homebrew/bin/claude', '2026-08-10T18:00:00.000Z', 'max', {
+    runProcess: async (executable, args, options) => {
+      calls.push({ executable, args, options })
+      return subscriptionReport()
+    },
+  })
+
+  assert.equal(usage.usedPercent, 74)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].executable, '/opt/homebrew/bin/claude')
+  assert.equal(calls[0].options.input, '/usage')
+  // A full `claude --print /usage` round trip was measured at 4-13s on a healthy
+  // Mac, so the old 8s ceiling killed the read whenever the machine was busy.
+  assert.ok(
+    calls[0].options.timeoutMs >= 30_000,
+    `expected a ceiling above the measured worst case, got ${calls[0].options.timeoutMs}`,
+  )
+})
+
+test('a killed /usage probe is retried once before reporting no usage', async () => {
+  let attempts = 0
+  const usage = await probeClaudeUsage('/opt/homebrew/bin/claude', '2026-08-10T18:00:00.000Z', null, {
+    runProcess: async () => {
+      attempts += 1
+      return attempts === 1 ? killedByTimeout() : subscriptionReport()
+    },
+  })
+
+  assert.equal(attempts, 2)
+  assert.equal(usage?.usedPercent, 74)
+})
+
+test('two killed /usage probes report no usage without a third attempt', async () => {
+  let attempts = 0
+  const usage = await probeClaudeUsage('/opt/homebrew/bin/claude', '2026-08-10T18:00:00.000Z', null, {
+    runProcess: async () => {
+      attempts += 1
+      return killedByTimeout()
+    },
+  })
+
+  assert.equal(attempts, 2)
+  assert.equal(usage, null)
+})
+
+test('a completed CLI answer that reports no subscription quota is not retried', async () => {
+  let attempts = 0
+  const usage = await probeClaudeUsage('/opt/homebrew/bin/claude', '2026-08-10T18:00:00.000Z', null, {
+    runProcess: async () => {
+      attempts += 1
+      return probeResult({
+        type: 'result',
+        is_error: false,
+        num_turns: 0,
+        duration_api_ms: 0,
+        total_cost_usd: 0,
+        usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+        result: 'You are currently using a paid API key for your Claude Code usage',
+      })
+    },
+  })
+
+  assert.equal(attempts, 1)
+  assert.equal(usage, null)
 })
