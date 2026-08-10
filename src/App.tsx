@@ -1215,7 +1215,7 @@ function App() {
           ...provider,
           status: `Ensync Host unavailable: ${message}`,
           usageReason: 'Ensync is reconnecting to the local Host. Verified CLI values will return automatically.',
-        })))
+        }))
         return false
       }
     })()

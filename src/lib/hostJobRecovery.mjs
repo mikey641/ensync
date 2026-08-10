@@ -1,5 +1,5 @@
 const HOST_JOB_TURN_PATTERN = /^turn-[A-Za-z0-9_-]{8,96}$/
-const SUPPORTED_CHAT_PROVIDERS = Object.freeze(['codex', 'claude'])
+const SUPPORTED_CHAT_PROVIDERS = Object.freeze(['codex', 'claude', 'droid'])
 
 function providerOrder(chatProvider) {
   return SUPPORTED_CHAT_PROVIDERS.includes(chatProvider)
