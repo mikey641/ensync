@@ -50,6 +50,10 @@ export type Provider = {
   /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   usageReason: string
+  /** True when the shown percentage is the last verified reading, not this refresh's. */
+  usageStale?: boolean
+  /** Exact time the shown percentage was measured by the CLI. */
+  usageCheckedAt?: string | null
   canConnect: boolean
   /** True only when Ensync has a fixed, verified provider-owned self-update command. */
   canUpdate?: boolean

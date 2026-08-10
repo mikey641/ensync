@@ -780,6 +780,38 @@ export function getProviderCatalog() {
   }))
 }
 
+// A usage probe drives a real CLI, so it can lose a race it has no stake in: a
+// busy machine, a manual refresh landing on a scheduled one, a CLI that dies on
+// startup. Discarding a percentage the CLI already verified because the *next*
+// read failed tells the person their quota is unknown when Ensync knows it, and
+// the card visibly flips between a number and "quota unavailable".
+//
+// A verified reading is therefore kept across a failed refresh, but never
+// laundered as fresh: it keeps the checkedAt of the read that produced it, says
+// so in its reason, and carries stale: true. It is dropped as soon as it stops
+// being evidence — the account logged out, the CLI disappeared, or the reading
+// aged past the retention window — because a frozen percentage would be a
+// worse lie than an honest blank.
+const VERIFIED_USAGE_RETENTION_MS = 30 * 60_000
+
+function isVerifiedUsage(usage) {
+  return usage?.source === 'cli' && typeof usage.usedPercent === 'number'
+}
+
+// Only the state that made the old reading true. A percentage captured while
+// authenticated says nothing about a provider that has since logged out.
+function usageEvidenceKey(provider) {
+  return `${provider?.installed === true ? 'installed' : 'absent'}:${provider?.authentication?.state ?? 'unknown'}`
+}
+
+function retainedUsage(usage) {
+  return {
+    ...usage,
+    stale: true,
+    reason: `${usage.reason} This refresh's quota probe returned nothing, so Ensync kept the last verified reading rather than blanking it; it was measured at ${usage.checkedAt}.`,
+  }
+}
+
 export class ProviderStatusService {
   #cache = null
   #cacheDurationMs
@@ -787,11 +819,35 @@ export class ProviderStatusService {
   #inspect
   #inFlight = null
   #invalidatedWhileRefreshing = false
+  #verifiedUsage = new Map()
+  #verifiedUsageRetentionMs
+  #now
 
   constructor(options = {}) {
     this.#cacheDurationMs = options.cacheDurationMs ?? 60_000
     this.#definitions = options.definitions ?? providerDefinitions
     this.#inspect = options.inspectProvider ?? inspectProvider
+    this.#verifiedUsageRetentionMs = options.verifiedUsageRetentionMs ?? VERIFIED_USAGE_RETENTION_MS
+    this.#now = options.now ?? (() => Date.now())
+  }
+
+  #keepVerifiedUsage(providers) {
+    const currentMs = this.#now()
+    return providers.map((provider) => {
+      const evidenceKey = usageEvidenceKey(provider)
+      if (isVerifiedUsage(provider?.usage)) {
+        this.#verifiedUsage.set(provider.id, { usage: provider.usage, evidenceKey, capturedAtMs: currentMs })
+        return provider
+      }
+      const retained = this.#verifiedUsage.get(provider?.id)
+      if (!retained) return provider
+      if (retained.evidenceKey !== evidenceKey
+        || currentMs - retained.capturedAtMs > this.#verifiedUsageRetentionMs) {
+        this.#verifiedUsage.delete(provider.id)
+        return provider
+      }
+      return { ...provider, usage: retainedUsage(retained.usage) }
+    })
   }
 
   async list(options = {}) {
@@ -816,7 +872,9 @@ export class ProviderStatusService {
       providers = await Promise.all(this.#definitions.map((provider) => this.#inspect(provider)))
     } while (this.#invalidatedWhileRefreshing)
 
-    const ranked = rankProvidersByAvailability(providers, providerNavigationOrder)
+    // Retention runs before ranking so a provider whose probe lost a race keeps
+    // its place in the list instead of sinking to "capacity unknown".
+    const ranked = rankProvidersByAvailability(this.#keepVerifiedUsage(providers), providerNavigationOrder)
     this.#cache = { createdAt: Date.now(), providers: ranked }
     return ranked
   }
