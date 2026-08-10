@@ -3682,7 +3682,13 @@ function ConversationPane({
                   {automaticMode && <Check size={15} />}
                 </button>
                 <div className="menu-separator" />
-                {providers.map((item) => (
+                {[...providers]
+                  .sort((a, b) => {
+                    const aAvailable = a.connected && supportsChat(a) ? 0 : 1
+                    const bAvailable = b.connected && supportsChat(b) ? 0 : 1
+                    return aAvailable - bAvailable
+                  })
+                  .map((item) => (
                   <button key={item.id} disabled={!item.connected || !supportsChat(item)} onClick={() => onProviderChange(item.id)} title={supportsChat(item) ? item.status : `${item.name} chat execution is not supported yet.`}>
                     <ProviderMark provider={item} />
                     <span><strong>{item.name}</strong><small>{item.connected && supportsChat(item) ? `${item.usage === null ? 'Usage not reported' : `${item.usage}% used`} · Provider default model` : supportsChat(item) ? item.status : 'Chat execution not supported'}</small></span>
