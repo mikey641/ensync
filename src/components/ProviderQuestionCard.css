@@ -47,6 +47,22 @@
   overflow-wrap: anywhere;
 }
 
+/* The exact call being approved, laid out but never reworded. */
+.provider-question__detail {
+  margin: 0;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-main);
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--font-label);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .provider-question__chip {
   display: inline-block;
   margin-inline-end: 7px;
