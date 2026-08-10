@@ -8,3 +8,11 @@ export function splitPaneDisplayWeights(
   paneSizes: Readonly<Record<string, number>> | undefined,
   largestTabId: string | null | undefined,
 ): Record<string, number>
+
+export function largestPaneScrollLeft(measurements: {
+  scrollLeft: number
+  paneLeft: number
+  paneWidth: number
+  viewportWidth: number
+  scrollWidth: number
+}): number

@@ -17,6 +17,7 @@ import type { Chat, ConversationLayoutMode, Provider, WorkspaceTab } from '../ty
 import type { CompletionIndicatorPreference } from '../display-preferences'
 import { fileDragContainsFiles } from '../lib/fileAttachments.mjs'
 import {
+  largestPaneScrollLeft,
   selectSplitLayoutSource,
   splitPaneDisplayWeights,
 } from '../lib/splitLayoutPersistence.mjs'
@@ -312,6 +313,7 @@ export function SplitWorkspace({
   const blockTabDragRef = useRef(false)
   const suppressMaximizeAfterDragRef = useRef(false)
   const dragSuppressionTimerRef = useRef<number | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
   const {
     layout,
     hidePane,
@@ -448,6 +450,40 @@ export function SplitWorkspace({
       window.removeEventListener('pointercancel', finishDrag)
     }
   }, [resizeDragState, minPaneWidth, setPanePairSizes])
+
+  const renderedTabIdsKey = renderedTabs.map((tab) => tab.id).join('\n')
+
+  // Sibling minimum widths lay the enlarged pane out past the viewport's
+  // right edge; keep it fully in view on maximize and while sizes change.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    const largestTabId = viewMode === 'split' ? layout.maximizedTabId : null
+    if (!viewport || !largestTabId
+      || !renderedTabIdsKey.split('\n').includes(largestTabId)) return undefined
+
+    const alignLargestPane = () => {
+      const row = viewport.firstElementChild
+      const pane = Array.from(viewport.querySelectorAll<HTMLElement>('[data-tab-id]'))
+        .find((element) => element.dataset.tabId === largestTabId)
+      if (!row || !pane) return
+      const paneBounds = pane.getBoundingClientRect()
+      const target = largestPaneScrollLeft({
+        scrollLeft: viewport.scrollLeft,
+        paneLeft: paneBounds.left - row.getBoundingClientRect().left,
+        paneWidth: paneBounds.width,
+        viewportWidth: viewport.clientWidth,
+        scrollWidth: viewport.scrollWidth,
+      })
+      if (target !== viewport.scrollLeft) viewport.scrollLeft = target
+    }
+
+    alignLargestPane()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(alignLargestPane)
+    observer.observe(viewport)
+    if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+    return () => observer.disconnect()
+  }, [viewMode, layout.maximizedTabId, renderedTabIdsKey])
 
   useEffect(() => {
     if (!tabDragState) return undefined
@@ -781,7 +817,7 @@ export function SplitWorkspace({
           )}
         </div>
       ) : (
-        <div className="relay-split-viewport">
+        <div className="relay-split-viewport" ref={viewportRef}>
           <div className={`relay-split-panes ${viewMode === 'tabs' ? 'relay-split-panes--tabs' : ''}`}>
             {renderedTabs.map((tab, index) => {
               const chat = chatById.get(tab.chatId)

@@ -2,7 +2,7 @@ import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readFileSync } from 'node:fs'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
 
 import {
   APP_HOST,
@@ -62,6 +62,11 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
+  createWindowStateSession,
+  createWindowStateStore,
+  NATIVE_WINDOW_STATE_FILENAME,
+} from './window-state.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -92,6 +97,7 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
+let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -413,11 +419,14 @@ async function createWindow(workspaceIdentity) {
     return existingWindowAfterRuntimeStart
   }
 
+  const windowStateSession = createWindowStateSession({
+    workspaceId: workspaceIdentity.id,
+    store: windowStateStore,
+    displays: screen.getAllDisplays(),
+    primaryDisplay: screen.getPrimaryDisplay(),
+  })
   const window = new BrowserWindow({
-    width: 1440,
-    height: 940,
-    minWidth: 900,
-    minHeight: 620,
+    ...windowStateSession.browserWindowOptions,
     show: false,
     backgroundColor: '#17181c',
     title: 'Ensync',
@@ -433,6 +442,7 @@ async function createWindow(workspaceIdentity) {
   const recovery = createRendererCrashRecovery()
   let recoveryBlockedNoticeShown = false
   let preserveWorkspaceRecord = false
+  const disposeWindowState = windowStateSession.observe(window)
 
   window.webContents.setWindowOpenHandler(({ url }) => {
     if (url.startsWith('https://')) void shell.openExternal(url)
@@ -481,8 +491,9 @@ async function createWindow(workspaceIdentity) {
     nativeWindows.focus(window)
     nativeWorkspaceStore?.touch(workspaceIdentity.id)
   })
-  window.once('ready-to-show', () => showWindow(window))
+  windowStateSession.showWhenReady(window, showWindow)
   window.on('closed', () => {
+    disposeWindowState()
     recovery.dispose()
     projectLaunchByWorkspace.delete(workspaceIdentity.id)
     const retainWorkspace = shouldRetainNativeWorkspaceOnClose({
@@ -493,6 +504,7 @@ async function createWindow(workspaceIdentity) {
     })
     if (!retainWorkspace) {
       nativeWorkspaceStore?.remove(workspaceIdentity.id)
+      windowStateSession.forget()
     }
     nativeWindows.remove(window)
   })
@@ -540,6 +552,9 @@ if (!singleInstance) {
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
+    })
+    windowStateStore = createWindowStateStore({
+      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
