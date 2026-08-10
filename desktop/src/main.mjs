@@ -35,7 +35,6 @@ import {
   NATIVE_WORKSPACE_STATE_FILENAME,
   shouldRetainNativeWorkspaceOnClose,
   WORKSPACE_FOCUS_CHANNEL,
-  WORKSPACE_OPEN_PROJECT_CHANNEL,
   WORKSPACE_PROJECT_FOCUS_CHANNEL,
 } from './native-workspaces.mjs'
 import {
@@ -238,11 +237,6 @@ function registerNativeBridge() {
       window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)
     },
   }))
-  ipcMain.handle(WORKSPACE_OPEN_PROJECT_CHANNEL, createWorkspaceOpenProjectHandler({
-    isAuthorized: isAuthorizedNativeEvent,
-    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
-    openProjectWindow,
-  }))
   ipcMain.handle(WORKSPACE_RECOVERY_CHANNEL, createWorkspaceRecoveryHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -330,7 +324,6 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
-  ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
   ipcMain.removeHandler(LOCAL_FILE_OPEN_CHANNEL)

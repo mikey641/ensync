@@ -4,7 +4,6 @@ import { dirname } from 'node:path'
 
 export const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
 export const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
-export const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
 export const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 export const NATIVE_WORKSPACE_STATE_FILENAME = 'native-workspaces-v1.json'
 export const NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -164,10 +163,9 @@ export function createWorkspaceIdentityHandler({
       .filter(isNativeWorkspaceIdentity)
       .map((item) => ({ id: item.id, kind: item.kind }))
     const retainedWorkspaceIds = retainedWorkspaces.map((item) => item.id)
-    if (!isNativeWorkspaceIdentity(identity)) return null
-    const response = { id: identity.id, kind: identity.kind, retainedWorkspaceIds, retainedWorkspaces }
-    const projectLaunch = normalizeWorkspaceProjectLaunch(projectLaunchForIdentity(identity), identity)
-    return projectLaunch ? { ...response, projectLaunch } : response
+    return isNativeWorkspaceIdentity(identity)
+      ? { id: identity.id, kind: identity.kind, retainedWorkspaceIds, retainedWorkspaces }
+      : null
   }
 }
 
@@ -176,48 +174,6 @@ function absoluteLocalPath(value) {
   if (value.startsWith('/')) return value !== '/' && !/^\/+$/u.test(value)
   if (/^[a-z]:[\\/]/i.test(value)) return !/^[a-z]:[\\/]*$/i.test(value)
   return /^\\\\[^\\]+\\[^\\]+/.test(value)
-}
-
-function normalizeProjectRequest(request) {
-  if (!request || typeof request !== 'object'
-    || typeof request.projectId !== 'string'
-    || request.projectId.length === 0
-    || request.projectId.length > 256
-    || !absoluteLocalPath(request.projectPath)) return null
-  return { projectId: request.projectId, projectPath: request.projectPath }
-}
-
-function normalizeWorkspaceProjectLaunch(value, targetIdentity) {
-  const project = normalizeProjectRequest(value)
-  const sourceWorkspace = value?.sourceWorkspace
-  if (!project || !isNativeWorkspaceIdentity(targetIdentity)
-    || !isNativeWorkspaceIdentity(sourceWorkspace)
-    || sourceWorkspace.id === targetIdentity.id) return null
-  return {
-    ...project,
-    sourceWorkspace: { id: sourceWorkspace.id, kind: sourceWorkspace.kind },
-  }
-}
-
-export function createWorkspaceOpenProjectHandler({
-  isAuthorized,
-  identityForWebContents,
-  openProjectWindow,
-}) {
-  for (const [name, value] of Object.entries({
-    isAuthorized,
-    identityForWebContents,
-    openProjectWindow,
-  })) {
-    if (typeof value !== 'function') throw new TypeError(`${name} must be a function.`)
-  }
-  return async (event, request) => {
-    if (!isAuthorized(event)) return false
-    const sourceWorkspace = identityForWebContents(event.sender)
-    const project = normalizeProjectRequest(request)
-    if (!isNativeWorkspaceIdentity(sourceWorkspace) || !project) return false
-    return await openProjectWindow(project, sourceWorkspace) !== false
-  }
 }
 
 export function createWorkspaceFocusHandler({

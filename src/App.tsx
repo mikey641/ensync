@@ -130,10 +130,6 @@ import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
-  conversationWorkspaceKey,
-  resolveConversationWorkspaceKey,
-} from './lib/conversationWorkspaceKey.mjs'
-import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -191,7 +187,6 @@ import {
   getRetainedNativeWorkspaceIds,
   getRetainedNativeWorkspaces,
   isCanonicalWorkspace,
-  isNativeWorkspaceIdentity,
   refreshRetainedNativeWorkspaces,
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
@@ -202,10 +197,6 @@ import {
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
 import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
-import {
-  recoverFocusedProjectHistory,
-  recoverOpenedProjectHistory,
-} from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -362,14 +353,10 @@ function readInitialStoredState(): StoredState | null {
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
       legacyStates,
     }).state
-    const withArchivedProjects = recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
+    return recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
       identity,
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
     }).state
-    const projectLaunch = getInitialNativeProjectLaunch()
-    return projectLaunch
-      ? recoverOpenedProjectHistory(withArchivedProjects, window.localStorage, { projectLaunch }).state
-      : withArchivedProjects
   } catch {
     return null
   }
@@ -1572,102 +1559,8 @@ function App() {
     setActiveTabId('')
   }
 
-  const recoverProjectIntoCurrentWorkspace = (project: RelayProject) => {
-    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return false
-    const result = recoverFocusedProjectHistory(workspaceSnapshot, window.localStorage, {
-      project,
-      currentWorkspace: nativeWorkspaceIdentity,
-    })
-    if (!result.summary.recovered) return false
-
-    const recovered = result.state as Partial<StoredState>
-    const nextChats = (recovered.chats ?? []).map(normalizeChatModelChoice)
-    const nextTabs = [...(recovered.tabs ?? [])]
-    if (nextTabs.length === 0 && nextChats[0]) {
-      nextTabs.push({ id: `restored-tab-${nextChats[0].id}`, chatId: nextChats[0].id })
-    }
-    const nextTabIds = new Set(nextTabs.map((tab) => tab.id))
-    const nextActiveTabId = nextTabIds.has(recovered.activeTabId ?? '')
-      ? recovered.activeTabId ?? ''
-      : nextTabs[0]?.id ?? ''
-    const nextDrafts = recovered.drafts ?? {}
-    const nextDraftAttachments = Object.fromEntries(
-      Object.entries(recovered.draftAttachments ?? {}).map(([chatId, attachments]) => [
-        chatId,
-        normalizeFileAttachments(attachments),
-      ]),
-    )
-    const nextChatSessions = recovered.chatSessions ?? {}
-    const nextReadCompletionByChat = recovered.readCompletionByChat ?? {}
-    const nextExecutionPanelOpenByChat = normalizeExecutionPanelOpenByChat(
-      recovered.executionPanelOpenByChat,
-    )
-    const nextChatErrors = recovered.chatErrors ?? {}
-    const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
-    const nextInFlightRuns = recovered.inFlightRuns ?? {}
-    const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
-
-    chatsRef.current = nextChats
-    tabsRef.current = nextTabs
-    activeTabIdRef.current = nextActiveTabId
-    draftsRef.current = nextDrafts
-    draftAttachmentsRef.current = nextDraftAttachments
-    projectsRef.current = [project]
-    chatSessionsRef.current = nextChatSessions
-    chatErrorsRef.current = nextChatErrors
-    chatExecutionEventsRef.current = nextChatExecutionEvents
-    inFlightRunsRef.current = nextInFlightRuns
-    promptQueuesRef.current = nextPromptQueues
-
-    setProjects([project])
-    setActiveProjectId(project.id)
-    setChats(nextChats)
-    setTabs(nextTabs)
-    setActiveTabId(nextActiveTabId)
-    setDrafts(nextDrafts)
-    setDraftAttachments(nextDraftAttachments)
-    setChatSessions(nextChatSessions)
-    setReadCompletionByChat(nextReadCompletionByChat)
-    setExecutionPanelOpenByChat(nextExecutionPanelOpenByChat)
-    setChatErrors(nextChatErrors)
-    setChatExecutionEvents(nextChatExecutionEvents)
-    setInFlightRuns(nextInFlightRuns)
-    setPromptQueues(nextPromptQueues)
-    setSplitLayout(recovered.splitLayout)
-    if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
-      setPlacement(recovered.placement)
-    }
-    if (recovered.conversationLayout === 'tabs' || recovered.conversationLayout === 'split') {
-      setConversationLayout(recovered.conversationLayout)
-    }
-    setSearch('')
-    setProjectOpen(false)
-
-    commitWorkspace({
-      projects: [project],
-      activeProjectId: project.id,
-      chats: nextChats,
-      tabs: nextTabs,
-      activeTabId: nextActiveTabId,
-      drafts: nextDrafts,
-      draftAttachments: nextDraftAttachments,
-      chatSessions: nextChatSessions,
-      readCompletionByChat: nextReadCompletionByChat,
-      executionPanelOpenByChat: nextExecutionPanelOpenByChat,
-      chatErrors: nextChatErrors,
-      chatExecutionEvents: nextChatExecutionEvents,
-      inFlightRuns: nextInFlightRuns,
-      promptQueues: nextPromptQueues,
-      splitLayout: recovered.splitLayout,
-      ...(recovered.placement ? { placement: recovered.placement } : {}),
-      ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
-    })
-    void rememberNativeRecentProject(project).catch((error) => console.error('[ensync-recent-projects]', error))
-    return true
-  }
-
   const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
-    const workspaceHistory = {
+    const localHistoryScore = workspaceProjectHistoryScore({
       projects,
       chats,
       drafts,
@@ -1676,12 +1569,8 @@ function App() {
       chatExecutionEvents,
       inFlightRuns,
       promptQueues,
-    }
-    const sameProject = project.id === activeProject.id
-      || (nativeProjectPathKey(project.path)
-        && nativeProjectPathKey(project.path) === nativeProjectPathKey(activeProject.path))
-    const activeProjectHistoryScore = workspaceProjectHistoryScore(workspaceHistory, activeProject)
-    if (allowNativeRoute && !sameProject && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
+    }, project)
+    if (allowNativeRoute && localHistoryScore === 0 && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
       let retainedWorkspaces = getRetainedNativeWorkspaces()
       try {
         retainedWorkspaces = await refreshRetainedNativeWorkspaces(window)
@@ -1706,33 +1595,6 @@ function App() {
           }
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
-        }
-      }
-      if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
-        return
-      }
-      if (activeProjectHistoryScore > 0) {
-        if (typeof window.ensyncDesktop.openProjectWorkspace !== 'function') {
-          setProjectError('Quit Ensync completely and reopen it before opening another project window.')
-          return
-        }
-        try {
-          const opened = await window.ensyncDesktop.openProjectWorkspace({
-            projectId: project.id,
-            projectPath: project.path,
-          })
-          if (opened) {
-            setProjectOpen(false)
-          } else {
-            setProjectError('Ensync could not open another project window. The current project remains open.')
-          }
-          return
-        } catch (error) {
-          console.error('[ensync-workspace-open-project]', error)
-          setProjectError(error instanceof Error
-            ? error.message
-            : 'Ensync could not open another project window. The current project remains open.')
-          return
         }
       }
     }
@@ -1823,7 +1685,7 @@ function App() {
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: conversationWorkspaceKey(chatId),
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2691,7 +2553,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2700,7 +2562,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,

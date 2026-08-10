@@ -2,7 +2,6 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import {
-  getInitialNativeProjectLaunch,
   getNativeWorkspaceIdentity,
   getRetainedNativeWorkspaceIds,
   getRetainedNativeWorkspaces,
@@ -89,50 +88,6 @@ test('renderer refreshes retained workspaces created after its initial bootstrap
     { id: isolatedId, kind: 'isolated' },
   ])
   assert.deepEqual(getRetainedNativeWorkspaceIds(), [canonicalId, isolatedId])
-})
-
-test('renderer accepts a shell-issued project launch without changing its own identity', async () => {
-  const sourceId = '11111111-1111-4111-8111-111111111111'
-  const targetId = '22222222-2222-4222-8222-222222222222'
-  await initializeNativeWorkspaceIdentity({
-    ensyncDesktop: { getWorkspaceIdentity: async () => ({
-      id: targetId,
-      kind: 'isolated',
-      retainedWorkspaceIds: [sourceId, targetId],
-      retainedWorkspaces: [
-        { id: sourceId, kind: 'canonical' },
-        { id: targetId, kind: 'isolated' },
-      ],
-      projectLaunch: {
-        projectId: 'project-nadlan',
-        projectPath: '/Users/example/nadlan-desk',
-        sourceWorkspace: { id: sourceId, kind: 'canonical' },
-      },
-    }) },
-  })
-  assert.deepEqual(getNativeWorkspaceIdentity(), { id: targetId, kind: 'isolated' })
-  assert.deepEqual(getInitialNativeProjectLaunch(), {
-    projectId: 'project-nadlan',
-    projectPath: '/Users/example/nadlan-desk',
-    sourceWorkspace: { id: sourceId, kind: 'canonical' },
-  })
-})
-
-test('renderer rejects a project launch whose source is its own workspace', async () => {
-  const id = '11111111-1111-4111-8111-111111111111'
-  await assert.rejects(() => initializeNativeWorkspaceIdentity({
-    ensyncDesktop: { getWorkspaceIdentity: async () => ({
-      id,
-      kind: 'canonical',
-      retainedWorkspaceIds: [id],
-      retainedWorkspaces: [{ id, kind: 'canonical' }],
-      projectLaunch: {
-        projectId: 'project-nadlan',
-        projectPath: '/Users/example/nadlan-desk',
-        sourceWorkspace: { id, kind: 'canonical' },
-      },
-    }) },
-  }), /project window request/)
 })
 
 test('retained-workspace refresh cannot change a hydrated renderer identity', async () => {
