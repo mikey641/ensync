@@ -3,7 +3,6 @@ import { timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
-import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
@@ -199,9 +198,6 @@ export function createEnsyncHost(options = {}) {
   const providerUpdateLaunches = new Map()
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
-  })
-  const chatImages = options.chatImageService ?? new ChatImageService({
-    workspaceRoot: options.projectIsolationRoot,
   })
   const chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
@@ -922,7 +918,7 @@ export function createEnsyncHost(options = {}) {
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation }
   return server
 }
 
