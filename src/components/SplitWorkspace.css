@@ -228,6 +228,21 @@
   overflow-y: hidden;
   scrollbar-width: thin;
   container-type: inline-size;
+  /*
+   * The row is allowed to overflow horizontally, so without snapping it can
+   * rest between two panes and clip both of them. Every resting scroll offset
+   * must land on a pane edge instead.
+   */
+  scroll-snap-type: x mandatory;
+}
+
+/*
+ * Dragging a divider or a header changes pane geometry continuously; re-snapping
+ * mid-gesture would fight the pointer.
+ */
+.relay-split-workspace--resizing .relay-split-viewport,
+.relay-split-workspace--reordering .relay-split-viewport {
+  scroll-snap-type: none;
 }
 
 .relay-split-panes {
@@ -251,6 +266,11 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--relay-split-bg);
+  /*
+   * A pane's own left edge is its snap position, so a scrolled row always shows
+   * whole panes: header, conversation, and composer stay aligned with it.
+   */
+  scroll-snap-align: start;
 }
 
 .relay-split-file-drop-overlay {
