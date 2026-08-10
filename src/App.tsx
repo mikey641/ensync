@@ -1186,10 +1186,18 @@ function App() {
     const refresh = (async () => {
       try {
         const response = await ensyncHost.providers(force)
-        const nextProviders = providersRef.current.map((provider) => {
-          const status = response.providers.find((item) => item.id === provider.id)
-          return status ? providerFromStatus(status, provider) : provider
-        })
+        // The Host ranks providers by real availability, so adopt its order
+        // instead of keeping the pre-probe fallback order. A provider the Host
+        // did not report keeps its relative position at the end of the list.
+        const hostOrder = new Map(response.providers.map((item, index) => [item.id, index]))
+        const nextProviders = providersRef.current
+          .map((provider) => {
+            const status = response.providers.find((item) => item.id === provider.id)
+            return status ? providerFromStatus(status, provider) : provider
+          })
+          .sort((left, right) =>
+            (hostOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER)
+              - (hostOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER))
         providersRef.current = nextProviders
         setProviders(nextProviders)
         const firstRunnable = response.providers.find((status) =>

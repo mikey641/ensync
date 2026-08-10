@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { findExecutable, subscriptionEnvironment } from './command.mjs'
+import { availabilityRank } from './provider-availability.mjs'
 import {
   getProviderDefinition,
   getProviderCatalog,
@@ -183,25 +184,31 @@ test('host returns real provider states and never invents usage numbers', async 
   assert.equal(health.ok, true)
 
   const payload = await fetch(`${baseUrl}/api/providers?refresh=1`).then((response) => response.json())
-  assert.deepEqual(payload.providers.map((provider) => provider.id), [
-    'droid',
-    'codex',
+  assert.deepEqual([...payload.providers.map((provider) => provider.id)].sort(), [
+    'amp',
+    'antigravity',
+    'auggie',
     'claude',
+    'codebuddy',
+    'codex',
     'copilot',
     'cursor',
-    'antigravity',
+    'droid',
+    'gitlab_duo',
     'jules',
+    'junie',
     'kimi',
     'kiro',
-    'junie',
-    'gitlab_duo',
-    'oz',
-    'amp',
-    'auggie',
-    'qoder',
-    'codebuddy',
     'ollama',
+    'oz',
+    'qoder',
   ])
+
+  // The live order depends on this machine's real quotas, so assert the ranking
+  // invariant instead of a fixed list: availability never increases down the list.
+  const ranks = payload.providers.map((provider) => availabilityRank(provider))
+  assert.deepEqual(ranks, [...ranks].sort((left, right) => left - right))
+  assert.equal(payload.providers.at(-1).id, 'ollama')
 
   for (const provider of payload.providers) {
     assert.equal(provider.installed, provider.executable !== null)
@@ -225,8 +232,8 @@ test('host returns real provider states and never invents usage numbers', async 
   }
 
   assert.deepEqual(
-    payload.providers.filter((provider) => provider.chatExecution === 'supported').map((provider) => provider.id),
-    ['droid', 'codex', 'claude'],
+    payload.providers.filter((provider) => provider.chatExecution === 'supported').map((provider) => provider.id).sort(),
+    ['claude', 'codex', 'droid'],
   )
 
   const usage = await fetch(`${baseUrl}/api/usage`).then((response) => response.json())
