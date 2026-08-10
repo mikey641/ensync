@@ -1,11 +1,13 @@
 import { open, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
 import { autoLandWorkspace } from './auto-land.mjs'
-import { describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
+import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
+import { withEnsyncMultiAgentInstructions } from './multi-agent-prompt.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
@@ -35,7 +37,9 @@ const CHAT_PROVIDER_CONTAINMENT = {
   droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1_000
+// There is no absolute run ceiling by default; this conservative ceiling is
+// applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
+const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -46,7 +50,7 @@ const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const QUOTA_PATTERN = /(?:usage|spending|rate)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
-const CLAUDE_TRACKED_NOTE_MESSAGES = 8
+const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
   /\b(?:sk-(?:proj-|live-)?|ghp_|github_pat_|glpat-|xox[baprs]-)[a-zA-Z0-9_-]{12,}\b/g,
   /\bBearer\s+[a-zA-Z0-9._~+\/-]{12,}/gi,
@@ -107,15 +111,54 @@ function combinedAbortSignal(...signals) {
   }
 }
 
+export function workspaceBaseSummary(workspace) {
+  const base = workspace?.base
+  if (!base) return null
+  const canonical = base.remote && base.branch ? `${base.remote}/${base.branch}` : 'the canonical branch'
+  if (base.source === 'remote_default_branch') {
+    return `Base: ${canonical} at ${base.sha}${base.refreshed ? ', fetched for this run' : ''}.`
+  }
+  if (base.source === 'already_canonical') return `Base: already current with ${canonical} at ${base.sha}.`
+  if (base.reason) return `Base: ${base.sha}. ${base.reason}`
+  return `Base: ${base.sha}.`
+}
+
 function isolatedPrompt(prompt, workspace) {
   if (!workspace) return prompt
+  const base = workspaceBaseSummary(workspace)
+  const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
+    && workspace.integration.unintegratedCommits > 0
+    ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
+    : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
 Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-
+${base ? `${base}\n` : ''}${unintegrated}
 ${prompt}`
+}
+
+function conflictResolutionPrompt({ branch, baselineSha, conflictFiles }) {
+  return `[ENSYNC HOST CONFLICT RESOLUTION]
+Ensync merged baseline commit ${baselineSha} into this conversation's protected branch ${branch} so the finished work can land, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
+1. Inspect the conflicts with \`git status\` and \`git diff\`.
+2. Edit each conflicted file so the baseline changes and this branch's changes are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible; prefer the baseline's intent for changes this conversation did not make.
+3. Stage each resolved file with \`git add\`.
+4. Conclude the merge with \`git commit --no-verify --no-edit\`.
+Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
+Conflicted files:
+${conflictFiles.map((file) => `- ${file}`).join('\n')}`
+}
+
+function landCheckRepairPrompt({ branch, baselineSha, reason, output }) {
+  return `[ENSYNC HOST LAND CHECK REPAIR]
+Ensync merged this conversation's branch ${branch} into the baseline and ran the repository's land check (npm run land:check). The check failed, so the merge was rolled back. Baseline commit ${baselineSha} is already merged into the protected worktree that is the current working directory. Your only task is to make the land check pass here:
+1. Reproduce the failure if possible (npm run land:check) or work from the failure output below.
+2. This failure usually means the merge silently dropped code one side depends on — for example a declaration or import whose usages survived. Compare this branch with the baseline (git log, git show, git diff) and restore the missing code. Do not delete working features just to silence the check.
+3. Commit the fix with git add and git commit --no-verify.
+Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
+Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -123,7 +166,7 @@ function timeoutMessage(providerName, timeoutReason) {
     return `${providerName} produced no CLI output or lifecycle progress before Ensync Host's inactivity limit and was stopped. Partial work may exist; review the project before retrying.`
   }
   if (timeoutReason === 'hard_limit') {
-    return `${providerName} reached an explicit Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
+    return `${providerName} reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.`
   }
   return `${providerName} reached an Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
 }
@@ -162,37 +205,59 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function providerNoteFromEvent(provider, event) {
-  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
-
-  if (
-    provider === 'codex'
-    && event.type === 'item.completed'
-    && event.item?.type === 'agent_message'
-    && event.item.phase === 'commentary'
-    && typeof event.item.text === 'string'
-    && event.item.text.trim()
-  ) {
-    return event.item.text.trim()
-  }
-
-  if (provider !== 'claude' || event.type !== 'assistant') return null
-  const content = event.message?.content ?? event.content
-  if (!Array.isArray(content)) return null
-  // Claude has no commentary/final phase marker. Only surface assistant text
-  // when the same message also starts provider work; a text-only assistant
-  // message is the final response and should not briefly appear as a note.
-  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
-  const text = content
+function assistantTextBlocks(content) {
+  return content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-  return text || null
 }
 
-function createProviderNoteReader(provider) {
-  return (event) => providerNoteFromEvent(provider, event)
+function claudeNoteExtractor() {
+  const pending = new Map()
+
+  const remember = (id, text) => {
+    const held = pending.get(id) ?? { text: '', toolStarted: false }
+    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
+    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
+    pending.set(id, held)
+    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
+    return held
+  }
+
+  return (event) => {
+    if (event.type !== 'assistant') return null
+    const content = event.message?.content ?? event.content
+    if (!Array.isArray(content)) return null
+    const text = assistantTextBlocks(content)
+    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
+    if (!id) return startsToolWork ? text || null : null
+
+    const held = remember(id, text)
+    if (!startsToolWork && !held.toolStarted) return null
+    held.toolStarted = true
+    const note = held.text
+    held.text = ''
+    return note || null
+  }
+}
+
+function providerNoteExtractor(provider) {
+  if (provider === 'claude') return claudeNoteExtractor()
+  return (event) => {
+    if (
+      provider === 'codex'
+      && event.type === 'item.completed'
+      && event.item?.type === 'agent_message'
+      && event.item.phase === 'commentary'
+      && typeof event.item.text === 'string'
+      && event.item.text.trim()
+    ) {
+      return event.item.text.trim()
+    }
+    return null
+  }
 }
 
 function outputForwarder(onEvent, provider) {
@@ -200,7 +265,7 @@ function outputForwarder(onEvent, provider) {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
-  const readNote = createProviderNoteReader(provider)
+  const noteFromEvent = providerNoteExtractor(provider)
   const emit = (stream, text) => {
     if (!text) return
     const safe = redactTerminalText(text)
@@ -218,7 +283,8 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    const note = providerNoteFromEvent(provider, structured)
+    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
+    const note = noteFromEvent(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
@@ -483,6 +549,19 @@ function claudeEventsProveNoActivity(events) {
   })
 }
 
+function claudeStartupFailureIsSafe(stdout, stderr, outputTruncated) {
+  if (outputTruncated === true || (typeof stderr === 'string' && stderr.trim())) return false
+  const events = structuredEvents(stdout)
+  if (!events) return false
+  return events.every((event) => {
+    if (event.type !== 'system') return false
+    if (event.subtype === 'init') return true
+    if (!['hook_started', 'hook_response'].includes(event.subtype)) return false
+    return event.hook_event === 'SessionStart'
+      || (typeof event.hook_name === 'string' && event.hook_name.startsWith('SessionStart:'))
+  })
+}
+
 export function quotaFailureIsSafe(provider, stdout, stderr = '', options = {}) {
   // A capture that dropped provider output cannot prove the run performed no
   // work, so it can never authorize an automatic replay on another provider.
@@ -513,11 +592,13 @@ function quotaError(provider, safeToRetry) {
   )
 }
 
-export function parseCodexChatResult(stdout) {
+export function parseCodexChatResult(stdout, options = {}) {
+  const truncation = options.outputTruncated ?? null
   let decoded
   try {
     decoded = decodeJsonEventStream(stdout, { allowRepair: true })
   } catch {
+    if (truncation) throw truncatedOutputError('Codex')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Codex output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
@@ -526,6 +607,7 @@ export function parseCodexChatResult(stdout) {
   }
   const { events, recovery } = decoded
   if (events.length === 0) {
+    if (truncation) throw truncatedOutputError('Codex')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Codex output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
@@ -583,14 +665,16 @@ export function parseCodexChatResult(stdout) {
       502,
     )
   }
-  return { response, sessionId, model, usage, outputRecovery: recovery }
+  return { response, sessionId, model, usage, outputRecovery: recovery, outputTruncation: truncation }
 }
 
-export function parseClaudeChatResult(stdout) {
+export function parseClaudeChatResult(stdout, options = {}) {
+  const truncation = options.outputTruncated ?? null
   let decoded
   try {
     decoded = decodeJsonEventStream(stdout, { allowRepair: true })
   } catch {
+    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Claude Code output but could not verify it as JSON events. The task was not replayed because partial work may exist.',
@@ -599,6 +683,7 @@ export function parseClaudeChatResult(stdout) {
   }
   const { events, recovery } = decoded
   if (events.length === 0) {
+    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
       'Ensync Host tried a bounded repair of Claude Code output but found no verifiable JSON events. The task was not replayed because partial work may exist.',
@@ -606,6 +691,8 @@ export function parseClaudeChatResult(stdout) {
     )
   }
 
+  // A truncated single-event stream cannot serve as its own terminal result:
+  // the dropped lines may have contained the real one.
   const result = [...events].reverse().find((event) => event.type === 'result')
     ?? (events.length === 1 && !truncation ? events[0] : null)
 
@@ -626,6 +713,7 @@ export function parseClaudeChatResult(stdout) {
     )
   }
   if (result.is_error !== false) {
+    if (truncation) throw truncatedOutputError('Claude Code')
     throw new ChatRunError(
       'invalid_cli_output',
       'Claude Code returned no verified success state.',
@@ -657,6 +745,7 @@ export function parseClaudeChatResult(stdout) {
     model: modelUsage.length === 1 ? modelUsage[0] : initModel ?? null,
     usage: usageFrom(result.usage),
     outputRecovery: recovery,
+    outputTruncation: truncation,
   }
 }
 
@@ -750,6 +839,10 @@ export class ChatRunService {
   #codexLiveTurns
   #droidExecRuns
   #projectIsolation
+  #autoLand
+  #autoPushLanded
+  #gitExecutable
+  #landCheck
   #activeRuns = 0
 
   constructor(options = {}) {
@@ -759,8 +852,13 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.#hardTimeoutMs = options.hardTimeoutMs
+      ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
+    this.#autoLand = options.autoLand !== false
+    this.#autoPushLanded = options.autoPushLanded !== false
+    this.#gitExecutable = options.gitExecutable
+    this.#landCheck = options.landCheck ?? runLandCheck
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -825,11 +923,17 @@ export class ChatRunService {
         })
         workspace = workspaceLease.workspace
         combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
+        const baseSummary = workspaceBaseSummary(workspace)
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
-          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.`,
-          workspace: { path: workspace.projectPath, branch: workspace.branch },
+          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}`,
+          workspace: {
+            path: workspace.projectPath,
+            branch: workspace.branch,
+            base: workspace.base ?? null,
+            integration: workspace.integration ?? null,
+          },
           at: new Date().toISOString(),
         })
       } catch (error) {
@@ -843,19 +947,42 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
-    const executionRequest = workspace ? { ...request, prompt: isolatedPrompt(request.prompt, workspace) } : request
+    // Every provider runner — codex exec, the codex live turn, claude resume,
+    // and droid — receives the same bundled Ensync multi-agent/Superpowers
+    // contract ahead of the user's prompt (and ahead of any workspace
+    // isolation header). Wrapping is idempotent for an already-wrapped prompt.
+    const executionRequest = {
+      ...request,
+      prompt: withEnsyncMultiAgentInstructions(
+        workspace ? isolatedPrompt(request.prompt, workspace) : request.prompt,
+      ),
+    }
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
       repositoryPath: workspace.repositoryPath,
       branch: workspace.branch,
       reused: workspace.reused,
+      base: workspace.base ?? null,
+      integration: workspace.integration ?? null,
       gitBefore: workspace.gitBefore,
     } : null
+    // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
+    // canonical shared checkout that provider processes must not write to directly.
+    const containment = workspace ? {
+      worktreePath: workspace.repositoryPath,
+      canonicalRepositoryPath: workspace.shared.repositoryPath,
+    } : null
 
+    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
       try {
+        // Live-turn containment is pinned in codex-live-turn session configuration; verify
+        // separately before enabling sandbox there. Step 0 verification for this task found a
+        // `sandboxPolicy` field on `TurnStartParams` in the app-server v2 protocol schema, but
+        // could not confirm it applies under the non-experimental `initialize` handshake this
+        // runner uses (no `experimentalApi: true`), so it was not pinned here. Do not guess.
         const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
@@ -875,6 +1002,7 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -896,10 +1024,60 @@ export class ChatRunService {
       }
     }
 
+    if (request.provider === 'droid') {
+      this.#activeRuns += 1
+      try {
+        // Droid has no argv containment flags: `cwd` plus the pinned per-session
+        // autonomy level is the whole enforcement surface, and the runner verifies
+        // the CLI echoed that level back before it sends the prompt.
+        const result = await this.#droidExecRuns.run({
+          executable: provider.executable,
+          projectPath: executionProjectPath,
+          prompt: executionRequest.prompt,
+          attachmentPaths,
+          sessionId: request.sessionId ?? null,
+          model: request.model ?? null,
+          effort: request.effort ?? null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: combinedSignal.signal,
+          onEvent: (event) => {
+            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
+            const safe = redactTerminalText(event.text)
+            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
+          },
+        })
+        workspaceLease?.assertHeld()
+        runOutcome = 'succeeded'
+        return { ...result, projectPath, workspace: publicWorkspace }
+      } catch (error) {
+        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
+          const reason = workspaceLease.signal.reason
+          throw new ChatRunError(
+            'workspace_write_lock_lost',
+            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            409,
+            false,
+          )
+        }
+        if (error instanceof DroidExecError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+
     const startedAt = Date.now()
+    // A null hard ceiling means "no absolute run limit": the inactivity
+    // watchdog alone detects hung providers, so runProcess starts no hard timer.
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
-    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths)
+    const inactivityTimeoutMs = hardTimeoutMs == null
+      ? this.#inactivityTimeoutMs
+      : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const args = argumentsFor(executionRequest, attachmentPaths, containment)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1
     let processResult
@@ -908,7 +1086,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(
@@ -960,14 +1138,10 @@ export class ChatRunService {
         true,
       )
     }
-    const outputTruncated = processResult.truncation?.stdout ?? null
+    const outputTruncated = processResult.truncation?.stdout
+      ?? (processResult.outputTruncated ? true : null)
     if (processResult.exitCode !== 0) {
-      if (quotaFailureIsSafe(
-        request.provider,
-        processResult.stdout,
-        processResult.stderr,
-        { outputTruncated },
-      )) {
+      if (quotaFailureIsSafe(request.provider, processResult.stdout, processResult.stderr, { outputTruncated })) {
         throw quotaError(request.provider, true)
       }
       if (
@@ -994,8 +1168,9 @@ export class ChatRunService {
       )
     }
 
-    const parsed = parseResult(request.provider, processResult.stdout)
+    const parsed = parseResult(request.provider, processResult.stdout, { outputTruncated })
     workspaceLease?.assertHeld()
+    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -1010,10 +1185,174 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
+    } catch (error) {
+      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
+      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
+      throw error
     } finally {
       combinedSignal.dispose()
+      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
+        let agentWorkSaved = true
+        try {
+          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
+            outcome: runOutcome,
+            provider: request.provider,
+            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
+          })
+          if (workCommit.committed) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'agent_work_committed',
+              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch (commitError) {
+          agentWorkSaved = false
+          options.onEvent?.({
+            type: 'notice',
+            code: 'agent_work_commit_failed',
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            at: new Date().toISOString(),
+          })
+        }
+        try {
+          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+          if (sharedCheck.available && sharedCheck.changed) {
+            const message = sharedCheck.destructive
+              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+              : sharedCheck.landed
+                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
+                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
+            options.onEvent?.({
+              type: 'notice',
+              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+              message,
+              at: new Date().toISOString(),
+            })
+          }
+        } catch {
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+        }
+        if (runOutcome === 'succeeded' && this.#autoLand && agentWorkSaved && !options.signal?.aborted) {
+          await this.#autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options)
+        }
+      }
       await workspaceLease?.release()
     }
+  }
+
+  /**
+   * Automatic landing runs only for verified successful local runs whose work
+   * committed cleanly; failed, cancelled, timed-out, and SSH runs keep their
+   * branches unlanded for explicit review. Any failure here is reported as a
+   * notice and never changes the finished run's outcome.
+   */
+  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options) {
+    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal)
+    try {
+      await autoLandWorkspace(workspace, {
+        allowedRoots: this.#allowedRoots,
+        gitExecutable: this.#gitExecutable,
+        signal: landSignal.signal,
+        onNotice: (code, message) => options.onEvent?.({
+          type: 'notice',
+          code,
+          message,
+          at: new Date().toISOString(),
+        }),
+        runConflictAgent: (details) => this.#runConflictResolutionAgent(provider, request, workspace, containment, details, {
+          onEvent: options.onEvent,
+          signal: landSignal.signal,
+        }),
+        verifyLand: (details) => this.#landCheck(details.repositoryPath, {
+          environment: this.#environment,
+          signal: landSignal.signal,
+        }),
+        runRepairAgent: (details) => this.#runLandCheckRepairAgent(provider, request, workspace, containment, details, {
+          onEvent: options.onEvent,
+          signal: landSignal.signal,
+        }),
+        autoPush: this.#autoPushLanded,
+      })
+    } catch (error) {
+      options.onEvent?.({
+        type: 'notice',
+        code: 'auto_land_failed',
+        message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
+        at: new Date().toISOString(),
+      })
+    } finally {
+      landSignal.dispose()
+    }
+  }
+
+  /**
+   * Runs the same provider CLI as a fresh, sessionless turn inside the
+   * protected worktree to resolve an in-progress baseline merge. The run is
+   * verified the same way a normal run is: process exit, cancellation,
+   * timeout, and a parseable completed provider result.
+   */
+  async #runConflictResolutionAgent(provider, request, workspace, containment, details, runtime) {
+    await this.#runWorktreeAgentRun(provider, request, workspace, containment, conflictResolutionPrompt(details), {
+      code: 'conflict_resolution_failed',
+      label: 'conflict-resolution',
+    }, runtime)
+  }
+
+  /** Same contained provider run, prompted to repair a rolled-back land check. */
+  async #runLandCheckRepairAgent(provider, request, workspace, containment, details, runtime) {
+    await this.#runWorktreeAgentRun(provider, request, workspace, containment, landCheckRepairPrompt(details), {
+      code: 'land_check_repair_failed',
+      label: 'land-check repair',
+    }, runtime)
+  }
+
+  async #runWorktreeAgentRun(provider, request, workspace, containment, rawPrompt, failure, runtime) {
+    const prompt = withEnsyncMultiAgentInstructions(rawPrompt)
+    const subRequest = {
+      provider: request.provider,
+      prompt,
+      model: request.model ?? null,
+      effort: request.effort ?? null,
+    }
+    const args = argumentsFor(subRequest, [], containment)
+    const forwarder = outputForwarder(runtime.onEvent, request.provider)
+    this.#activeRuns += 1
+    let processResult
+    try {
+      processResult = await this.#processRunner(provider.executable, args, {
+        cwd: workspace.repositoryPath,
+        env: subscriptionEnvironment(this.#environment),
+        input: prompt,
+        inactivityTimeoutMs: this.#hardTimeoutMs == null
+          ? this.#inactivityTimeoutMs
+          : Math.min(this.#inactivityTimeoutMs, this.#hardTimeoutMs),
+        hardTimeoutMs: this.#hardTimeoutMs,
+        maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
+        onStdout: forwarder.stdout,
+        onStderr: forwarder.stderr,
+        signal: runtime.signal,
+      })
+    } finally {
+      this.#activeRuns -= 1
+      forwarder.flush()
+      this.#statusService.invalidate?.()
+    }
+    if (processResult.aborted || runtime.signal?.aborted) {
+      throw new ChatRunError('run_cancelled', `The ${failure.label} agent run was cancelled.`, 499)
+    }
+    if (processResult.timedOut) {
+      throw new ChatRunError('run_timed_out', timeoutMessage(provider.name, processResult.timeoutReason), 504)
+    }
+    if (processResult.error || processResult.exitCode !== 0) {
+      const output = processResult.stderr || processResult.stdout
+      const reason = output ? ` ${redactTerminalText(output.slice(0, 300)).text}` : ''
+      throw new ChatRunError(failure.code, `${describeProcessExit(provider.name, processResult)}.${reason}`, 502)
+    }
+    parseResult(request.provider, processResult.stdout, {
+      outputTruncated: processResult.truncation?.stdout ?? (processResult.outputTruncated ? true : null),
+    })
   }
 
   hasRunningRuns() {

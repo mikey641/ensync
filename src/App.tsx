@@ -53,6 +53,7 @@ import {
 import { SplitWorkspace, type SplitWorkspaceLayout } from './components/SplitWorkspace'
 import { ChatContextHeader } from './components/ChatContextHeader'
 import { MessageContent } from './components/MessageContent'
+import { isLongMessageContent } from './lib/messageContent.mjs'
 import { useChatAutoScroll } from './components/useChatAutoScroll'
 import { ResizableSidebar, readResizableSidebarPreferences } from './components/ResizableSidebar'
 import { RemoteSshSetup } from './components/RemoteSshSetup'
@@ -96,16 +97,12 @@ import {
   orderedAutomaticProviders,
   selectAutomaticFallbackProviderAfterRefresh,
   selectAutomaticProvider,
-  selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
 import {
-  readStoredFallbackProviderOrder,
   resolveFallbackProviderOrder,
-  writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
 import {
-  supportsAnyProviderRunner,
   withProviderRunnerInstructions,
 } from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
@@ -126,8 +123,8 @@ import {
 } from './lib/hostJobRecovery.mjs'
 import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
-import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
+import { providerResetText } from './lib/providerResetText.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
   conversationWorkspaceKey,
@@ -147,17 +144,17 @@ import {
   workingElapsedLabel,
 } from './lib/workingElapsed.mjs'
 import {
-  activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
-  liveSteerWasSafelyRejected,
+  liveSteerReadyAfterEvent,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  promptSubmissionMode,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -218,7 +215,6 @@ import {
   droppedFileAttachments,
   messageTextWithAttachments,
   normalizeFileAttachments,
-  resolveDroppedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
 import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
@@ -763,6 +759,7 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [viewedFilePath, setViewedFilePath] = useState<string | null>(null)
   const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
   const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
   const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
@@ -799,6 +796,8 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
+  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -1216,6 +1215,8 @@ function App() {
           status: `Ensync Host unavailable: ${message}`,
           usageReason: 'Ensync is reconnecting to the local Host. Verified CLI values will return automatically.',
         }))
+        providersRef.current = unavailableProviders
+        setProviders(unavailableProviders)
         return false
       }
     })()
@@ -3276,7 +3277,7 @@ function App() {
         <main className="main-area">
           <SplitWorkspace
             tabs={projectTabs}
-            chats={projectChats}
+            chats={displayProjectChats}
             providers={executionProviders}
             completedTabIds={completedTabIds}
             completionIndicator={completionIndicator}
@@ -3307,6 +3308,8 @@ function App() {
                 isActive={isActive}
                 onOpenFile={setViewedFilePath}
                 provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
+                autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
+                runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
                 providers={executionProviders}
                 projectPath={executionTarget.kind === 'ssh' ? `${executionTarget.connection.username}@${executionTarget.connection.hostname}:${executionTarget.connection.projectPath}` : activeProject.path}
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
@@ -3316,6 +3319,7 @@ function App() {
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
+                  && liveSteeringReadyChatIds.has(chat.id)
                   && executionTarget.kind === 'local'
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
@@ -3327,6 +3331,7 @@ function App() {
                   const entry = promptQueues[chat.id]?.[0]
                   return Boolean(
                     sendingChatIds.has(chat.id)
+                    && liveSteeringReadyChatIds.has(chat.id)
                     && activeRun?.provider === 'codex'
                     && activeRun.executionTarget === 'local'
                     && activeRun.jobId
@@ -3562,6 +3567,7 @@ function ConversationPane({
   })
   const composerQueueState = promptQueueComposerState({
     sending,
+    liveSteering,
     draft: draft || (attachments.length > 0 ? 'attached files' : ''),
     canRun: canRunChat,
   })
@@ -3632,6 +3638,17 @@ function ConversationPane({
     }
   }, [modelMenuOpen, onModelMenu, onProviderMenu, providerMenuOpen])
 
+  const automaticMode = chat.providerMode !== 'fixed'
+  const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
+  // The face of this control is a fact, so say which fact it is and, for Auto,
+  // where the next turn would go when that differs from what is shown.
+  const providerPickerTitle = runningProviderPinned
+    ? `${provider.name} is running this turn.`
+    : automaticMode
+      ? provider.id === autoProvider.id
+        ? `Auto would run the next turn on ${provider.name}.`
+        : `${provider.name} ran this conversation's last turn. Auto would run the next turn on ${autoProvider.name}.`
+      : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
   const modelPickerLabel = selectedSize?.label ?? 'Provider default'
@@ -3733,12 +3750,12 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} collapsible />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} collapsible /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
@@ -3752,7 +3769,9 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} />
+                      {typeof window.ensyncDesktop?.openPath === 'function'
+                        ? <MessageContent content={note.text} projectPath={projectPath} />
+                        : <MessageContent content={note.text} onOpenFile={onOpenFile} />}
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>

@@ -12,6 +12,7 @@ import {
   landAgentBranch,
   listUnlandedAgentWork,
   pushGit,
+  pushLandedBaseline,
   verifyGitRemote,
 } from './git.mjs'
 
@@ -291,4 +292,111 @@ test('landAgentBranch rejects landing an already-landed branch', async (context)
     ),
     (error) => error instanceof GitWorkflowError && error.code === 'agent_branch_already_landed',
   )
+})
+
+test('landAgentBranch rolls the merge back when the land verification fails', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  const headBefore = (await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim()
+  const seen = []
+
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      {
+        allowedRoots: [fixture.root],
+        verifyLand: async (details) => {
+          seen.push(details)
+          return { ok: false, reason: 'the land check failed', output: "error TS2304: Cannot find name 'viewedFilePath'" }
+        },
+      },
+    ),
+    (error) => error instanceof GitWorkflowError
+      && error.code === 'agent_branch_verification_failed'
+      && error.message.includes('the land check failed')
+      && error.verification?.output.includes('TS2304'),
+  )
+
+  assert.equal(seen.length, 1)
+  assert.equal(seen[0].branch, 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+  assert.equal(seen[0].mergedInto, 'main')
+  assert.equal((await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim(), headBefore)
+  assert.equal((await git(['status', '--porcelain'], { cwd: fixture.seed })).stdout.trim(), '')
+  const after = await listUnlandedAgentWork(fixture.seed, { allowedRoots: [fixture.root] })
+  assert.equal(after.branches.length, 1)
+})
+
+test('landAgentBranch lands normally when the land verification passes', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+
+  const result = await landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    {
+      allowedRoots: [fixture.root],
+      verifyLand: async (details) => {
+        // The merge commit must already exist when the verification runs.
+        const merged = (await git(['log', '-1', '--format=%s'], { cwd: details.repositoryPath })).stdout.trim()
+        assert.equal(merged, 'Ensync land: ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+        return { ok: true }
+      },
+    },
+  )
+
+  assert.equal(result.land.mergedInto, 'main')
+  const subject = (await git(['log', '-1', '--format=%s'], { cwd: fixture.seed })).stdout.trim()
+  assert.equal(subject, 'Ensync land: ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa')
+})
+
+test('pushLandedBaseline pushes the landed baseline to its configured remote', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  await landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    { allowedRoots: [fixture.root] },
+  )
+
+  const result = await pushLandedBaseline(fixture.seed, { allowedRoots: [fixture.root] })
+
+  assert.equal(result.pushed, true)
+  assert.equal(result.remote, 'origin')
+  assert.equal(result.branch, 'main')
+  const seedHead = (await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim()
+  const remoteHead = (await git(['rev-parse', 'refs/heads/main'], { cwd: fixture.remote })).stdout.trim()
+  assert.equal(seedHead, remoteHead)
+})
+
+test('pushLandedBaseline reports a missing remote without throwing', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  await git(['remote', 'remove', 'origin'], { cwd: fixture.seed })
+
+  const result = await pushLandedBaseline(fixture.seed, { allowedRoots: [fixture.root] })
+
+  assert.equal(result.pushed, false)
+  assert.equal(result.code, 'git_remote_not_found')
+})
+
+test('pushLandedBaseline reports a diverged remote without force-pushing', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  await git(['clone', fixture.remote, fixture.clone])
+  await git(['config', 'user.name', 'Relay Other'], { cwd: fixture.clone })
+  await git(['config', 'user.email', 'relay-other@example.invalid'], { cwd: fixture.clone })
+  await writeFile(join(fixture.clone, 'other.txt'), 'concurrent remote work\n')
+  await git(['add', 'other.txt'], { cwd: fixture.clone })
+  await git(['commit', '-m', 'Concurrent remote commit'], { cwd: fixture.clone })
+  await git(['push', 'origin', 'main'], { cwd: fixture.clone })
+  const remoteHeadBefore = (await git(['rev-parse', 'refs/heads/main'], { cwd: fixture.remote })).stdout.trim()
+
+  await landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    { allowedRoots: [fixture.root] },
+  )
+  const result = await pushLandedBaseline(fixture.seed, { allowedRoots: [fixture.root] })
+
+  assert.equal(result.pushed, false)
+  assert.equal(result.code, 'git_push_failed')
+  const remoteHeadAfter = (await git(['rev-parse', 'refs/heads/main'], { cwd: fixture.remote })).stdout.trim()
+  assert.equal(remoteHeadAfter, remoteHeadBefore)
 })

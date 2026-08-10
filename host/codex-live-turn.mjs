@@ -453,6 +453,7 @@ class CodexLiveSession {
     } else if (message.method === 'turn/completed'
       && params?.threadId === this.#threadId
       && params?.turn?.id === this.#turnId) {
+      this.#closeSteering('The Codex turn finished; new messages will queue normally.')
       this.#settled = true
       this.#rejectReadyOnce(new CodexLiveTurnError(
         'live_steer_unavailable',
@@ -503,6 +504,16 @@ class CodexLiveSession {
       || !this.#turnId
       || this.#activatedTurnId !== this.#turnId) return
     this.#readySettled = true
+    // Steering opens only once the app-server both returned the started turn
+    // and reported that exact turn active; a Host-authored ready notice lets
+    // the renderer offer Push now for precisely this turn.
+    this.#steerReady = true
+    this.onEvent?.({
+      type: 'notice',
+      code: 'live_steer_ready',
+      message: 'Codex can accept a new instruction in this active turn.',
+      at: new Date().toISOString(),
+    })
     this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
   }
 

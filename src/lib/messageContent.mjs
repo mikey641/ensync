@@ -94,27 +94,6 @@ function alignmentOf(cell) {
   return null
 }
 
-const MARKDOWN_IMAGE = /!\[([^\]\r\n]*)\]\(\s*(?:<([^>\r\n]+)>|([^()\s]+))(?:\s+(?:"[^"\r\n]*"|'[^'\r\n]*'))?\s*\)/g
-
-function appendProseBlocks(blocks, text) {
-  if (!text) return
-  let cursor = 0
-  MARKDOWN_IMAGE.lastIndex = 0
-
-  for (const match of text.matchAll(MARKDOWN_IMAGE)) {
-    appendTextBlock(blocks, text.slice(cursor, match.index))
-    blocks.push({
-      type: 'image',
-      alt: match[1],
-      path: match[2] ?? match[3],
-      markdown: match[0],
-    })
-    cursor = match.index + match[0].length
-  }
-
-  appendTextBlock(blocks, text.slice(cursor))
-}
-
 const LONG_MESSAGE_CHARACTER_LIMIT = 900
 const LONG_MESSAGE_LINE_LIMIT = 14
 
@@ -790,3 +769,4 @@ export function parseInlineSegments(value) {
   appendInlineText(segments, content.slice(index))
   return segments
 }
+

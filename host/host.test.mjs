@@ -13,7 +13,6 @@ import {
   parseCursorAuthentication,
   parseKiroAuthentication,
 } from './providers.mjs'
-import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 import { createRelayHost } from './server.mjs'
 
 test('subscription environment removes model API keys without removing PATH', () => {

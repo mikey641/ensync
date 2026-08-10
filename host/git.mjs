@@ -514,6 +514,42 @@ export async function pushGit(input, options = {}) {
   }
 }
 
+/**
+ * Push used only by the automatic landing pipeline: publishes the already
+ * landed baseline branch to its configured remote, never with force. It never
+ * throws — automatic landing must not fail because publishing did — and it
+ * deliberately bypasses pushGit's interactive production confirmation: a land
+ * that passed verification is the pipeline's product, and publishing it is the
+ * standing intent behind automatic landing. Every other push keeps the guarded
+ * interactive flow.
+ */
+export async function pushLandedBaseline(projectPath, options = {}) {
+  try {
+    const status = await getGitStatus(projectPath, options)
+    if (!status.branch || status.detached) return { pushed: false, code: 'git_detached_head' }
+    const remote = status.preferredRemote
+    if (!remote || !status.remotes.some((item) => item.name === remote)) {
+      return { pushed: false, code: 'git_remote_not_found' }
+    }
+    await validateConfiguredRemote(status.repositoryPath, remote, 'push', options)
+    const branch = await validateBranchName(status.branch, { gitExecutable: options.gitExecutable })
+    await checkedGit(['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], {
+      cwd: status.repositoryPath,
+      gitExecutable: options.gitExecutable,
+      timeoutMs: options.timeoutMs ?? 120_000,
+      failureMessage: `Git could not push ${branch} to ${remote}.`,
+      code: 'git_push_failed',
+    })
+    return { pushed: true, remote, branch }
+  } catch (error) {
+    return {
+      pushed: false,
+      code: typeof error?.code === 'string' ? error.code : 'git_push_failed',
+      reason: error instanceof Error ? error.message : 'Git could not push the landed baseline.',
+    }
+  }
+}
+
 const AGENT_BRANCH_PATTERN = /^ensync\/chat-[a-f0-9]{24}$/
 const LAND_MESSAGE_PREFIX = 'Ensync land: '
 
@@ -647,6 +683,30 @@ export async function landAgentBranch(input, options = {}) {
       status: 409,
     })
   }
+  if (typeof options.verifyLand === 'function') {
+    // A textually clean merge can still drop code one side depends on, so the
+    // land is verified semantically after the merge commit exists. A failed
+    // verification rolls the checkout back to its pre-merge state exactly; the
+    // checkout was verified clean above, so the reset cannot destroy user work.
+    let verification
+    try {
+      verification = await options.verifyLand({ repositoryPath, branch, mergedInto })
+    } catch (error) {
+      verification = { ok: false, reason: error instanceof Error ? error.message : 'The land verification could not run.' }
+    }
+    if (verification && verification.ok === false) {
+      await checkedGit(['reset', '--hard', 'ORIG_HEAD'], {
+        cwd: repositoryPath,
+        gitExecutable: options.gitExecutable,
+      })
+      const verificationError = new GitWorkflowError(
+        `Landing ${branch} was rolled back because the land verification failed: ${verification.reason ?? 'no reason was reported'}`,
+        { code: 'agent_branch_verification_failed', status: 409 },
+      )
+      verificationError.verification = verification
+      throw verificationError
+    }
+  }
   const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
     cwd: repositoryPath,
     gitExecutable: options.gitExecutable,
@@ -666,10 +726,11 @@ export class GitWorkflowService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
     this.gitExecutable = options.gitExecutable
+    this.verifyLand = options.verifyLand
   }
 
   options() {
-    return { allowedRoots: this.allowedRoots, gitExecutable: this.gitExecutable }
+    return { allowedRoots: this.allowedRoots, gitExecutable: this.gitExecutable, verifyLand: this.verifyLand }
   }
 
   status(projectPath) {
