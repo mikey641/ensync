@@ -566,8 +566,8 @@ function verifiedProject(project: ProjectInspection): RelayProject {
   return { ...project, color: projectColor(project.path || project.id), verified: true }
 }
 
-function supportsChat(provider: Provider): boolean {
-  return provider.chatExecution === 'supported' && supportsAnyProviderRunner(provider.id)
+function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
+  return provider.chatExecution === 'supported'
 }
 
 function automaticProvider(providers: Provider[], priorityOrder: readonly ProviderId[], preferredId?: ProviderId) {
@@ -1068,7 +1068,9 @@ function App() {
   const activeProvider = providerForChat(executionProviders, activeChat, fallbackProviderOrder)
   const fallbackProviders = orderedAutomaticProviders(executionProviders, fallbackProviderOrder)
     .filter((provider) => provider.connected && supportsChat(provider) && (provider.usage === null || provider.usage < 100))
-  const supportProvider = automaticProvider(executionProviders, fallbackProviderOrder, activeProvider.id)
+  // Support repair runs only the structured Codex or Claude runner (host/support-repair.mjs).
+  const repairCapableProviders = executionProviders.filter((provider) => provider.id === 'codex' || provider.id === 'claude')
+  const supportProvider = automaticProvider(repairCapableProviders, fallbackProviderOrder, activeProvider.id)
   const supportRepairAvailable = executionTarget.kind === 'local'
     && activeProject.verified
     && supportProvider.connected
@@ -2359,14 +2361,14 @@ function App() {
       )
     }
     if (automaticMode && !selectedAutomaticProvider && !enqueueBehindActiveRun) {
-      setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex or Claude Code.' }))
+      setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex, Claude Code, or Factory Droid.' }))
       return
     }
     const provider = automaticMode
       ? selectedAutomaticProvider ?? providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
       : providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
     if (!supportsChat(provider) && !enqueueBehindActiveRun) {
-      setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex or Claude Code.` }))
+      setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex, Claude Code, or Factory Droid.` }))
       return
     }
     const activeRun = inFlightRunsRef.current[chatId]
@@ -4571,7 +4573,7 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
           </div>
           <section className="model-telemetry">
             <div className="model-telemetry__heading"><h3>Exact run usage by model</h3><span>Reported by CLI processes only</span></div>
-            {modelTelemetry.length === 0 ? <p className="model-telemetry__empty">No CLI-reported token totals yet. A completed Codex or Claude run will appear here only when its CLI reports usage.</p> : modelTelemetry.map((item) => {
+            {modelTelemetry.length === 0 ? <p className="model-telemetry__empty">No CLI-reported token totals yet. A completed Codex, Claude, or Factory Droid run will appear here only when its CLI reports usage.</p> : modelTelemetry.map((item) => {
               const provider = providers.find((entry) => entry.id === item.provider) ?? providers[0]
               return <div className="model-telemetry__row" key={`${item.provider}-${item.model}`}><ProviderMark provider={provider} small /><span><strong>{item.model}</strong><small>{provider.name} · {item.runs} verified {item.runs === 1 ? 'run' : 'runs'}</small></span><dl><div><dt>Input</dt><dd>{item.inputTokens?.toLocaleString() ?? 'Not reported'}</dd></div><div><dt>Output</dt><dd>{item.outputTokens?.toLocaleString() ?? 'Not reported'}</dd></div><div><dt>Cached</dt><dd>{item.cachedInputTokens?.toLocaleString() ?? 'Not reported'}</dd></div></dl></div>
             })}

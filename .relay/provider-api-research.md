@@ -69,3 +69,73 @@ Unknown capability remains explicit and disabled. An API key is never treated as
 - Jules is a cloud-session adapter, and Ollama needs an Ensync-owned agent/tool loop. Neither should be forced into the local subscription subprocess contract.
 
 Re-run this research for the affected provider immediately before implementation and before public release. Record the verified CLI/SDK version in tests; web documentation alone is not runtime proof.
+
+### Provider install command, auth verification, and MCP config finding (verified 2026-08-09)
+
+All 17 catalog provider CLIs were verified as installed on the test machine. Each provider's official curl install command was fetched from its first-party documentation and added to `host/provider-install.mjs`. A new `POST /api/providers/:id/install` route mirrors the existing connect/update terminal-launch pattern: the browser sends only a provider ID and an explicit launch boolean; the Host resolves the fixed, allowlisted curl command and launches it in a terminal. Install is refused while agent runs are active, matching the update route's guard.
+
+MCP (Model Context Protocol) server configuration detection was added in `host/provider-mcp.mjs`. It is read-only: Ensync reports only whether a provider's MCP config file exists and which server names are configured. It never reads, parses, or transmits server command arguments, environment variables, URLs, or credentials. The server names themselves are non-sensitive labels. MCP config locations per provider:
+
+| Provider | MCP config file | Format | Verified servers |
+| --- | --- | --- | --- |
+| Claude Code | `~/.claude.json` | JSON (`mcpServers` + per-project) | `mcp-gsuite` (global), `clalit` (project `/Users/mikeyhasson`) |
+| Codex | `~/.codex/config.toml` | TOML (`[mcp_servers.<name>]`) | `node_repl`, `computer-use`, `openaiDeveloperDocs` |
+| Copilot CLI | `~/.copilot/mcp-config.json` | JSON | Not yet created on test machine |
+| Cursor Agent | `~/.cursor/mcp.json` | JSON | Not yet created on test machine |
+| Factory Droid | `~/.factory/mcp.json` | JSON | Not yet created; `/mcp` command available |
+| Kiro CLI | `~/.kiro/settings/cli.json` | JSON | Empty `{}` on test machine |
+| Augment Auggie | `~/.augment/auggie/settings.json` | JSON | Not yet created |
+| Amp | `~/.config/amp/settings.json` | JSON (`amp.mcpServers`) | Not yet created |
+| Qoder CLI | `~/.qoder/settings.json` | JSON | Not yet created |
+| CodeBuddy Code | `~/.codebuddy/.mcp.json` | JSON | Not yet created |
+| Junie CLI | `~/.junie/mcp.json` | JSON | Not yet created |
+| Kimi Code | `~/.kimi-code/config.toml` | TOML (`[mcp_servers.<name>]`) | Not yet created |
+| Google Antigravity | `~/.antigravity/mcp.json` | JSON | Not yet created |
+| Warp Oz | `~/.config/warp/mcp.json` | JSON | Not yet created |
+| GitLab Duo | `~/.config/gitlab/duo-mcp.json` | JSON | Not yet created |
+| Google Jules | None | N/A | Cloud-session agent; no local MCP config |
+| Ollama | None | N/A | Local runtime; no MCP config |
+
+Authentication verification results against the installed CLIs:
+
+| Provider | CLI version | Auth status | Method |
+| --- | --- | --- | --- |
+| Codex | codex-cli 0.146.0 | Authenticated | ChatGPT login |
+| Claude Code | 2.1.226 | Authenticated | claude.ai (Max plan) |
+| GitHub Copilot CLI | 1.0.78 | Authenticated | GitHub account (mikey641) |
+| Cursor Agent | 2026.08.04-aaa8809 | Not authenticated | Needs `agent login` |
+| Google Antigravity | 1.1.10 | Unknown (no status command) | OS-keyring/browser sign-in |
+| Google Jules | v0.1.42 | Authenticated | Google account (via `jules login`) |
+| Kimi Code | 0.34.0 | Unknown (no status command) | Device OAuth via `kimi login` |
+| Kiro CLI | 2.16.2 | Not authenticated | `whoami` returned `{"account":null}` |
+| Qoder CLI | 1.1.16 | Unknown (no status command) | Browser login via `qodercli login` |
+| CodeBuddy Code | 2.132.0 | Unknown (no status command) | Browser onboarding |
+| Factory Droid | 0.190.0 | Authenticated | Browser login (credential file present) |
+| Augment Auggie | 0.34.0 | Not authenticated | Needs `auggie login` |
+| Amp | 0.0.1786006377 | Not authenticated | Needs `amp login` |
+| GitLab Duo | 9.8.0 | Unknown | Reuses GitLab/glab credentials |
+| Warp Oz | v0.2026.07.29.09.05 | Unknown (no `login status` command) | Browser login via `oz login` |
+| Junie CLI | 26.8.3 (2548.5) | Unknown (no status command) | JetBrains Account or `JUNIE_API_KEY` |
+| Ollama | 0.13.5 | Not required | Local runtime |
+
+Official curl install commands (macOS/Linux) verified from first-party documentation:
+
+| Provider | Install command | Source |
+| --- | --- | --- |
+| Codex | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | github.com/openai/codex |
+| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` | code.claude.com/docs/en/setup |
+| GitHub Copilot CLI | `curl -fsSL https://gh.io/copilot-install \| bash` | docs.github.com |
+| Cursor Agent | `curl https://cursor.com/install -fsS \| bash` | cursor.com/docs/cli/installation |
+| Google Antigravity | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | antigravity.google/docs/cli/install |
+| Google Jules | `npm install -g @google/jules` | jules.google/docs/cli/reference |
+| Kimi Code | `curl -fsSL https://code.kimi.com/kimi-code/install.sh \| bash` | kimi.com/help/kimi-code |
+| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` | kiro.dev/docs/cli/installation |
+| Junie CLI | `curl -fsSL https://junie.jetbrains.com/install.sh \| bash` | junie.jetbrains.com/docs/junie-cli |
+| GitLab Duo | `bash <(curl --fail --silent --show-error --location "https://gitlab.com/.../install_duo_cli.sh")` | docs.gitlab.com |
+| Warp Oz | `curl -fsSL https://app.warp.dev/download/agent-cli \| bash` | docs.warp.dev/cli/quickstart |
+| Factory Droid | `curl -fsSL https://app.factory.ai/cli \| sh` | docs.factory.ai/cli/getting-started/quickstart |
+| Amp | `curl -fsSL https://ampcode.com/install.sh \| bash` | ampcode.com/manual |
+| Augment Auggie | `npm install -g @augmentcode/auggie` | docs.augmentcode.com |
+| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` | docs.qoder.com/cli/installation |
+| CodeBuddy Code | `curl -fsSL https://www.codebuddy.cn/cli/install.sh \| bash` | codebuddy.ai/docs/cli/installation |
+| Ollama | `curl -fsSL https://ollama.com/install.sh \| sh` | docs.ollama.com/linux |

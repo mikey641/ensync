@@ -221,7 +221,28 @@ export type GitPushResult = {
   git: GitStatus
 }
 
-export type ChatProviderId = CliProviderId
+export interface GitUnlandedBranch {
+  branch: string
+  head: string
+  aheadCount: number
+  changedFiles: number
+  lastCommittedAt: string | null
+  lastSubject: string | null
+}
+
+export interface GitUnlandedResult {
+  repositoryPath: string
+  baseline: { branch: string | null; head: string }
+  branches: GitUnlandedBranch[]
+  checkedAt: string
+}
+
+export interface GitLandResult {
+  land: { branch: string; mergedInto: string; mergeHead: string; completedAt: string }
+  git: GitStatus
+}
+
+export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid'>
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
 export type ChatRunRequest = {
