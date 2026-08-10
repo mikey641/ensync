@@ -1,7 +1,9 @@
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
+import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
@@ -65,6 +67,30 @@ function sendJson(response, statusCode, payload, origin) {
   if (response.destroyed || response.writableEnded) return
   response.writeHead(statusCode, responseHeaders(origin))
   response.end(JSON.stringify(payload))
+}
+
+function sendImage(response, image, origin) {
+  if (response.destroyed || response.writableEnded) return
+  const headers = {
+    'Cache-Control': 'no-store',
+    'Content-Length': String(image.size),
+    'Content-Type': image.contentType,
+    'X-Content-Type-Options': 'nosniff',
+  }
+  if (origin && isAllowedOrigin(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin
+    headers.Vary = 'Origin'
+  }
+  response.writeHead(200, headers)
+  const stream = createReadStream(image.path)
+  const stop = () => stream.destroy()
+  response.once('close', stop)
+  stream.once('error', () => {
+    response.removeListener('close', stop)
+    if (!response.destroyed) response.destroy()
+  })
+  stream.once('end', () => response.removeListener('close', stop))
+  stream.pipe(response)
 }
 
 function streamHeaders(origin) {
@@ -173,6 +199,9 @@ export function createEnsyncHost(options = {}) {
   const providerUpdateLaunches = new Map()
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
+  })
+  const chatImages = options.chatImageService ?? new ChatImageService({
+    workspaceRoot: options.projectIsolationRoot,
   })
   const chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
@@ -402,6 +431,14 @@ export function createEnsyncHost(options = {}) {
         } finally {
           cancellation.dispose()
         }
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/chat/image') {
+        const image = await chatImages.open({
+          workspacePath: url.searchParams.get('workspacePath'),
+          imagePath: url.searchParams.get('path'),
+        })
+        return sendImage(response, image, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/chat/jobs') {
@@ -836,6 +873,12 @@ export function createEnsyncHost(options = {}) {
           code: error.code,
         }, origin)
       }
+      if (error instanceof ChatImageError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
       if (error instanceof SupportRepairError) {
         return sendJson(response, error.status, supportRepairErrorPayload(error), origin)
       }
@@ -879,7 +922,7 @@ export function createEnsyncHost(options = {}) {
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
   return server
 }
 

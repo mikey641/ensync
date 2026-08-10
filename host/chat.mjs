@@ -105,31 +105,14 @@ function combinedAbortSignal(...signals) {
   }
 }
 
-export function workspaceBaseSummary(workspace) {
-  const base = workspace?.base
-  if (!base) return null
-  const canonical = base.remote && base.branch ? `${base.remote}/${base.branch}` : 'the canonical branch'
-  if (base.source === 'remote_default_branch') {
-    return `Base: ${canonical} at ${base.sha}${base.refreshed ? ', fetched for this run' : ''}.`
-  }
-  if (base.source === 'already_canonical') return `Base: already current with ${canonical} at ${base.sha}.`
-  if (base.reason) return `Base: ${base.sha}. ${base.reason}`
-  return `Base: ${base.sha}.`
-}
-
 function isolatedPrompt(prompt, workspace) {
   if (!workspace) return prompt
-  const base = workspaceBaseSummary(workspace)
-  const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
-    && workspace.integration.unintegratedCommits > 0
-    ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
-    : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
 Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-${base ? `${base}\n` : ''}${unintegrated}
+
 ${prompt}`
 }
 
@@ -829,17 +812,11 @@ export class ChatRunService {
         })
         workspace = workspaceLease.workspace
         combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
-        const baseSummary = workspaceBaseSummary(workspace)
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
-          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}`,
-          workspace: {
-            path: workspace.projectPath,
-            branch: workspace.branch,
-            base: workspace.base ?? null,
-            integration: workspace.integration ?? null,
-          },
+          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.`,
+          workspace: { path: workspace.projectPath, branch: workspace.branch },
           at: new Date().toISOString(),
         })
       } catch (error) {
@@ -859,8 +836,6 @@ export class ChatRunService {
       repositoryPath: workspace.repositoryPath,
       branch: workspace.branch,
       reused: workspace.reused,
-      base: workspace.base ?? null,
-      integration: workspace.integration ?? null,
       gitBefore: workspace.gitBefore,
     } : null
 

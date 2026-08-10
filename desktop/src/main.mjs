@@ -62,11 +62,6 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
-  createWindowStateSession,
-  createWindowStateStore,
-  NATIVE_WINDOW_STATE_FILENAME,
-} from './window-state.mjs'
-import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -97,7 +92,6 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
-let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -552,9 +546,6 @@ if (!singleInstance) {
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
-    })
-    windowStateStore = createWindowStateStore({
-      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),

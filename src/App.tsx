@@ -125,10 +125,6 @@ import { transcriptProviderNotes } from './lib/liveProviderNotes.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
-  conversationWorkspaceKey,
-  resolveConversationWorkspaceKey,
-} from './lib/conversationWorkspaceKey.mjs'
-import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -185,7 +181,6 @@ import {
   getRetainedNativeWorkspaceIds,
   getRetainedNativeWorkspaces,
   isCanonicalWorkspace,
-  isNativeWorkspaceIdentity,
   refreshRetainedNativeWorkspaces,
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
@@ -196,10 +191,7 @@ import {
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
 import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
-import {
-  recoverFocusedProjectHistory,
-  recoverOpenedProjectHistory,
-} from './lib/openedProjectHistory.mjs'
+import { recoverOpenedProjectHistory } from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -1573,100 +1565,6 @@ function App() {
     setActiveTabId('')
   }
 
-  const recoverProjectIntoCurrentWorkspace = (project: RelayProject) => {
-    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return false
-    const result = recoverFocusedProjectHistory(workspaceSnapshot, window.localStorage, {
-      project,
-      currentWorkspace: nativeWorkspaceIdentity,
-    })
-    if (!result.summary.recovered) return false
-
-    const recovered = result.state as Partial<StoredState>
-    const nextChats = (recovered.chats ?? []).map(normalizeChatModelChoice)
-    const nextTabs = [...(recovered.tabs ?? [])]
-    if (nextTabs.length === 0 && nextChats[0]) {
-      nextTabs.push({ id: `restored-tab-${nextChats[0].id}`, chatId: nextChats[0].id })
-    }
-    const nextTabIds = new Set(nextTabs.map((tab) => tab.id))
-    const nextActiveTabId = nextTabIds.has(recovered.activeTabId ?? '')
-      ? recovered.activeTabId ?? ''
-      : nextTabs[0]?.id ?? ''
-    const nextDrafts = recovered.drafts ?? {}
-    const nextDraftAttachments = Object.fromEntries(
-      Object.entries(recovered.draftAttachments ?? {}).map(([chatId, attachments]) => [
-        chatId,
-        normalizeFileAttachments(attachments),
-      ]),
-    )
-    const nextChatSessions = recovered.chatSessions ?? {}
-    const nextReadCompletionByChat = recovered.readCompletionByChat ?? {}
-    const nextExecutionPanelOpenByChat = normalizeExecutionPanelOpenByChat(
-      recovered.executionPanelOpenByChat,
-    )
-    const nextChatErrors = recovered.chatErrors ?? {}
-    const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
-    const nextInFlightRuns = recovered.inFlightRuns ?? {}
-    const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
-
-    chatsRef.current = nextChats
-    tabsRef.current = nextTabs
-    activeTabIdRef.current = nextActiveTabId
-    draftsRef.current = nextDrafts
-    draftAttachmentsRef.current = nextDraftAttachments
-    projectsRef.current = [project]
-    chatSessionsRef.current = nextChatSessions
-    chatErrorsRef.current = nextChatErrors
-    chatExecutionEventsRef.current = nextChatExecutionEvents
-    inFlightRunsRef.current = nextInFlightRuns
-    promptQueuesRef.current = nextPromptQueues
-
-    setProjects([project])
-    setActiveProjectId(project.id)
-    setChats(nextChats)
-    setTabs(nextTabs)
-    setActiveTabId(nextActiveTabId)
-    setDrafts(nextDrafts)
-    setDraftAttachments(nextDraftAttachments)
-    setChatSessions(nextChatSessions)
-    setReadCompletionByChat(nextReadCompletionByChat)
-    setExecutionPanelOpenByChat(nextExecutionPanelOpenByChat)
-    setChatErrors(nextChatErrors)
-    setChatExecutionEvents(nextChatExecutionEvents)
-    setInFlightRuns(nextInFlightRuns)
-    setPromptQueues(nextPromptQueues)
-    setSplitLayout(recovered.splitLayout)
-    if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
-      setPlacement(recovered.placement)
-    }
-    if (recovered.conversationLayout === 'tabs' || recovered.conversationLayout === 'split') {
-      setConversationLayout(recovered.conversationLayout)
-    }
-    setSearch('')
-    setProjectOpen(false)
-
-    commitWorkspace({
-      projects: [project],
-      activeProjectId: project.id,
-      chats: nextChats,
-      tabs: nextTabs,
-      activeTabId: nextActiveTabId,
-      drafts: nextDrafts,
-      draftAttachments: nextDraftAttachments,
-      chatSessions: nextChatSessions,
-      readCompletionByChat: nextReadCompletionByChat,
-      executionPanelOpenByChat: nextExecutionPanelOpenByChat,
-      chatErrors: nextChatErrors,
-      chatExecutionEvents: nextChatExecutionEvents,
-      inFlightRuns: nextInFlightRuns,
-      promptQueues: nextPromptQueues,
-      splitLayout: recovered.splitLayout,
-      ...(recovered.placement ? { placement: recovered.placement } : {}),
-      ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
-    })
-    void rememberNativeRecentProject(project).catch((error) => console.error('[ensync-recent-projects]', error))
-    return true
-  }
-
   const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
     const workspaceHistory = {
       projects,
@@ -1708,9 +1606,6 @@ function App() {
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
         }
-      }
-      if (activeProjectHistoryScore === 0 && recoverProjectIntoCurrentWorkspace(project)) {
-        return
       }
       if (activeProjectHistoryScore > 0) {
         if (typeof window.ensyncDesktop.openProjectWorkspace !== 'function') {
@@ -1820,12 +1715,11 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
-    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: agentWorkspaceKey,
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2681,7 +2575,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2690,7 +2584,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -3770,12 +3664,12 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} workspacePath={chat.workspace?.path ?? chat.continuation?.workspace?.path} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} workspacePath={chat.workspace?.path ?? chat.continuation?.workspace?.path} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
@@ -3789,7 +3683,7 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} />
+                      <MessageContent content={note.text} workspacePath={chat.workspace?.path ?? chat.continuation?.workspace?.path} />
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>

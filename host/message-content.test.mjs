@@ -40,27 +40,36 @@ test('message content leaves ordinary backticks and invalid fences as prose', ()
   assert.deepEqual(parseMessageContent(content), [{ type: 'text', text: content }])
 })
 
-test('message prose exposes Markdown, angle, and bare HTTPS links', () => {
-  const content = 'Read [the guide](https://example.com/guide), <https://example.com/api>, or https://example.com/a_(b).'
-
-  assert.deepEqual(parseMessageText(content), [
-    { type: 'text', text: 'Read ' },
-    { type: 'link', text: 'the guide', href: 'https://example.com/guide' },
-    { type: 'text', text: ', ' },
-    { type: 'link', text: 'https://example.com/api', href: 'https://example.com/api' },
-    { type: 'text', text: ', or ' },
-    { type: 'link', text: 'https://example.com/a_(b)', href: 'https://example.com/a_(b)' },
-    { type: 'text', text: '.' },
-  ])
-})
-
-test('message prose keeps code, images, and unsupported link schemes inert', () => {
+test('message content extracts local Markdown images without interpreting fenced code', () => {
+  const logoPath = '/Users/example/Ensync workspace/brand/ensync-logo.png'
   const content = [
-    '`https://example.com/in-code`',
-    '![preview](https://example.com/image.png)',
-    '[unsafe](javascript:alert(1))',
-    'http://example.com',
-  ].join(' ')
+    'Here is the full logo:',
+    '',
+    `![Ensync logo](<${logoPath}>)`,
+    '',
+    '```md',
+    '![This remains code](./not-rendered.png)',
+    '```',
+    '',
+    'And the icon: ![App icon](brand/icon.png "Generated icon")',
+  ].join('\n')
 
-  assert.deepEqual(parseMessageText(content), [{ type: 'text', text: content }])
+  assert.deepEqual(parseMessageContent(content), [
+    { type: 'text', text: 'Here is the full logo:\n\n' },
+    {
+      type: 'image',
+      alt: 'Ensync logo',
+      path: logoPath,
+      markdown: `![Ensync logo](<${logoPath}>)`,
+    },
+    { type: 'text', text: '\n\n' },
+    { type: 'code', code: '![This remains code](./not-rendered.png)\n', language: 'md' },
+    { type: 'text', text: '\nAnd the icon: ' },
+    {
+      type: 'image',
+      alt: 'App icon',
+      path: 'brand/icon.png',
+      markdown: '![App icon](brand/icon.png "Generated icon")',
+    },
+  ])
 })
