@@ -63,10 +63,6 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
-  createLocalFileOpenHandler,
-  LOCAL_FILE_OPEN_CHANNEL,
-} from './local-file-open.mjs'
-import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,

@@ -38,10 +38,6 @@ interface Window {
     migrateRecentProjects?: (projects: Array<{ name: string; path: string; host: 'local' }>) => Promise<{ projects: Array<{ name: string; path: string; host: 'local' }> } | null>
     rememberRecentProject?: (project: { name: string; path: string; host: 'local' }) => Promise<{ projects: Array<{ name: string; path: string; host: 'local' }> } | null>
     onRecentProjectsChanged?: (callback: (state: { projects: Array<{ name: string; path: string; host: 'local' }> }) => void) => () => void
-    openLocalFile?: (path: string) => Promise<{
-      status: 'opened' | 'revealed' | 'missing' | 'error'
-      message?: string
-    } | null>
     getDevicePreferences?: () => Promise<{
       completionNotifications: {
         mode: 'off' | 'ringtone' | 'speech'

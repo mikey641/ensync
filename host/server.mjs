@@ -9,7 +9,6 @@ import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
-import { readLocalFileForDisplay } from './local-file.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {

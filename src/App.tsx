@@ -99,8 +99,8 @@ import {
   selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
 import {
+  readStoredFallbackProviderOrder,
   resolveFallbackProviderOrder,
-  subscribeStoredFallbackProviderOrder,
   writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
@@ -758,7 +758,6 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [viewedFilePath, setViewedFilePath] = useState<string | null>(null)
   const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
   const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
   const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
@@ -1263,10 +1262,17 @@ function App() {
     const synchronizePreferences = (event: StorageEvent) => {
       if (event.storageArea === window.localStorage) {
         setAgentUpdatePreferences(readAgentUpdatePreferences(window.localStorage))
+        const savedOrder = readStoredFallbackProviderOrder(window.localStorage)
+        if (savedOrder) setFallbackProviderOrder(savedOrder)
       }
     }
     window.addEventListener('storage', synchronizePreferences)
     return () => window.removeEventListener('storage', synchronizePreferences)
+  }, [])
+
+  // The saved ranking is device-wide, so persist it outside this window's workspace snapshot.
+  const changeFallbackProviderOrder = useCallback((value: ProviderId[]) => {
+    setFallbackProviderOrder(writeStoredFallbackProviderOrder(window.localStorage, value))
   }, [])
 
   useEffect(() => {
@@ -3458,7 +3464,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={changeFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -3790,7 +3796,7 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} onOpenFile={onOpenFile} />
+                      <MessageContent content={note.text} />
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>
