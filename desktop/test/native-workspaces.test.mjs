@@ -229,3 +229,23 @@ test('workspace focus routes only authorized project requests to a different ret
   assert.equal(await handler({ sender }, { ...request, workspaceId: source.id }), false)
   assert.equal(await handler({ sender }, { ...request, projectPath: 'relative/path' }), false)
 })
+
+test('opening a project workspace is authorized and keeps the source identity', async () => {
+  const source = { id: IDS[0], kind: 'canonical' }
+  const sender = {}
+  const calls = []
+  const handler = createWorkspaceOpenProjectHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: (webContents) => webContents === sender ? source : null,
+    openProjectWindow: (project, sourceWorkspace) => {
+      calls.push({ project, sourceWorkspace })
+      return true
+    },
+  })
+  const project = { projectId: 'project-nadlan', projectPath: '/Users/example/nadlan-desk' }
+  assert.equal(await handler({ sender }, project), true)
+  assert.deepEqual(calls, [{ project, sourceWorkspace: source }])
+  assert.equal(await handler({ sender: {} }, project), false)
+  assert.equal(await handler({ sender }, { ...project, projectPath: 'relative/path' }), false)
+  assert.equal(calls.length, 1)
+})

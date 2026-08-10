@@ -42,6 +42,19 @@ export function promptQueueStatusPresentation(
   detail: string
   actionLabel: string | null
 }
+export function queuedPromptCanPushNow(input: {
+  sending: boolean
+  liveSteeringReady: boolean
+  activeRun?: {
+    turnId?: string
+    provider?: ProviderId
+    executionTarget?: string
+    jobId?: string
+    projectId?: string
+    projectPath?: string
+  }
+  entry?: QueuedPrompt
+}): boolean
 export function transcriptMessagesBeforeTurn(messages: Message[], turnId: string): Message[]
 export function insertAgentReplyBeforeLaterQueued(messages: Message[], turnId: string, reply: Message): Message[]
 export function promoteQueuedMessageToActiveTurn(messages: Message[], messageId: string, activeTurnId: string): Message[]

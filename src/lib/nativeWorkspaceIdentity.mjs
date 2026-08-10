@@ -10,6 +10,7 @@ const MISSING_HANDLER_MESSAGES = new Set([
 let currentWorkspace = CANONICAL_WORKSPACE
 let retainedWorkspaceIds = Object.freeze([])
 let retainedWorkspaces = Object.freeze([])
+let initialProjectLaunch = null
 
 export function isNativeWorkspaceIdentity(value) {
   return Boolean(
@@ -45,6 +46,34 @@ function normalizeRetainedWorkspaces(value) {
   return result
 }
 
+function absoluteLocalPath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return false
+  if (value.startsWith('/')) return value !== '/' && !/^\/+$/u.test(value)
+  if (/^[a-z]:[\\/]/i.test(value)) return !/^[a-z]:[\\/]*$/i.test(value)
+  return /^\\\\[^\\]+\\[^\\]+/.test(value)
+}
+
+function normalizeProjectLaunch(value, current) {
+  if (value === undefined || value === null) return null
+  if (!value || typeof value !== 'object'
+    || typeof value.projectId !== 'string'
+    || value.projectId.length === 0
+    || value.projectId.length > 256
+    || !absoluteLocalPath(value.projectPath)
+    || !isNativeWorkspaceIdentity(value.sourceWorkspace)
+    || value.sourceWorkspace.id.toLowerCase() === current.id) {
+    throw new Error('Ensync could not verify the native project window request.')
+  }
+  return Object.freeze({
+    projectId: value.projectId,
+    projectPath: value.projectPath,
+    sourceWorkspace: Object.freeze({
+      id: value.sourceWorkspace.id.toLowerCase(),
+      kind: value.sourceWorkspace.kind,
+    }),
+  })
+}
+
 function normalizeWorkspaceIdentityResponse(identity) {
   const retainedIds = normalizeRetainedWorkspaceIds(identity?.retainedWorkspaceIds)
   if (!isNativeWorkspaceIdentity(identity) || !retainedIds || !retainedIds.includes(identity.id.toLowerCase())) {
@@ -65,6 +94,10 @@ function normalizeWorkspaceIdentityResponse(identity) {
     current: { id: identity.id.toLowerCase(), kind: identity.kind },
     retainedIds,
     retainedWorkspaces: normalizedWorkspaces,
+    projectLaunch: normalizeProjectLaunch(identity.projectLaunch, {
+      id: identity.id.toLowerCase(),
+      kind: identity.kind,
+    }),
   }
 }
 
@@ -72,6 +105,7 @@ function applyWorkspaceIdentityResponse(normalized) {
   currentWorkspace = Object.freeze({ ...normalized.current })
   retainedWorkspaceIds = Object.freeze([...normalized.retainedIds])
   retainedWorkspaces = Object.freeze([...normalized.retainedWorkspaces])
+  initialProjectLaunch = normalized.projectLaunch
   return currentWorkspace
 }
 
@@ -131,6 +165,7 @@ export async function initializeNativeWorkspaceIdentity(target = globalThis, com
     currentWorkspace = CANONICAL_WORKSPACE
     retainedWorkspaceIds = Object.freeze([])
     retainedWorkspaces = Object.freeze([])
+    initialProjectLaunch = null
     return currentWorkspace
   }
 
@@ -177,6 +212,16 @@ export function getRetainedNativeWorkspaceIds() {
 /** Shell-authenticated retained identities, including canonical storage kind. */
 export function getRetainedNativeWorkspaces() {
   return retainedWorkspaces.map((workspace) => ({ ...workspace }))
+}
+
+/** Shell-authenticated project request used only while opening a new window. */
+export function getInitialNativeProjectLaunch() {
+  if (!initialProjectLaunch) return null
+  return {
+    projectId: initialProjectLaunch.projectId,
+    projectPath: initialProjectLaunch.projectPath,
+    sourceWorkspace: { ...initialProjectLaunch.sourceWorkspace },
+  }
 }
 
 export function isCanonicalWorkspace(identity = currentWorkspace) {

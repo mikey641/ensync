@@ -153,6 +153,7 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  queuedPromptCanPushNow,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -197,6 +198,7 @@ import {
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
 import { recoverArchivedProjectHistory } from './lib/archivedProjectHistory.mjs'
+import { recoverOpenedProjectHistory } from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
   rememberNativeRecentProject,
@@ -353,10 +355,14 @@ function readInitialStoredState(): StoredState | null {
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
       legacyStates,
     }).state
-    return recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
+    const withArchivedProjects = recoverArchivedProjectHistory(withRecentProjects, window.localStorage, {
       identity,
       retainedWorkspaceIds: getRetainedNativeWorkspaceIds(),
     }).state
+    const projectLaunch = getInitialNativeProjectLaunch()
+    return projectLaunch
+      ? recoverOpenedProjectHistory(withArchivedProjects, window.localStorage, { projectLaunch }).state
+      : withArchivedProjects
   } catch {
     return null
   }
@@ -785,6 +791,8 @@ function App() {
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
+  const liveSteeringReadyChatIdsRef = useRef<ReadonlySet<string>>(new Set())
+  const [liveSteeringReadyChatIds, setLiveSteeringReadyChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
@@ -1141,6 +1149,16 @@ function App() {
     chatErrorsRef.current = next
     setChatErrors(next)
     return next
+  }, [])
+
+  const updateLiveSteeringReadiness = useCallback((chatId: string, ready: boolean) => {
+    const current = liveSteeringReadyChatIdsRef.current
+    if (current.has(chatId) === ready) return
+    const next = new Set(current)
+    if (ready) next.add(chatId)
+    else next.delete(chatId)
+    liveSteeringReadyChatIdsRef.current = next
+    setLiveSteeringReadyChatIds(next)
   }, [])
 
   const toggleConversationSidebar = useCallback(() => {
@@ -1560,7 +1578,7 @@ function App() {
   }
 
   const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
-    const localHistoryScore = workspaceProjectHistoryScore({
+    const workspaceHistory = {
       projects,
       chats,
       drafts,
@@ -1569,8 +1587,12 @@ function App() {
       chatExecutionEvents,
       inFlightRuns,
       promptQueues,
-    }, project)
-    if (allowNativeRoute && localHistoryScore === 0 && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
+    }
+    const sameProject = project.id === activeProject.id
+      || (nativeProjectPathKey(project.path)
+        && nativeProjectPathKey(project.path) === nativeProjectPathKey(activeProject.path))
+    const activeProjectHistoryScore = workspaceProjectHistoryScore(workspaceHistory, activeProject)
+    if (allowNativeRoute && !sameProject && typeof window.ensyncDesktop?.focusWorkspace === 'function') {
       let retainedWorkspaces = getRetainedNativeWorkspaces()
       try {
         retainedWorkspaces = await refreshRetainedNativeWorkspaces(window)
@@ -1595,6 +1617,30 @@ function App() {
           }
         } catch (error) {
           console.error('[ensync-workspace-focus]', error)
+        }
+      }
+      if (activeProjectHistoryScore > 0) {
+        if (typeof window.ensyncDesktop.openProjectWorkspace !== 'function') {
+          setProjectError('Quit Ensync completely and reopen it before opening another project window.')
+          return
+        }
+        try {
+          const opened = await window.ensyncDesktop.openProjectWorkspace({
+            projectId: project.id,
+            projectPath: project.path,
+          })
+          if (opened) {
+            setProjectOpen(false)
+          } else {
+            setProjectError('Ensync could not open another project window. The current project remains open.')
+          }
+          return
+        } catch (error) {
+          console.error('[ensync-workspace-open-project]', error)
+          setProjectError(error instanceof Error
+            ? error.message
+            : 'Ensync could not open another project window. The current project remains open.')
+          return
         }
       }
     }
@@ -2239,6 +2285,7 @@ function App() {
     const activeRun = inFlightRunsRef.current[chatId]
     const canTryLiveSteer = enqueueBehindActiveRun
       && (promptQueuesRef.current[chatId]?.length ?? 0) === 0
+      && liveSteeringReadyChatIdsRef.current.has(chatId)
       && runTarget.kind === 'local'
       && activeRun?.provider === 'codex'
       && activeRun.executionTarget === 'local'
@@ -2374,6 +2421,7 @@ function App() {
       return
     }
     if (!chatRunRegistryRef.current.begin(chatId)) return
+    updateLiveSteeringReadiness(chatId, false)
     activeTurnIdsRef.current[chatId] = turnId
     if (queuedPrompt) {
       updatePromptQueues(removePromptFromQueue(promptQueuesRef.current, chatId, queuedPrompt.id))
@@ -2570,6 +2618,11 @@ function App() {
             effort: requestedEffort,
           }
       return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
+        if (event.type === 'started' && targetProviderId === 'codex' && runTarget.kind === 'local') {
+          updateLiveSteeringReadiness(chatId, true)
+        } else if (event.type === 'finished') {
+          updateLiveSteeringReadiness(chatId, false)
+        }
         if (event.type === 'started') providerProcessStarted = true
         if (event.type !== 'finished' && typeof event.sequence === 'number') {
           updateInFlightRun(chatId, (current) => current ? {
@@ -2716,6 +2769,7 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
+      updateLiveSteeringReadiness(chatId, false)
       delete activeTurnIdsRef.current[chatId]
       const nextRuns = updateInFlightRun(chatId, () => undefined)
       commitWorkspace({
@@ -2747,8 +2801,22 @@ function App() {
       && activeRun.executionTarget === 'local'
       && typeof activeRun.jobId === 'string'
       && Boolean(activeRun.jobId)
-    if (!entry || !activeRun || !activeRun.jobId || !queuedMessage || !exactActiveCodexTurn) {
+    if (!entry || !queuedMessage) return
+    if (!activeRun || !activeRun.jobId) {
+      queueMicrotask(() => drainPromptQueueRef.current(chatId))
+      return
+    }
+    if (!exactActiveCodexTurn) {
       updateChatError(chatId, 'This queued message can no longer be matched to the exact active local Codex turn. It remains safely queued.')
+      return
+    }
+    if (!queuedPromptCanPushNow({
+      sending: chatRunRegistryRef.current.has(chatId),
+      liveSteeringReady: liveSteeringReadyChatIdsRef.current.has(chatId),
+      activeRun,
+      entry,
+    })) {
+      queueMicrotask(() => drainPromptQueueRef.current(chatId))
       return
     }
     if (steeringChatIdsRef.current.has(chatId)) return
@@ -2802,7 +2870,15 @@ function App() {
     } catch (steerError) {
       const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
       if (safelyNotDelivered) {
-        updateChatError(chatId, `${steerError.message} It remains queued.`)
+        // The provider can finish between the last Host lifecycle event and
+        // the steering request. Keep the prompt in FIFO without surfacing a
+        // stale "no active turn" error, hide Push now, and retry queue drain
+        // in case the verified completion has already reached the renderer.
+        updateLiveSteeringReadiness(chatId, false)
+        if (promptQueuesRef.current[chatId]?.[0]?.id === entry.id) {
+          updateChatError(chatId, null)
+          queueMicrotask(() => drainPromptQueueRef.current(chatId))
+        }
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -2860,6 +2936,7 @@ function App() {
   const recoverDetachedRun = useCallback(async (chatId: string, initialRun: PersistedInFlightRun) => {
     if (!initialRun.jobId || recoveringChatIdsRef.current.has(chatId)) return
     if (!chatRunRegistryRef.current.begin(chatId)) return
+    updateLiveSteeringReadiness(chatId, false)
     recoveringChatIdsRef.current.add(chatId)
     activeTurnIdsRef.current[chatId] = initialRun.turnId
     const runController = chatRunCancellationRef.current.begin(chatId)
@@ -2890,6 +2967,13 @@ function App() {
           } : current)
           const cursor = inFlightRunsRef.current[chatId]?.lastEventSequence ?? 0
           const result = await ensyncHost.attachChatJob(initialRun.jobId, (event) => {
+            if (event.type === 'started'
+              && initialRun.provider === 'codex'
+              && initialRun.executionTarget === 'local') {
+              updateLiveSteeringReadiness(chatId, true)
+            } else if (event.type === 'finished') {
+              updateLiveSteeringReadiness(chatId, false)
+            }
             if (event.type !== 'finished' && typeof event.sequence === 'number') {
               updateInFlightRun(chatId, (current) => current ? {
                 ...current,
@@ -2944,6 +3028,7 @@ function App() {
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
+      updateLiveSteeringReadiness(chatId, false)
       recoveringChatIdsRef.current.delete(chatId)
       delete activeTurnIdsRef.current[chatId]
       if (terminal) {
@@ -2960,7 +3045,7 @@ function App() {
       if (initialRun.executionTarget === 'local') void refreshProviders(false)
       if (queueMayAdvance) queueMicrotask(() => void drainPromptQueueRef.current(chatId))
     }
-  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
+  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun, updateLiveSteeringReadiness])
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3249,6 +3334,7 @@ function App() {
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
+                  && liveSteeringReadyChatIds.has(chat.id)
                   && executionTarget.kind === 'local'
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
@@ -3259,17 +3345,12 @@ function App() {
                 canPushQueuedNow={(() => {
                   const activeRun = inFlightRuns[chat.id]
                   const entry = promptQueues[chat.id]?.[0]
-                  return Boolean(
-                    sendingChatIds.has(chat.id)
-                    && activeRun?.provider === 'codex'
-                    && activeRun.executionTarget === 'local'
-                    && activeRun.jobId
-                    && entry
-                    && entry.predecessorTurnId === activeRun.turnId
-                    && entry.preferences.executionTargetKey === activeRun.executionTarget
-                    && entry.preferences.projectId === activeRun.projectId
-                    && entry.preferences.projectPath === activeRun.projectPath,
-                  )
+                  return queuedPromptCanPushNow({
+                    sending: sendingChatIds.has(chat.id),
+                    liveSteeringReady: liveSteeringReadyChatIds.has(chat.id),
+                    activeRun,
+                    entry,
+                  })
                 })()}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
