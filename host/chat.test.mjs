@@ -16,6 +16,7 @@ import {
   validateProjectPath,
 } from './chat.mjs'
 import { createRelayHost } from './server.mjs'
+import { ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-chat-test-'))
@@ -109,7 +110,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   const result = await service.run({
     provider: 'codex',
     projectPath,
-    prompt: 'Inspect this project',
+    prompt: `Inspect this project and explain ${ENSYNC_MULTI_AGENT_MARKER}`,
     model: 'gpt-5.4',
     effort: 'high',
     timeoutMs: 2_000,
@@ -120,7 +121,10 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   assert.equal(executable, '/test/bin/codex')
   assert.deepEqual(args, ['exec', '--json', '--color', 'never', '--skip-git-repo-check', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="high"', '-'])
   assert.equal(options.cwd, await realpath(projectPath))
-  assert.equal(options.input, 'Inspect this project')
+  assert.equal(options.input.startsWith(ENSYNC_MULTI_AGENT_MARKER), true)
+  assert.match(options.input, /bundled Superpowers contract applies to every Ensync provider runner/)
+  assert.match(options.input, /Inspect this project and explain \[ENSYNC SAFE MULTI-AGENT v1\]$/)
+  assert.equal(options.input.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 2)
   assert.equal(options.inactivityTimeoutMs, 2_000)
   assert.equal(options.hardTimeoutMs, 2_000)
   assert.equal(options.env.OPENAI_API_KEY, undefined)
@@ -239,7 +243,8 @@ test('retained Codex jobs use the live runner and validate steering through the 
 
   assert.equal(service.hasRunningRuns(), true)
   assert.equal(liveInput.id, 'job_1111111111111111')
-  assert.equal(liveInput.prompt, 'Start live')
+  assert.match(liveInput.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(liveInput.prompt, /Start live$/)
   assert.equal(liveInput.effort, 'medium')
   assert.equal(liveInput.env.OPENAI_API_KEY, undefined)
   assert.deepEqual(await service.steer('job_1111111111111111', { prompt: 'Correct it now' }), {
@@ -542,7 +547,8 @@ test('Claude chat resumes a verified session without putting the prompt in argum
     '--resume',
     sessionId,
   ])
-  assert.equal(captured[2].input, 'Continue the implementation')
+  assert.match(captured[2].input, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(captured[2].input, /Continue the implementation$/)
   assert.equal(result.response, 'Real Claude response')
   assert.equal(result.model, 'claude-opus-4-6')
   assert.equal(result.requestedEffort, 'max')

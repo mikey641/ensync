@@ -6,6 +6,7 @@ import { probeDroidAuthentication } from './droid-auth.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
+import { ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
 
 // Product-navigation heuristic: broadly recognized subscription coding agents
 // appear first, followed by progressively more specialist discovery candidates.
@@ -388,6 +389,18 @@ const providerCatalog = {
 }
 
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
+const universalAgentCoordination = Object.freeze({
+  policy: ENSYNC_SUPERPOWERS_POLICY,
+  delivery: 'ensync_prompt',
+  nativePlugin: 'optional',
+})
+
+function providerCatalogEntry(id) {
+  return {
+    ...providerCatalog[id],
+    agentCoordination: universalAgentCoordination,
+  }
+}
 
 function now() {
   return new Date().toISOString()
@@ -660,7 +673,7 @@ async function inspectProvider(provider) {
       break
     }
   }
-  const catalog = providerCatalog[provider.id]
+  const catalog = providerCatalogEntry(provider.id)
 
   if (!executable) {
     const authentication = unavailableAuthentication(
@@ -755,7 +768,7 @@ export function getProviderCatalog() {
   return providerDefinitions.map((provider) => ({
     id: provider.id,
     name: provider.name,
-    ...providerCatalog[provider.id],
+    ...providerCatalogEntry(provider.id),
   }))
 }
 

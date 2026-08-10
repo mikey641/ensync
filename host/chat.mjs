@@ -5,34 +5,11 @@ import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
+import {
+  supportsProviderRunner,
+  withProviderRunnerInstructions,
+} from './provider-runner-contract.mjs'
 
-const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
-// Providers whose Ensync Host runner is implemented and containment-recorded but
-// whose catalog entry is still `discovery_only`. They are refused at validation
-// with their exact outstanding requirement instead of a generic message, so the
-// runner cannot be reached by Auto routing, a fixed selection, or fallback until
-// the catalog is promoted.
-const GATED_CHAT_PROVIDERS = new Map([])
-// Verified containment levels per the catalog capability contract. A provider
-// with no record here is refused as runnable regardless of SUPPORTED_CHAT_PROVIDERS.
-const CHAT_PROVIDER_CONTAINMENT = {
-  codex: { level: 'os_sandbox' },
-  // permission_config gap (verified via `claude --help`): in `-p`/`--print` mode, settings
-  // files that fail validation are silently ignored (no error dialog is shown) — a malformed
-  // --settings payload fails open rather than blocking the run. Also, Bash is governed by
-  // command-prefix rules, not the file-pattern rules our deny list uses, so Write(...)/Edit(...)
-  // deny rules do not constrain shell commands run through the Bash tool.
-  claude: { level: 'permission_config' },
-  // permission_config gap (verified against droid 0.190.0 over stream-jsonrpc):
-  // Droid's containment is a risk-tiered autonomy level pinned per session, not a
-  // path-scoped rule, so `medium` still permits ordinary local build, test, and git
-  // operations anywhere the process can reach rather than confining writes to the
-  // protected worktree. Its session settings schema also declares autonomyLevel as
-  // `.optional().catch(void 0)`, so an unrecognised value is silently discarded
-  // instead of rejected; the runner therefore refuses to send the prompt unless the
-  // CLI echoes the pinned level back in its effective settings.
-  droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
-}
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
@@ -348,8 +325,7 @@ function validateRequest(request) {
   if (typeof request.provider !== 'string' || !request.provider) {
     throw new ChatRunError('invalid_provider', 'A provider is required.')
   }
-  if (!SUPPORTED_CHAT_PROVIDERS.has(request.provider)) {
-    const gatedReason = GATED_CHAT_PROVIDERS.get(request.provider)
+  if (!supportsProviderRunner(request.provider, 'local')) {
     throw new ChatRunError(
       gatedReason ? 'provider_execution_gated' : 'unsupported_provider',
       gatedReason
@@ -830,7 +806,10 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
-    const executionRequest = workspace ? { ...request, prompt: isolatedPrompt(request.prompt, workspace) } : request
+    const executionRequest = {
+      ...request,
+      prompt: isolatedPrompt(withProviderRunnerInstructions(request.provider, 'local', request.prompt), workspace),
+    }
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
       repositoryPath: workspace.repositoryPath,

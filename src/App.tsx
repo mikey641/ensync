@@ -103,6 +103,10 @@ import {
   writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
+import {
+  supportsAnyProviderRunner,
+  withProviderRunnerInstructions,
+} from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
 import {
   chatRunPreferences,
@@ -445,6 +449,7 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     setupKind: status.setupKind,
     documentationUrl: status.documentationUrl,
     catalogReason: status.catalogReason,
+    agentCoordination: status.agentCoordination ?? current.agentCoordination,
     checkedAt: status.checkedAt,
   }
 }
@@ -573,8 +578,8 @@ function verifiedProject(project: ProjectInspection): RelayProject {
   return { ...project, color: projectColor(project.path || project.id), verified: true }
 }
 
-function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
-  return provider.chatExecution === 'supported'
+function supportsChat(provider: Provider): boolean {
+  return provider.chatExecution === 'supported' && supportsAnyProviderRunner(provider.id)
 }
 
 function automaticProvider(providers: Provider[], priorityOrder: readonly ProviderId[], preferredId?: ProviderId) {
@@ -2633,7 +2638,7 @@ function App() {
       const continuityCapsuleRequired = runAutoContext
         || fallbackReason !== null
         || attemptedProviders.length > 1
-      const effectivePrompt = continuityCapsuleRequired
+      const basePrompt = continuityCapsuleRequired
         ? buildAutoContextPrompt({
             project: runProject,
             target: runTarget,
@@ -2645,6 +2650,11 @@ function App() {
             providerMode: chatToSend.providerMode ?? 'auto',
           })
         : canResume || !transcript ? prompt : `${transcript}\n\nUser: ${prompt}`
+      const effectivePrompt = withProviderRunnerInstructions(
+        targetProviderId,
+        runTarget.kind === 'local' ? 'local' : 'ssh',
+        basePrompt,
+      )
       const requestedModel = null
       const requestedEffort = runPreferences.requestedEffort
       const jobId = `job-${turnId}-${targetProviderId}-${attemptedProviders.length}`

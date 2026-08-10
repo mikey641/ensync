@@ -248,7 +248,7 @@ test('SSH transport failures do not claim a connection and return bounded diagno
 })
 
 test('remote Codex chat keeps prompt out of argv and returns only parsed structured output publicly', async () => {
-  const prompt = 'Continue the remote implementation without copying context.'
+  const prompt = 'Continue the remote implementation and explain [ENSYNC SAFE MULTI-AGENT v1].'
   const cliStdout = [
     'Remote Codex startup diagnostic.',
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
@@ -310,8 +310,12 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   const payloadMarker = captured[2].input.lastIndexOf(')("')
   const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
   const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
-  assert.equal(remotePayload.inactivityTimeoutMs, 15 * 60 * 1_000)
-  assert.equal(remotePayload.hardTimeoutMs, null)
+  assert.match(remotePayload.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(remotePayload.prompt, /bundled Superpowers contract applies to every Ensync provider runner/)
+  assert.match(remotePayload.prompt, /Continue the remote implementation and explain \[ENSYNC SAFE MULTI-AGENT v1\]\.$/)
+  assert.equal(remotePayload.prompt.split('[ENSYNC SAFE MULTI-AGENT v1]').length - 1, 2)
+  assert.equal(remotePayload.inactivityTimeoutMs, 2_000)
+  assert.equal(remotePayload.hardTimeoutMs, 2_000)
   assert.equal(result.response, 'Remote Codex response')
   assert.equal(result.sessionId, '123e4567-e89b-12d3-a456-426614174000')
   assert.equal(result.model, 'gpt-5.4')

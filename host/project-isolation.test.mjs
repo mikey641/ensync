@@ -315,6 +315,8 @@ test('ChatRunService binds provider cwd to the protected worktree and releases i
   assert.equal(result.workspace.path, providerCwd)
   assert.notEqual(providerCwd, fixture.repository)
   assert.match(providerPrompt, /current working directory as the only writable project/i)
+  assert.match(providerPrompt, /\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(providerPrompt, /Never let two agents edit the same path concurrently/)
   assert.match(providerPrompt, /Make one change$/)
   assert.deepEqual(events.slice(0, 2).map((event) => event.code ?? event.type), [
     'project_workspace_ready',

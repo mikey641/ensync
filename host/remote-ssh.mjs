@@ -8,6 +8,10 @@ import {
 } from './chat.mjs'
 import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
+  supportsProviderRunner,
+  withProviderRunnerInstructions,
+} from './provider-runner-contract.mjs'
+import {
   createRemoteBridgeInput,
   decodeRemoteBridgeEnvelope,
 } from './remote-ssh-bridge.mjs'
@@ -366,7 +370,7 @@ function publicProbeResult(result) {
 
 function validateRemoteChatRequest(request) {
   requirePlainObject(request, 'The remote chat request')
-  if (!['codex', 'claude'].includes(request.provider)) {
+  if (!supportsProviderRunner(request.provider, 'ssh')) {
     throw new RemoteSshError('unsupported_provider', 'Remote chat supports Codex and Claude Code only.', 422)
   }
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
@@ -514,7 +518,7 @@ export class RemoteSshService {
         provider: request.provider,
         projectPath: connection.projectPath,
         workspaceKey: request.workspaceKey,
-        prompt: request.prompt,
+        prompt: withProviderRunnerInstructions(request.provider, 'ssh', request.prompt),
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
         effort: request.effort ?? null,

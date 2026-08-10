@@ -75,6 +75,12 @@ export type CliModel = {
   isDefault: boolean
 }
 
+export type AgentCoordinationPolicy = {
+  policy: 'ensync_superpowers_v1'
+  delivery: 'ensync_prompt'
+  nativePlugin: 'optional'
+}
+
 export type CliProviderStatus = {
   id: CliProviderId
   name: string
@@ -96,6 +102,7 @@ export type CliProviderStatus = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
+  agentCoordination: AgentCoordinationPolicy
   checkedAt: string
 }
 
@@ -197,28 +204,7 @@ export type GitPushResult = {
   git: GitStatus
 }
 
-export interface GitUnlandedBranch {
-  branch: string
-  head: string
-  aheadCount: number
-  changedFiles: number
-  lastCommittedAt: string | null
-  lastSubject: string | null
-}
-
-export interface GitUnlandedResult {
-  repositoryPath: string
-  baseline: { branch: string | null; head: string }
-  branches: GitUnlandedBranch[]
-  checkedAt: string
-}
-
-export interface GitLandResult {
-  land: { branch: string; mergedInto: string; mergeHead: string; completedAt: string }
-  git: GitStatus
-}
-
-export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid'>
+export type ChatProviderId = CliProviderId
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
 export type ChatRunRequest = {

@@ -17,6 +17,12 @@ export type ProviderId =
   | 'junie'
   | 'ollama'
 
+export type AgentCoordinationPolicy = {
+  policy: 'ensync_superpowers_v1'
+  delivery: 'ensync_prompt'
+  nativePlugin: 'optional'
+}
+
 export type Provider = {
   id: ProviderId
   name: string
@@ -54,6 +60,8 @@ export type Provider = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
+  /** Universal Ensync behavior; provider-native Superpowers installation is optional. */
+  agentCoordination: AgentCoordinationPolicy
   checkedAt: string | null
 }
 
