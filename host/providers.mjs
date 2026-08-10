@@ -3,6 +3,7 @@ import { parseCodexAppServerProbe, probeCodexAppServer } from './codex-app-serve
 import { probeClaudeUsage } from './claude-usage.mjs'
 import { probeCopilotAuthentication } from './copilot-auth.mjs'
 import { probeDroidAuthentication } from './droid-auth.mjs'
+import { probeDroidLimits } from './droid-limits.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
@@ -173,7 +174,7 @@ const providerDefinitions = [
     authentication: probeDroidAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
-      'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
+      'Factory Droid reports Standard usage only in its interactive /limits view. Ensync drives that view in a disposable PTY and strictly parses the panel; the capture could not be completed and verified on this machine, so remaining capacity is unknown.',
   },
   {
     id: 'auggie',
@@ -340,7 +341,7 @@ const providerCatalog = {
     chatExecution: 'supported',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Ensync still has no /limits quota adapter, so remaining capacity is unknown.',
+    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Usage comes from the TUI /limits panel, driven in a disposable PTY and strictly parsed (verified against droid 0.191.1); an unverifiable capture degrades to honest-unknown capacity.',
   },
   auggie: {
     routeKind: 'subscription',
@@ -719,6 +720,9 @@ async function inspectProvider(provider) {
   const claudeUsage = provider.id === 'claude' && authentication.state === 'authenticated'
     ? await probeClaudeUsage(executable, checkedAt, authentication.exactPlan ?? null)
     : null
+  const droidLimits = provider.id === 'droid' && authentication.state === 'authenticated'
+    ? await probeDroidLimits(executable, checkedAt)
+    : null
   const ollamaProbe = provider.id === 'ollama'
     ? await probeOllamaRuntime(executable, checkedAt)
     : null
@@ -736,7 +740,7 @@ async function inspectProvider(provider) {
     version,
     connectionState: connectionState(true, authentication),
     authentication,
-    usage: codexProbe?.usage ?? claudeUsage ?? ollamaProbe?.usage ?? usageFor(provider, authentication, checkedAt),
+    usage: codexProbe?.usage ?? claudeUsage ?? droidLimits ?? ollamaProbe?.usage ?? usageFor(provider, authentication, checkedAt),
     availableModels: codexProbe?.models ?? ollamaProbe?.models ?? [],
     canConnect: Array.isArray(provider.loginArgs),
     connectReason: Array.isArray(provider.loginArgs)
