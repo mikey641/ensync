@@ -135,6 +135,7 @@ function isolatedPrompt(prompt, workspace) {
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
 Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
+Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
 ${base ? `${base}\n` : ''}${unintegrated}

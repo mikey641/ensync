@@ -107,6 +107,23 @@ export function droidRequestEnvelope(id, method, params) {
   }
 }
 
+/**
+ * Names the tools a `droid.request_permission` asked Ensync to approve, from
+ * the CLI's own request payload: `params.toolUses[].toolUse.name`. Only the
+ * names are read; tool input can carry command text and secrets, so it never
+ * reaches an Ensync notice or error message.
+ */
+export function droidPermissionToolNames(params) {
+  if (!Array.isArray(params?.toolUses)) return []
+  const names = []
+  for (const entry of params.toolUses) {
+    const name = typeof entry?.toolUse?.name === 'string' ? entry.toolUse.name.trim() : ''
+    if (!name || names.includes(name)) continue
+    names.push(name)
+  }
+  return names
+}
+
 export function droidImagePaths(attachmentPaths = []) {
   return attachmentPaths.filter((path) => DROID_IMAGE_EXTENSIONS.has(extname(path).toLowerCase()))
 }
@@ -215,6 +232,8 @@ class DroidExecSession {
   #usage = null
   #settings = null
   #stderr = ''
+  #declinedPermissionTools = []
+  #declinedPermissions = 0
   #hardTimer = null
   #inactivityTimer = null
   #forceKillTimer = null
@@ -323,14 +342,7 @@ class DroidExecSession {
         throw turnFailure(terminal, droidTurnProvesNoActivity(this.#notifications))
       }
       const response = this.#finalResponse()
-      if (!response) {
-        throw new DroidExecError(
-          'empty_cli_response',
-          'Factory Droid finished without a verifiable final agent response.',
-          502,
-          false,
-        )
-      }
+      if (!response) throw this.#emptyResponseFailure()
       return {
         provider: 'droid',
         projectPath: this.input.projectPath,
@@ -426,6 +438,36 @@ class DroidExecSession {
     if (typeof this.#finalText === 'string' && this.#finalText.trim()) return this.#finalText.trim()
     const pending = this.#pendingAssistantText.at(-1)
     return typeof pending === 'string' && pending.trim() ? pending.trim() : null
+  }
+
+  /**
+   * Explains a completed turn that carries no answer. Verified against the
+   * droid CLI: a cancelled tool batch breaks the agent loop immediately, and
+   * the exec-mode "insufficient permission" message that would explain it is
+   * only appended in non-interactive CLI mode — never in the stream-jsonrpc
+   * mode this runner drives. Droid then reports `agent_turn_completed` with
+   * reason `completed` and no closing message, so a declined permission
+   * request is the cause of the silence and is reported as such rather than as
+   * an unexplained empty response.
+   */
+  #emptyResponseFailure() {
+    if (this.#declinedPermissions === 0) {
+      return new DroidExecError(
+        'empty_cli_response',
+        'Factory Droid finished without a verifiable final agent response.',
+        502,
+        false,
+      )
+    }
+    const refused = this.#declinedPermissionTools.length > 0
+      ? `run ${this.#declinedPermissionTools.join(', ')}`
+      : 'run a tool'
+    return new DroidExecError(
+      'provider_permission_declined',
+      `Factory Droid asked for approval to ${refused}, which its pinned "${DROID_AUTONOMY_LEVEL}" autonomy level cannot approve on its own, and ended the turn without a closing message once Ensync declined. Ensync Host never approves interactive permission requests: it commits this conversation's branch itself and performs every push and land, so work Droid finished before the request is saved on the branch. Review the branch before retrying.`,
+      409,
+      false,
+    )
   }
 
   #abort = () => {
@@ -573,8 +615,16 @@ class DroidExecSession {
   // provider's own documented outcome values rather than leaving the turn
   // hanging. Questionnaires reach the person instead; see #askUser.
   #declineServerRequest(message) {
+    let refusedTools = []
     if (message.method === 'droid.request_permission') {
       this.#respond(message.id, { selectedOption: 'cancel' })
+      // Recorded because Droid stops the turn silently after a decline, and
+      // that silence is otherwise indistinguishable from a provider fault.
+      refusedTools = droidPermissionToolNames(message.params)
+      this.#declinedPermissions += 1
+      for (const name of refusedTools) {
+        if (!this.#declinedPermissionTools.includes(name)) this.#declinedPermissionTools.push(name)
+      }
     } else if (message.method === 'droid.ask_user') {
       this.#respond(message.id, { cancelled: true, answers: [] })
     } else {
@@ -589,7 +639,7 @@ class DroidExecSession {
     this.onEvent?.({
       type: 'notice',
       code: 'provider_request_declined',
-      message: `Factory Droid requested interactive input (${message.method}); Ensync declined it safely.`,
+      message: `Factory Droid requested interactive input (${message.method}${refusedTools.length > 0 ? `: ${refusedTools.join(', ')}` : ''}); Ensync declined it safely. Droid ends the turn after a declined permission, so it may stop here without a closing message.`,
       at: new Date().toISOString(),
     })
   }
