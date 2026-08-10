@@ -447,6 +447,8 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     resetLabel: status.usage.resetLabel ?? null,
     resetWindow: status.usage.resetWindow ?? null,
     usageReason: status.usage.reason,
+    usageStale: status.usage.stale === true,
+    usageCheckedAt: status.usage.checkedAt ?? null,
     canConnect: status.canConnect,
     canUpdate: status.canUpdate,
     updateStrategy: status.updateStrategy,
@@ -4606,6 +4608,15 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
     return 'No verified non-consuming quota probe.'
   }
 
+  // A retained percentage stays on the card so a lost probe race cannot blank it,
+  // but it is never presented as this refresh's reading.
+  const staleUsageNote = (provider: Provider) => {
+    const measuredAt = provider.usageCheckedAt ? new Date(provider.usageCheckedAt) : null
+    return measuredAt && !Number.isNaN(measuredAt.getTime())
+      ? `Last verified ${measuredAt.toLocaleTimeString()}; this check returned no quota data.`
+      : 'Last verified earlier; this check returned no quota data.'
+  }
+
   const refresh = async () => {
     setRefreshing(true)
     try {
@@ -4635,7 +4646,9 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
                 <div className={`plan-meter ${provider.usage === null ? 'plan-meter--unknown' : ''}`}>{provider.usage !== null && <i style={{ width: `${provider.usage}%`, background: provider.color }} />}</div>
                 {provider.usageDetails.length > 0 && <dl className="usage-details">{provider.usageDetails.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
                 <div className="plan-card__foot"><span>{providerResetText(provider) ? <strong>{providerResetText(provider)}</strong> : 'Reset not reported'}</span><span>{provider.routeKind === 'local' ? (provider.installed ? 'Local runtime' : 'Not installed') : provider.connected ? 'Authenticated' : provider.installed ? provider.authenticationState === 'not_authenticated' ? 'Not authenticated' : 'Login not checked' : 'Not installed'}</span></div>
-                {provider.usage === null && <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>}
+                {provider.usage === null
+                  ? <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>
+                  : provider.usageStale && <p className="usage-unavailable-reason" title={provider.usageReason}>{staleUsageNote(provider)}</p>}
               </div>
             ))}
           </div>

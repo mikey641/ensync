@@ -67,6 +67,8 @@ export type ProviderUsage = {
   checkedAt: string
   details: Array<{ label: string; value: string }>
   reason: string
+  /** True when this refresh's probe failed and the Host kept the previous verified reading. */
+  stale?: boolean
 }
 
 export type CliModel = {
