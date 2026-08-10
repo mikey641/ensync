@@ -419,14 +419,10 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    if (
-      this.#threadId
-      && typeof params?.threadId === 'string'
-      && params.threadId !== this.#threadId
-    ) return
-
-    if (message.method === 'turn/started' && params?.turn?.id) {
-      if (!this.#turnId) this.#turnId = params.turn.id
+    if (message.method === 'turn/started'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id) {
+      this.#turnId = params.turn.id
       this.#turnStarted = true
       this.#resolveReadyIfActive()
     } else if (message.method === 'item/completed' && params?.item?.type === 'agentMessage') {
