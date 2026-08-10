@@ -170,9 +170,7 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: [],
     updateArgs: ['update'],
-    authentication: unsupportedAuthentication(
-      'Factory Droid uses browser account sign-in during first-run onboarding, but does not document a non-interactive subscription authentication-status command.',
-    ),
+    authentication: probeDroidAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
       'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
