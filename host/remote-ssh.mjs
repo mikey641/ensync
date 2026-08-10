@@ -14,7 +14,6 @@ import {
 
 const DEFAULT_SSH_TIMEOUT_MS = 30_000
 const DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_CHAT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const CHAT_TRANSPORT_TIMEOUT_GRACE_MS = 30_000
 const MAX_CHAT_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
@@ -216,6 +215,9 @@ export class RemoteSshProcessAdapter {
       )
     }
     const timeoutMs = options.timeoutMs ?? DEFAULT_SSH_TIMEOUT_MS
+    const hardTimeoutMs = Object.hasOwn(options, 'hardTimeoutMs')
+      ? options.hardTimeoutMs
+      : timeoutMs
     const result = await this.#processRunner(
       sshExecutable,
       buildSshArguments(connection),
@@ -226,7 +228,7 @@ export class RemoteSshProcessAdapter {
         ...(options.inactivityTimeoutMs == null
           ? {}
           : { inactivityTimeoutMs: options.inactivityTimeoutMs }),
-        ...(options.hardTimeoutMs == null ? {} : { hardTimeoutMs: options.hardTimeoutMs }),
+        hardTimeoutMs,
         maxCaptureBytes: MAX_BRIDGE_CAPTURE_BYTES,
         signal: options.signal,
       },
@@ -244,7 +246,7 @@ export class RemoteSshProcessAdapter {
       const message = result.timeoutReason === 'inactivity'
         ? 'The SSH transport produced no verified bridge progress before its inactivity limit and was stopped. The remote project may contain partial work; review it before retrying.'
         : result.timeoutReason === 'hard_limit'
-          ? 'The SSH transport reached its hard run limit and was stopped. The remote project may contain partial work; review it before retrying.'
+          ? 'The SSH transport reached an explicit run limit and was stopped. The remote project may contain partial work; review it before retrying.'
           : 'The SSH operation reached a run limit and was stopped. The remote project may contain partial work; review it before retrying.'
       throw new RemoteSshError('ssh_timed_out', message, 504)
     }
@@ -370,12 +372,6 @@ function validateRemoteChatRequest(request) {
   if (typeof request.prompt !== 'string' || !request.prompt.trim()) {
     throw new RemoteSshError('invalid_prompt', 'Enter a message before running remote chat.')
   }
-  if (request.workspaceKey === undefined || request.workspaceKey === null) {
-    throw new RemoteSshError(
-      'client_upgrade_required',
-      'This Ensync window is older than the running Host. Quit Ensync completely and reopen it before starting another remote agent run.',
-    )
-  }
   if (
     typeof request.workspaceKey !== 'string'
     || !request.workspaceKey.trim()
@@ -429,8 +425,7 @@ export class RemoteSshService {
   constructor(options = {}) {
     this.#adapter = options.adapter ?? new RemoteSshProcessAdapter(options)
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_CHAT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs
-      ?? configuredHardTimeoutMs(options.environment ?? process.env, DEFAULT_CHAT_HARD_TIMEOUT_MS)
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? null
   }
 
   async probe(input) {
@@ -499,7 +494,12 @@ export class RemoteSshService {
       throw new RemoteSshError('run_cancelled', 'Run stopped by user.', 499, false)
     }
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
-    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const inactivityTimeoutMs = hardTimeoutMs == null
+      ? this.#inactivityTimeoutMs
+      : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const transportHardTimeoutMs = hardTimeoutMs == null
+      ? null
+      : hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS
     const startedAt = Date.now()
     const execution = await this.#adapter.execute(
       connection,
@@ -516,9 +516,9 @@ export class RemoteSshService {
         hardTimeoutMs,
       },
       {
-        timeoutMs: hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
+        timeoutMs: transportHardTimeoutMs ?? DEFAULT_SSH_TIMEOUT_MS,
         inactivityTimeoutMs: inactivityTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
-        hardTimeoutMs: hardTimeoutMs + CHAT_TRANSPORT_TIMEOUT_GRACE_MS,
+        hardTimeoutMs: transportHardTimeoutMs,
         signal: options.signal,
       },
     )
@@ -561,7 +561,6 @@ export class RemoteSshService {
       workspace: { path: workspace.path, branch: workspace.branch },
       at: new Date().toISOString(),
     })
-    emitSharedCheckoutNotice(result?.sharedCheckout, options)
     const processResult = result?.process
     if (!processResult || typeof processResult.stdout !== 'string' || typeof processResult.stderr !== 'string') {
       throw new RemoteSshError('invalid_bridge_response', 'Remote chat returned an invalid process result.', 502)
@@ -570,7 +569,7 @@ export class RemoteSshService {
       const message = processResult.timeoutReason === 'inactivity'
         ? 'The remote provider produced no CLI output or lifecycle progress before Ensync Host\'s inactivity limit and was stopped. Partial work may exist; review the remote project before retrying.'
         : processResult.timeoutReason === 'hard_limit'
-          ? 'The remote provider reached Ensync Host\'s hard run limit and was stopped. Partial work may exist; review the remote project before retrying.'
+          ? 'The remote provider reached an explicit Ensync Host run limit and was stopped. Partial work may exist; review the remote project before retrying.'
           : 'The remote provider reached an Ensync Host run limit and was stopped. Partial work may exist; review the remote project before retrying.'
       throw new RemoteSshError('run_timed_out', message, 504)
     }

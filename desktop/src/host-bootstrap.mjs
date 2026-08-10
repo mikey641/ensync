@@ -18,7 +18,6 @@ const token = process.env.ENSYNC_HOST_AUTH_TOKEN
 const stateFile = process.env.ENSYNC_HOST_STATE_FILE
 const journalFile = process.env.ENSYNC_HOST_JOB_JOURNAL_FILE
 const projectIsolationRoot = process.env.ENSYNC_HOST_PROJECT_ISOLATION_ROOT
-const chatAttachmentsRoot = process.env.ENSYNC_HOST_CHAT_ATTACHMENTS_ROOT
 const idleShutdownMs = Number(process.env.ENSYNC_HOST_IDLE_SHUTDOWN_MS || 60_000)
 const detachedMode = Boolean(token && stateFile && journalFile)
 
@@ -34,9 +33,6 @@ if (detachedMode && !isAbsolute(stateFile)) throw new Error('ENSYNC_HOST_STATE_F
 if (detachedMode && !isAbsolute(journalFile)) throw new Error('ENSYNC_HOST_JOB_JOURNAL_FILE must be absolute.')
 if (projectIsolationRoot && !isAbsolute(projectIsolationRoot)) {
   throw new Error('ENSYNC_HOST_PROJECT_ISOLATION_ROOT must be absolute.')
-}
-if (chatAttachmentsRoot && !isAbsolute(chatAttachmentsRoot)) {
-  throw new Error('ENSYNC_HOST_CHAT_ATTACHMENTS_ROOT must be absolute.')
 }
 await access(hostEntry)
 
@@ -59,7 +55,6 @@ const server = startEnsyncHost({
   instanceId: detachedMode ? instanceId : null,
   chatJobJournalPath: detachedMode ? journalFile : null,
   projectIsolationRoot: projectIsolationRoot || undefined,
-  chatAttachmentsRoot: chatAttachmentsRoot || undefined,
   daemonLeaseService,
 })
 

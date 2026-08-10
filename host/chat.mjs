@@ -34,7 +34,6 @@ const CHAT_PROVIDER_CONTAINMENT = {
   droid: { level: 'permission_config', autonomyLevel: DROID_AUTONOMY_LEVEL },
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_TIMEOUT_MS = 10 * 60 * 1_000
 const MAX_PROMPT_LENGTH = 100_000
 const MAX_CHAT_OUTPUT_BYTES = 4 * 1024 * 1024
@@ -106,31 +105,14 @@ function combinedAbortSignal(...signals) {
   }
 }
 
-export function workspaceBaseSummary(workspace) {
-  const base = workspace?.base
-  if (!base) return null
-  const canonical = base.remote && base.branch ? `${base.remote}/${base.branch}` : 'the canonical branch'
-  if (base.source === 'remote_default_branch') {
-    return `Base: ${canonical} at ${base.sha}${base.refreshed ? ', fetched for this run' : ''}.`
-  }
-  if (base.source === 'already_canonical') return `Base: already current with ${canonical} at ${base.sha}.`
-  if (base.reason) return `Base: ${base.sha}. ${base.reason}`
-  return `Base: ${base.sha}.`
-}
-
 function isolatedPrompt(prompt, workspace) {
   if (!workspace) return prompt
-  const base = workspaceBaseSummary(workspace)
-  const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
-    && workspace.integration.unintegratedCommits > 0
-    ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
-    : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
 Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-${base ? `${base}\n` : ''}${unintegrated}
+
 ${prompt}`
 }
 
@@ -139,7 +121,7 @@ function timeoutMessage(providerName, timeoutReason) {
     return `${providerName} produced no CLI output or lifecycle progress before Ensync Host's inactivity limit and was stopped. Partial work may exist; review the project before retrying.`
   }
   if (timeoutReason === 'hard_limit') {
-    return `${providerName} reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.`
+    return `${providerName} reached an explicit Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
   }
   return `${providerName} reached an Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
 }
@@ -178,59 +160,33 @@ function visibleArguments(request, attachmentPaths, containment = null) {
   })
 }
 
-function assistantTextBlocks(content) {
-  return content
+function providerNoteFromEvent(provider, event) {
+  if (!event || typeof event !== 'object' || Array.isArray(event)) return null
+
+  if (
+    provider === 'codex'
+    && event.type === 'item.completed'
+    && event.item?.type === 'agent_message'
+    && event.item.phase === 'commentary'
+    && typeof event.item.text === 'string'
+    && event.item.text.trim()
+  ) {
+    return event.item.text.trim()
+  }
+
+  if (provider !== 'claude' || event.type !== 'assistant') return null
+  const content = event.message?.content ?? event.content
+  if (!Array.isArray(content)) return null
+  // Claude has no commentary/final phase marker. Only surface assistant text
+  // when the same message also starts provider work; a text-only assistant
+  // message is the final response and should not briefly appear as a note.
+  if (!content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')) return null
+  const text = content
     .filter((block) => block && typeof block === 'object' && block.type === 'text' && typeof block.text === 'string')
     .map((block) => block.text.trim())
     .filter(Boolean)
     .join('\n\n')
-}
-
-function claudeNoteExtractor() {
-  const pending = new Map()
-
-  const remember = (id, text) => {
-    const held = pending.get(id) ?? { text: '', toolStarted: false }
-    if (text) held.text = held.text ? `${held.text}\n\n${text}` : text
-    if (held.text.length > TERMINAL_EVENT_TEXT_LIMIT) held.text = held.text.slice(0, TERMINAL_EVENT_TEXT_LIMIT)
-    pending.set(id, held)
-    while (pending.size > CLAUDE_PENDING_NOTE_MESSAGES) pending.delete(pending.keys().next().value)
-    return held
-  }
-
-  return (event) => {
-    if (event.type !== 'assistant') return null
-    const content = event.message?.content ?? event.content
-    if (!Array.isArray(content)) return null
-    const text = assistantTextBlocks(content)
-    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
-    const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
-    if (!id) return startsToolWork ? text || null : null
-
-    const held = remember(id, text)
-    if (!startsToolWork && !held.toolStarted) return null
-    held.toolStarted = true
-    const note = held.text
-    held.text = ''
-    return note || null
-  }
-}
-
-function providerNoteExtractor(provider) {
-  if (provider === 'claude') return claudeNoteExtractor()
-  return (event) => {
-    if (
-      provider === 'codex'
-      && event.type === 'item.completed'
-      && event.item?.type === 'agent_message'
-      && event.item.phase === 'commentary'
-      && typeof event.item.text === 'string'
-      && event.item.text.trim()
-    ) {
-      return event.item.text.trim()
-    }
-    return null
-  }
+  return text || null
 }
 
 function outputForwarder(onEvent, provider) {
@@ -256,8 +212,7 @@ function outputForwarder(onEvent, provider) {
     } catch {
       return
     }
-    if (!structured || typeof structured !== 'object' || Array.isArray(structured)) return
-    const note = noteFromEvent(structured)
+    const note = providerNoteFromEvent(provider, structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
     onEvent({
@@ -781,7 +736,6 @@ export class ChatRunService {
   #inactivityTimeoutMs
   #hardTimeoutMs
   #codexLiveTurns
-  #droidExecRuns
   #projectIsolation
   #activeRuns = 0
 
@@ -792,8 +746,7 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.#hardTimeoutMs = options.hardTimeoutMs
-      ?? configuredHardTimeoutMs(this.#environment, DEFAULT_HARD_TIMEOUT_MS)
+    this.#hardTimeoutMs = options.hardTimeoutMs ?? null
     this.#projectIsolation = options.projectIsolation ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
@@ -859,17 +812,11 @@ export class ChatRunService {
         })
         workspace = workspaceLease.workspace
         combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
-        const baseSummary = workspaceBaseSummary(workspace)
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
-          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}`,
-          workspace: {
-            path: workspace.projectPath,
-            branch: workspace.branch,
-            base: workspace.base ?? null,
-            integration: workspace.integration ?? null,
-          },
+          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.`,
+          workspace: { path: workspace.projectPath, branch: workspace.branch },
           at: new Date().toISOString(),
         })
       } catch (error) {
@@ -889,27 +836,13 @@ export class ChatRunService {
       repositoryPath: workspace.repositoryPath,
       branch: workspace.branch,
       reused: workspace.reused,
-      base: workspace.base ?? null,
-      integration: workspace.integration ?? null,
       gitBefore: workspace.gitBefore,
     } : null
-    // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
-    // canonical shared checkout that provider processes must not write to directly.
-    const containment = workspace ? {
-      worktreePath: workspace.repositoryPath,
-      canonicalRepositoryPath: workspace.shared.repositoryPath,
-    } : null
 
-    let runOutcome = 'failed'
     try {
     if (request.provider === 'codex' && typeof options.liveTurnId === 'string' && options.liveTurnId) {
       this.#activeRuns += 1
       try {
-        // Live-turn containment is pinned in codex-live-turn session configuration; verify
-        // separately before enabling sandbox there. Step 0 verification for this task found a
-        // `sandboxPolicy` field on `TurnStartParams` in the app-server v2 protocol schema, but
-        // could not confirm it applies under the non-experimental `initialize` handshake this
-        // runner uses (no `experimentalApi: true`), so it was not pinned here. Do not guess.
         const result = await this.#codexLiveTurns.run({
           id: options.liveTurnId,
           executable: provider.executable,
@@ -929,7 +862,6 @@ export class ChatRunService {
           },
         })
         workspaceLease?.assertHeld()
-        runOutcome = 'succeeded'
         return { ...result, projectPath, workspace: publicWorkspace }
       } catch (error) {
         if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
@@ -951,56 +883,12 @@ export class ChatRunService {
       }
     }
 
-    if (request.provider === 'droid') {
-      this.#activeRuns += 1
-      try {
-        // Droid has no argv containment flags: `cwd` plus the pinned per-session
-        // autonomy level is the whole enforcement surface, and the runner verifies
-        // the CLI echoed that level back before it sends the prompt.
-        const result = await this.#droidExecRuns.run({
-          executable: provider.executable,
-          projectPath: executionProjectPath,
-          prompt: executionRequest.prompt,
-          attachmentPaths,
-          sessionId: request.sessionId ?? null,
-          model: request.model ?? null,
-          effort: request.effort ?? null,
-          env: subscriptionEnvironment(this.#environment),
-        }, {
-          signal: combinedSignal.signal,
-          onEvent: (event) => {
-            if (!['output', 'note'].includes(event?.type)) return options.onEvent?.(event)
-            const safe = redactTerminalText(event.text)
-            options.onEvent?.({ ...event, text: safe.text, redacted: safe.redacted })
-          },
-        })
-        workspaceLease?.assertHeld()
-        runOutcome = 'succeeded'
-        return { ...result, projectPath, workspace: publicWorkspace }
-      } catch (error) {
-        if (workspaceLease?.signal.aborted && !options.signal?.aborted) {
-          const reason = workspaceLease.signal.reason
-          throw new ChatRunError(
-            'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
-            409,
-            false,
-          )
-        }
-        if (error instanceof DroidExecError) {
-          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
-        }
-        throw error
-      } finally {
-        this.#activeRuns -= 1
-        this.#statusService.invalidate?.()
-      }
-    }
-
     const startedAt = Date.now()
     const hardTimeoutMs = request.timeoutMs ?? this.#hardTimeoutMs
-    const inactivityTimeoutMs = Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
-    const args = argumentsFor(executionRequest, attachmentPaths, containment)
+    const inactivityTimeoutMs = hardTimeoutMs == null
+      ? this.#inactivityTimeoutMs
+      : Math.min(this.#inactivityTimeoutMs, hardTimeoutMs)
+    const args = argumentsFor(executionRequest, attachmentPaths)
     const forwarder = outputForwarder(options.onEvent, request.provider)
     this.#activeRuns += 1
     let processResult
@@ -1009,7 +897,7 @@ export class ChatRunService {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
-        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths, containment)].map(quoteTerminalArgument).join(' '),
+        command: [provider.executable, ...visibleArguments(executionRequest, attachmentPaths)].map(quoteTerminalArgument).join(' '),
         at: new Date(startedAt).toISOString(),
       })
       processResult = await this.#processRunner(
@@ -1091,7 +979,6 @@ export class ChatRunService {
 
     const parsed = parseResult(request.provider, processResult.stdout)
     workspaceLease?.assertHeld()
-    runOutcome = 'succeeded'
     return {
       provider: request.provider,
       projectPath,
@@ -1106,54 +993,8 @@ export class ChatRunService {
       durationMs: Date.now() - startedAt,
       completedAt: new Date().toISOString(),
     }
-    } catch (error) {
-      if (error?.code === 'run_cancelled') runOutcome = 'cancelled'
-      else if (error?.code === 'run_timed_out') runOutcome = 'timed_out'
-      throw error
     } finally {
       combinedSignal.dispose()
-      if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
-        try {
-          const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
-            outcome: runOutcome,
-            provider: request.provider,
-            jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
-          })
-          if (workCommit.committed) {
-            options.onEvent?.({
-              type: 'notice',
-              code: 'agent_work_committed',
-              message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
-              at: new Date().toISOString(),
-            })
-          }
-        } catch (commitError) {
-          options.onEvent?.({
-            type: 'notice',
-            code: 'agent_work_commit_failed',
-            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
-            at: new Date().toISOString(),
-          })
-        }
-        try {
-          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
-          if (sharedCheck.available && sharedCheck.changed) {
-            const message = sharedCheck.destructive
-              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
-              : sharedCheck.landed
-                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
-                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
-            options.onEvent?.({
-              type: 'notice',
-              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
-              message,
-              at: new Date().toISOString(),
-            })
-          }
-        } catch {
-          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
-        }
-      }
       await workspaceLease?.release()
     }
   }

@@ -120,7 +120,7 @@ export function queuedPromptGate(chat, entry) {
 }
 
 /** Plain-language queue copy for the conversation pane's compact status card. */
-export function promptQueueStatusPresentation(gate, count, delivery) {
+export function promptQueueStatusPresentation(gate, count) {
   const queueCount = Number.isSafeInteger(count) && count > 0 ? count : 0
   const messageLabel = queueCount === 1 ? 'message' : 'messages'
   const headline = `${queueCount} ${messageLabel} ${gate?.state === 'paused' ? 'paused' : 'queued'}`
@@ -133,23 +133,9 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
     }
   }
   if (gate?.state === 'waiting') {
-    // Live mid-turn delivery is Codex-only, so on every other provider the push
-    // action is absent by design. Name that limit rather than leaving the user
-    // to guess why a queued message cannot be promoted.
-    const waitingDetail = 'It will run automatically after the current turn finishes successfully.'
-    if (delivery && delivery.liveDeliverySupported === false) {
-      const subject = typeof delivery.activeProviderName === 'string' && delivery.activeProviderName.trim()
-        ? delivery.activeProviderName.trim()
-        : 'This provider'
-      return {
-        headline,
-        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.`,
-        actionLabel: null,
-      }
-    }
     return {
       headline,
-      detail: waitingDetail,
+      detail: 'It will run automatically after the current turn finishes successfully.',
       actionLabel: null,
     }
   }

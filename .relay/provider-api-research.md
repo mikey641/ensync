@@ -1,7 +1,7 @@
 ---
 name: Provider API and automation research
 description: Dated first-party interface, authentication, billing, and readiness evidence for every Ensync provider.
-last_verified: 2026-08-09
+last_verified: 2026-08-07
 ---
 
 # Provider API and automation research
@@ -59,21 +59,8 @@ Unknown capability remains explicit and disabled. An API key is never treated as
 ### Provider progress-note streaming finding (verified 2026-08-07)
 
 - Codex CLI 0.146.0's generated App Server schema and current first-party App Server documentation expose `agentMessage` items with `commentary` or `final_answer` phases plus authoritative `item/completed` notifications. Ensync marks local Codex progress notes `supported` by forwarding only completed `commentary` text; raw reasoning events remain excluded.
-- Claude Code 2.1.223 and its current CLI documentation expose verbose stream-JSON as ordered assistant events followed by a terminal result. The verified CLI emits one assistant event per content block while retaining one `message.id`, so Ensync holds text by message ID until a later block for that same message starts tool work. Because the protocol does not distinguish commentary from the final answer, text-only final messages and thinking blocks remain excluded.
+- Claude Code 2.1.223 and its current CLI documentation expose verbose stream-JSON as ordered assistant messages followed by a terminal result. Because that protocol does not distinguish commentary from the final answer, Ensync marks local Claude progress notes `supported` only for assistant text in a message that also starts tool work; text-only final messages and thinking blocks remain excluded.
 - Catalog-wide result for this capability: Codex and Claude local runners are `supported`; Copilot, Cursor, Kimi, Antigravity, Jules, Kiro, Junie, GitLab Duo, Warp Oz, Factory Droid, Amp, Auggie, Qoder, CodeBuddy, and Ollama remain `discovery_only` because Ensync has no enabled tested runner for them. Live SSH provider notes are `unavailable` in the current buffered bridge and must not be simulated.
-
-### Automatic fallback and turn identity finding (verified 2026-08-09)
-
-- Claude Code 2.1.226 was reverified locally at an exact 100% current-session window. The documented zero-model-turn `/usage` command returned that exact percentage, and a non-interactive verbose `stream-json` prompt then exited with code 1 after `SessionStart` hook events, `system/init`, a rejected `rate_limit_event`, one synthetic text-only assistant error, and a terminal `result` carrying `is_error: true`, HTTP 429, zero tokens, and zero cost. Ensync's Host classified this complete no-tool stream as safe `provider_quota`. The missed handoff was downstream: the renderer selected the destination from its pre-run provider snapshot. Safe local runtime fallback now refreshes Host status before choosing the next unattempted provider, while preserving the existing no-replay boundary after tool, command, file, or unknown activity.
-- Claude Code 2.1.223 startup failures were reproduced as exact newline-delimited `system` events (`init`, then `hook_started`/`hook_response` identified as `SessionStart`) followed by exit code 1, without an assistant, user, tool, terminal-result event, or stderr diagnostic. Ensync treats only that complete, untruncated startup-only shape as `provider_startup_failed`; any other hook, stderr, unknown/provider-activity event, or capture truncation remains non-retryable. The renderer accepts this explicit Host proof as preflight and advances through the saved Auto priority without replaying an observed provider task.
-- Codex CLI 0.146.0's locally generated App Server schema requires `threadId` on `turn/started`. Ensync therefore accepts the active turn ID only when that thread identity matches the retained thread; a notification from another thread cannot retarget `turn/steer`.
-- Catalog-wide result for failure framing and active-turn identity: local Codex and Claude runners are `supported` under the exact versioned rules above. Every other catalog provider remains `discovery_only` because its runner, activity classifier, and no-replay proof are not enabled and tested. SSH fallback remains limited to its existing buffered terminal proof and does not inherit local Claude startup classification implicitly.
-
-### Provider containment verification finding (verified 2026-08-09)
-
-- Codex CLI 0.146.0's `codex exec --help` confirms `-s`/`--sandbox <SANDBOX_MODE>` (including `workspace-write`) directly on `exec`; the installed binary's own serialized config-struct name (`SandboxWorkspaceWrite`/`writable_roots`) and a version-matched cached config reference confirm the `-c sandbox_workspace_write.writable_roots=[...]` override. `codex exec resume --sandbox workspace-write` was reproduced against the installed binary and rejected at argv-parse time (`error: unexpected argument '--sandbox' found`, exit 2) before any session lookup. The equivalent `-c 'sandbox_mode="workspace-write"'` plus `-c 'sandbox_workspace_write.writable_roots=[...]'` pair was reproduced passing `--strict-config` validation through to real session resolution — the run failed with a "no rollout found" session-lookup error against a fake UUID, not a config/argv error, proving both overrides are accepted on `exec resume`. Codex live-turn/steer's app-server `turn/start`/`thread/start` `sandboxPolicy` field appears only in a locally-generated experimental (`--experimental`) v2 protocol schema; the non-experimental v1 schema this runner's handshake actually uses does not confirm the field's presence, casing, or shape, so it remains unpinned pending first-party verification under the stable handshake.
-- Claude Code 2.1.226's `claude --help` confirms the `--settings <file-or-json>` flag. The version-matched bundled `claude-code-settings.schema.json` (from the matching `anthropic.claude-code-2.1.226-darwin-arm64` VS Code extension) documents `permissions.deny` as a string array; the installed CLI's own bundled JS exposes its permission-rule validator's example strings and a `filePatternTools` list (`["Read","Write","Edit","Glob","NotebookRead","NotebookEdit","Cd"]`), confirming `Write(<path>/**)`, `Edit(<path>/**)`, and `NotebookEdit(<path>/**)` as valid glob-based deny rules scoped to the canonical checkout path, not the worktree. The same `--help` output documents that, under `-p`/`--print`, settings files failing validation are silently ignored with no error dialog — a fail-open gap, not a fail-closed one. The bundled JS also places `Bash` in a separate `bashPrefixTools` category (command-prefix matching), disjoint from the `filePatternTools` category the deny rules use, confirming the deny rules do not constrain Bash-tool shell commands.
-- Catalog-wide result for this capability: Codex local `exec`/`exec resume` and Claude Code local runs each have a pinned, verified containment level (`os_sandbox` and `permission_config` respectively). Codex live-turn/steer and all SSH executions are prompt-plus-`cwd` only in the shipped code; this gap is stated factually in `../features/agent-routing.md` and is not yet a separate recorded containment level in the catalog.
 
 - Codex remains the reference for an account-authenticated, structured local runner.
 - Claude remains technically integrated, but the current third-party OAuth and separate Agent SDK credit terms are a public-release blocker until resolved.
@@ -82,73 +69,3 @@ Unknown capability remains explicit and disabled. An API key is never treated as
 - Jules is a cloud-session adapter, and Ollama needs an Ensync-owned agent/tool loop. Neither should be forced into the local subscription subprocess contract.
 
 Re-run this research for the affected provider immediately before implementation and before public release. Record the verified CLI/SDK version in tests; web documentation alone is not runtime proof.
-
-### Provider install command, auth verification, and MCP config finding (verified 2026-08-09)
-
-All 17 catalog provider CLIs were verified as installed on the test machine. Each provider's official curl install command was fetched from its first-party documentation and added to `host/provider-install.mjs`. A new `POST /api/providers/:id/install` route mirrors the existing connect/update terminal-launch pattern: the browser sends only a provider ID and an explicit launch boolean; the Host resolves the fixed, allowlisted curl command and launches it in a terminal. Install is refused while agent runs are active, matching the update route's guard.
-
-MCP (Model Context Protocol) server configuration detection was added in `host/provider-mcp.mjs`. It is read-only: Ensync reports only whether a provider's MCP config file exists and which server names are configured. It never reads, parses, or transmits server command arguments, environment variables, URLs, or credentials. The server names themselves are non-sensitive labels. MCP config locations per provider:
-
-| Provider | MCP config file | Format | Verified servers |
-| --- | --- | --- | --- |
-| Claude Code | `~/.claude.json` | JSON (`mcpServers` + per-project) | `mcp-gsuite` (global), `clalit` (project `/Users/mikeyhasson`) |
-| Codex | `~/.codex/config.toml` | TOML (`[mcp_servers.<name>]`) | `node_repl`, `computer-use`, `openaiDeveloperDocs` |
-| Copilot CLI | `~/.copilot/mcp-config.json` | JSON | Not yet created on test machine |
-| Cursor Agent | `~/.cursor/mcp.json` | JSON | Not yet created on test machine |
-| Factory Droid | `~/.factory/mcp.json` | JSON | Not yet created; `/mcp` command available |
-| Kiro CLI | `~/.kiro/settings/cli.json` | JSON | Empty `{}` on test machine |
-| Augment Auggie | `~/.augment/auggie/settings.json` | JSON | Not yet created |
-| Amp | `~/.config/amp/settings.json` | JSON (`amp.mcpServers`) | Not yet created |
-| Qoder CLI | `~/.qoder/settings.json` | JSON | Not yet created |
-| CodeBuddy Code | `~/.codebuddy/.mcp.json` | JSON | Not yet created |
-| Junie CLI | `~/.junie/mcp.json` | JSON | Not yet created |
-| Kimi Code | `~/.kimi-code/config.toml` | TOML (`[mcp_servers.<name>]`) | Not yet created |
-| Google Antigravity | `~/.antigravity/mcp.json` | JSON | Not yet created |
-| Warp Oz | `~/.config/warp/mcp.json` | JSON | Not yet created |
-| GitLab Duo | `~/.config/gitlab/duo-mcp.json` | JSON | Not yet created |
-| Google Jules | None | N/A | Cloud-session agent; no local MCP config |
-| Ollama | None | N/A | Local runtime; no MCP config |
-
-Authentication verification results against the installed CLIs:
-
-| Provider | CLI version | Auth status | Method |
-| --- | --- | --- | --- |
-| Codex | codex-cli 0.146.0 | Authenticated | ChatGPT login |
-| Claude Code | 2.1.226 | Authenticated | claude.ai (Max plan) |
-| GitHub Copilot CLI | 1.0.78 | Authenticated | GitHub account (mikey641) |
-| Cursor Agent | 2026.08.04-aaa8809 | Not authenticated | Needs `agent login` |
-| Google Antigravity | 1.1.10 | Unknown (no status command) | OS-keyring/browser sign-in |
-| Google Jules | v0.1.42 | Authenticated | Google account (via `jules login`) |
-| Kimi Code | 0.34.0 | Unknown (no status command) | Device OAuth via `kimi login` |
-| Kiro CLI | 2.16.2 | Not authenticated | `whoami` returned `{"account":null}` |
-| Qoder CLI | 1.1.16 | Unknown (no status command) | Browser login via `qodercli login` |
-| CodeBuddy Code | 2.132.0 | Unknown (no status command) | Browser onboarding |
-| Factory Droid | 0.190.0 | Authenticated | Browser login (credential file present) |
-| Augment Auggie | 0.34.0 | Not authenticated | Needs `auggie login` |
-| Amp | 0.0.1786006377 | Not authenticated | Needs `amp login` |
-| GitLab Duo | 9.8.0 | Unknown | Reuses GitLab/glab credentials |
-| Warp Oz | v0.2026.07.29.09.05 | Unknown (no `login status` command) | Browser login via `oz login` |
-| Junie CLI | 26.8.3 (2548.5) | Unknown (no status command) | JetBrains Account or `JUNIE_API_KEY` |
-| Ollama | 0.13.5 | Not required | Local runtime |
-
-Official curl install commands (macOS/Linux) verified from first-party documentation:
-
-| Provider | Install command | Source |
-| --- | --- | --- |
-| Codex | `curl -fsSL https://chatgpt.com/codex/install.sh \| sh` | github.com/openai/codex |
-| Claude Code | `curl -fsSL https://claude.ai/install.sh \| bash` | code.claude.com/docs/en/setup |
-| GitHub Copilot CLI | `curl -fsSL https://gh.io/copilot-install \| bash` | docs.github.com |
-| Cursor Agent | `curl https://cursor.com/install -fsS \| bash` | cursor.com/docs/cli/installation |
-| Google Antigravity | `curl -fsSL https://antigravity.google/cli/install.sh \| bash` | antigravity.google/docs/cli/install |
-| Google Jules | `npm install -g @google/jules` | jules.google/docs/cli/reference |
-| Kimi Code | `curl -fsSL https://code.kimi.com/kimi-code/install.sh \| bash` | kimi.com/help/kimi-code |
-| Kiro CLI | `curl -fsSL https://cli.kiro.dev/install \| bash` | kiro.dev/docs/cli/installation |
-| Junie CLI | `curl -fsSL https://junie.jetbrains.com/install.sh \| bash` | junie.jetbrains.com/docs/junie-cli |
-| GitLab Duo | `bash <(curl --fail --silent --show-error --location "https://gitlab.com/.../install_duo_cli.sh")` | docs.gitlab.com |
-| Warp Oz | `curl -fsSL https://app.warp.dev/download/agent-cli \| bash` | docs.warp.dev/cli/quickstart |
-| Factory Droid | `curl -fsSL https://app.factory.ai/cli \| sh` | docs.factory.ai/cli/getting-started/quickstart |
-| Amp | `curl -fsSL https://ampcode.com/install.sh \| bash` | ampcode.com/manual |
-| Augment Auggie | `npm install -g @augmentcode/auggie` | docs.augmentcode.com |
-| Qoder CLI | `curl -fsSL https://qoder.com/install \| bash` | docs.qoder.com/cli/installation |
-| CodeBuddy Code | `curl -fsSL https://www.codebuddy.cn/cli/install.sh \| bash` | codebuddy.ai/docs/cli/installation |
-| Ollama | `curl -fsSL https://ollama.com/install.sh \| sh` | docs.ollama.com/linux |

@@ -118,10 +118,6 @@ import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
-  conversationWorkspaceKey,
-  resolveConversationWorkspaceKey,
-} from './lib/conversationWorkspaceKey.mjs'
-import {
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -1180,9 +1176,7 @@ function App() {
           ...provider,
           status: `Ensync Host unavailable: ${message}`,
           usageReason: 'Ensync is reconnecting to the local Host. Verified CLI values will return automatically.',
-        }))
-        providersRef.current = unavailableProviders
-        setProviders(unavailableProviders)
+        })))
         return false
       }
     })()
@@ -1797,12 +1791,11 @@ function App() {
     }
     const stamp = Date.now()
     const chatId = `support-repair-${stamp}`
-    const agentWorkspaceKey = conversationWorkspaceKey(chatId)
     const result = await supportRepairHost.run({
       provider: supportProvider.id,
       projectId: activeProject.id,
       projectPath: activeProject.path,
-      workspaceKey: agentWorkspaceKey,
+      workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
       prompt,
       diagnostics: {
         summary: report.ticket.summary,
@@ -2563,7 +2556,7 @@ function App() {
         ? {
             connection: runTarget.connection,
             provider: target.id,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
@@ -2572,7 +2565,7 @@ function App() {
         : {
             provider: target.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
+            workspaceKey: `${nativeWorkspaceIdentity}:${chatId}`,
             prompt: effectivePrompt,
             attachments: attachments.map((attachment) => attachment.path),
             sessionId: canResume ? session.sessionId : null,
@@ -3269,17 +3262,6 @@ function App() {
                     && entry.preferences.projectPath === activeRun.projectPath,
                   )
                 })()}
-                liveDeliverySupported={(() => {
-                  const activeRun = inFlightRuns[chat.id]
-                  // With no active run there is no provider limit to report; keep the plain copy.
-                  if (!activeRun) return true
-                  return activeRun.provider === 'codex' && activeRun.executionTarget === 'local'
-                })()}
-                activeRunProviderName={(() => {
-                  const activeProviderId = inFlightRuns[chat.id]?.provider
-                  if (!activeProviderId) return null
-                  return executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? null
-                })()}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
@@ -3382,8 +3364,6 @@ function ConversationPane({
   sending,
   liveSteering,
   canPushQueuedNow,
-  liveDeliverySupported,
-  activeRunProviderName,
   pushingQueued,
   runStartedAt,
   queuedPrompts,
@@ -3425,8 +3405,6 @@ function ConversationPane({
   sending: boolean
   liveSteering: boolean
   canPushQueuedNow: boolean
-  liveDeliverySupported: boolean
-  activeRunProviderName: string | null
   pushingQueued: boolean
   runStartedAt: string | null
   queuedPrompts: QueuedPrompt[]
@@ -3476,10 +3454,7 @@ function ConversationPane({
     && fallbackProviders.some((candidate) => candidate.id !== provider.id)
   const canRunChat = canRunSelectedProvider || canRunFallback
   const queueGate = queuedPromptGate(chat, queuedPrompts[0])
-  const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length, {
-    liveDeliverySupported,
-    activeProviderName: activeRunProviderName,
-  })
+  const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length)
   const composerQueueState = promptQueueComposerState({
     sending,
     liveSteering,
@@ -3729,7 +3704,7 @@ function ConversationPane({
               )
             })
           )}
-          {providerNotes.length > 0 && (
+          {sending && providerNotes.length > 0 && (
             <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
               {providerNotes.map((note, index) => {
                 const noteProvider = providers.find((item) => item.id === note.provider) ?? provider

@@ -7,7 +7,6 @@ import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_STDERR_CHARACTERS = 256 * 1024
 
 export class CodexLiveTurnError extends Error {
@@ -100,7 +99,7 @@ class CodexLiveSession {
     this.signal = options.signal
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.hardTimeoutMs = options.hardTimeoutMs ?? null
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
@@ -168,13 +167,15 @@ class CodexLiveSession {
     })
 
     this.#touch()
-    this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
-      'run_timed_out',
-      "Codex reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.",
-      504,
-      false,
-    )), this.hardTimeoutMs)
-    this.#hardTimer.unref?.()
+    if (Number.isFinite(this.hardTimeoutMs) && this.hardTimeoutMs > 0) {
+      this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
+        'run_timed_out',
+        "Codex reached Ensync Host's explicit run limit and was stopped. Partial work may exist; review the project before retrying.",
+        504,
+        false,
+      )), this.hardTimeoutMs)
+      this.#hardTimer.unref?.()
+    }
     this.signal?.addEventListener('abort', this.#abort, { once: true })
     if (this.signal?.aborted) this.#abort()
 
@@ -530,7 +531,7 @@ class CodexLiveSession {
   }
 
   #finishProcess() {
-    clearTimeout(this.#hardTimer)
+    if (this.#hardTimer) clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.signal?.removeEventListener('abort', this.#abort)
     if (!this.#child) return

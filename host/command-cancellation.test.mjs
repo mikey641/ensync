@@ -45,6 +45,23 @@ test('process inactivity watchdog refreshes on real stdout and stderr progress',
   assert.equal(`${result.stdout}${result.stderr}`.length, 25)
 })
 
+test('an explicit null hard timeout disables the legacy wall-clock deadline', async () => {
+  const result = await runProcess(
+    process.execPath,
+    ['-e', 'setTimeout(() => process.stdout.write("finished"), 125)'],
+    {
+      timeoutMs: 25,
+      inactivityTimeoutMs: 1_000,
+      hardTimeoutMs: null,
+    },
+  )
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.timedOut, false)
+  assert.equal(result.timeoutReason, null)
+  assert.equal(result.stdout, 'finished')
+})
+
 test('process reports inactivity separately from its hard ceiling', async () => {
   const inactive = await runProcess(
     process.execPath,

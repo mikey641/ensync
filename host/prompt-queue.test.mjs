@@ -117,34 +117,6 @@ test('queue status explains the safety pause and the exact action in plain langu
   })
 })
 
-test('a waiting queue names the provider that cannot take a mid-turn instruction', () => {
-  // Live delivery is Codex-only, so on every other provider the push action is
-  // absent by design. Say why instead of leaving an unexplained missing button.
-  assert.deepEqual(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
-    liveDeliverySupported: false,
-    activeProviderName: 'Claude Code',
-  }), {
-    headline: '1 message queued',
-    detail: 'Claude Code cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.',
-    actionLabel: null,
-  })
-  // A supported provider keeps the existing copy; the push action speaks for itself.
-  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
-    liveDeliverySupported: true,
-    activeProviderName: 'Codex',
-  }).detail, 'It will run automatically after the current turn finishes successfully.')
-  // An unnamed provider must not render "undefined cannot take…".
-  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
-    liveDeliverySupported: false,
-    activeProviderName: null,
-  }).detail, 'This provider cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.')
-  // The paused safety copy outranks it: a failed predecessor is the bigger fact.
-  assert.equal(promptQueueStatusPresentation({ state: 'paused', reason: 'The preceding turn failed.' }, 1, {
-    liveDeliverySupported: false,
-    activeProviderName: 'Claude Code',
-  }).actionLabel, 'Run next message anyway')
-})
-
 test('execution context stops before its own prompt and replies precede future queued prompts', () => {
   const messages = [
     { id: 'u1', role: 'user', turnId: 'turn-1', deliveryStatus: 'completed' },

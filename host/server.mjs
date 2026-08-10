@@ -2,11 +2,6 @@ import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
-import {
-  ChatAttachmentStore,
-  MAX_STORED_ATTACHMENT_BYTES,
-  probeAttachmentPaths,
-} from './chat-attachments.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
@@ -182,9 +177,6 @@ export function createEnsyncHost(options = {}) {
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
-  })
-  const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
-    rootPath: options.chatAttachmentsRoot,
   })
   const projects = options.projectService ?? new ProjectInspectionService({
     allowedRoots: options.allowedProjectRoots,
