@@ -491,18 +491,26 @@ test('Claude chat resumes a verified session without putting the prompt in argum
           session_id: sessionId,
           model: 'claude-opus-4-6',
         }),
+        // Claude Code streams one event per content block, so the progress text and the
+        // tool call that justifies showing it arrive as separate assistant events that
+        // share a message id. The final answer is a text-only message that never gets one.
         JSON.stringify({
           type: 'assistant',
           message: {
+            id: 'msg_progress',
             content: [
+              { type: 'thinking', thinking: 'hidden reasoning that must never leave the Host' },
               { type: 'text', text: 'I found the affected test and am updating it.' },
-              { type: 'tool_use', id: 'tool-1', name: 'Edit', input: {} },
             ],
           },
         }),
         JSON.stringify({
           type: 'assistant',
-          message: { content: [{ type: 'text', text: 'Real Claude response' }] },
+          message: { id: 'msg_progress', content: [{ type: 'tool_use', id: 'tool-1', name: 'Edit', input: {} }] },
+        }),
+        JSON.stringify({
+          type: 'assistant',
+          message: { id: 'msg_final', content: [{ type: 'text', text: 'Real Claude response' }] },
         }),
         JSON.stringify({
           type: 'result',
@@ -555,6 +563,54 @@ test('Claude chat resumes a verified session without putting the prompt in argum
   assert.deepEqual(
     events.filter((event) => event.type === 'note').map((event) => ({ provider: event.provider, text: event.text })),
     [{ provider: 'claude', text: 'I found the affected test and am updating it.' }],
+  )
+})
+
+test('Claude progress notes span split content-block events and exclude reasoning and the final answer', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const cliLines = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'thinking', thinking: 'private-reasoning-marker' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'text', text: 'Reading the failing test first.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_1', content: [{ type: 'tool_use', id: 'tool-1', name: 'Read', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_2', content: [{ type: 'text', text: 'Now updating the note reader.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_2', content: [{ type: 'tool_use', id: 'tool-2', name: 'Edit', input: {} }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_3', content: [{ type: 'text', text: 'Claude notes now reach the conversation.' }] } }),
+    JSON.stringify({
+      type: 'result',
+      is_error: false,
+      result: 'Claude notes now reach the conversation.',
+      session_id: sessionId,
+    }),
+  ]
+  const stdout = cliLines.join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      // Network chunks do not respect CLI line boundaries.
+      const boundary = stdout.indexOf('failing test') + 4
+      options.onStdout(stdout.slice(0, boundary))
+      options.onStdout(stdout.slice(boundary))
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Fix the note reader' },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  assert.deepEqual(
+    events.filter((event) => event.type === 'note').map((event) => event.text),
+    ['Reading the failing test first.', 'Now updating the note reader.'],
+  )
+  assert.equal(result.response, 'Claude notes now reach the conversation.')
+  assert.equal(
+    JSON.stringify(events.filter((event) => event.type === 'note')).includes('private-reasoning-marker'),
+    false,
   )
 })
 
