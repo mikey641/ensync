@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
@@ -10,22 +10,6 @@ const DEFAULT_LOCK_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 5_000
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
-
-const AGENT_COMMIT_IDENTITY = {
-  GIT_AUTHOR_NAME: 'Ensync Agent',
-  GIT_AUTHOR_EMAIL: 'agent@ensync.local',
-  GIT_COMMITTER_NAME: 'Ensync Agent',
-  GIT_COMMITTER_EMAIL: 'agent@ensync.local',
-}
-
-function agentCommitMessage(details, branch) {
-  const lines = [`Ensync agent work (${details.outcome})`, '']
-  if (details.provider) lines.push(`Provider: ${details.provider}`)
-  if (details.jobId) lines.push(`Job: ${details.jobId}`)
-  lines.push(`Workspace-Branch: ${branch}`)
-  return lines.join('\n')
-}
-
 
 function digest(value, length = 24) {
   return createHash('sha256').update(value).digest('hex').slice(0, length)
@@ -206,139 +190,6 @@ export class ProjectIsolationService {
       await lease.release()
       throw error
     }
-  }
-
-  async commitAgentWork(workspace, details = {}) {
-    const outcome = details.outcome ?? 'failed'
-    return this.#commitWorktree(workspace.repositoryPath, workspace.branch, { ...details, outcome })
-  }
-
-  async checkSharedCheckout(workspace) {
-    const before = workspace?.shared
-    if (!before) return { available: false }
-    try {
-      const headResult = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: before.repositoryPath })
-      const statusResult = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-        cwd: before.repositoryPath,
-      })
-      const afterHead = firstLine(headResult.stdout)
-      const afterEntries = statusResult.stdout.split('\0').filter(Boolean)
-      const headMoved = afterHead !== before.head
-      const statusMoved = afterEntries.join('\n') !== before.statusEntries.join('\n')
-      let landed = false
-      if (headMoved) {
-        const log = await this.#git(['log', '--format=%s', `${before.head}..${afterHead}`], {
-          cwd: before.repositoryPath,
-          allowFailure: true,
-        })
-        const subjects = log.exitCode === 0 ? log.stdout.split(/\r?\n/).filter(Boolean) : []
-        landed = subjects.length > 0 && subjects.every((subject) => subject.startsWith('Ensync land: '))
-      }
-      // git checkout . shape: same head, a previously-dirty path is no longer dirty.
-      const afterPaths = new Set(afterEntries.map((entry) => entry.slice(3)))
-      const destructive = !headMoved
-        && before.statusEntries.some((entry) => !afterPaths.has(entry.slice(3)))
-      const changed = landed ? statusMoved : (headMoved || statusMoved)
-      return {
-        available: true,
-        changed,
-        destructive: changed && destructive,
-        landed,
-        before: { head: before.head, changedFiles: before.statusEntries.length },
-        after: { head: afterHead, changedFiles: afterEntries.length },
-        checkedAt: new Date(this.#now()).toISOString(),
-      }
-    } catch {
-      return { available: false }
-    }
-  }
-
-  async recoverStrandedWorktrees() {
-    const summary = { scanned: 0, recovered: [], skipped: [] }
-    let repositoryHashes
-    try {
-      repositoryHashes = await readdir(this.#rootPath)
-    } catch {
-      return summary
-    }
-    for (const repositoryHash of repositoryHashes) {
-      let workspaceHashes
-      try {
-        workspaceHashes = await readdir(join(this.#rootPath, repositoryHash))
-      } catch {
-        continue
-      }
-      for (const workspaceHash of workspaceHashes) {
-        let worktreePath = join(this.#rootPath, repositoryHash, workspaceHash)
-        summary.scanned += 1
-        try {
-          worktreePath = await realpath(worktreePath)
-          const branchResult = await this.#git(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
-            cwd: worktreePath,
-            allowFailure: true,
-          })
-          const branch = firstLine(branchResult.stdout)
-          if (branchResult.exitCode !== 0 || !branch.startsWith('ensync/chat-')) {
-            summary.skipped.push({ worktreePath, reason: 'not_an_agent_worktree' })
-            continue
-          }
-          const commonResult = await this.#git(['rev-parse', '--git-common-dir'], { cwd: worktreePath })
-          const commonValue = firstLine(commonResult.stdout)
-          const commonDirectory = isAbsolute(commonValue) ? commonValue : resolve(worktreePath, commonValue)
-          const lockPath = join(commonDirectory, 'ensync', 'workspace-write-locks', `${workspaceHash}.lock`)
-          let leaseHeld = false
-          try {
-            await stat(lockPath)
-            leaseHeld = true
-          } catch { /* no active lease */ }
-          if (leaseHeld) {
-            summary.skipped.push({ worktreePath, reason: 'active_lease' })
-            continue
-          }
-          const result = await this.#commitWorktree(worktreePath, branch, { outcome: 'recovered' })
-          if (result.committed) {
-            summary.recovered.push({ worktreePath, branch, changedFiles: result.changedFiles, head: result.head })
-          } else {
-            summary.skipped.push({ worktreePath, reason: 'clean' })
-          }
-        } catch (error) {
-          summary.skipped.push({ worktreePath, reason: error instanceof Error ? error.message : 'unknown_error' })
-        }
-      }
-    }
-    return summary
-  }
-
-  async #commitWorktree(worktreePath, branch, details) {
-    const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-      cwd: worktreePath,
-      code: 'agent_work_commit_failed',
-      message: `Ensync could not inspect the protected worktree for ${branch}.`,
-    })
-    const changedFiles = status.stdout.split('\0').filter(Boolean).length
-    if (changedFiles === 0) {
-      const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
-      return { committed: false, changedFiles: 0, head: firstLine(head.stdout) }
-    }
-    const env = {
-      ...AGENT_COMMIT_IDENTITY,
-      GIT_AUTHOR_DATE: new Date(this.#now()).toISOString(),
-      GIT_COMMITTER_DATE: new Date(this.#now()).toISOString(),
-    }
-    await this.#git(['add', '-A', '--', '.'], {
-      cwd: worktreePath,
-      env,
-      code: 'agent_work_commit_failed',
-      message: `Ensync could not stage this run's changes on ${branch}.`,
-    })
-    await this.#git(['-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-m', agentCommitMessage(details, branch)], {
-      cwd: worktreePath,
-      env,
-      code: 'agent_work_commit_failed',
-      message: `Ensync could not commit this run's changes on ${branch}.`,
-    })
-    const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
-    return { committed: true, changedFiles, head: firstLine(head.stdout) }
   }
 
   async #git(args, options = {}) {
@@ -542,7 +393,6 @@ export class ProjectIsolationService {
     let worktreePath
     let reused = false
     let seededFromSharedCheckout = false
-    let branchExistedBeforeAcquire
 
     if (registered) {
       if (registered.prunable) {
@@ -557,14 +407,12 @@ export class ProjectIsolationService {
         `The protected Ensync worktree for ${branch} is missing or inaccessible.`,
       )
       reused = true
-      branchExistedBeforeAcquire = true
     } else {
       const branchCheck = await this.#git(['show-ref', '--verify', '--quiet', branchRef], {
         cwd: repository.repositoryPath,
         allowFailure: true,
       })
       const branchExists = branchCheck.exitCode === 0
-      branchExistedBeforeAcquire = branchExists
       let startingPoint = repository.head
       if (!branchExists) {
         const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
@@ -602,50 +450,6 @@ export class ProjectIsolationService {
           code: 'managed_worktree_create_failed',
           message: `Git could not expose the shared-checkout snapshot in ${branch}.`,
         })
-      }
-    }
-
-    const createdThisAcquire = !registered && !branchExistedBeforeAcquire
-    if (!createdThisAcquire) {
-      const leftovers = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
-      if (leftovers.stdout.split('\0').filter(Boolean).length > 0) {
-        await this.#commitWorktree(worktreePath, branch, { outcome: 'recovered' })
-      }
-    }
-
-    if (!createdThisAcquire) {
-      const upToDate = await this.#git(['merge-base', '--is-ancestor', repository.head, 'HEAD'], {
-        cwd: worktreePath,
-        allowFailure: true,
-      })
-      if (upToDate.exitCode !== 0) {
-        const merge = await this.#git(
-          ['-c', 'commit.gpgsign=false', 'merge', '--no-edit', '--no-verify',
-            '-m', `Ensync baseline sync into ${branch}`, repository.head],
-          {
-            cwd: worktreePath,
-            env: {
-              GIT_AUTHOR_NAME: 'Ensync Agent',
-              GIT_AUTHOR_EMAIL: 'agent@ensync.local',
-              GIT_COMMITTER_NAME: 'Ensync Agent',
-              GIT_COMMITTER_EMAIL: 'agent@ensync.local',
-            },
-            allowFailure: true,
-          },
-        )
-        if (merge.exitCode !== 0) {
-          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U'], {
-            cwd: worktreePath,
-            allowFailure: true,
-          })
-          const files = conflicted.stdout.split(/\r?\n/).filter(Boolean)
-          await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
-          throw new ProjectIsolationError(
-            'workspace_baseline_conflict',
-            `New baseline changes conflict with this conversation's work in: ${files.join(', ') || 'unknown files'}. Resolve the conflict in the protected worktree at ${worktreePath}, commit it, then run again.`,
-            409,
-          )
-        }
       }
     }
 
@@ -695,17 +499,6 @@ export class ProjectIsolationService {
     const status = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
     const changedFiles = status.stdout.split('\0').filter(Boolean).length
     const head = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
-
-    const sharedHead = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: repository.repositoryPath })
-    const sharedStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-      cwd: repository.repositoryPath,
-    })
-    const shared = {
-      repositoryPath: repository.repositoryPath,
-      head: firstLine(sharedHead.stdout),
-      statusEntries: sharedStatus.stdout.split('\0').filter(Boolean),
-    }
-
     return {
       canonicalProjectPath,
       repositoryPath: worktreePath,
@@ -713,7 +506,6 @@ export class ProjectIsolationService {
       branch,
       reused,
       seededFromSharedCheckout,
-      shared,
       gitBefore: {
         branch,
         head: firstLine(head.stdout),
