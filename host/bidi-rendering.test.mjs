@@ -8,6 +8,7 @@ const messageContentPath = new URL('../src/components/MessageContent.tsx', impor
 const contextHeaderPath = new URL('../src/components/ChatContextHeader.tsx', import.meta.url)
 const contextHeaderCssPath = new URL('../src/components/ChatContextHeader.css', import.meta.url)
 const splitWorkspacePath = new URL('../src/components/SplitWorkspace.tsx', import.meta.url)
+const bidiTextPath = new URL('../src/lib/bidiText.mjs', import.meta.url)
 
 test('runtime conversation text uses automatic isolated direction without changing stored text', async () => {
   const [app, appCss, messageContent, contextHeader, contextHeaderCss, splitWorkspace] = await Promise.all([
@@ -20,7 +21,7 @@ test('runtime conversation text uses automatic isolated direction without changi
   ])
 
   assert.equal(app.match(/<MessageContent content=\{message\.content\} collapsible \/>/g)?.length, 2)
-  assert.match(messageContent, /<p key=\{index\} dir="auto">\{block\.text\}<\/p>/)
+  assert.match(messageContent, /<p key=\{index\} dir="auto">\{renderDirectional\(block\.text, createBidiCursor\(\)\)\}<\/p>/)
   assert.match(messageContent, /<pre dir="ltr"><code>\{code\}<\/code><\/pre>/)
   assert.match(messageContent, /<th key=\{index\} scope="col" dir="auto"/)
   assert.match(messageContent, /<td key=\{index\} dir="auto"/)
@@ -43,4 +44,23 @@ test('runtime conversation text uses automatic isolated direction without changi
 
   const invisibleDirectionalControls = /[\u202a-\u202e\u2066-\u2069]/u
   assert.equal(invisibleDirectionalControls.test(`${app}${contextHeader}${splitWorkspace}`), false)
+})
+
+test('mixed-direction phrases render inside bdi so neighbouring text keeps its place', async () => {
+  const [appCss, messageContent, bidiText] = await Promise.all([
+    readFile(appCssPath, 'utf8'),
+    readFile(messageContentPath, 'utf8'),
+    readFile(bidiTextPath, 'utf8'),
+  ])
+
+  // Both conversation renderers walk one cursor per block: the rich Markdown
+  // tree and the structured blocks a long or browser-mode message uses.
+  assert.match(messageContent, /<bdi key=\{key\}>\{run\.text\}<\/bdi>/)
+  assert.match(messageContent, /function renderBlockInline\([\s\S]*?renderInline\(nodes, projectPath, createBidiCursor\(\)\)/)
+  assert.match(messageContent, /function renderInlineText\([\s\S]*?const cursor = createBidiCursor\(\)/)
+  assert.equal(/<InlineText\b/.test(messageContent), false)
+  assert.match(appCss, /\.message-content bdi\s*\{[^}]*unicode-bidi:\s*isolate;/s)
+
+  // Isolation is markup only; the rendered characters stay the stored ones.
+  assert.equal(/[\u202a-\u202e\u2066-\u2069]/u.test(`${messageContent}${bidiText}`), false)
 })
