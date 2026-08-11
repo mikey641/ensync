@@ -118,6 +118,7 @@ Expected: PASS.
 - Produces: top-level start input `navigation?: { nativeWorkspaceId: string | null; projectId: string; chatId: string }`; it is admission-only and never reaches provider requests or the journal.
 - Produces: `ChatRunService.run(request, { preAcquiredWorkspaceLease, ... })`, where the retained job owns release after the complete landing lifecycle.
 - Produces: `ChatJobOccupiedError` in `src/lib/relayHost.ts`, carrying only `owner` and thrown by `runChatJob` before stream attachment.
+- Produces: `steer(jobId, { idempotencyKey, prompt, attachments })`, where one job/key/content tuple owns one retained delivery outcome; identical repeats never call the provider twice and same-key/different-content returns HTTP 409.
 
 - [ ] **Step 1: Write failing `started` / `reconnected` / `occupied` service tests**
 
@@ -177,6 +178,8 @@ Add an integration test whose occupied JSON is recursively inspected for forbidd
 - [ ] **Step 6: Update the browser Host client**
 
 Define literal TypeScript unions for `ChatJobAdmission` and `OccupiedChatJobOwner`. `startChatJob` returns that union. `runChatJob` attaches only for `started`/`reconnected`; on `occupied` it throws `new ChatJobOccupiedError(owner)` so App integration can convert the pending message to FIFO without treating it as a provider failure.
+
+Add a failing steer test before implementation: two concurrent identical `idempotencyKey` calls join one provider delivery, a later identical call returns the retained outcome, and the same key with different prompt or attachments throws `live_steer_conflict` with status 409. Retain a safe rejection or ambiguous error as that key's outcome so retrying the HTTP request can never resend an instruction whose delivery state was already decided or became unknown.
 
 - [ ] **Step 7: Run Host admission verification**
 
@@ -301,7 +304,7 @@ Expected: PASS.
 
 **Files:**
 - Modify: `src/App.tsx`
-- Modify: `src/index.css`
+- Modify: `src/theme.css`
 - Modify: `host/prompt-queue.test.mjs`
 - Modify: `host/native-workspace-routing.test.mjs`
 - Modify: `host/workspace-persistence.test.mjs`
