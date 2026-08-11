@@ -7,6 +7,7 @@ export const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
 export const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
 export const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 export const ACTIVE_RUNS_PUBLISH_CHANNEL = 'ensync:workspace:publish-active-runs'
+export const ACTIVE_RUN_MATCH_CHANNEL = 'ensync:workspace:match-active-run'
 export const QUEUED_MESSAGE_HANDOFF_CHANNEL = 'ensync:workspace:handoff-queued-message'
 export const QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL = 'ensync:workspace:queued-message-handoff-ack'
 export const QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL = 'ensync:workspace:queued-message-handoff'
@@ -272,6 +273,14 @@ export function createActiveRunRoster({ isAuthorized, identityForWebContents }) 
   })
 }
 
+/** Lets an authorized renderer ask only about one exact shell-owned binding. */
+export function createActiveRunMatchHandler({ isAuthorized, activeRuns }) {
+  if (typeof isAuthorized !== 'function' || !activeRuns || typeof activeRuns.matches !== 'function') {
+    throw new TypeError('Active run match authorization is required.')
+  }
+  return (event, request) => Boolean(isAuthorized(event) && activeRuns.matches(request))
+}
+
 function normalizeAttachment(value) {
   if (!value || typeof value !== 'object' || !nonEmptyString(value.name, 512)
     || !nonEmptyString(value.path, 4096)) return null
@@ -335,6 +344,18 @@ function normalizeHandoffRequest(request) {
 
 function handoffResult(status, handoffId, messageId) {
   return { status, handoffId, messageId }
+}
+
+function handoffDigest(request) {
+  return checksum(JSON.stringify({
+    ...request,
+    entry: {
+      ...request.entry,
+      // Approval time is audit metadata. The presence of approval changes the
+      // action identity, while a retry keeps the first accepted timestamp.
+      resumeApprovedAt: request.entry.resumeApprovedAt == null ? null : true,
+    },
+  }))
 }
 
 /**
@@ -407,22 +428,35 @@ export function createQueuedMessageHandoffHandlers({
       if (source.id === normalized.target.workspaceId) {
         return Promise.resolve(handoffResult('rejected', normalized.handoffId, normalized.entry.messageId))
       }
-      const digest = checksum(JSON.stringify(normalized))
+      const digest = handoffDigest(normalized)
       const existing = records.get(normalized.handoffId)
       if (existing) {
-        return existing.sourceWorkspaceId === source.id && existing.digest === digest
-          ? existing.promise
-          : Promise.resolve(handoffResult('rejected', normalized.handoffId, normalized.entry.messageId))
+        if (existing.sourceWorkspaceId !== source.id || existing.digest !== digest) {
+          return Promise.resolve(handoffResult('rejected', normalized.handoffId, normalized.entry.messageId))
+        }
+        if (existing.result?.status !== 'unavailable') return existing.promise
+
+        // A target may have durably accepted just before its ACK timed out or
+        // its renderer closed. Re-deliver only the exact original request to
+        // the same authenticated workspace so its persistent tombstone can
+        // reconcile ownership. A current active-run roster is not required:
+        // the original record proves this exact target was authorized.
+        const retryWindow = windowForWorkspace(existing.target.workspaceId)
+        const retryIdentity = retryWindow && identityForWebContents(retryWindow.webContents)
+        if (!retryWindow || !isNativeWorkspaceIdentity(retryIdentity)
+          || retryIdentity.id !== existing.target.workspaceId) return existing.promise
+        records.delete(normalized.handoffId)
       }
-      if (!activeRuns.matches(normalized.target)) {
+      if (!existing && !activeRuns.matches(normalized.target)) {
         return Promise.resolve(handoffResult('rejected', normalized.handoffId, normalized.entry.messageId))
       }
       if (!reserveRecordCapacity()) {
         return Promise.resolve(handoffResult('unavailable', normalized.handoffId, normalized.entry.messageId))
       }
-      const targetWindow = windowForWorkspace(normalized.target.workspaceId)
+      const delivery = existing?.request ?? normalized
+      const targetWindow = windowForWorkspace(delivery.target.workspaceId)
       if (!targetWindow || identityForWebContents(targetWindow.webContents) == null
-        || identityForWebContents(targetWindow.webContents).id !== normalized.target.workspaceId) {
+        || identityForWebContents(targetWindow.webContents).id !== delivery.target.workspaceId) {
         return Promise.resolve(handoffResult('unavailable', normalized.handoffId, normalized.entry.messageId))
       }
       let resolve
@@ -430,8 +464,9 @@ export function createQueuedMessageHandoffHandlers({
       const record = {
         digest,
         sourceWorkspaceId: source.id,
-        target: normalized.target,
-        messageId: normalized.entry.messageId,
+        target: delivery.target,
+        messageId: delivery.entry.messageId,
+        request: delivery,
         promise,
         resolve,
         result: null,
@@ -442,7 +477,7 @@ export function createQueuedMessageHandoffHandlers({
       }, timeoutMs)
       records.set(normalized.handoffId, record)
       try {
-        sendToWebContents(targetWindow.webContents, QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, normalized)
+        sendToWebContents(targetWindow.webContents, QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, delivery)
       } catch {
         finish(record, handoffResult('unavailable', normalized.handoffId, record.messageId))
       }

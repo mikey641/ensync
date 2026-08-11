@@ -27,7 +27,9 @@ import {
   createNativeWindowRegistry,
 } from './native-windows.mjs'
 import {
+  ACTIVE_RUN_MATCH_CHANNEL,
   ACTIVE_RUNS_PUBLISH_CHANNEL,
+  createActiveRunMatchHandler,
   createActiveRunRoster,
   createNativeWorkspaceStore,
   createQueuedMessageHandoffHandlers,
@@ -260,6 +262,10 @@ function registerNativeBridge() {
   workspaceIdentityIpc.register()
   if (nativeBridgeRegistered) return
   ipcMain.handle(ACTIVE_RUNS_PUBLISH_CHANNEL, (event, entries) => activeRunRoster.publish(event, entries))
+  ipcMain.handle(ACTIVE_RUN_MATCH_CHANNEL, createActiveRunMatchHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    activeRuns: activeRunRoster,
+  }))
   ipcMain.handle(WORKSPACE_FOCUS_CHANNEL, createWorkspaceFocusHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -382,6 +388,7 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
   ipcMain.removeHandler(ACTIVE_RUNS_PUBLISH_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUN_MATCH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
   ipcMain.removeHandler(QUEUED_MESSAGE_HANDOFF_CHANNEL)
   ipcMain.removeListener(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)

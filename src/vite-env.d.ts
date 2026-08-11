@@ -47,6 +47,7 @@ interface Window {
       }
     } | null>
     publishActiveRuns?: (entries: NativeExactRunTarget[]) => Promise<boolean>
+    matchesActiveRun?: (request: NativeExactRunTarget) => Promise<boolean>
     focusWorkspace?: (request: NativeWorkspaceFocusRequest) => Promise<boolean>
     handoffQueuedMessage?: (request: {
       handoffId: string

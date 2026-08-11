@@ -276,6 +276,31 @@ test('active run roster authenticates publication, replaces workspace jobs atomi
   assert.equal(roster.matches(entry('job-0')), false)
 })
 
+test('active run match queries require an authorized exact live roster binding', () => {
+  const sourceSender = { id: 7 }
+  const targetSender = { id: 8 }
+  const target = { id: IDS[1], kind: 'canonical' }
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => event.sender === sourceSender || event.sender === targetSender,
+    identityForWebContents: (sender) => sender === targetSender ? target : { id: IDS[0], kind: 'isolated' },
+  })
+  const binding = {
+    workspaceId: target.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-relay',
+  }
+  assert.equal(roster.publish({ sender: targetSender }, [binding]), true)
+  const match = nativeWorkspaces.createActiveRunMatchHandler({
+    isAuthorized: (event) => event.sender === sourceSender,
+    activeRuns: roster,
+  })
+  assert.equal(match({ sender: sourceSender }, binding), true)
+  assert.equal(match({ sender: sourceSender }, { ...binding, jobId: 'job-stale' }), false)
+  assert.equal(match({ sender: {} }, binding), false)
+})
+
 test('exact active run focus requires the authenticated workspace, project, path, chat, and job binding', async () => {
   const source = { id: IDS[0], kind: 'isolated' }
   const target = { id: IDS[1], kind: 'canonical' }
@@ -526,6 +551,85 @@ test('queued message handoff waits for the target ACK, is idempotent, and become
   assert.deepEqual(await unavailable, {
     status: 'unavailable', handoffId: 'handoff-closed', messageId: request.entry.messageId,
   })
+})
+
+test('a timed-out exact handoff redelivers for tombstone reconciliation without changing Stop approval', async () => {
+  const source = { id: IDS[0], kind: 'isolated' }
+  const target = { id: IDS[1], kind: 'canonical' }
+  const sourceSender = { id: 7 }
+  const targetSender = { id: 8 }
+  const targetWindow = { webContents: targetSender }
+  const activeRuns = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => event.sender === sourceSender || event.sender === targetSender,
+    identityForWebContents: (sender) => sender === sourceSender ? source : sender === targetSender ? target : null,
+  })
+  const targetBinding = {
+    workspaceId: target.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-relay',
+  }
+  assert.equal(activeRuns.publish({ sender: targetSender }, [targetBinding]), true)
+  const sent = []
+  const handoffs = nativeWorkspaces.createQueuedMessageHandoffHandlers({
+    isAuthorized: (event) => event.sender === sourceSender || event.sender === targetSender,
+    identityForWebContents: (sender) => sender === sourceSender ? source : sender === targetSender ? target : null,
+    activeRuns,
+    windowForWorkspace: (id) => id === target.id ? targetWindow : null,
+    sendToWebContents: (_webContents, _channel, payload) => sent.push(payload),
+    timeoutMs: 5,
+  })
+  const request = {
+    handoffId: 'handoff-timeout-reconcile',
+    target: targetBinding,
+    entry: {
+      id: 'queued-timeout-reconcile',
+      turnId: 'turn-queued',
+      messageId: 'message-queued',
+      prompt: 'Continue the active task.',
+      attachments: [],
+      enqueuedAt: '2026-08-11T10:00:00.000Z',
+      predecessorTurnId: 'turn-active',
+      resumeApprovedAt: '2026-08-11T10:00:01.000Z',
+      preferences: {
+        providerMode: 'fixed',
+        provider: 'claude',
+        sizeTier: null,
+        automaticFallback: false,
+        autoContextSkill: true,
+        fallbackProviderOrder: ['claude'],
+        executionTargetKey: 'local',
+        projectId: targetBinding.projectId,
+        projectPath: targetBinding.projectPath,
+      },
+    },
+  }
+
+  assert.equal((await handoffs.handoff({ sender: sourceSender }, request)).status, 'unavailable')
+  assert.equal(sent.length, 1)
+  assert.equal(activeRuns.publish({ sender: targetSender }, []), true)
+  const retried = handoffs.handoff({ sender: sourceSender }, {
+    ...request,
+    entry: { ...request.entry, resumeApprovedAt: '2026-08-11T10:00:09.000Z' },
+  })
+  await Promise.resolve()
+  assert.equal(sent.length, 2)
+  assert.equal(sent[1].entry.resumeApprovedAt, request.entry.resumeApprovedAt)
+  assert.equal(handoffs.ack({ sender: targetSender }, {
+    handoffId: request.handoffId,
+    status: 'accepted',
+    messageId: request.entry.messageId,
+  }), true)
+  assert.equal((await retried).status, 'accepted')
+  assert.equal((await handoffs.handoff({ sender: sourceSender }, {
+    ...request,
+    entry: { ...request.entry, resumeApprovedAt: null },
+  })).status, 'rejected')
+  assert.equal((await handoffs.handoff({ sender: sourceSender }, {
+    ...request,
+    entry: { ...request.entry, prompt: 'Changed content.' },
+  })).status, 'rejected')
 })
 
 test('opening a project workspace is authorized and keeps the source identity', async () => {

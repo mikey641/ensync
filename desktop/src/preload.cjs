@@ -17,6 +17,7 @@ const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
 const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
 const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 const ACTIVE_RUNS_PUBLISH_CHANNEL = 'ensync:workspace:publish-active-runs'
+const ACTIVE_RUN_MATCH_CHANNEL = 'ensync:workspace:match-active-run'
 const QUEUED_MESSAGE_HANDOFF_CHANNEL = 'ensync:workspace:handoff-queued-message'
 const QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL = 'ensync:workspace:queued-message-handoff-ack'
 const QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL = 'ensync:workspace:queued-message-handoff'
@@ -34,6 +35,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
   getWorkspaceIdentity: () => ipcRenderer.invoke(WORKSPACE_IDENTITY_CHANNEL),
   publishActiveRuns: (entries) => ipcRenderer.invoke(ACTIVE_RUNS_PUBLISH_CHANNEL, entries),
+  matchesActiveRun: (request) => ipcRenderer.invoke(ACTIVE_RUN_MATCH_CHANNEL, request),
   focusWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_FOCUS_CHANNEL, request),
   handoffQueuedMessage: (request) => ipcRenderer.invoke(QUEUED_MESSAGE_HANDOFF_CHANNEL, request),
   onQueuedMessageHandoff: (callback) => {
