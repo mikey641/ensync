@@ -238,6 +238,11 @@ const CHAT_PROVIDER_CONTAINMENT = {
   // contain and no honest level to claim. The absent record keeps it unrunnable.
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+// A question card holds the inactivity watchdog for as long as a person needs
+// to read it, but never longer than this: an unanswered question also pins this
+// conversation's workspace lease, so every other message in the same chat waits
+// behind it. One hour is far past a real answer and far short of a lost evening.
+const DEFAULT_QUESTION_HOLD_TIMEOUT_MS = 60 * 60 * 1_000
 // There is no absolute run ceiling by default; this conservative ceiling is
 // applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
 const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
@@ -379,6 +384,9 @@ function timeoutMessage(providerName, timeoutReason) {
   }
   if (timeoutReason === 'hard_limit') {
     return `${providerName} reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.`
+  }
+  if (timeoutReason === 'question_unanswered') {
+    return `${providerName} waited for an answer to its question longer than Ensync Host allows one run to hold this conversation's workspace, and was stopped. Nothing was answered on your behalf. Partial work is saved to this conversation's branch; send the answer as a message to continue.`
   }
   return `${providerName} reached an Ensync Host run limit and was stopped. Partial work may exist; review the project before retrying.`
 }
@@ -1089,6 +1097,7 @@ export class ChatRunService {
   #allowedRoots
   #environment
   #inactivityTimeoutMs
+  #questionHoldTimeoutMs
   #hardTimeoutMs
   #codexLiveTurns
   #droidExecRuns
@@ -1110,6 +1119,7 @@ export class ChatRunService {
     this.#allowedRoots = options.allowedRoots
     this.#environment = options.environment ?? process.env
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
+    this.#questionHoldTimeoutMs = options.questionHoldTimeoutMs ?? DEFAULT_QUESTION_HOLD_TIMEOUT_MS
     this.#hardTimeoutMs = options.hardTimeoutMs
       ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
@@ -1123,6 +1133,7 @@ export class ChatRunService {
     })
     this.#droidExecRuns = options.droidExecRunner ?? new DroidExecRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      questionHoldTimeoutMs: this.#questionHoldTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
     this.#cursorAgentRuns = options.cursorAgentRunner ?? new CursorAgentRunner({
@@ -1472,6 +1483,7 @@ export class ChatRunService {
           keepStdinOpen: questionsEnabled,
           onSession: questionsEnabled ? (handle) => { session = handle } : undefined,
           inactivityTimeoutMs,
+          questionHoldTimeoutMs: questionsEnabled ? this.#questionHoldTimeoutMs : null,
           hardTimeoutMs,
           maxCaptureBytes: MAX_CHAT_OUTPUT_BYTES,
           onStdout: forwarder.stdout,
@@ -1617,7 +1629,18 @@ export class ChatRunService {
           await this.#autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options)
         }
       }
-      await workspaceLease?.release()
+      const leaseRelease = await workspaceLease?.release()
+      // A lease that could not be deleted is the one failure nobody sees from
+      // the outside: this run ends normally while the next message in the same
+      // conversation waits on a lock with nothing behind it.
+      if (leaseRelease && leaseRelease.removed === false) {
+        options.onEvent?.({
+          type: 'notice',
+          code: 'workspace_lease_release_failed',
+          message: `${leaseRelease.reason} Ensync Host reclaims it automatically once it goes stale, so the next message in this conversation may wait briefly before it starts.`,
+          at: new Date().toISOString(),
+        })
+      }
     }
   }
 

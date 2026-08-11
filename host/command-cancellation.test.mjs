@@ -90,6 +90,52 @@ test('process reports inactivity separately from its hard ceiling', async () => 
   assert.equal(active.aborted, false)
 })
 
+test('an unanswered question stops holding the watchdog once its own bound expires', async () => {
+  const result = await runProcess(
+    process.execPath,
+    ['-e', 'process.stdin.resume();setInterval(() => {}, 1_000)'],
+    {
+      input: '',
+      keepStdinOpen: true,
+      onSession: (session) => session.holdInactivity(),
+      inactivityTimeoutMs: 60_000,
+      questionHoldTimeoutMs: 60,
+      hardTimeoutMs: 5_000,
+      terminationGraceMs: 25,
+    },
+  )
+
+  assert.equal(result.timedOut, true)
+  assert.equal(result.timeoutReason, 'question_unanswered')
+  assert.equal(result.aborted, false)
+})
+
+test('answering a question inside its bound hands the run back to the inactivity watchdog', async () => {
+  const result = await runProcess(
+    process.execPath,
+    ['-e', 'process.stdin.resume();setTimeout(() => process.stdout.write("done"), 150)'],
+    {
+      input: '',
+      keepStdinOpen: true,
+      onSession: (session) => {
+        session.holdInactivity()
+        setTimeout(() => {
+          session.releaseInactivity()
+          session.endInput()
+        }, 40)
+      },
+      inactivityTimeoutMs: 2_000,
+      questionHoldTimeoutMs: 80,
+      hardTimeoutMs: 5_000,
+      terminationGraceMs: 25,
+    },
+  )
+
+  assert.equal(result.timedOut, false)
+  assert.equal(result.timeoutReason, null)
+  assert.equal(result.stdout, 'done')
+})
+
 test('process capture reports when provider output was truncated', async () => {
   const result = await runProcess(
     process.execPath,

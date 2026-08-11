@@ -279,6 +279,7 @@ export async function findExecutable(command, options = {}) {
 export function runProcess(executable, args, options = {}) {
   const legacyTimeoutMs = options.timeoutMs ?? 8_000
   const inactivityTimeoutMs = options.inactivityTimeoutMs ?? null
+  const questionHoldTimeoutMs = options.questionHoldTimeoutMs ?? null
   const hardTimeoutMs = Object.hasOwn(options, 'hardTimeoutMs')
     ? options.hardTimeoutMs
     : legacyTimeoutMs
@@ -298,6 +299,7 @@ export function runProcess(executable, args, options = {}) {
     let forceKillTimer = null
     let inactivityTimer = null
     let hardTimer = null
+    let questionHoldTimer = null
     // A CLI that is blocked on a question Ensync put to the person is not hung.
     // The interactive session holds the watchdog for exactly that window.
     let inactivityHeld = false
@@ -396,13 +398,25 @@ export function runProcess(executable, args, options = {}) {
         child.stdin.end()
         return true
       },
+      // Holding the watchdog is what keeps a person's thinking time from
+      // reading as a hung CLI, but an unanswered question must never pin the
+      // run — and through it this conversation's workspace lease — forever.
+      // Every hold therefore carries its own bound, and answering hands the
+      // run straight back to the ordinary inactivity watchdog.
       holdInactivity: () => {
         inactivityHeld = true
         if (inactivityTimer) clearTimeout(inactivityTimer)
         inactivityTimer = null
+        if (questionHoldTimer) clearTimeout(questionHoldTimer)
+        questionHoldTimer = null
+        if (questionHoldTimeoutMs === null || settled || timedOut || aborted) return
+        questionHoldTimer = setTimeout(() => timeout('question_unanswered'), questionHoldTimeoutMs)
+        questionHoldTimer.unref?.()
       },
       releaseInactivity: () => {
         inactivityHeld = false
+        if (questionHoldTimer) clearTimeout(questionHoldTimer)
+        questionHoldTimer = null
         refreshInactivityWatchdog()
       },
     })
@@ -419,6 +433,7 @@ export function runProcess(executable, args, options = {}) {
       settled = true
       if (hardTimer) clearTimeout(hardTimer)
       if (inactivityTimer) clearTimeout(inactivityTimer)
+      if (questionHoldTimer) clearTimeout(questionHoldTimer)
       if (forceKillTimer) clearTimeout(forceKillTimer)
       options.signal?.removeEventListener('abort', onAbort)
       resolve({

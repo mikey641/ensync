@@ -642,6 +642,27 @@ test('a droid questionnaire reaches the person and their answer completes the tu
   assert.equal(resolved.cancelled, false)
 })
 
+test('an unanswered droid question releases the watchdog at its own bound instead of pinning the run', async () => {
+  const server = fakeDroidExec()
+  const runner = new DroidExecRunner({
+    spawnProcess: () => server.child,
+    inactivityTimeoutMs: 60_000,
+    questionHoldTimeoutMs: 60,
+  })
+  const events = []
+  const run = runner.run(droidInput('job-droid-question-0003'), {
+    onEvent: (event) => events.push(event),
+  })
+
+  await assert.rejects(run, (error) => {
+    assert.equal(error.code, 'run_timed_out')
+    assert.match(error.message, /question/i)
+    return true
+  })
+  // Nobody answered on the person's behalf: droid is told the question was cancelled.
+  assert.equal(events.find((event) => event.type === 'question_resolved').cancelled, true)
+})
+
 test('a droid run with no retained job still declines questionnaires safely', async () => {
   const server = fakeDroidExec()
   const runner = new DroidExecRunner({ spawnProcess: () => server.child })
