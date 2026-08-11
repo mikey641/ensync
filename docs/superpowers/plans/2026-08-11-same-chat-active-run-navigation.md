@@ -115,7 +115,7 @@ Expected: PASS.
 - Consumes: Task 1 `tryAcquireOrDescribe` and its acquired lease.
 - Produces: async `ChatJobService.start(input) -> Promise<ChatJobAdmission>`.
 - Produces: `ChatJobAdmission = { disposition: 'started' | 'reconnected'; job: ChatJobSnapshot } | { disposition: 'occupied'; owner: OccupiedChatJobOwner }`.
-- Produces: top-level start input `navigation?: { nativeWorkspaceId: string | null; projectId: string; chatId: string }`; it is admission-only and never reaches provider requests or the journal.
+- Produces: top-level start input `navigation?: { nativeWorkspaceId: string | null; projectId: string; chatId: string; turnId: string }`; it is admission-only and never reaches provider requests or the journal. `turnId` is retained only in the owning Host process and is `null` in cross-Host occupied descriptions.
 - Produces: `ChatRunService.run(request, { preAcquiredWorkspaceLease, ... })`, where the retained job owns release after the complete landing lifecycle.
 - Produces: `ChatJobOccupiedError` in `src/lib/relayHost.ts`, carrying only `owner` and thrown by `runChatJob` before stream attachment.
 - Produces: `steer(jobId, { idempotencyKey, prompt, attachments })`, where one job/key/content tuple owns one retained delivery outcome; identical repeats never call the provider twice and same-key/different-content returns HTTP 409.
@@ -313,7 +313,7 @@ Expected: PASS.
 - Consumes: Task 2 `ChatJobOccupiedError.owner`.
 - Consumes: Task 3 native bridge roster/focus/handoff methods.
 - Consumes: Task 4 transfer/accept/predicate helpers.
-- Adds persisted `occupiedRuns?: Record<string, OccupiedChatRun>` to `StoredState`, with `{ ownerJobId, provider, targetKind, startedAt, providerProcessStarted, steerable, nativeWorkspaceId, projectId, projectPath, chatId, controllable }`.
+- Adds persisted `occupiedRuns?: Record<string, OccupiedChatRun>` to `StoredState`, with `{ ownerJobId, turnId, provider, targetKind, startedAt, providerProcessStarted, steerable, nativeWorkspaceId, projectId, projectPath, chatId, controllable }`. Hydration resets `controllable`; exact shell reachability is separate ephemeral state and is never persisted.
 
 - [ ] **Step 1: Add failing renderer-contract tests**
 
