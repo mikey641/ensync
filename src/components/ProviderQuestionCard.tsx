@@ -56,10 +56,14 @@ export function ProviderQuestionCard({
   const firstOptionRef = useRef<HTMLButtonElement>(null)
 
   // A new question replaces the old one outright; carrying a stale selection
-  // across would answer a question the person never saw.
+  // across would answer a question the person never saw. Only the question id
+  // may clear a choice: the panel rebuilds this object from the event buffer on
+  // every render — once a second while the run's clock ticks — so clearing on
+  // the object itself would wipe the person's pick a moment after they made it.
   useEffect(() => {
     setSelection(initialQuestionSelection(pending))
-  }, [pending])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pending.questionId])
 
   useEffect(() => {
     firstOptionRef.current?.focus()
