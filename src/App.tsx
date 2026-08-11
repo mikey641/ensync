@@ -66,6 +66,7 @@ import { SupportDesk } from './components/SupportDesk'
 import { UIVisibilityPreferences, useUIVisibility, type UIVisibilityState } from './ui-visibility'
 import {
   ensyncHost,
+  ChatJobOccupiedError,
   EnsyncHostError,
   type ChatProviderId,
   type ChatExecutionEvent,
@@ -147,8 +148,10 @@ import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerWasSafelyRejected,
   liveSteerReadyAfterEvent,
   normalizePromptQueues,
+  markQueuedMessageTransferred,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
@@ -163,6 +166,24 @@ import {
   type PromptQueues,
   type QueuedPrompt,
 } from './lib/promptQueue.mjs'
+import {
+  activeNativeRunBindings,
+  applyOccupiedJobObservation,
+  commitHandoffAcceptance,
+  completedNativeRunBinding,
+  convertPendingTurnToOccupiedQueue,
+  exactNativeFocusCanApply,
+  handoffEntryForAction,
+  normalizeOccupiedRuns,
+  occupiedQueueSnapshotForAttempt,
+  occupiedRunControls,
+  reconcileQueuedMessageHandoff,
+  validateTerminalQueuedMessageHandoff,
+  validateQueuedMessageHandoff,
+  type CompletedNativeRunBinding,
+  type NativeExactRunBinding,
+  type OccupiedRuns,
+} from './lib/occupiedRunState.mjs'
 import {
   pendingQuestionsFromEvents,
   type ProviderQuestionAnswerPayload,
@@ -308,6 +329,8 @@ type StoredState = {
   inFlightRuns?: Record<string, PersistedInFlightRun>
   /** Persisted same-chat FIFO prompts, including their enqueue-time routing/target choices. */
   promptQueues?: PromptQueues
+  /** Bounded owner coordinates for messages admitted behind another live renderer. */
+  occupiedRuns?: OccupiedRuns
   /** Hashes of explicitly merged external recovery artifacts. */
   workspaceRecoveryIds?: string[]
   /** Retired native snapshots already inspected for project-only history recovery. */
@@ -805,6 +828,11 @@ function App() {
   const rediscoveringHostJobsRef = useRef(false)
   const rediscoveredHostJobsRef = useRef(false)
   const steeringChatIdsRef = useRef(new Set<string>())
+  const occupiedOwnerProbeAttemptedRef = useRef(new Set<string>())
+  const occupiedOwnerPollCountRef = useRef(new Map<string, number>())
+  const completedNativeRunsRef = useRef(new Map<string, CompletedNativeRunBinding>())
+  const handoffActionsInvokedRef = useRef(new Set<string>())
+  const transferringChatIdsRef = useRef(new Set<string>())
   // A stop-and-send arms exactly one cancellation to advance the queue. It is
   // consumed by that run's teardown so a later unrelated stop never inherits it.
   const stopAndSendChatIdsRef = useRef(new Set<string>())
@@ -832,6 +860,9 @@ function App() {
   )
   const [hostJobRecoveryRetry, setHostJobRecoveryRetry] = useState(0)
   const [promptQueues, setPromptQueues] = useState<PromptQueues>(() => normalizePromptQueues(hydrated?.promptQueues))
+  const [occupiedRuns, setOccupiedRuns] = useState<OccupiedRuns>(() => normalizeOccupiedRuns(hydrated?.occupiedRuns))
+  // Shell reachability is live native authority, never retained workspace data.
+  const [occupiedShellReachability, setOccupiedShellReachability] = useState<Record<string, string>>({})
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>({ kind: 'local' })
   const chatsRef = useRef(chats)
   const tabsRef = useRef(tabs)
@@ -845,11 +876,16 @@ function App() {
   const chatExecutionEventsRef = useRef(chatExecutionEvents)
   const inFlightRunsRef = useRef(inFlightRuns)
   const promptQueuesRef = useRef(promptQueues)
+  const occupiedRunsRef = useRef(occupiedRuns)
+  const occupiedShellReachabilityRef = useRef(occupiedShellReachability)
   const executionTargetRef = useRef(executionTarget)
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
   const focusProjectRequestRef = useRef<(project: RelayProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
+  const openChatRef = useRef<(chatId: string) => void>(() => {})
+  const pushQueuedNowRef = useRef<(chatId: string) => Promise<void>>(async () => {})
+  const stopAndSendNowRef = useRef<(chatId: string) => void>(() => {})
   chatsRef.current = chats
   tabsRef.current = tabs
   activeTabIdRef.current = activeTabId
@@ -862,6 +898,8 @@ function App() {
   chatExecutionEventsRef.current = chatExecutionEvents
   inFlightRunsRef.current = inFlightRuns
   promptQueuesRef.current = promptQueues
+  occupiedRunsRef.current = occupiedRuns
+  occupiedShellReachabilityRef.current = occupiedShellReachability
   executionTargetRef.current = executionTarget
 
   const workspaceSnapshot: StoredState = {
@@ -887,6 +925,7 @@ function App() {
     conversationSidebarWidth,
     inFlightRuns,
     promptQueues,
+    occupiedRuns,
     workspaceRecoveryIds,
     recentProjectRecoveryIds,
     conversationImportIds,
@@ -902,8 +941,10 @@ function App() {
         compactWorkspaceSnapshot({ ...workspaceSnapshotRef.current, ...overrides }),
         { keys: workspaceSnapshotKeys },
       )
+      return true
     } catch (error) {
       console.error('[ensync-workspace-persistence]', error)
+      return false
     }
   }, [workspaceSnapshotKeys])
 
@@ -1166,6 +1207,37 @@ function App() {
     return next
   }, [])
 
+  const updateOccupiedRuns = useCallback((next: OccupiedRuns) => {
+    occupiedRunsRef.current = next
+    setOccupiedRuns(next)
+    return next
+  }, [])
+
+  const updateOccupiedShellReachability = useCallback((chatId: string, ownerJobId: string, reachable: boolean) => {
+    const current = occupiedShellReachabilityRef.current
+    const next = { ...current }
+    if (reachable) next[chatId] = ownerJobId
+    else delete next[chatId]
+    occupiedShellReachabilityRef.current = next
+    setOccupiedShellReachability(next)
+  }, [])
+
+  const rememberCompletedNativeRun = useCallback((chatId: string, run: PersistedInFlightRun | undefined) => {
+    const completed = completedNativeRunBinding(
+      isNativeWorkspaceIdentity(nativeWorkspaceIdentity) ? nativeWorkspaceIdentity.id : null,
+      chatId,
+      run,
+    )
+    if (!completed) return
+    completedNativeRunsRef.current.delete(completed.jobId)
+    completedNativeRunsRef.current.set(completed.jobId, completed)
+    while (completedNativeRunsRef.current.size > 128) {
+      const oldest = completedNativeRunsRef.current.keys().next().value
+      if (typeof oldest !== 'string') break
+      completedNativeRunsRef.current.delete(oldest)
+    }
+  }, [nativeWorkspaceIdentity])
+
   const updateChatError = useCallback((chatId: string, error: string | null) => {
     const next = { ...chatErrorsRef.current, [chatId]: error }
     chatErrorsRef.current = next
@@ -1414,7 +1486,7 @@ function App() {
 
   useLayoutEffect(() => {
     commitWorkspace()
-  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
 
   useEffect(() => {
     const flush = () => commitWorkspace()
@@ -1563,6 +1635,7 @@ function App() {
     activateTab(tab.id)
     setMobileNavOpen(false)
   }
+  openChatRef.current = openChat
 
   const createChat = (relativeToTabId = activeTabIdRef.current) => {
     if (!activeProject.id || !activeProject.verified) {
@@ -1651,6 +1724,8 @@ function App() {
     const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
     const nextInFlightRuns = recovered.inFlightRuns ?? {}
     const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
+    // Recovery imports conversation history, not another renderer's live shell/Host authority.
+    const nextOccupiedRuns: OccupiedRuns = {}
 
     chatsRef.current = nextChats
     tabsRef.current = nextTabs
@@ -1663,6 +1738,7 @@ function App() {
     chatExecutionEventsRef.current = nextChatExecutionEvents
     inFlightRunsRef.current = nextInFlightRuns
     promptQueuesRef.current = nextPromptQueues
+    occupiedRunsRef.current = nextOccupiedRuns
 
     setProjects([project])
     setActiveProjectId(project.id)
@@ -1678,6 +1754,7 @@ function App() {
     setChatExecutionEvents(nextChatExecutionEvents)
     setInFlightRuns(nextInFlightRuns)
     setPromptQueues(nextPromptQueues)
+    setOccupiedRuns(nextOccupiedRuns)
     setSplitLayout(recovered.splitLayout)
     if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
       setPlacement(recovered.placement)
@@ -1703,6 +1780,7 @@ function App() {
       chatExecutionEvents: nextChatExecutionEvents,
       inFlightRuns: nextInFlightRuns,
       promptQueues: nextPromptQueues,
+      occupiedRuns: nextOccupiedRuns,
       splitLayout: recovered.splitLayout,
       ...(recovered.placement ? { placement: recovered.placement } : {}),
       ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
@@ -1814,8 +1892,129 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    const publish = window.ensyncDesktop?.publishActiveRuns
+    if (typeof publish !== 'function' || !isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
+    const activeRuns = Object.fromEntries(Object.entries(inFlightRuns)
+      .filter(([chatId]) => sendingChatIds.has(chatId)))
+    void publish(activeNativeRunBindings(activeRuns, nativeWorkspaceIdentity.id))
+      .catch((error) => console.error('[ensync-active-run-roster]', error))
+  }, [inFlightRuns, nativeWorkspaceIdentity, sendingChatIds])
+
+  useEffect(() => {
+    const publish = window.ensyncDesktop?.publishActiveRuns
+    return () => {
+      if (typeof publish === 'function') void publish([]).catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    if (hostOnline) {
+      occupiedOwnerProbeAttemptedRef.current.clear()
+      return
+    }
+    occupiedShellReachabilityRef.current = {}
+    setOccupiedShellReachability({})
+  }, [hostOnline])
+
+  useEffect(() => {
+    if (!hostOnline) return
+    const timers: number[] = []
+    let cancelled = false
+    for (const [chatId, owner] of Object.entries(occupiedRuns)) {
+      if (!owner.ownerJobId || !owner.turnId || owner.targetKind !== 'local') continue
+      const ownerKey = `${chatId}\0${owner.ownerJobId}`
+      if (!owner.controllable && occupiedOwnerProbeAttemptedRef.current.has(ownerKey)) continue
+      occupiedOwnerProbeAttemptedRef.current.add(ownerKey)
+      const pollCount = occupiedOwnerPollCountRef.current.get(ownerKey) ?? 0
+      const delay = owner.controllable
+        ? Math.min(10_000, 1_000 * (2 ** Math.min(pollCount, 3)))
+        : 0
+      occupiedOwnerPollCountRef.current.set(ownerKey, pollCount + 1)
+      timers.push(window.setTimeout(() => {
+        void (async () => {
+          try {
+            const response = await ensyncHost.chatJob(owner.ownerJobId)
+            if (cancelled || response.job.id !== owner.ownerJobId) return
+            if (response.job.state === 'running') {
+              let shellReachable = false
+              if (owner.nativeWorkspaceId && typeof window.ensyncDesktop?.matchesActiveRun === 'function') {
+                try {
+                  shellReachable = await window.ensyncDesktop.matchesActiveRun({
+                    workspaceId: owner.nativeWorkspaceId,
+                    projectId: owner.projectId,
+                    projectPath: owner.projectPath,
+                    chatId: owner.chatId,
+                    jobId: owner.ownerJobId,
+                  })
+                } catch {
+                  shellReachable = false
+                }
+              }
+              const current = occupiedRunsRef.current[chatId]
+              if (!current || current.ownerJobId !== owner.ownerJobId) return
+              updateOccupiedShellReachability(chatId, owner.ownerJobId, shellReachable)
+              const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, {
+                kind: 'running',
+                providerProcessStarted: response.job.providerProcessStarted,
+                steerable: response.job.steerable,
+              })
+              updateOccupiedRuns(next)
+              commitWorkspace({ occupiedRuns: next })
+              return
+            }
+            const current = occupiedRunsRef.current[chatId]
+            if (!current || current.ownerJobId !== owner.ownerJobId) return
+            const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'terminal' })
+            occupiedOwnerPollCountRef.current.delete(ownerKey)
+            updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+            updateOccupiedRuns(next)
+            commitWorkspace({ occupiedRuns: next })
+            queueMicrotask(() => drainPromptQueueRef.current(chatId))
+          } catch {
+            if (cancelled) return
+            const current = occupiedRunsRef.current[chatId]
+            if (!current || current.ownerJobId !== owner.ownerJobId) return
+            const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'unavailable' })
+            occupiedOwnerPollCountRef.current.delete(ownerKey)
+            updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+            updateOccupiedRuns(next)
+            commitWorkspace({ occupiedRuns: next })
+          }
+        })()
+      }, delay))
+    }
+    return () => {
+      cancelled = true
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [commitWorkspace, hostOnline, occupiedRuns, updateOccupiedRuns, updateOccupiedShellReachability])
+
   useEffect(() => window.ensyncDesktop?.onWorkspaceProjectFocus?.((request) => {
     if (!request || typeof request.projectId !== 'string' || typeof request.projectPath !== 'string') return
+    if ('chatId' in request && typeof request.chatId === 'string'
+      && typeof request.jobId === 'string' && typeof request.workspaceId === 'string') {
+      if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
+      const run = inFlightRunsRef.current[request.chatId]
+      const chat = chatsRef.current.find((candidate) => candidate.id === request.chatId
+        && candidate.projectId === request.projectId)
+      const project = projectsRef.current.find((candidate) => candidate.id === request.projectId
+        && candidate.path === request.projectPath)
+      if (!chat || !project || !run || !chatRunRegistryRef.current.has(chat.id)
+        || run.projectId !== project.id || run.projectPath !== project.path
+        || !exactNativeFocusCanApply(request, {
+          workspaceId: nativeWorkspaceIdentity.id,
+          projectId: project.id,
+          projectPath: project.path,
+          chatId: chat.id,
+          jobId: run.jobId ?? '',
+        })) return
+      setProjects((current) => [project, ...current.filter((candidate) => candidate.id !== project.id)])
+      setActiveProjectId(project.id)
+      openChatRef.current(chat.id)
+      setProjectError(null)
+      return
+    }
     void (async () => {
       try {
         const response = await ensyncHost.inspectProject(request.projectPath)
@@ -1829,7 +2028,7 @@ function App() {
         setProjectError(error instanceof Error ? error.message : 'Ensync Host could not recheck the focused project.')
       }
     })()
-  }), [])
+  }), [nativeWorkspaceIdentity])
 
   const setChatProvider = (chatId: string, providerId: ProviderId) => {
     setChats((current) => current.map((chat) => (chat.id === chatId ? { ...chat, provider: providerId, providerMode: 'fixed', model: null } : chat)))
@@ -2246,6 +2445,7 @@ function App() {
     stopAndSendChatIdsRef.current.add(chatId)
     chatRunCancellationRef.current.stop(chatId)
   }
+  stopAndSendNowRef.current = handleStopAndSendNow
 
   const handleFilesDrop = async (chatId: string, files: FileList) => {
     if (executionTargetRef.current.kind !== 'local') {
@@ -2719,7 +2919,14 @@ function App() {
           } : current)
         }
         appendChatExecutionEvent(chatId, event)
-      }, runController.signal)
+      }, runController.signal, {
+        nativeWorkspaceId: isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+          ? nativeWorkspaceIdentity.id
+          : null,
+        projectId: runProject.id,
+        chatId,
+        turnId,
+      })
     }
 
     let queueMayAdvance = false
@@ -2773,6 +2980,61 @@ function App() {
       queueMayAdvance = true
     } catch (runError) {
       const failedAt = new Date().toISOString()
+      if (runError instanceof ChatJobOccupiedError) {
+        const owner = runError.owner as typeof runError.owner & { turnId?: string | null }
+        const occupiedQueueSnapshot = occupiedQueueSnapshotForAttempt(queuedPrompt, {
+          messageId: `msg-${turnId}`,
+          enqueuedAt: failedAt,
+          preferences: {
+            providerMode: chatToSendCurrent.providerMode ?? 'auto',
+            provider: routedProvider.id,
+            sizeTier: chatToSendCurrent.sizeTier ?? null,
+            automaticFallback: runAutoFallback,
+            autoContextSkill: runAutoContext,
+            fallbackProviderOrder: [...runFallbackOrder],
+            executionTargetKey: runTargetKey,
+            projectId: runProject.id,
+            projectPath: runProject.path,
+          },
+        })
+        const converted = convertPendingTurnToOccupiedQueue({
+          chats: chatsRef.current,
+          queues: promptQueuesRef.current,
+          inFlightRuns: inFlightRunsRef.current,
+          occupiedRuns: occupiedRunsRef.current,
+          chatId,
+          turnId,
+          queueId: occupiedQueueSnapshot.queueId,
+          messageId: occupiedQueueSnapshot.messageId,
+          prompt: message,
+          attachments,
+          enqueuedAt: occupiedQueueSnapshot.enqueuedAt,
+          preferences: occupiedQueueSnapshot.preferences,
+          owner,
+          binding: { projectId: runProject.id, projectPath: runProject.path, chatId },
+        })
+        if (converted.status !== 'invalid') {
+          chatsRef.current = converted.chats
+          promptQueuesRef.current = converted.queues
+          inFlightRunsRef.current = converted.inFlightRuns as Record<string, PersistedInFlightRun>
+          occupiedRunsRef.current = converted.occupiedRuns
+          updateOccupiedShellReachability(chatId, converted.occupiedRuns[chatId]?.ownerJobId ?? '', false)
+          setChats(converted.chats)
+          setPromptQueues(converted.queues)
+          setInFlightRuns(converted.inFlightRuns as Record<string, PersistedInFlightRun>)
+          setOccupiedRuns(converted.occupiedRuns)
+          const nextErrors = updateChatError(chatId, null)
+          commitWorkspace({
+            chats: converted.chats,
+            promptQueues: converted.queues,
+            inFlightRuns: converted.inFlightRuns as Record<string, PersistedInFlightRun>,
+            occupiedRuns: converted.occupiedRuns,
+            chatErrors: nextErrors,
+          })
+
+          return
+        }
+      }
       if (runWasCancelled(runError, runController.signal)) {
         const nextSessions = { ...chatSessionsRef.current }
         delete nextSessions[chatId]
@@ -2856,6 +3118,7 @@ function App() {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
       delete activeTurnIdsRef.current[chatId]
+      rememberCompletedNativeRun(chatId, inFlightRunsRef.current[chatId])
       const nextRuns = updateInFlightRun(chatId, () => undefined)
       commitWorkspace({
         chats: chatsRef.current,
@@ -2863,6 +3126,7 @@ function App() {
         chatErrors: chatErrorsRef.current,
         chatExecutionEvents: chatExecutionEventsRef.current,
         inFlightRuns: nextRuns,
+        occupiedRuns: occupiedRunsRef.current,
       })
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (runTarget.kind === 'local') void refreshProviders(false)
@@ -2902,6 +3166,7 @@ function App() {
       await ensyncHost.steerChatJob(
         activeRun.jobId,
         messageTextWithAttachments(entry.prompt, entry.attachments),
+        entry.id,
         normalizeFileAttachments(entry.attachments).map((attachment) => attachment.path),
       )
 
@@ -2943,9 +3208,12 @@ function App() {
         chatErrors: nextErrors,
       })
     } catch (steerError) {
-      const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
+      const safelyNotDelivered = liveSteerWasSafelyRejected(steerError)
       if (safelyNotDelivered) {
-        updateChatError(chatId, `${steerError.message} It remains queued.`)
+        const rejectionMessage = steerError instanceof Error
+          ? steerError.message
+          : 'The active turn did not accept this message.'
+        updateChatError(chatId, `${rejectionMessage} It remains queued.`)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -2973,9 +3241,254 @@ function App() {
       })
     }
   }
+  pushQueuedNowRef.current = handlePushQueuedNow
+
+  const occupiedBinding = (owner: OccupiedRuns[string] | undefined) => owner ? {
+    workspaceId: owner.nativeWorkspaceId ?? '',
+    jobId: owner.ownerJobId,
+    turnId: owner.turnId ?? '',
+    provider: owner.provider,
+    targetKind: owner.targetKind,
+    projectId: owner.projectId,
+    projectPath: owner.projectPath,
+    chatId: owner.chatId,
+  } : null
+
+  const handleViewOccupiedRun = async (chatId: string) => {
+    const owner = occupiedRunsRef.current[chatId]
+    const entry = promptQueuesRef.current[chatId]?.[0]
+    const binding = occupiedBinding(owner)
+    const controls = occupiedRunControls(owner, entry, binding, {
+      nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+      shellReachable: Boolean(owner
+        && occupiedShellReachabilityRef.current[chatId] === owner.ownerJobId),
+    })
+    if (!owner || !binding || !controls.canView || !owner.nativeWorkspaceId
+      || typeof window.ensyncDesktop?.focusWorkspace !== 'function') {
+      updateChatError(chatId, 'Ensync cannot verify the active run window. The message remains queued here.')
+      return
+    }
+    try {
+      const focused = await window.ensyncDesktop.focusWorkspace({
+        workspaceId: owner.nativeWorkspaceId,
+        projectId: owner.projectId,
+        projectPath: owner.projectPath,
+        chatId: owner.chatId,
+        jobId: owner.ownerJobId,
+      })
+      updateChatError(chatId, focused
+        ? null
+        : 'The active run window is no longer available. The message remains queued here.')
+    } catch {
+      updateChatError(chatId, 'Ensync could not open the active run window. The message remains queued here.')
+    }
+  }
+
+  const handleTransferToOccupiedRun = async (chatId: string, stopAndSend = false) => {
+    const owner = occupiedRunsRef.current[chatId]
+    const originalEntry = promptQueuesRef.current[chatId]?.[0]
+    const binding = occupiedBinding(owner)
+    const controls = occupiedRunControls(owner, originalEntry, binding, {
+      nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+      shellReachable: Boolean(owner
+        && occupiedShellReachabilityRef.current[chatId] === owner.ownerJobId),
+    })
+    const bridge = window.ensyncDesktop
+    const authorized = stopAndSend ? controls.canStopAndSend : controls.canPush
+    if (!owner || !originalEntry || !binding || !owner.nativeWorkspaceId || !authorized
+      || typeof bridge?.handoffQueuedMessage !== 'function') {
+      updateChatError(chatId, 'The exact active run can no longer accept this handoff. The message remains safely queued.')
+      return
+    }
+    if (transferringChatIdsRef.current.has(chatId)) return
+    transferringChatIdsRef.current.add(chatId)
+    setPushingQueuedChatIds((current) => new Set(current).add(chatId))
+
+    const entry = handoffEntryForAction(originalEntry, stopAndSend, new Date().toISOString())
+    if (!entry) {
+      updateChatError(chatId, 'Ensync could not prepare the exact handoff. The source message remains unchanged and queued.')
+      transferringChatIdsRef.current.delete(chatId)
+      setPushingQueuedChatIds((current) => {
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
+      return
+    }
+
+    try {
+      const result = await bridge.handoffQueuedMessage({
+        handoffId: entry.id,
+        target: {
+          workspaceId: owner.nativeWorkspaceId,
+          projectId: owner.projectId,
+          projectPath: owner.projectPath,
+          chatId: owner.chatId,
+          jobId: owner.ownerJobId,
+        },
+        entry,
+      })
+      if (result.status !== 'accepted' || result.handoffId !== entry.id
+        || result.messageId !== entry.messageId) {
+        updateChatError(chatId, result.status === 'unavailable'
+          ? 'The active window did not acknowledge the handoff. The message remains queued here.'
+          : 'The active window rejected the handoff because its exact run changed. The message remains queued here.')
+        return
+      }
+
+      const currentHead = promptQueuesRef.current[chatId]?.[0]
+      if (!currentHead || currentHead.id !== originalEntry.id || currentHead.messageId !== originalEntry.messageId) {
+        updateChatError(chatId, 'The local queue changed during handoff. No additional message was removed.')
+        return
+      }
+      if (JSON.stringify(currentHead) !== JSON.stringify(originalEntry)) {
+        updateChatError(chatId, 'The queued message changed during handoff. No local message was removed.')
+        return
+      }
+      const nextQueues = removePromptFromQueue(promptQueuesRef.current, chatId, originalEntry.id)
+      const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
+        ...chat,
+        messages: markQueuedMessageTransferred(chat.messages, originalEntry.messageId),
+      } : chat)
+      const nextOccupied = { ...occupiedRunsRef.current }
+      delete nextOccupied[chatId]
+      chatsRef.current = nextChats
+      promptQueuesRef.current = nextQueues
+      occupiedRunsRef.current = nextOccupied
+      updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+      setChats(nextChats)
+      setPromptQueues(nextQueues)
+      setOccupiedRuns(nextOccupied)
+      const nextErrors = updateChatError(chatId, null)
+      commitWorkspace({
+        chats: nextChats,
+        promptQueues: nextQueues,
+        occupiedRuns: nextOccupied,
+        chatErrors: nextErrors,
+      })
+      if (typeof bridge.focusWorkspace === 'function') {
+        try {
+          const focused = await bridge.focusWorkspace({
+            workspaceId: owner.nativeWorkspaceId,
+            projectId: owner.projectId,
+            projectPath: owner.projectPath,
+            chatId: owner.chatId,
+            jobId: owner.ownerJobId,
+          })
+          if (!focused) updateChatError(chatId, 'The message was transferred, but its active window could not be focused.')
+        } catch {
+          updateChatError(chatId, 'The message was transferred, but Ensync could not focus its active window.')
+        }
+      }
+    } catch {
+      updateChatError(chatId, 'Ensync could not hand this message to the active window. It remains queued here.')
+    } finally {
+      transferringChatIdsRef.current.delete(chatId)
+      setPushingQueuedChatIds((current) => {
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
+    }
+  }
+
+  useEffect(() => window.ensyncDesktop?.onQueuedMessageHandoff?.((request) => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return { status: 'rejected' as const }
+    const typedRequest = request as { handoffId: string; target: NativeExactRunBinding; entry: QueuedPrompt }
+    const project = projectsRef.current.find((candidate) => candidate.id === request.target.projectId
+      && candidate.path === request.target.projectPath)
+    const chat = chatsRef.current.find((candidate) => candidate.id === request.target.chatId
+      && candidate.projectId === request.target.projectId)
+    if (!project || !chat) return { status: 'rejected' as const }
+
+    const entry = request.entry as QueuedPrompt
+    const reconciliation = reconcileQueuedMessageHandoff(typedRequest, {
+      workspaceId: nativeWorkspaceIdentity.id,
+      projectId: project.id,
+      projectPath: project.path,
+      chatId: chat.id,
+      chats: chatsRef.current,
+      queues: promptQueuesRef.current,
+    })
+    if (reconciliation.status === 'conflict') return { status: 'rejected' as const }
+    if (reconciliation.status === 'duplicate') {
+      // A byte-identical queue copy or immutable consumed tombstone already
+      // proves target ownership. ACK before ephemeral run checks and never
+      // repeat Push/Stop; the target FIFO/gates own future execution.
+      return { status: 'duplicate' as const }
+    }
+
+    const activeRun = inFlightRunsRef.current[chat.id]
+    const activeAuthorized = Boolean(activeRun
+      && chatRunRegistryRef.current.has(chat.id)
+      && activeRun.projectId === project.id
+      && activeRun.projectPath === project.path
+      && validateQueuedMessageHandoff(typedRequest, {
+        workspaceId: nativeWorkspaceIdentity.id,
+        projectId: project.id,
+        projectPath: project.path,
+        chatId: chat.id,
+        activeRun,
+        queue: promptQueuesRef.current[chat.id] ?? [],
+      }))
+    const completedRun = completedNativeRunsRef.current.get(request.target.jobId)
+    const terminalAuthorized = !activeAuthorized && validateTerminalQueuedMessageHandoff(typedRequest, {
+      workspaceId: nativeWorkspaceIdentity.id,
+      projectId: project.id,
+      projectPath: project.path,
+      chatId: chat.id,
+      completedRun,
+    })
+    if (!activeAuthorized && !terminalAuthorized) return { status: 'rejected' as const }
+
+    const stopAndSendApproved = Boolean(entry.resumeApprovedAt)
+    let action: 'push' | 'stop' | null = null
+    if (activeAuthorized && reconciliation.status === 'accepted' && activeRun) {
+      const liveSteerAvailable = activeRun.liveSteerReady === true
+        && activeRun.provider === 'codex'
+        && activeRun.executionTarget === 'local'
+      if (stopAndSendApproved) {
+        if (activeRun.providerProcessStarted !== true
+          || !queuedPromptCanStopAndSendNow(entry, activeRun, { liveSteerAvailable })) {
+          return { status: 'rejected' as const }
+        }
+        action = 'stop'
+      } else {
+        if (!liveSteerAvailable) return { status: 'rejected' as const }
+        action = 'push'
+      }
+    }
+
+    if (reconciliation.status === 'accepted') {
+      const committed = commitHandoffAcceptance(
+        reconciliation,
+        ({ chats, promptQueues }) => commitWorkspace({ chats, promptQueues }),
+        (accepted) => {
+          // Persistence is target-first: refs and render state move only after
+          // the synchronous snapshot commit has succeeded.
+          promptQueuesRef.current = accepted.queues
+          chatsRef.current = accepted.chats
+          setPromptQueues(accepted.queues)
+          setChats(accepted.chats)
+        },
+      )
+      if (!committed) return { status: 'rejected' as const }
+    }
+
+    const persistedHead = promptQueuesRef.current[chat.id]?.[0]
+    if (action && persistedHead?.id === entry.id && !handoffActionsInvokedRef.current.has(entry.id)) {
+      handoffActionsInvokedRef.current.add(entry.id)
+      queueMicrotask(() => {
+        if (action === 'stop') stopAndSendNowRef.current(chat.id)
+        else void pushQueuedNowRef.current(chat.id)
+      })
+    }
+    return { status: reconciliation.status === 'accepted' ? 'accepted' as const : 'duplicate' as const }
+  }), [commitWorkspace, nativeWorkspaceIdentity])
 
   function drainPromptQueue(chatId: string) {
     if (chatRunRegistryRef.current.has(chatId)) return
+    if (occupiedRunsRef.current[chatId]) return
     const entry = promptQueuesRef.current[chatId]?.[0]
     const chat = chatsRef.current.find((item) => item.id === chatId)
     if (!entry || !chat || queuedPromptGate(chat, entry).state !== 'ready') return
@@ -3090,6 +3603,7 @@ function App() {
       recoveringChatIdsRef.current.delete(chatId)
       delete activeTurnIdsRef.current[chatId]
       if (terminal) {
+        rememberCompletedNativeRun(chatId, inFlightRunsRef.current[chatId] ?? initialRun)
         const nextRuns = updateInFlightRun(chatId, () => undefined)
         commitWorkspace({
           chats: chatsRef.current,
@@ -3106,7 +3620,7 @@ function App() {
         queueMicrotask(() => void drainPromptQueueRef.current(chatId))
       }
     }
-  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
+  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, rememberCompletedNativeRun, updateInFlightRun])
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3235,7 +3749,7 @@ function App() {
     for (const chatId of Object.keys(promptQueuesRef.current)) {
       queueMicrotask(() => drainPromptQueueRef.current(chatId))
     }
-  }, [executionTarget, hostOnline, projects, providers])
+  }, [chats, executionTarget, hostOnline, projects, providers])
 
   return (
     <div className="app-shell">
@@ -3380,7 +3894,55 @@ function App() {
                 <button type="button" onClick={() => createChat()}><Plus size={15} /> New conversation</button>
               </>
             )}
-            renderPane={({ chat, isActive }) => (
+            renderPane={({ chat, isActive }) => {
+              const occupied = occupiedRuns[chat.id]
+              const occupiedHead = promptQueues[chat.id]?.[0]
+              const occupiedControls = occupiedRunControls(
+                occupied,
+                occupiedHead,
+                occupiedBinding(occupied),
+                {
+                  nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+                  shellReachable: Boolean(occupied
+                    && occupiedShellReachability[chat.id] === occupied.ownerJobId),
+                },
+              )
+              const nativeIdentityAvailable = isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+              const nativeFocusAvailable = typeof window.ensyncDesktop?.focusWorkspace === 'function'
+              const nativeHandoffAvailable = typeof window.ensyncDesktop?.handoffQueuedMessage === 'function'
+              const occupiedReason = !occupied
+                ? null
+                : !nativeIdentityAvailable
+                  ? 'This browser cannot open or control another Ensync window. The message remains queued.'
+                  : !nativeFocusAvailable || !nativeHandoffAvailable
+                    ? 'This Ensync window is missing the active-run bridge. Quit Ensync completely and reopen it; the message remains queued.'
+                    : !occupied.turnId
+                      ? 'The active run belongs to another Ensync Host, so this window cannot control it. The message remains queued.'
+                      : occupiedControls.reason
+              const localActiveRun = inFlightRuns[chat.id]
+              const localCanPush = Boolean(
+                sendingChatIds.has(chat.id)
+                && localActiveRun?.liveSteerReady === true
+                && localActiveRun?.provider === 'codex'
+                && localActiveRun.executionTarget === 'local'
+                && localActiveRun.jobId
+                && occupiedHead
+                && occupiedHead.predecessorTurnId === localActiveRun.turnId
+                && occupiedHead.preferences.executionTargetKey === localActiveRun.executionTarget
+                && occupiedHead.preferences.projectId === localActiveRun.projectId
+                && occupiedHead.preferences.projectPath === localActiveRun.projectPath,
+              )
+              const localCanStopAndSend = Boolean(
+                sendingChatIds.has(chat.id)
+                && queuedPromptCanStopAndSendNow(occupiedHead, localActiveRun, {
+                  liveSteerAvailable: localActiveRun?.liveSteerReady === true && localActiveRun.provider === 'codex',
+                }),
+              )
+              const activeProviderId = localActiveRun?.provider ?? occupied?.provider
+              const activeRunProviderName = activeProviderId
+                ? executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? activeProviderId
+                : null
+              return (
               <ConversationPane
                 chat={chat}
                 isActive={isActive}
@@ -3404,44 +3966,22 @@ function App() {
                   && Boolean(inFlightRuns[chat.id]?.jobId)
                   && (promptQueues[chat.id]?.length ?? 0) === 0
                 }
-                canPushQueuedNow={(() => {
-                  const activeRun = inFlightRuns[chat.id]
-                  const entry = promptQueues[chat.id]?.[0]
-                  return Boolean(
-                    sendingChatIds.has(chat.id)
-                    && activeRun?.liveSteerReady === true
-                    && activeRun?.provider === 'codex'
-                    && activeRun.executionTarget === 'local'
-                    && activeRun.jobId
-                    && entry
-                    && entry.predecessorTurnId === activeRun.turnId
-                    && entry.preferences.executionTargetKey === activeRun.executionTarget
-                    && entry.preferences.projectId === activeRun.projectId
-                    && entry.preferences.projectPath === activeRun.projectPath,
-                  )
-                })()}
-                canStopAndSendNow={(() => {
-                  const activeRun = inFlightRuns[chat.id]
-                  return Boolean(
-                    sendingChatIds.has(chat.id)
-                    && queuedPromptCanStopAndSendNow(promptQueues[chat.id]?.[0], activeRun, {
-                      liveSteerAvailable: activeRun?.liveSteerReady === true && activeRun.provider === 'codex',
-                    }),
-                  )
-                })()}
+                canPushQueuedNow={localCanPush || (occupiedControls.canPush && nativeHandoffAvailable)}
+                canStopAndSendNow={localCanStopAndSend || (occupiedControls.canStopAndSend && nativeHandoffAvailable)}
+                canViewOccupiedRun={occupiedControls.canView && nativeFocusAvailable}
+                occupiedRunReason={occupiedReason}
                 liveDeliverySupported={(() => {
-                  const activeRun = inFlightRuns[chat.id]
                   // With no active run there is no provider limit to report; keep the plain copy.
-                  if (!activeRun) return true
-                  return activeRun.provider === 'codex' && activeRun.executionTarget === 'local'
+                  if (localActiveRun) {
+                    return localActiveRun.provider === 'codex' && localActiveRun.executionTarget === 'local'
+                  }
+                  if (occupied) return occupied.provider === 'codex' && occupied.targetKind === 'local'
+                  return true
                 })()}
-                activeRunProviderName={(() => {
-                  const activeProviderId = inFlightRuns[chat.id]?.provider
-                  if (!activeProviderId) return null
-                  return executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? null
-                })()}
+                activeRunProviderName={activeRunProviderName}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
-                runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
+                runStartedAt={localActiveRun?.startedAt ?? occupied?.startedAt ?? null}
+                occupiedRun={occupied ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
                 error={chatErrors[chat.id] ?? null}
                 providerMenuOpen={providerMenuChatId === chat.id}
@@ -3460,8 +4000,13 @@ function App() {
                 onSend={() => handleSend(chat.id)}
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
-                onPushQueuedNow={() => void handlePushQueuedNow(chat.id)}
-                onStopAndSendNow={() => handleStopAndSendNow(chat.id)}
+                onViewOccupiedRun={() => void handleViewOccupiedRun(chat.id)}
+                onPushQueuedNow={() => occupied
+                  ? void handleTransferToOccupiedRun(chat.id, false)
+                  : void handlePushQueuedNow(chat.id)}
+                onStopAndSendNow={() => occupied
+                  ? void handleTransferToOccupiedRun(chat.id, true)
+                  : handleStopAndSendNow(chat.id)}
                 onProviderMenu={() => {
                   setModelMenuChatId(null)
                   setProviderMenuChatId((current) => current === chat.id ? null : chat.id)
@@ -3486,7 +4031,8 @@ function App() {
                 )}
                 onSettings={() => setSettingsOpen(true)}
               />
-            )}
+              )
+            }}
           />
         </main>
       </div>
@@ -3549,10 +4095,13 @@ function ConversationPane({
   liveSteering,
   canPushQueuedNow,
   canStopAndSendNow,
+  canViewOccupiedRun,
+  occupiedRunReason,
   liveDeliverySupported,
   activeRunProviderName,
   pushingQueued,
   runStartedAt,
+  occupiedRun,
   queuedPrompts,
   error,
   providerMenuOpen,
@@ -3568,6 +4117,7 @@ function ConversationPane({
   onSend,
   onStop,
   onResumeQueue,
+  onViewOccupiedRun,
   onPushQueuedNow,
   onStopAndSendNow,
   onProviderMenu,
@@ -3603,10 +4153,13 @@ function ConversationPane({
   liveSteering: boolean
   canPushQueuedNow: boolean
   canStopAndSendNow: boolean
+  canViewOccupiedRun: boolean
+  occupiedRunReason: string | null
   liveDeliverySupported: boolean
   activeRunProviderName: string | null
   pushingQueued: boolean
   runStartedAt: string | null
+  occupiedRun: OccupiedRuns[string] | null
   queuedPrompts: QueuedPrompt[]
   error: string | null
   providerMenuOpen: boolean
@@ -3622,6 +4175,7 @@ function ConversationPane({
   onSend: () => void
   onStop: () => void
   onResumeQueue: () => void
+  onViewOccupiedRun: () => void
   onPushQueuedNow: () => void
   onStopAndSendNow: () => void
   onProviderMenu: () => void
@@ -3650,6 +4204,7 @@ function ConversationPane({
   const providerMenuStyle = useFloatingMenuPosition(providerMenuOpen, providerButtonRef)
   const modelMenuStyle = useFloatingMenuPosition(modelMenuOpen, modelButtonRef)
   const elapsedWorkingLabel = useWorkingElapsedLabel(sending, runStartedAt)
+  const occupiedElapsedLabel = useWorkingElapsedLabel(Boolean(occupiedRun), occupiedRun?.startedAt ?? null)
   const canRunSelectedProvider = provider.connected && supportsChat(provider)
   const canRunFallback = autoFallback
     && chat.providerMode === 'fixed'
@@ -3884,7 +4439,7 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : message.deliveryStatus === 'transferred' ? ' · transferred to active run' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
@@ -3919,9 +4474,15 @@ function ConversationPane({
             <span className="copy-announcement">{provider.name} is working in this chat.</span>
           </div>}
           {queuedPrompts.length > 0 && (
-            <div className={`prompt-queue-status ${queueGate.state === 'paused' ? 'prompt-queue-status--paused' : ''}`} role="status">
+            <div className={`prompt-queue-status ${occupiedRun ? 'prompt-queue-status--occupied' : ''} ${queueGate.state === 'paused' ? 'prompt-queue-status--paused' : ''}`} role="status">
               <History size={13} />
-              <span className="prompt-queue-status__copy"><strong>{queueStatus.headline}</strong><span>{queueStatus.detail}</span></span>
+              <span className="prompt-queue-status__copy">
+                <strong>{occupiedRun ? `${activeRunProviderName ?? occupiedRun.provider} is active in another window` : queueStatus.headline}</strong>
+                <span>{occupiedRun
+                  ? `${occupiedElapsedLabel ? `${occupiedElapsedLabel}. ` : ''}${occupiedRunReason ?? 'This message remains queued until the active run can accept it.'}`
+                  : queueStatus.detail}</span>
+              </span>
+              {canViewOccupiedRun && <button type="button" className="prompt-queue-status__view" onClick={onViewOccupiedRun}>View active run</button>}
               {canPushQueuedNow && <button type="button" className="prompt-queue-status__push" onClick={onPushQueuedNow} disabled={pushingQueued} title="Deliver the first queued message to the active Codex turn now">{pushingQueued ? 'Pushing…' : 'Push now'}</button>}
               {canStopAndSendNow && (
                 <button
@@ -3938,7 +4499,7 @@ function ConversationPane({
                   title={`${activeRunProviderName ?? provider.name} cannot take a new instruction mid-turn. This stops the current turn, discarding its in-progress work, and runs the queued message immediately. The stopped turn is not retried.`}
                 >{stopAndSendArmed ? 'Confirm stop & send' : 'Stop & send now'}</button>
               )}
-              {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
+              {queueGate.state === 'paused' && !occupiedRun && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
             </div>
           )}
           {!sending && chat.messages.at(-1)?.deliveryStatus === 'cancelled' && (
@@ -4096,7 +4657,9 @@ function ExecutionPanel({
           <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
           {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
-            {latestProviderNote?.type === 'note'
+            {waitingForWorkspace
+              ? 'This older run cannot identify its owner window. Quit Ensync completely and reopen it before relying on active-run controls.'
+              : latestProviderNote?.type === 'note'
               ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>

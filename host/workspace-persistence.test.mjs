@@ -233,6 +233,29 @@ test('workspace snapshots preserve unsent and queued file attachments by chat', 
   assert.deepEqual(readWorkspaceSnapshot(storage)?.state, state)
 })
 
+test('workspace snapshots transactionally preserve bounded occupied-run ownership', () => {
+  const storage = createStorage()
+  const occupiedRun = {
+    ownerJobId: 'job-owner-1234567890',
+    turnId: 'turn-owner',
+    provider: 'codex',
+    targetKind: 'local',
+    startedAt: '2026-08-11T10:00:00.000Z',
+    providerProcessStarted: true,
+    steerable: true,
+    nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+    projectId: 'relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-a',
+    controllable: false,
+  }
+  commitWorkspaceSnapshot(storage, {
+    chats: [{ id: 'chat-a', messages: [] }],
+    occupiedRuns: { 'chat-a': occupiedRun },
+  })
+  assert.deepEqual(readWorkspaceSnapshot(storage)?.state.occupiedRuns, { 'chat-a': occupiedRun })
+})
+
 test('a fully written staging snapshot survives failed primary promotion', () => {
   const storage = createStorage()
   const originalSetItem = storage.setItem.bind(storage)

@@ -1749,6 +1749,9 @@ kbd {
 .prompt-queue-status__copy strong { color: var(--text); }
 .prompt-queue-status__copy span { margin-top: 2px; line-height: 1.4; }
 .prompt-queue-status--paused { border-color: #d7a66a; }
+.prompt-queue-status--occupied {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-default));
+}
 .prompt-queue-status button {
   flex: 0 0 auto;
   padding: 5px 8px;
@@ -1761,6 +1764,12 @@ kbd {
   background: color-mix(in srgb, var(--accent) 12%, var(--surface-subtle));
   color: var(--text);
   font-weight: 650;
+}
+
+.prompt-queue-status .prompt-queue-status__view {
+  background: var(--surface-raised);
+  color: var(--text);
+  font-weight: 600;
 }
 
 .prompt-queue-status .prompt-queue-status__push:hover:not(:disabled) {
