@@ -241,6 +241,7 @@ class DroidExecSession {
   #inactivityTimer = null
   #forceKillTimer = null
   #inactivityHolds = 0
+  #questionHoldTimer = null
   #questions
   #resolveDone
   #rejectDone
@@ -257,6 +258,7 @@ class DroidExecSession {
       : null
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
+    this.questionHoldTimeoutMs = options.questionHoldTimeoutMs ?? null
     this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
@@ -748,15 +750,33 @@ class DroidExecSession {
 
   // Counted, not a flag: two things can be waiting on the person at once, and
   // the first one answered must not restart the watchdog while the second is
-  // still open.
+  // still open. The hold is bounded all the same — an unanswered card also
+  // pins this conversation's workspace lease, so every later message in the
+  // same chat waits behind it. Each new card starts the bound over.
   #holdInactivity() {
     this.#inactivityHolds += 1
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.#inactivityTimer = null
+    if (this.#questionHoldTimer) clearTimeout(this.#questionHoldTimer)
+    this.#questionHoldTimer = null
+    if (this.#settled || !Number.isFinite(this.questionHoldTimeoutMs)) return
+    // Deliberately not unref'd: a run waiting on a person is the one state
+    // where the Host must stay awake to end it. run() clears this in its
+    // finally, so it can never outlive the session.
+    this.#questionHoldTimer = setTimeout(() => this.#fail(new DroidExecError(
+      'run_timed_out',
+      'Factory Droid waited for an answer to its question longer than Ensync Host allows one run to hold this conversation’s workspace, and was stopped. Nothing was answered on your behalf. Partial work may exist; send the answer as a message to continue.',
+      504,
+      false,
+    )), this.questionHoldTimeoutMs)
   }
 
   #releaseInactivity() {
     this.#inactivityHolds = Math.max(0, this.#inactivityHolds - 1)
+    if (this.#inactivityHolds === 0 && this.#questionHoldTimer) {
+      clearTimeout(this.#questionHoldTimer)
+      this.#questionHoldTimer = null
+    }
     this.#touch()
   }
 
@@ -786,6 +806,7 @@ class DroidExecSession {
     this.#questions?.closeAll()
     clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
+    if (this.#questionHoldTimer) clearTimeout(this.#questionHoldTimer)
     this.signal?.removeEventListener('abort', this.#abort)
     if (!this.#child) return
     if (!this.#child.stdin.destroyed) this.#child.stdin.end()
@@ -821,11 +842,13 @@ export class DroidExecRunner {
   #sessions = new Map()
   #spawnProcess
   #inactivityTimeoutMs
+  #questionHoldTimeoutMs
   #hardTimeoutMs
 
   constructor(options = {}) {
     this.#spawnProcess = options.spawnProcess ?? spawn
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs
+    this.#questionHoldTimeoutMs = options.questionHoldTimeoutMs
     this.#hardTimeoutMs = options.hardTimeoutMs
   }
 
@@ -837,6 +860,7 @@ export class DroidExecRunner {
       questionsEnabled: typeof input?.id === 'string' && Boolean(input.id),
       spawnProcess: this.#spawnProcess,
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      questionHoldTimeoutMs: this.#questionHoldTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
     if (typeof input?.id !== 'string' || !input.id) return session.run()

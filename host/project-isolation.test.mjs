@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { runGit } from './git.mjs'
@@ -293,7 +293,7 @@ test('an abandoned stale lease is quarantined before a new Host proceeds', async
   await assert.rejects(stat(lockPath), { code: 'ENOENT' })
 })
 
-test('a stale heartbeat is never stolen while its Host process is still alive', async (context) => {
+test('a stale heartbeat is never stolen while another Host process is still alive', async (context) => {
   const fixture = await repositoryFixture(context)
   const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
   const key = 'window-a:chat-a'
@@ -303,7 +303,9 @@ test('a stale heartbeat is never stolen while its Host process is still alive', 
   await writeFile(ownerPath, JSON.stringify({
     version: 2,
     token: 'suspended-live-host',
-    pid: process.pid,
+    // Process 1 exists on every supported platform, so this stands in for
+    // another Host that is alive but suspended.
+    pid: 1,
     workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
     acquiredAt: '2020-01-01T00:00:00.000Z',
     heartbeatAt: '2020-01-01T00:00:00.000Z',
@@ -325,6 +327,120 @@ test('a stale heartbeat is never stolen while its Host process is still alive', 
 
   await assert.rejects(pending, (error) => error.code === 'run_cancelled')
   assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'suspended-live-host')
+})
+
+test('a lease this Host still holds is never stolen when its own heartbeat freezes', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const key = 'window-a:chat-a'
+  const holder = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    // Long enough that no tick rewrites the record this test freezes.
+    heartbeatMs: 60_000,
+    lockPollMs: 5,
+  })
+  const lease = await holder.acquire(fixture.repository, key)
+  context.after(() => lease.release())
+  const lockPath = workspaceLockPath(fixture.repository, '.git', key)
+  const ownerPath = join(lockPath, 'owner.json')
+  const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
+  await writeFile(ownerPath, JSON.stringify({ ...owner, heartbeatAt: '2020-01-01T00:00:00.000Z' }))
+  const old = new Date('2020-01-01T00:00:00.000Z')
+  await utimes(ownerPath, old, old)
+  await utimes(lockPath, old, old)
+
+  const controller = new AbortController()
+  const waiter = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    lockStaleMs: 10,
+    lockPollMs: 5,
+  })
+  const pending = waiter.acquire(fixture.repository, key, {
+    signal: controller.signal,
+    onWait: () => controller.abort(),
+  })
+
+  await assert.rejects(pending, (error) => error.code === 'run_cancelled')
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, owner.token)
+  lease.assertHeld()
+})
+
+test('a lease this Host leaked is reclaimed instead of being guarded by its own pid forever', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
+  const key = 'window-a:chat-a'
+  const lockPath = workspaceLockPath(fixture.repository, commonDirectory, key)
+  const ownerPath = join(lockPath, 'owner.json')
+  await mkdir(lockPath, { recursive: true })
+  // Every lease records the shared Host daemon's pid, so a lock this very
+  // process abandoned looks exactly like one it is still using. Only the token
+  // separates them, and this one was never handed out.
+  await writeFile(ownerPath, JSON.stringify({
+    version: 2,
+    token: 'leaked-by-this-host',
+    pid: process.pid,
+    workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
+    acquiredAt: '2020-01-01T00:00:00.000Z',
+    heartbeatAt: '2020-01-01T00:00:00.000Z',
+  }))
+  const old = new Date('2020-01-01T00:00:00.000Z')
+  await utimes(ownerPath, old, old)
+  await utimes(lockPath, old, old)
+
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    lockStaleMs: 10,
+    lockPollMs: 5,
+  })
+  const lease = await isolation.acquire(fixture.repository, key)
+  lease.assertHeld()
+  assert.notEqual(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'leaked-by-this-host')
+  await lease.release()
+})
+
+test('a release that cannot remove the lock reports it instead of reporting a clean release', async (context) => {
+  if (process.getuid?.() === 0) return // root ignores the directory permission this test relies on
+  const fixture = await repositoryFixture(context)
+  const key = 'window-a:chat-a'
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    heartbeatMs: 60_000,
+    lockPollMs: 5,
+  })
+  const lease = await isolation.acquire(fixture.repository, key)
+  const lockPath = workspaceLockPath(fixture.repository, '.git', key)
+  const lockParent = dirname(lockPath)
+
+  await chmod(lockParent, 0o500)
+  let outcome
+  try {
+    outcome = await lease.release()
+  } finally {
+    await chmod(lockParent, 0o700)
+  }
+
+  assert.equal(outcome.removed, false)
+  assert.match(outcome.reason, /lease/i)
+  await stat(lockPath)
+  await rm(lockPath, { recursive: true, force: true })
+})
+
+test('a lease released while its heartbeat is writing leaves no lock behind', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    // A tick every millisecond puts a write in flight across the release.
+    heartbeatMs: 1,
+    lockPollMs: 5,
+  })
+  const lockPath = workspaceLockPath(fixture.repository, '.git', 'window-a:chat-a')
+
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const lease = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 3))
+    const outcome = await lease.release()
+    assert.equal(outcome.removed, true, `release ${attempt} reported a lock it could not remove`)
+    await assert.rejects(stat(lockPath), { code: 'ENOENT' }, `release ${attempt} left a lock behind`)
+  }
 })
 
 test('non-Git projects fail closed before provider execution', async (context) => {
