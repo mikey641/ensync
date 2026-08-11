@@ -149,12 +149,20 @@ test('transferred precedence never contaminates stronger target states or regres
     ...acceptedTarget.state,
     chats: [{
       ...acceptedTarget.state.chats[0],
-      messages: [{ ...acceptedTarget.state.chats[0].messages[0], deliveryStatus: 'completed' }],
+      messages: [{
+        ...acceptedTarget.state.chats[0].messages[0],
+        deliveryStatus: 'completed',
+        handoffTombstone: {
+          handoffId: 'queue-turn-2',
+          queuedPromptIdentity: '{"local":"machine metadata must not sync"}',
+        },
+      }],
     }],
   }
   const portableCompleted = prepareAccountWorkspace(completedTarget)
   assert.equal(portableCompleted.chats[0].messages[0].deliveryStatus, 'completed')
   assert.equal('handoffTransferred' in portableCompleted.chats[0].messages[0], false)
+  assert.equal('handoffTombstone' in portableCompleted.chats[0].messages[0], false)
 
   const afterStaleQueueMerge = mergeAccountWorkspace({ chats: [chatWithStatus('queued')], projects }, portableCompleted)
   assert.equal(afterStaleQueueMerge.state.chats[0].messages[0].deliveryStatus, 'completed')

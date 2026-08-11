@@ -62,6 +62,9 @@ function portableMessage(value) {
     sessionResumable: false,
   }
   if (!transferredHandoff) delete portable.handoffTransferred
+  // This receipt can contain local project and attachment identity. It remains
+  // in the originating workspace snapshot and never enters account sync.
+  delete portable.handoffTombstone
   return portable
 }
 

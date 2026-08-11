@@ -33,7 +33,10 @@ export function acceptTransferredPrompt(
   chats: Chat[],
   chatId: string,
   entry: QueuedPrompt,
-): { status: 'accepted' | 'duplicate' | 'conflict'; queues: PromptQueues; chats: Chat[] }
+):
+  | { status: 'accepted'; queues: PromptQueues; chats: Chat[] }
+  | { status: 'duplicate'; alreadyConsumed: boolean; queues: PromptQueues; chats: Chat[] }
+  | { status: 'conflict'; queues: PromptQueues; chats: Chat[] }
 export function promoteQueuedPromptToActiveTurn(queues: PromptQueues, chatId: string, entryId: string, activeTurnId: string): PromptQueues
 export function approveNextQueuedPrompt(queues: PromptQueues, chatId: string, approvedAt: string): PromptQueues
 export function predecessorTurnIdForPrompt(queue: QueuedPrompt[], messages: Message[], inFlightRun?: { turnId?: string } | null): string | null

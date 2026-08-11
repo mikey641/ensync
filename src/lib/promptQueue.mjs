@@ -59,6 +59,23 @@ function queuedPromptIdentity(entry) {
   })
 }
 
+const TRANSFERRED_HANDOFF_IDENTITY_LIMIT = 512_000
+
+function handoffTombstone(entry) {
+  const queuedPromptIdentityValue = queuedPromptIdentity(entry)
+  if (queuedPromptIdentityValue.length > TRANSFERRED_HANDOFF_IDENTITY_LIMIT) return null
+  return Object.freeze({
+    handoffId: entry.id,
+    queuedPromptIdentity: queuedPromptIdentityValue,
+  })
+}
+
+function messageMatchesHandoffTombstone(message, messageId, tombstone) {
+  return message?.id === messageId
+    && message.handoffTombstone?.handoffId === tombstone.handoffId
+    && message.handoffTombstone?.queuedPromptIdentity === tombstone.queuedPromptIdentity
+}
+
 export function appendPromptToQueue(queues, chatId, entry) {
   return { ...queues, [chatId]: [...(queues[chatId] ?? []), entry] }
 }
@@ -93,7 +110,8 @@ export function acceptTransferredPrompt(queues, chats, chatId, entry) {
   const targetIndex = Array.isArray(chats)
     ? chats.findIndex((chat) => chat?.id === chatId)
     : -1
-  if (!normalized || targetIndex < 0) return { status: 'conflict', queues, chats }
+  const tombstone = normalized ? handoffTombstone(normalized) : null
+  if (!normalized || !tombstone || targetIndex < 0) return { status: 'conflict', queues, chats }
 
   const target = chats[targetIndex]
   const existingEntries = Array.isArray(queues?.[chatId]) ? queues[chatId] : []
@@ -111,12 +129,22 @@ export function acceptTransferredPrompt(queues, chats, chatId, entry) {
       && existingMessage.deliveryStatus === 'queued'
       && canonicalJson(normalizedAttachments(existingMessage.attachments))
         === canonicalJson(normalized.attachments)
-      ? { status: 'duplicate', queues, chats }
+      && messageMatchesHandoffTombstone(existingMessage, normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: false, queues, chats }
       : { status: 'conflict', queues, chats }
   }
 
-  if ((target.messages ?? []).some((message) =>
-    message?.id === normalized.messageId || message?.turnId === normalized.turnId)) {
+  const acceptedMessages = (target.messages ?? []).filter((message) =>
+    message?.id === normalized.messageId
+    || message?.handoffTombstone?.handoffId === normalized.id)
+  if (acceptedMessages.length > 0) {
+    return acceptedMessages.length === 1
+      && messageMatchesHandoffTombstone(acceptedMessages[0], normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: true, queues, chats }
+      : { status: 'conflict', queues, chats }
+  }
+
+  if ((target.messages ?? []).some((message) => message?.turnId === normalized.turnId)) {
     return { status: 'conflict', queues, chats }
   }
 
@@ -127,6 +155,7 @@ export function acceptTransferredPrompt(queues, chats, chatId, entry) {
     content: normalized.prompt,
     time: normalized.enqueuedAt,
     deliveryStatus: 'queued',
+    handoffTombstone: tombstone,
     ...(normalized.attachments.length > 0 ? { attachments: normalized.attachments } : {}),
   }
   return {

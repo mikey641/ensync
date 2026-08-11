@@ -377,6 +377,7 @@ test('transferred source prompts remain auditable but cannot feed execution cont
 test('transferred handoff accepts one canonical queue entry and rejects stable-ID conflicts', () => {
   const handoff = {
     ...entry('turn-2', 'turn-1'),
+    id: 'handoff-stable-turn-2',
     prompt: 'Push the correction now',
     attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
     preferences: {
@@ -390,14 +391,17 @@ test('transferred handoff accepts one canonical queue entry and rejects stable-I
 
   assert.equal(accepted.status, 'accepted')
   assert.deepEqual(accepted.queues['chat-a'], [handoff])
-  assert.deepEqual(accepted.chats[0].messages.at(-1), {
+  const { handoffTombstone, ...acceptedMessage } = accepted.chats[0].messages.at(-1)
+  assert.deepEqual(acceptedMessage, {
     id: 'message-turn-2', role: 'user', turnId: 'turn-2', content: 'Push the correction now',
     time: '2026-08-06T12:00:00.000Z', deliveryStatus: 'queued',
     attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
   })
+  assert.equal(handoffTombstone?.handoffId, handoff.id)
 
   const duplicate = acceptTransferredPrompt(accepted.queues, accepted.chats, 'chat-a', handoff)
   assert.equal(duplicate.status, 'duplicate')
+  assert.equal(duplicate.alreadyConsumed, false)
   assert.strictEqual(duplicate.queues, accepted.queues)
   assert.strictEqual(duplicate.chats, accepted.chats)
 
@@ -429,6 +433,58 @@ test('transferred handoff accepts one canonical queue entry and rejects stable-I
     assert.equal(conflict.status, 'conflict')
     assert.strictEqual(conflict.queues, accepted.queues)
     assert.strictEqual(conflict.chats, accepted.chats)
+  }
+})
+
+test('consumed transferred handoff retries use the immutable target tombstone without reinsertion', () => {
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    prompt: 'Push the correction now',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+  const chats = [{ id: 'chat-a', messages: [
+    { id: 'u1', role: 'user', turnId: 'turn-1', content: 'Active', deliveryStatus: 'pending' },
+  ] }]
+  const accepted = acceptTransferredPrompt({}, chats, 'chat-a', handoff)
+  const acceptedMessage = accepted.chats[0].messages.at(-1)
+  assert.equal(typeof acceptedMessage.handoffTombstone, 'object')
+  assert.equal(acceptedMessage.handoffTombstone.handoffId, handoff.id)
+  assert.equal(typeof acceptedMessage.handoffTombstone.queuedPromptIdentity, 'string')
+  assert.ok(acceptedMessage.handoffTombstone.queuedPromptIdentity.length <= 512_000)
+  assert.equal(Object.isFrozen(acceptedMessage.handoffTombstone), true)
+
+  const promotedChats = accepted.chats.map((chat) => ({
+    ...chat,
+    messages: promoteQueuedMessageToActiveTurn(chat.messages, handoff.messageId, 'turn-1'),
+  }))
+  const consumedQueues = promoteQueuedPromptToActiveTurn(accepted.queues, 'chat-a', handoff.id, 'turn-1')
+  const promotedMessage = promotedChats[0].messages.find((message) => message.id === handoff.messageId)
+  assert.strictEqual(promotedMessage.handoffTombstone, acceptedMessage.handoffTombstone)
+  assert.deepEqual(consumedQueues, {})
+
+  const retry = acceptTransferredPrompt(consumedQueues, promotedChats, 'chat-a', handoff)
+  assert.equal(retry.status, 'duplicate')
+  assert.equal(retry.alreadyConsumed, true)
+  assert.strictEqual(retry.queues, consumedQueues)
+  assert.strictEqual(retry.chats, promotedChats)
+  assert.deepEqual(retry.queues, {})
+
+  for (const changed of [
+    { ...handoff, messageId: 'message-conflicting-id' },
+    { ...handoff, turnId: 'turn-conflicting-id' },
+    { ...handoff, prompt: 'Altered prompt' },
+    { ...handoff, attachments: [{ name: 'other.md', path: '/repo/other.md' }] },
+    { ...handoff, preferences: { ...handoff.preferences, automaticFallback: false } },
+  ]) {
+    const conflict = acceptTransferredPrompt(consumedQueues, promotedChats, 'chat-a', changed)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, consumedQueues)
+    assert.strictEqual(conflict.chats, promotedChats)
   }
 })
 
