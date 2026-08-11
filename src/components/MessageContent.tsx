@@ -1,5 +1,7 @@
 import { createElement, Fragment, useId, useMemo, useState, type CSSProperties, type MouseEvent, type ReactNode } from 'react'
 import { Check, ChevronDown, ChevronUp, Copy } from 'lucide-react'
+import { createBidiCursor } from '../lib/bidiText.mjs'
+import type { BidiCursor } from '../lib/bidiText.mjs'
 import { classifyLinkTarget, filePathFromText, parseMarkdown } from '../lib/markdown.mjs'
 import type { InlineNode, MarkdownBlock } from '../lib/markdown.mjs'
 import {
@@ -18,6 +20,21 @@ import './MessageContent.css'
 
 const HEADING_TAGS = ['h1', 'h2', 'h3', 'h4', 'h5', 'h6'] as const
 const CELL_ALIGNMENT = { left: 'start', center: 'center', right: 'end' } as const
+
+/**
+ * Renders prose with every opposite-direction phrase wrapped in `<bdi>`, so a
+ * Hebrew title inside an English sentence cannot drag the quote, price, or
+ * count beside it into the middle of the phrase. The text itself is untouched:
+ * a message still copies exactly as the agent wrote it. Blocks that mix nothing
+ * render as the plain string they always did.
+ */
+function renderDirectional(text: string, cursor: BidiCursor): ReactNode {
+  const runs = cursor.split(text)
+  if (runs.length === 1 && !runs[0].isolate) return runs[0].text
+  return runs.map((run, key) => (run.isolate
+    ? <bdi key={key}>{run.text}</bdi>
+    : <Fragment key={key}>{run.text}</Fragment>))
+}
 
 function CodeBlock({ code, language }: { code: string; language: string | null }) {
   const [copied, setCopied] = useState(false)
@@ -95,17 +112,17 @@ function inlineText(nodes: InlineNode[]): string {
   }).join('')
 }
 
-function renderInline(nodes: InlineNode[], projectPath: string | null | undefined): ReactNode[] {
+function renderInline(nodes: InlineNode[], projectPath: string | null | undefined, cursor: BidiCursor): ReactNode[] {
   return nodes.map((node, key) => {
     switch (node.type) {
       case 'text':
-        return node.text
+        return <Fragment key={key}>{renderDirectional(node.text, cursor)}</Fragment>
       case 'strong':
-        return <strong key={key}>{renderInline(node.content, projectPath)}</strong>
+        return <strong key={key}>{renderInline(node.content, projectPath, cursor)}</strong>
       case 'em':
-        return <em key={key}>{renderInline(node.content, projectPath)}</em>
+        return <em key={key}>{renderInline(node.content, projectPath, cursor)}</em>
       case 'del':
-        return <del key={key}>{renderInline(node.content, projectPath)}</del>
+        return <del key={key}>{renderInline(node.content, projectPath, cursor)}</del>
       case 'code': {
         const file = filePathFromText(node.text)
         if (file && canOpenNatively() && (file.path.startsWith('/') || file.path.startsWith('~') || Boolean(projectPath))) {
@@ -116,13 +133,13 @@ function renderInline(nodes: InlineNode[], projectPath: string | null | undefine
       case 'link': {
         const target = classifyLinkTarget(node.href)
         if (target.kind === 'external') {
-          return <a key={key} href={target.url} target="_blank" rel="noreferrer">{renderInline(node.content, projectPath)}</a>
+          return <a key={key} href={target.url} target="_blank" rel="noreferrer">{renderInline(node.content, projectPath, cursor)}</a>
         }
         if (target.kind === 'file' && canOpenNatively()) {
           const file = filePathFromText(target.path) ?? { path: target.path, line: null }
           return <FileChip key={key} display={inlineText(node.content) || target.path} path={file.path} line={file.line} projectPath={projectPath} />
         }
-        return <span key={key}>{renderInline(node.content, projectPath)}</span>
+        return <span key={key}>{renderInline(node.content, projectPath, cursor)}</span>
       }
       case 'image': {
         const target = classifyLinkTarget(node.src)
@@ -139,14 +156,19 @@ function renderInline(nodes: InlineNode[], projectPath: string | null | undefine
   })
 }
 
+/** Every block is its own bidi paragraph, so each one starts a fresh cursor. */
+function renderBlockInline(nodes: InlineNode[], projectPath: string | null | undefined): ReactNode[] {
+  return renderInline(nodes, projectPath, createBidiCursor())
+}
+
 function renderMarkdownBlocks(blocks: MarkdownBlock[], projectPath: string | null | undefined): ReactNode[] {
   return blocks.map((block, key) => {
     switch (block.type) {
       case 'paragraph':
-        return <p key={key} dir="auto">{renderInline(block.content, projectPath)}</p>
+        return <p key={key} dir="auto">{renderBlockInline(block.content, projectPath)}</p>
       case 'heading': {
         const Tag = HEADING_TAGS[block.level - 1] ?? 'h6'
-        return <Tag key={key} dir="auto">{renderInline(block.content, projectPath)}</Tag>
+        return <Tag key={key} dir="auto">{renderBlockInline(block.content, projectPath)}</Tag>
       }
       case 'code':
         return <CodeBlock key={key} code={block.code} language={block.language} />
@@ -157,7 +179,7 @@ function renderMarkdownBlocks(blocks: MarkdownBlock[], projectPath: string | nul
       case 'list': {
         const items = block.items.map((item, itemKey) => (
           <li key={itemKey} dir="auto">
-            {renderInline(item.content, projectPath)}
+            {renderBlockInline(item.content, projectPath)}
             {item.children.length > 0 && renderMarkdownBlocks(item.children, projectPath)}
           </li>
         ))
@@ -176,7 +198,7 @@ function renderMarkdownBlocks(blocks: MarkdownBlock[], projectPath: string | nul
               <thead>
                 <tr>
                   {block.header.map((cell, column) => (
-                    <th key={column} dir="auto" style={alignStyle(column)}>{renderInline(cell, projectPath)}</th>
+                    <th key={column} dir="auto" style={alignStyle(column)}>{renderBlockInline(cell, projectPath)}</th>
                   ))}
                 </tr>
               </thead>
@@ -184,7 +206,7 @@ function renderMarkdownBlocks(blocks: MarkdownBlock[], projectPath: string | nul
                 {block.rows.map((row, rowKey) => (
                   <tr key={rowKey}>
                     {row.map((cell, column) => (
-                      <td key={column} dir="auto" style={alignStyle(column)}>{renderInline(cell, projectPath)}</td>
+                      <td key={column} dir="auto" style={alignStyle(column)}>{renderBlockInline(cell, projectPath)}</td>
                     ))}
                   </tr>
                 ))}
@@ -199,10 +221,7 @@ function renderMarkdownBlocks(blocks: MarkdownBlock[], projectPath: string | nul
 
 // --- Structured rendering (default conversation mode) -----------------------
 
-function InlineLink({ segment, onOpenFile }: {
-  segment: MessageInlineLink
-  onOpenFile?: (path: string) => void
-}) {
+function renderInlineLink(segment: MessageInlineLink, cursor: BidiCursor, key: number, onOpenFile?: (path: string) => void): ReactNode {
   if (segment.kind === 'file') {
     // A local path cannot navigate the workspace origin. Ensync displays the
     // file itself, and falls back to the native shell only where no viewer is
@@ -220,59 +239,59 @@ function InlineLink({ segment, onOpenFile }: {
       void openLocalFile(segment.path)
     }
 
+    // A file link is already direction-isolated by dir="ltr", so its label
+    // stays outside the surrounding line's bidi run.
     return (
-      <a className="message-link" href={segment.href} title={segment.path} onClick={openFile} dir="ltr">
+      <a key={key} className="message-link" href={segment.href} title={segment.path} onClick={openFile} dir="ltr">
         {segment.label}
       </a>
     )
   }
 
   return (
-    <a className="message-link" href={segment.href} title={segment.href} target="_blank" rel="noreferrer">
-      {segment.label}
+    <a key={key} className="message-link" href={segment.href} title={segment.href} target="_blank" rel="noreferrer">
+      {renderDirectional(segment.label, cursor)}
     </a>
   )
 }
 
-function MessageInline({ nodes, onOpenFile }: { nodes: MessageInlineNode[]; onOpenFile?: (path: string) => void }) {
-  return (
-    <>
-      {nodes.map((node, position) => {
-        switch (node.type) {
-          case 'text':
-            return <Fragment key={position}>{node.text}</Fragment>
-          case 'code':
-            return <code key={position} className="message-inline-code" dir="ltr">{node.text}</code>
-          case 'link':
-            return (
-              <a key={position} className="message-link" href={node.href} target="_blank" rel="noreferrer">
-                <MessageInline nodes={node.children} onOpenFile={onOpenFile} />
-              </a>
-            )
-          case 'strong':
-            return <strong key={position}><MessageInline nodes={node.children} onOpenFile={onOpenFile} /></strong>
-          case 'em':
-            return <em key={position}><MessageInline nodes={node.children} onOpenFile={onOpenFile} /></em>
-          default:
-            return <s key={position}><MessageInline nodes={node.children} onOpenFile={onOpenFile} /></s>
-        }
-      })}
-    </>
-  )
+function renderMessageInline(nodes: MessageInlineNode[], cursor: BidiCursor): ReactNode[] {
+  return nodes.map((node, position) => {
+    switch (node.type) {
+      case 'text':
+        return <Fragment key={position}>{renderDirectional(node.text, cursor)}</Fragment>
+      case 'code':
+        return <code key={position} className="message-inline-code" dir="ltr">{node.text}</code>
+      case 'link':
+        return (
+          <a key={position} className="message-link" href={node.href} target="_blank" rel="noreferrer">
+            {renderMessageInline(node.children, cursor)}
+          </a>
+        )
+      case 'strong':
+        return <strong key={position}>{renderMessageInline(node.children, cursor)}</strong>
+      case 'em':
+        return <em key={position}>{renderMessageInline(node.children, cursor)}</em>
+      default:
+        return <s key={position}>{renderMessageInline(node.children, cursor)}</s>
+    }
+  })
 }
 
-function InlineText({ text, onOpenFile }: { text: string; onOpenFile?: (path: string) => void }) {
+/**
+ * Renders one block's prose. The runs are resolved as the block is built rather
+ * than inside child components, so the cursor always sees the line in the order
+ * it is written.
+ */
+function renderInlineText(text: string, onOpenFile?: (path: string) => void): ReactNode {
+  const cursor = createBidiCursor()
   const segments = parseInlineSegments(text)
   if (segments.some((segment) => segment.type === 'link')) {
-    return (
-      <>
-        {segments.map((segment, position) => (segment.type === 'link'
-          ? <InlineLink key={position} segment={segment} onOpenFile={onOpenFile} />
-          : <Fragment key={position}><MessageInline nodes={parseInline(segment.text)} onOpenFile={onOpenFile} /></Fragment>))}
-      </>
-    )
+    return segments.map((segment, position) => (segment.type === 'link'
+      ? renderInlineLink(segment, cursor, position, onOpenFile)
+      : <Fragment key={position}>{renderMessageInline(parseInline(segment.text), cursor)}</Fragment>))
   }
-  return <MessageInline nodes={parseInline(text)} onOpenFile={onOpenFile} />
+  return renderMessageInline(parseInline(text), cursor)
 }
 
 /** True when prose carries inline Markdown or links the plain path would lose. */
@@ -297,7 +316,7 @@ function StructuredTable({ header, alignments, rows, onOpenFile }: {
           <tr>
             {header.map((cell, index) => (
               <th key={index} scope="col" dir="auto" style={{ textAlign: align(index) }}>
-                <InlineText text={cell} onOpenFile={onOpenFile} />
+                {renderInlineText(cell, onOpenFile)}
               </th>
             ))}
           </tr>
@@ -307,7 +326,7 @@ function StructuredTable({ header, alignments, rows, onOpenFile }: {
             <tr key={rowIndex}>
               {row.map((cell, index) => (
                 <td key={index} dir="auto" style={{ textAlign: align(index) }}>
-                  <InlineText text={cell} onOpenFile={onOpenFile} />
+                  {renderInlineText(cell, onOpenFile)}
                 </td>
               ))}
             </tr>
@@ -324,7 +343,7 @@ function StructuredListItem({ blocks, onOpenFile }: {
   onOpenFile?: (path: string) => void
 }) {
   if (blocks.length === 1 && blocks[0].type === 'paragraph') {
-    return <li dir="auto"><InlineText text={blocks[0].text} onOpenFile={onOpenFile} /></li>
+    return <li dir="auto">{renderInlineText(blocks[0].text, onOpenFile)}</li>
   }
   return <li dir="auto"><StructuredBlocks blocks={blocks} onOpenFile={onOpenFile} /></li>
 }
@@ -343,7 +362,7 @@ function StructuredBlocks({ blocks, onOpenFile }: {
             return createElement(
               HEADING_TAGS[Math.min(6, Math.max(1, block.level)) - 1] ?? 'h6',
               { key: index, className: 'message-heading', dir: 'auto' },
-              <InlineText text={block.text} onOpenFile={onOpenFile} />,
+              renderInlineText(block.text, onOpenFile),
             )
           case 'rule':
             return <hr key={index} className="message-rule" />
@@ -373,9 +392,9 @@ function StructuredBlocks({ blocks, onOpenFile }: {
             )
           default: {
             if (!hasInlineMarkup(block.text)) {
-              return <p key={index} dir="auto">{block.text}</p>
+              return <p key={index} dir="auto">{renderDirectional(block.text, createBidiCursor())}</p>
             }
-            return <p key={index} dir="auto"><InlineText text={block.text} onOpenFile={onOpenFile} /></p>
+            return <p key={index} dir="auto">{renderInlineText(block.text, onOpenFile)}</p>
           }
         }
       })}
@@ -421,7 +440,7 @@ export function MessageContent({ content, collapsible = false, projectPath, onOp
     <div className="message-content-shell">
       {isCollapsed ? (
         <div id={contentId} className="message-content message-content--preview">
-          <p dir="auto">{preview}</p>
+          <p dir="auto">{renderDirectional(preview, createBidiCursor())}</p>
         </div>
       ) : (
         <div id={contentId} className="message-content">
