@@ -663,14 +663,29 @@ async function proxyProtocolApi(
     ? undefined
     : Buffer.from(await request.arrayBuffer())
 
+  const sendUpstream = () => fetchImpl(upstreamUrl, {
+    method: request.method,
+    headers: proxyHeaders(request.headers, resolvedToken, resolvedOwnerId),
+    body,
+    redirect: 'error',
+    signal: request.signal,
+  })
+
   try {
-    const upstream = await fetchImpl(upstreamUrl, {
-      method: request.method,
-      headers: proxyHeaders(request.headers, resolvedToken, resolvedOwnerId),
-      body,
-      redirect: 'error',
-      signal: request.signal,
-    })
+    let upstream = await sendUpstream()
+    // Shell leases live only in the Host's memory, so a Host restart, a missed
+    // heartbeat, or a machine that slept leaves this process holding a lease
+    // the Host has already forgotten while its own expiry clock still looks
+    // valid. Every proxied call then returns 403 and the renderer reports the
+    // Host as offline even though it is healthy and running jobs. Re-claim on
+    // that exact refusal and replay the request once.
+    if (upstream.status === 403 && typeof ensureHostLease === 'function') {
+      const refused = await upstream.clone().json().catch(() => null)
+      if (refused?.code === 'daemon_owner_expired') {
+        const reclaimed = await ensureHostLease({ force: true }).then(() => true).catch(() => false)
+        if (reclaimed) upstream = await sendUpstream()
+      }
+    }
     const headers = new Headers(upstream.headers)
     for (const [name, value] of Object.entries(security)) headers.set(name, value)
     return new Response(upstream.body, {

@@ -494,3 +494,70 @@ test('app protocol forwards NDJSON response bodies without buffering the executi
     await rm(uiRoot, { recursive: true, force: true })
   }
 })
+
+test('a Host that forgot this shell lease is re-claimed and the request replayed', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-lease-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const attempts = []
+  let leaseClaims = 0
+  // The Host keeps leases in memory only, so a restart or a slept machine
+  // leaves the shell holding one the Host no longer knows about while its own
+  // expiry clock still looks valid. Every call then 403s and the renderer
+  // reports the Host offline even though it is healthy and running jobs.
+  const fetchImpl = async (url, init) => {
+    attempts.push(init?.headers?.['x-ensync-owner'] ?? null)
+    if (attempts.length === 1) {
+      return Response.json(
+        { error: 'The native shell lease is missing or expired.', code: 'daemon_owner_expired' },
+        { status: 403 },
+      )
+    }
+    return Response.json({ ok: true, replayed: true })
+  }
+
+  try {
+    const handle = await createAppProtocolHandler({
+      uiRoot,
+      hostPort: 41_009,
+      hostToken: 'test-token',
+      ownerId: 'shell_test_owner_0123456789',
+      fetchImpl,
+      ensureHostLease: async ({ force } = {}) => { if (force) leaseClaims += 1 },
+    })
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true, replayed: true })
+    assert.equal(leaseClaims, 1, 'the expired lease is re-claimed exactly once')
+    assert.equal(attempts.length, 2, 'the original request is replayed, not dropped')
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('a 403 that is not an expired lease is returned untouched', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-lease2-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  let leaseClaims = 0
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    return Response.json({ error: 'Forbidden project path.', code: 'project_not_allowed' }, { status: 403 })
+  }
+
+  try {
+    const handle = await createAppProtocolHandler({
+      uiRoot,
+      hostPort: 41_010,
+      fetchImpl,
+      ensureHostLease: async ({ force } = {}) => { if (force) leaseClaims += 1 },
+    })
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+
+    assert.equal(response.status, 403)
+    assert.equal(leaseClaims, 0, 'an unrelated refusal must not re-claim a lease')
+    assert.equal(calls, 1, 'and must not be replayed')
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
