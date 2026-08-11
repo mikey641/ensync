@@ -14,6 +14,8 @@ const PREFERRED_CANONICAL_REMOTE = 'origin'
 const CANONICAL_BRANCH_FALLBACKS = ['main', 'master']
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
+const OCCUPIED_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/
+const OCCUPIED_NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
 
 const AGENT_COMMIT_IDENTITY = {
@@ -127,6 +129,27 @@ function workspaceKey(value) {
   return value
 }
 
+function boundedOwner(value) {
+  const owner = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const startedAt = typeof owner.startedAt === 'string' && Number.isFinite(Date.parse(owner.startedAt))
+    ? owner.startedAt
+    : null
+  return {
+    jobId: typeof owner.jobId === 'string' && OCCUPIED_JOB_ID_PATTERN.test(owner.jobId) ? owner.jobId : null,
+    provider: typeof owner.provider === 'string' && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(owner.provider)
+      ? owner.provider
+      : null,
+    targetKind: owner.targetKind === 'local' || owner.targetKind === 'ssh' ? owner.targetKind : null,
+    startedAt,
+    providerProcessStarted: owner.providerProcessStarted === true,
+    steerable: owner.steerable === true,
+    nativeWorkspaceId: typeof owner.nativeWorkspaceId === 'string'
+      && OCCUPIED_NATIVE_WORKSPACE_ID_PATTERN.test(owner.nativeWorkspaceId)
+      ? owner.nativeWorkspaceId
+      : null,
+  }
+}
+
 async function canonicalDirectory(value, code, message) {
   try {
     const canonical = await realpath(value)
@@ -234,6 +257,31 @@ export class ProjectIsolationService {
       }
     } catch (error) {
       await lease.release()
+      throw error
+    }
+  }
+
+  async tryAcquireOrDescribe(projectPath, rawWorkspaceKey, options = {}) {
+    const key = workspaceKey(rawWorkspaceKey)
+    throwIfCancelled(options.signal)
+    const canonicalProjectPath = await canonicalDirectory(
+      projectPath,
+      'invalid_project',
+      'The selected project folder does not exist or cannot be accessed.',
+    )
+    const repository = await this.#repository(canonicalProjectPath)
+    const admission = await this.#tryAcquireWorkspaceLease(repository.commonGitDirectory, key, options)
+    if (admission.disposition === 'occupied') return admission
+
+    try {
+      throwIfCancelled(options.signal)
+      const base = await this.#canonicalBase(repository, options)
+      throwIfCancelled(options.signal)
+      const workspace = await this.#ensureWorkspace(repository, canonicalProjectPath, key, base)
+      admission.lease.assertHeld()
+      return { disposition: 'acquired', lease: { ...admission.lease, workspace } }
+    } catch (error) {
+      await admission.lease.release()
       throw error
     }
   }
@@ -441,6 +489,13 @@ export class ProjectIsolationService {
     return this.#acquireLease(join(commonGitDirectory, 'ensync', 'workspace-write-locks'), digest(key), options)
   }
 
+  async #tryAcquireWorkspaceLease(commonGitDirectory, key, options) {
+    return this.#acquireLease(join(commonGitDirectory, 'ensync', 'workspace-write-locks'), digest(key), {
+      ...options,
+      nonBlocking: true,
+    })
+  }
+
   async #acquireLease(lockParent, workspaceHash, options) {
     const lockPath = join(lockParent, `${workspaceHash}.lock`)
     const ownerPath = join(lockPath, 'owner.json')
@@ -455,6 +510,10 @@ export class ProjectIsolationService {
         await mkdir(lockPath, { mode: 0o700 })
       } catch (error) {
         if (error?.code !== 'EEXIST') throw error
+        if (options.nonBlocking) {
+          if (await this.#quarantineStaleLock(lockPath, ownerPath)) continue
+          return { disposition: 'occupied', owner: await this.#occupiedOwner(ownerPath) }
+        }
         if (!waitingReported) {
           waitingReported = true
           options.onWait?.()
@@ -468,6 +527,7 @@ export class ProjectIsolationService {
         const controller = new AbortController()
         let released = false
         let failure = null
+        let ownerMetadata = boundedOwner(options.owner)
         const owner = () => ({
           version: 2,
           token,
@@ -475,6 +535,7 @@ export class ProjectIsolationService {
           workspaceHash,
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
+          owner: ownerMetadata,
         })
         // Replace the record atomically so no reader — this heartbeat, release,
         // or another Host's staleness probe — can observe a file between
@@ -493,8 +554,8 @@ export class ProjectIsolationService {
         // next tick's read into a false lease loss. The in-flight tick is also
         // what release waits on, so a write can never outlive its own lease.
         let pendingTick = null
-        const heartbeat = setInterval(() => {
-          if (pendingTick || released) return
+        const refreshOwner = () => {
+          if (pendingTick || released) return pendingTick ?? Promise.resolve()
           pendingTick = (async () => {
             try {
               const current = JSON.parse(await readFile(ownerPath, 'utf8'))
@@ -515,6 +576,10 @@ export class ProjectIsolationService {
               heldLeaseTokens.delete(token)
             }
           })().finally(() => { pendingTick = null })
+          return pendingTick
+        }
+        const heartbeat = setInterval(() => {
+          void refreshOwner()
         }, this.#heartbeatMs)
         heartbeat.unref?.()
 
@@ -558,10 +623,14 @@ export class ProjectIsolationService {
         }
 
         let releaseOutcome = null
-        return {
+        const lease = {
           signal: controller.signal,
           assertHeld() {
             if (failure) throw failure
+          },
+          updateOwner(patch) {
+            ownerMetadata = boundedOwner({ ...ownerMetadata, ...patch })
+            return refreshOwner()
           },
           release: async () => {
             if (released) return releaseOutcome ?? { removed: true, reason: null }
@@ -581,6 +650,7 @@ export class ProjectIsolationService {
             return releaseOutcome
           },
         }
+        return options.nonBlocking ? { disposition: 'acquired', lease } : lease
       } catch (error) {
         await rm(lockPath, { recursive: true, force: true }).catch(() => {})
         throw error
@@ -628,6 +698,15 @@ export class ProjectIsolationService {
       return true
     } catch (error) {
       return error?.code === 'ENOENT'
+    }
+  }
+
+  async #occupiedOwner(ownerPath) {
+    try {
+      const record = JSON.parse(await readFile(ownerPath, 'utf8'))
+      return boundedOwner(record?.owner)
+    } catch {
+      return boundedOwner(null)
     }
   }
 

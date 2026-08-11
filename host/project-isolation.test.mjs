@@ -204,6 +204,85 @@ test('a rapid lease heartbeat never corrupts its owner record', async (context) 
   await acquired.release()
 })
 
+test('non-blocking admission describes the active conversation without waiting', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const serviceA = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), lockPollMs: 10 })
+  const serviceB = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), lockPollMs: 10 })
+  const owner = {
+    jobId: 'job_1111111111111111',
+    provider: 'codex',
+    targetKind: 'local',
+    startedAt: '2026-08-11T10:00:00.000Z',
+    providerProcessStarted: false,
+    steerable: false,
+    nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+  }
+  const first = await serviceA.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', { owner })
+  try {
+    let waiting = false
+    const startedAt = Date.now()
+    const second = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', {
+      owner: { jobId: 'job_2222222222222222', provider: 'claude', targetKind: 'local' },
+      onWait: () => { waiting = true },
+    })
+    assert.ok(Date.now() - startedAt < 500)
+    assert.equal(waiting, false)
+    assert.equal(first.disposition, 'acquired')
+    assert.deepEqual(second, { disposition: 'occupied', owner })
+
+    const different = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-b', { owner })
+    assert.equal(different.disposition, 'acquired')
+    if (different.disposition === 'acquired') await different.lease.release()
+  } finally {
+    if (first.disposition === 'acquired') await first.lease.release()
+  }
+})
+
+test('bounded occupied owner reflects heartbeat updates only', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const serviceA = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), heartbeatMs: 5 })
+  const serviceB = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), heartbeatMs: 5 })
+  const first = await serviceA.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', {
+    owner: {
+      jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+      startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: false,
+      steerable: false, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111', extra: 'not-public',
+    },
+  })
+  try {
+    assert.equal(first.disposition, 'acquired')
+    if (first.disposition !== 'acquired') return
+    await first.lease.updateOwner({ providerProcessStarted: true, steerable: true, token: 'not-public' })
+
+    const second = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a')
+    assert.deepEqual(second, {
+      disposition: 'occupied',
+      owner: {
+        jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+        startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: true,
+        steerable: true, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+      },
+    })
+  } finally {
+    if (first.disposition === 'acquired') await first.lease.release()
+  }
+})
+
+test('release fences an unawaited owner update before removing its lock', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
+  const service = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, heartbeatMs: 1 })
+  const key = 'workspace:chat-a'
+  const acquired = await service.tryAcquireOrDescribe(fixture.repository, key, {
+    owner: { jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local' },
+  })
+  assert.equal(acquired.disposition, 'acquired')
+  if (acquired.disposition !== 'acquired') return
+  acquired.lease.updateOwner({ providerProcessStarted: true })
+  await acquired.lease.release()
+  await assert.rejects(stat(workspaceLockPath(fixture.repository, commonDirectory, key)), { code: 'ENOENT' })
+})
+
 test('separate Host instances serialize duplicate runs against the same conversation worktree', async (context) => {
   const fixture = await repositoryFixture(context)
   const firstService = new ProjectIsolationService({

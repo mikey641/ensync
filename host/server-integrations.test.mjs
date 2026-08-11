@@ -25,6 +25,71 @@ async function withHost(context, options) {
   return `http://127.0.0.1:${address.port}`
 }
 
+function assertNoForbiddenJobData(value) {
+  const forbidden = new Set(['prompt', 'attachments', 'projectPath', 'repositoryPath', 'token', 'pid', 'request'])
+  if (Array.isArray(value)) {
+    for (const item of value) assertNoForbiddenJobData(item)
+    return
+  }
+  if (!value || typeof value !== 'object') return
+  for (const [key, item] of Object.entries(value)) {
+    assert.equal(forbidden.has(key), false, `occupied response exposed ${key}`)
+    assertNoForbiddenJobData(item)
+  }
+}
+
+test('occupied job admission returns bounded owner data without request details', async (context) => {
+  let runs = 0
+  const projectIsolationService = {
+    async tryAcquireOrDescribe() {
+      return {
+        disposition: 'occupied',
+        owner: {
+          jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+          startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: true,
+          steerable: true, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+        },
+      }
+    },
+  }
+  const baseUrl = await withHost(context, {
+    projectIsolationService,
+    chatService: {
+      run: async () => { runs += 1 },
+      steer: async () => ({}),
+      canSteer: () => false,
+      answerQuestion: async () => ({}),
+      pendingQuestions: () => [],
+    },
+  })
+  const response = await fetch(`${baseUrl}/api/chat/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jobId: 'job_2222222222222222', kind: 'local',
+      request: {
+        provider: 'codex', prompt: 'private prompt', attachments: ['/private.png'],
+        projectPath: '/private/project', workspaceKey: 'workspace:chat-a',
+      },
+      navigation: { nativeWorkspaceId: '11111111-1111-4111-8111-111111111111', projectId: 'project-a', chatId: 'chat-a' },
+    }),
+  })
+
+  assert.equal(response.status, 200)
+  const payload = await response.json()
+  assert.deepEqual(payload, {
+    disposition: 'occupied',
+    owner: {
+      jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+      startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: true,
+      steerable: true, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+      turnId: null,
+    },
+  })
+  assertNoForbiddenJobData(payload)
+  assert.equal(runs, 0)
+})
+
 test('support repair route returns only the injected subscription repair result', async (context) => {
   const calls = []
   const supportRepairService = {
@@ -245,6 +310,84 @@ test('SSH routes expose only verified probe and parsed chat service results', as
   assert.equal(chat.response, 'Parsed remote response')
   assert.equal('stdout' in chat, false)
   assert.equal('stderr' in chat, false)
+})
+
+test('same-Host SSH admission retains one exact conversation bridge while another Host remains independent', async (context) => {
+  let firstHostRuns = 0
+  let secondHostRuns = 0
+  const chatService = {
+    run: async () => ({ response: 'unused' }),
+    steer: async () => ({}),
+    canSteer: () => false,
+    answerQuestion: async () => ({}),
+    pendingQuestions: () => [],
+  }
+  const pendingRemoteRun = (count) => async () => {
+    count()
+    return new Promise(() => {})
+  }
+  const firstHost = await withHost(context, {
+    chatService,
+    remoteSshService: {
+      runChat: pendingRemoteRun(() => { firstHostRuns += 1 }),
+      probe: async () => ({}),
+    },
+  })
+  const secondHost = await withHost(context, {
+    chatService,
+    remoteSshService: {
+      runChat: pendingRemoteRun(() => { secondHostRuns += 1 }),
+      probe: async () => ({}),
+    },
+  })
+  const request = {
+    connection: {
+      hostname: 'Worker.EXAMPLE.com.',
+      username: 'developer',
+      port: 22,
+      projectPath: '/srv/projects/ensync/',
+    },
+    provider: 'codex',
+    workspaceKey: 'canonical-window:remote-chat-1',
+    prompt: 'Continue remotely.',
+  }
+  const start = (baseUrl, jobId, turnId) => fetch(`${baseUrl}/api/chat/jobs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jobId,
+      kind: 'ssh',
+      request,
+      navigation: {
+        nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+        projectId: 'project-remote',
+        chatId: 'chat-remote',
+        turnId,
+      },
+    }),
+  })
+
+  const first = await start(firstHost, 'job_ssh_first_00000001', 'turn-ssh-first').then((response) => response.json())
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(firstHostRuns, 1)
+  const occupied = await start(firstHost, 'job_ssh_second_0000001', 'turn-ssh-second').then((response) => response.json())
+  const crossHost = await start(secondHost, 'job_ssh_crosshost_00001', 'turn-ssh-cross').then((response) => response.json())
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(secondHostRuns, 1)
+
+  assert.equal(first.disposition, 'started', JSON.stringify(first))
+  assert.equal(occupied.disposition, 'occupied')
+  assert.equal(occupied.owner.jobId, 'job_ssh_first_00000001')
+  assert.equal(occupied.owner.targetKind, 'ssh')
+  assert.equal(occupied.owner.nativeWorkspaceId, null)
+  assert.equal(occupied.owner.steerable, false)
+  assert.equal(occupied.owner.turnId, 'turn-ssh-first')
+  assert.equal(crossHost.disposition, 'started')
+  assert.equal(firstHostRuns, 1)
+  assert.equal(secondHostRuns, 1)
+
+  const absent = await fetch(`${firstHost}/api/chat/jobs/job_ssh_second_0000001`)
+  assert.equal(absent.status, 404)
 })
 
 test('SSH route errors preserve safe pre-activity fallback state', async (context) => {

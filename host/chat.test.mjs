@@ -75,6 +75,51 @@ test('project validation enforces configured host roots', async (context) => {
   )
 })
 
+test('ChatRunService uses a pre-acquired workspace lease without acquiring or releasing it', async (context) => {
+  const projectPath = await projectFixture(context)
+  let acquireCalls = 0
+  let releaseCalls = 0
+  let processCwd = null
+  const lease = {
+    workspace: {
+      projectPath, repositoryPath: projectPath, branch: 'ensync/chat-a', base: null, integration: null,
+      gitBefore: { dirty: false, changedFiles: 0 },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() { releaseCalls += 1 },
+  }
+  const projectIsolation = {
+    async acquire() { acquireCalls += 1; return lease },
+    async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+    async checkSharedCheckout() { return { available: false } },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation,
+    processRunner: async (_executable, _args, options) => {
+      processCwd = options.cwd
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.run({ provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-a' }, {
+    preAcquiredWorkspaceLease: lease,
+  })
+
+  assert.equal(acquireCalls, 0)
+  assert.equal(releaseCalls, 0)
+  assert.equal(processCwd, projectPath)
+})
+
 test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON only', async (context) => {
   const projectPath = await projectFixture(context)
   const calls = []

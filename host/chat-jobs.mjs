@@ -6,6 +6,8 @@ const DEFAULT_MAX_EVENTS = 1_000
 const DEFAULT_MAX_EVENT_CHARACTERS = 2 * 1024 * 1024
 const DEFAULT_FINISHED_TTL_MS = 24 * 60 * 60 * 1_000
 const JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/
+const STEER_IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/
+const MAX_NAVIGATION_TURN_ID_CHARACTERS = 256
 
 function eventSize(event) {
   try {
@@ -32,6 +34,26 @@ function requestKey(kind, request) {
 
 function requestHash(key) {
   return createHash('sha256').update(key).digest('hex')
+}
+
+function steerDeliveryIdentity(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || typeof input.idempotencyKey !== 'string'
+    || !STEER_IDEMPOTENCY_KEY_PATTERN.test(input.idempotencyKey)) {
+    throw new ChatJobError(
+      'invalid_live_steer_idempotency_key',
+      'A valid stable live-instruction ID is required.',
+      400,
+      true,
+    )
+  }
+  return {
+    key: input.idempotencyKey,
+    request: JSON.stringify({
+      prompt: typeof input.prompt === 'string' ? input.prompt.trim() : input.prompt,
+      attachments: Array.isArray(input.attachments) ? input.attachments : [],
+    }),
+  }
 }
 
 function journalSafe(value) {
@@ -78,6 +100,35 @@ function publicJob(job, canSteerLocal, pendingQuestionsLocal) {
   }
 }
 
+function publicOwnerFromStartInput(input, startedAt) {
+  return {
+    jobId: input.jobId,
+    provider: typeof input.request?.provider === 'string' ? input.request.provider : null,
+    targetKind: input.kind,
+    startedAt,
+    providerProcessStarted: false,
+    steerable: false,
+    nativeWorkspaceId: typeof input.navigation?.nativeWorkspaceId === 'string'
+      ? input.navigation.nativeWorkspaceId
+      : null,
+  }
+}
+
+function boundedNavigationTurnId(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_NAVIGATION_TURN_ID_CHARACTERS
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : null
+}
+
+function updateLeaseOwner(lease, patch) {
+  const update = lease?.updateOwner?.(patch)
+  void update?.catch?.(() => {})
+}
+
 export class ChatJobError extends Error {
   constructor(code, message, status = 400, safeToRetry = false) {
     super(message)
@@ -95,6 +146,7 @@ export class ChatJobError extends Error {
  */
 export class ChatJobService {
   #jobs = new Map()
+  #pendingStarts = new Map()
   #runLocal
   #runRemote
   #steerLocal
@@ -109,6 +161,8 @@ export class ChatJobService {
   #finishedTtlMs
   #journal
   #persistTimer = null
+  #admit
+  #shuttingDown = false
 
   constructor(options = {}) {
     if (typeof options.runLocal !== 'function' || typeof options.runRemote !== 'function') {
@@ -127,10 +181,11 @@ export class ChatJobService {
     this.#maxEventCharacters = options.maxEventCharacters ?? DEFAULT_MAX_EVENT_CHARACTERS
     this.#finishedTtlMs = options.finishedTtlMs ?? DEFAULT_FINISHED_TTL_MS
     this.#journal = options.journal ?? null
+    this.#admit = options.admit ?? (async () => ({ disposition: 'acquired', lease: null }))
     this.#restoreJournal()
   }
 
-  start(input) {
+  async start(input) {
     if (!input || typeof input !== 'object') {
       throw new ChatJobError('invalid_chat_job', 'A chat job request is required.', 400)
     }
@@ -141,43 +196,93 @@ export class ChatJobService {
     }
     const key = requestKey(kind, input.request)
     const hash = requestHash(key)
+    if (this.#shuttingDown) {
+      throw new ChatJobError(
+        'chat_job_shutting_down',
+        'Ensync Host is shutting down and cannot admit another chat job.',
+        503,
+        true,
+      )
+    }
     const existing = this.#jobs.get(id)
     if (existing) {
       if (existing.requestHash !== hash) {
         throw new ChatJobError('chat_job_conflict', 'That chat job ID already belongs to another request.', 409)
       }
-      return this.#publicJob(existing)
+      return { disposition: 'reconnected', job: this.#publicJob(existing) }
     }
 
-    this.#trimFinishedJobs()
-    if (this.#jobs.size >= this.#maxJobs) {
+    const pending = this.#pendingStarts.get(id)
+    if (pending) {
+      if (pending.requestHash !== hash) {
+        throw new ChatJobError('chat_job_conflict', 'That chat job ID already belongs to another request.', 409)
+      }
+      const admission = await pending.promise
+      return admission.disposition === 'started'
+        ? { disposition: 'reconnected', job: admission.job }
+        : admission
+    }
+
+    this.#trimFinishedJobs(this.#pendingStarts.size)
+    if (this.#jobs.size + this.#pendingStarts.size >= this.#maxJobs) {
       throw new ChatJobError('chat_job_capacity', 'Ensync Host has too many retained chat jobs.', 503)
+    }
+    // Queue admission only after publishing the reservation. Even a
+    // synchronously re-entrant admission hook must observe this capacity use.
+    const starting = Promise.resolve().then(() => this.#startNew({ ...input, jobId: id, kind }, key, hash))
+    this.#pendingStarts.set(id, { requestHash: hash, promise: starting })
+    try {
+      return await starting
+    } finally {
+      this.#pendingStarts.delete(id)
+    }
+  }
+
+  async #startNew(input, key, hash) {
+    const startedAt = this.#now()
+    const admission = await this.#admit(input, publicOwnerFromStartInput(input, startedAt))
+    if (admission?.disposition === 'occupied') return this.#occupiedAdmission(admission)
+    if (admission?.disposition !== 'acquired') {
+      throw new ChatJobError('project_isolation_failed', 'Ensync Host could not admit this retained chat job.', 409)
+    }
+    if (this.#shuttingDown) {
+      await admission.lease?.release()
+      throw new ChatJobError(
+        'chat_job_shutting_down',
+        'Ensync Host began shutting down before this chat job could start.',
+        503,
+        true,
+      )
     }
 
     const job = {
-      id,
-      kind,
+      id: input.jobId,
+      kind: input.kind,
       request: input.request,
       requestKey: key,
       requestHash: hash,
       state: 'running',
-      startedAt: this.#now(),
+      startedAt,
       finishedAt: null,
-      providerProcessStarted: kind === 'ssh',
+      providerProcessStarted: input.kind === 'ssh',
       sequence: 0,
       events: [],
       eventCharacters: 0,
       subscribers: new Set(),
       controller: new AbortController(),
       completion: null,
+      workspaceLease: admission.lease ?? null,
+      steerDeliveries: new Map(),
+      navigationTurnId: boundedNavigationTurnId(input.navigation?.turnId),
     }
-    this.#jobs.set(id, job)
+    this.#jobs.set(input.jobId, job)
     // The idempotency record reaches durable storage before provider execution.
     // A crash can therefore become reconciliation-required, never a duplicate.
     try {
       this.#persist()
     } catch (error) {
-      this.#jobs.delete(id)
+      this.#jobs.delete(input.jobId)
+      await job.workspaceLease?.release()
       throw new ChatJobError(
         'chat_job_journal_unavailable',
         error instanceof Error ? `Ensync Host could not durably register the run: ${error.message}` : 'Ensync Host could not durably register the run.',
@@ -188,7 +293,18 @@ export class ChatJobService {
     queueMicrotask(() => {
       job.completion = this.#execute(job)
     })
-    return this.#publicJob(job)
+    return { disposition: 'started', job: this.#publicJob(job) }
+  }
+
+  #occupiedAdmission(admission) {
+    const retained = this.#jobs.get(admission.owner?.jobId)
+    return {
+      disposition: 'occupied',
+      owner: {
+        ...(admission.owner ?? {}),
+        turnId: retained?.state === 'running' ? retained.navigationTurnId : null,
+      },
+    }
   }
 
   get(jobId) {
@@ -205,7 +321,8 @@ export class ChatJobService {
   }
 
   hasRunningJobs() {
-    return [...this.#jobs.values()].some((job) => job.state === 'running')
+    return this.#pendingStarts.size > 0
+      || [...this.#jobs.values()].some((job) => job.state === 'running')
   }
 
   sweep() {
@@ -215,7 +332,10 @@ export class ChatJobService {
   }
 
   async shutdown() {
+    this.#shuttingDown = true
     this.#flushPersist()
+    const pending = [...this.#pendingStarts.values()].map((item) => item.promise)
+    await Promise.allSettled(pending)
     const running = [...this.#jobs.values()].filter((job) => job.state === 'running')
     for (const job of running) job.controller.abort()
     await Promise.allSettled(running.map((job) => job.completion).filter(Boolean))
@@ -225,6 +345,29 @@ export class ChatJobService {
   async steer(jobId, input) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404, true)
+    const identity = steerDeliveryIdentity(input)
+    const existing = job.steerDeliveries.get(identity.key)
+    if (existing) {
+      if (existing.request !== identity.request) {
+        throw new ChatJobError(
+          'live_steer_conflict',
+          'That live-instruction ID already belongs to another message.',
+          409,
+          false,
+        )
+      }
+      return existing.promise
+    }
+    const providerInput = {
+      prompt: input.prompt,
+      ...(input.attachments === undefined ? {} : { attachments: input.attachments }),
+    }
+    const promise = this.#deliverSteer(job, providerInput)
+    job.steerDeliveries.set(identity.key, { request: identity.request, promise })
+    return promise
+  }
+
+  async #deliverSteer(job, input) {
     if (job.state !== 'running') {
       throw new ChatJobError(
         'live_steer_unavailable',
@@ -249,7 +392,9 @@ export class ChatJobService {
         true,
       )
     }
-    return this.#steerLocal(job.id, input)
+    const delivery = await this.#steerLocal(job.id, input)
+    updateLeaseOwner(job.workspaceLease, { steerable: true })
+    return delivery
   }
 
   /**
@@ -280,7 +425,14 @@ export class ChatJobService {
   }
 
   #publicJob(job) {
-    return publicJob(job, this.#canSteerLocal, this.#pendingQuestionsLocal)
+    const snapshot = publicJob(job, this.#canSteerLocal, this.#pendingQuestionsLocal)
+    if (job.workspaceLease && job.state === 'running') {
+      updateLeaseOwner(job.workspaceLease, {
+        providerProcessStarted: snapshot.providerProcessStarted,
+        steerable: snapshot.steerable,
+      })
+    }
+    return snapshot
   }
 
   subscribe(jobId, options = {}) {
@@ -323,8 +475,17 @@ export class ChatJobService {
         result = await this.#runLocal(job.request, {
           liveTurnId: job.id,
           signal: job.controller.signal,
+          preAcquiredWorkspaceLease: job.workspaceLease,
           onEvent: (event) => {
-            if (event?.type === 'started') job.providerProcessStarted = true
+            if (event?.type === 'started') {
+              job.providerProcessStarted = true
+              updateLeaseOwner(job.workspaceLease, { providerProcessStarted: true })
+            }
+            if (event?.code === 'live_steer_ready') {
+              updateLeaseOwner(job.workspaceLease, { steerable: true })
+            } else if (event?.code === 'live_steer_closed') {
+              updateLeaseOwner(job.workspaceLease, { steerable: false })
+            }
             this.#record(job, event)
           },
         })
@@ -366,6 +527,9 @@ export class ChatJobService {
         safeToRetry: payload.safeToRetry,
         at: job.finishedAt,
       })
+    } finally {
+      updateLeaseOwner(job.workspaceLease, { steerable: false })
+      await job.workspaceLease?.release()
     }
   }
 
@@ -400,13 +564,13 @@ export class ChatJobService {
     }
   }
 
-  #trimFinishedJobs() {
+  #trimFinishedJobs(pendingCount = 0) {
     this.#trimExpiredJobs()
-    if (this.#jobs.size < this.#maxJobs) return
+    if (this.#jobs.size + pendingCount < this.#maxJobs) return
     for (const [id, job] of this.#jobs) {
       if (job.state === 'running') continue
       this.#jobs.delete(id)
-      if (this.#jobs.size < this.#maxJobs) return
+      if (this.#jobs.size + pendingCount < this.#maxJobs) return
     }
   }
 
@@ -452,6 +616,9 @@ export class ChatJobService {
         subscribers: new Set(),
         controller: new AbortController(),
         completion: null,
+        workspaceLease: null,
+        steerDeliveries: new Map(),
+        navigationTurnId: null,
       }
       this.#jobs.set(job.id, job)
     }

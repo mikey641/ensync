@@ -117,3 +117,46 @@ test('claimed broker jobs without a matching durable Host job are reconciled and
   assert.equal(reconciled.events.at(-1).event.code, 'broker_job_reconciliation_required')
   assert.equal(reconciled.events.at(-1).event.safeToRetry, false)
 })
+
+test('occupied broker jobs fail safely without subscribing to a nonexistent local job', async (context) => {
+  let runs = 0
+  const chatJobs = new ChatJobService({
+    admit: async () => ({
+      disposition: 'occupied',
+      owner: {
+        jobId: 'job_existing_000000001',
+        provider: 'codex',
+        chatId: 'chat_existing_00000001',
+        nativeWorkspaceId: 'workspace_existing_01',
+        providerProcessStarted: true,
+        steerable: true,
+        startedAt: '2026-08-08T10:59:00.000Z',
+      },
+    }),
+    runLocal: async () => {
+      runs += 1
+      return { response: 'must not execute' }
+    },
+    runRemote: async () => ({ response: 'unused' }),
+  })
+  const { client, worker, hostId } = await brokerFixture(context, chatJobs)
+  const submitted = await client.submitBrokerJob({
+    hostId,
+    jobId: 'job_worker_occupied_001',
+    kind: 'local',
+    request: { provider: 'codex', projectPath: '/verified/project', prompt: 'must stay single owner' },
+  })
+
+  await worker.pollOnce()
+  const failed = await eventually(async () => {
+    await worker.pollOnce()
+    const status = await client.brokerJob(submitted.id)
+    assert.equal(status.state, 'failed')
+    return status
+  })
+
+  assert.equal(runs, 0)
+  assert.equal(failed.events.at(-1).event.code, 'chat_job_occupied')
+  assert.equal(failed.events.at(-1).event.safeToRetry, false)
+  assert.equal(worker.status().activeJobs, 0)
+})
