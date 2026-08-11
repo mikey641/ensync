@@ -595,6 +595,51 @@ function plainResponse(status, text, security) {
   })
 }
 
+// Every renderer call to /api decodes JSON, so a plain-text refusal from this
+// proxy reads as "the Host returned a non-JSON response" and loses the one
+// detail the caller needs: whether the request may be repeated.
+function hostErrorResponse(status, error, code, safeToRetry, security) {
+  return new Response(JSON.stringify({ error, code, safeToRetry }), {
+    status,
+    headers: {
+      ...security,
+      'Cache-Control': 'no-store',
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+  })
+}
+
+// A connection this process never established proves the Host never saw the
+// request. Anything later (a socket closed mid-exchange, a timed-out response)
+// leaves a mutation's completion state genuinely unknown.
+const UNDELIVERED_TRANSPORT_CODES = new Set([
+  'EACCES',
+  'EADDRNOTAVAIL',
+  'ECONNREFUSED',
+  'EHOSTUNREACH',
+  'ENETUNREACH',
+  'ENOTFOUND',
+  'UND_ERR_CONNECT_TIMEOUT',
+])
+
+const IDEMPOTENT_METHODS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+function transportFailureCodes(error, depth = 0) {
+  if (!error || typeof error !== 'object' || depth > 4) return []
+  const codes = typeof error.code === 'string' ? [error.code] : []
+  const nested = Array.isArray(error.errors) ? error.errors : []
+  return [
+    ...codes,
+    ...transportFailureCodes(error.cause, depth + 1),
+    ...nested.flatMap((entry) => transportFailureCodes(entry, depth + 1)),
+  ]
+}
+
+export function hostRequestSafeToRetry(method, error) {
+  if (IDEMPOTENT_METHODS.has(method)) return true
+  return transportFailureCodes(error).some((code) => UNDELIVERED_TRANSPORT_CODES.has(code))
+}
+
 function proxyHeaders(requestHeaders, hostToken, ownerId) {
   const headers = new Headers(requestHeaders)
   for (const name of [
@@ -627,8 +672,16 @@ async function proxyProtocolApi(
   ensureHostLease,
   resolveHostConnection,
 ) {
-  if (!['GET', 'POST', 'OPTIONS'].includes(request.method)) {
-    return plainResponse(405, 'Method not allowed.', security)
+  // PUT carries the account-sync workspace push; refusing it here made every
+  // push fail before it reached the route the Host actually implements.
+  if (!['GET', 'POST', 'PUT', 'OPTIONS'].includes(request.method)) {
+    return hostErrorResponse(
+      405,
+      'Ensync Host does not support this request method.',
+      'host_method_not_supported',
+      false,
+      security,
+    )
   }
 
   let connection = { hostPort, hostToken, ownerId }
@@ -695,7 +748,16 @@ async function proxyProtocolApi(
     })
   } catch (error) {
     if (request.signal.aborted) throw error
-    return plainResponse(502, 'Ensync Host is unavailable.', security)
+    const safeToRetry = hostRequestSafeToRetry(request.method, error)
+    return hostErrorResponse(
+      502,
+      safeToRetry
+        ? 'Ensync Host is unavailable. Nothing was delivered, so this can be retried.'
+        : 'Ensync Host became unreachable while this request was in flight, so its completion state is unknown.',
+      'host_unavailable',
+      safeToRetry,
+      security,
+    )
   }
 }
 

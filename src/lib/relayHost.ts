@@ -3,6 +3,7 @@ import {
   readNdjsonStream,
   TruncatedNdjsonStreamError,
 } from './ndjsonStream.mjs'
+import { canReattachChatJob } from './chatJobReconnect.mjs'
 import {
   InvalidJsonResponseError,
   readJsonResponse,
@@ -830,8 +831,7 @@ export class EnsyncHostClient {
       } catch (error) {
         if (signal?.aborted) throw error
         const reconnectable = !(error instanceof EnsyncHostError)
-          || error.code === 'chat_job_stream_disconnected'
-          || (error.code === null && error.status >= 500)
+          || canReattachChatJob(error)
         if (!reconnectable) throw error
         await new Promise<void>((resolve) => setTimeout(resolve, 750))
       }

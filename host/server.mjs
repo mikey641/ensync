@@ -289,7 +289,7 @@ export function createEnsyncHost(options = {}) {
     if (request.method === 'OPTIONS') {
       const headers = responseHeaders(origin)
       headers['Access-Control-Allow-Headers'] = 'Content-Type'
-      headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+      headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
       response.writeHead(204, headers)
       return response.end()
     }

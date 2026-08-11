@@ -427,6 +427,105 @@ test('app protocol does not proxy renderer work when its shell lease cannot be r
   }
 })
 
+test('a Host that never received the request is refused as retryable JSON, not an unreadable body', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-host-down-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:43121'), {
+          code: 'ECONNREFUSED',
+        }),
+      })
+    },
+  })
+
+  try {
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+    assert.equal(response.status, 502)
+    assert.match(response.headers.get('content-type'), /application\/json/)
+    const payload = await response.json()
+    assert.equal(payload.code, 'host_unavailable')
+    assert.equal(payload.safeToRetry, true, 'a refused connection never reached the Host')
+    assert.match(payload.error, /unavailable/i)
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('a mutation that died in flight stays ambiguous instead of being advertised as retryable', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-host-inflight-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+      })
+    },
+  })
+
+  try {
+    const mutation = await handle(new Request(`${APP_ORIGIN}/api/chat/run`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt: 'ship it' }),
+    }))
+    assert.equal(mutation.status, 502)
+    const payload = await mutation.json()
+    assert.equal(payload.code, 'host_unavailable')
+    assert.equal(payload.safeToRetry, false, 'the run may already have started')
+
+    // The same broken socket on an idempotent read is still safe to repeat.
+    const read = await handle(new Request(`${APP_ORIGIN}/api/chat/jobs/job_1/stream?after=0`))
+    assert.equal((await read.json()).safeToRetry, true)
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('workspace pushes reach the Host, and a truly unsupported method is refused as JSON', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-methods-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const forwarded = []
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async (url, init) => {
+      forwarded.push({ url, method: init.method, body: init.body?.toString() })
+      return Response.json({ revision: 4 })
+    },
+  })
+
+  try {
+    const push = await handle(new Request(`${APP_ORIGIN}/api/account-sync/workspace`, {
+      method: 'PUT',
+      body: JSON.stringify({ state: {}, baseRevision: 3 }),
+    }))
+    assert.equal(push.status, 200)
+    assert.deepEqual(await push.json(), { revision: 4 })
+    assert.deepEqual(forwarded, [{
+      url: 'http://127.0.0.1:43121/api/account-sync/workspace',
+      method: 'PUT',
+      body: JSON.stringify({ state: {}, baseRevision: 3 }),
+    }])
+
+    const unsupported = await handle(new Request(`${APP_ORIGIN}/api/providers`, { method: 'DELETE' }))
+    assert.equal(unsupported.status, 405)
+    assert.match(unsupported.headers.get('content-type'), /application\/json/)
+    assert.deepEqual(await unsupported.json(), {
+      error: 'Ensync Host does not support this request method.',
+      code: 'host_method_not_supported',
+      safeToRetry: false,
+    })
+    assert.equal(forwarded.length, 1, 'an unsupported method never reaches the Host')
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
 test('app protocol resolves a replacement Host endpoint without changing the renderer origin', async () => {
   const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-live-host-recovery-'))
   await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
