@@ -41,7 +41,9 @@ function portableMessage(value) {
   const deliveryStatus = typeof message.deliveryStatus === 'string'
     ? message.deliveryStatus
     : undefined
-  return {
+  const transferredHandoff = deliveryStatus === 'transferred'
+    || (deliveryStatus === 'interrupted' && message.handoffTransferred === true)
+  const portable = {
     ...message,
     content: text(message.content),
     time: text(message.time),
@@ -52,13 +54,15 @@ function portableMessage(value) {
         : {}),
     // Account sync cannot execute a native-window transfer. Preserve only this
     // internal precedence marker so its target's local queued copy wins later.
-    ...(deliveryStatus === 'transferred' ? { handoffTransferred: true } : {}),
+    ...(transferredHandoff ? { handoffTransferred: true } : {}),
     // Local paths are never portable. The message text and attachment names
     // remain visible in the source workspace; another device cannot execute
     // or resolve the file reference.
     attachments: undefined,
     sessionResumable: false,
   }
+  if (!transferredHandoff) delete portable.handoffTransferred
+  return portable
 }
 
 function portableContinuation(value) {
@@ -136,7 +140,9 @@ export function isAccountWorkspace(value) {
 }
 
 function messagePriority(message) {
-  if (message?.handoffTransferred === true) return DELIVERY_PRIORITY.transferred
+  if (message?.deliveryStatus === 'interrupted' && message.handoffTransferred === true) {
+    return DELIVERY_PRIORITY.transferred
+  }
   return DELIVERY_PRIORITY[message?.deliveryStatus] ?? 0
 }
 
@@ -150,6 +156,9 @@ function mergeMessage(authoritative, local) {
     : authoritative
   const secondary = preferred === local ? authoritative : local
   const merged = { ...secondary, ...preferred }
+  if (!(preferred.deliveryStatus === 'interrupted' && preferred.handoffTransferred === true)) {
+    delete merged.handoffTransferred
+  }
   // Attachment paths never come from the remote document, but the originating
   // computer must retain its richer local message after a sync merge.
   if (Array.isArray(local.attachments)) merged.attachments = local.attachments

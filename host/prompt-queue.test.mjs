@@ -401,6 +401,22 @@ test('transferred handoff accepts one canonical queue entry and rejects stable-I
   assert.strictEqual(duplicate.queues, accepted.queues)
   assert.strictEqual(duplicate.chats, accepted.chats)
 
+  for (const attachments of [
+    undefined,
+    [{ name: 'brief.md', path: '/repo/mutated.md' }],
+  ]) {
+    const driftedChats = accepted.chats.map((chat) => ({
+      ...chat,
+      messages: chat.messages.map((message) => message.id === handoff.messageId
+        ? { ...message, attachments }
+        : message),
+    }))
+    const conflict = acceptTransferredPrompt(accepted.queues, driftedChats, 'chat-a', handoff)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, accepted.queues)
+    assert.strictEqual(conflict.chats, driftedChats)
+  }
+
   for (const changed of [
     { ...handoff, prompt: 'Different prompt' },
     { ...handoff, attachments: [{ name: 'other.md', path: '/repo/other.md' }] },
@@ -444,6 +460,13 @@ test('occupied owner navigation and handoff require every exact live binding', (
     { ...binding, chatId: 'chat-b' },
   ]) assert.equal(occupiedRunCanNavigate(owner, mismatch), false)
   assert.equal(occupiedRunCanNavigate({ ...owner, projectId: undefined }, { ...binding, projectId: undefined }), false)
+  for (const invalidTurnId of [undefined, null, '', '   ']) {
+    assert.equal(occupiedRunCanHandoff(
+      owner,
+      { ...handoff, predecessorTurnId: invalidTurnId },
+      { ...binding, turnId: invalidTurnId },
+    ), false)
+  }
   assert.equal(occupiedRunCanHandoff({ ...owner, provider: 'claude' }, handoff, binding), false)
   assert.equal(occupiedRunCanHandoff(owner, { ...handoff, predecessorTurnId: 'turn-9' }, binding), false)
   assert.equal(occupiedRunCanHandoff(owner, { ...handoff, preferences: { ...handoff.preferences, projectId: 'project-b' } }, binding), false)

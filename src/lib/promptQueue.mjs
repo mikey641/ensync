@@ -109,6 +109,8 @@ export function acceptTransferredPrompt(queues, chats, chatId, entry) {
       && existingMessage.turnId === normalized.turnId
       && existingMessage.content === normalized.prompt
       && existingMessage.deliveryStatus === 'queued'
+      && canonicalJson(normalizedAttachments(existingMessage.attachments))
+        === canonicalJson(normalized.attachments)
       ? { status: 'duplicate', queues, chats }
       : { status: 'conflict', queues, chats }
   }
@@ -244,7 +246,7 @@ export function occupiedRunCanHandoff(owner, entry, currentBinding) {
     && owner?.providerProcessStarted === true
     && owner?.steerable === true
     && Boolean(normalized)
-    && normalized.predecessorTurnId === currentBinding?.turnId
+    && sameNonEmptyString(normalized.predecessorTurnId, currentBinding?.turnId)
     && normalized.preferences.provider === 'codex'
     && normalized.preferences.executionTargetKey === currentBinding?.targetKind
     && normalized.preferences.projectId === currentBinding?.projectId
