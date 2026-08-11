@@ -27,13 +27,18 @@ import {
   createNativeWindowRegistry,
 } from './native-windows.mjs'
 import {
+  ACTIVE_RUNS_PUBLISH_CHANNEL,
+  createActiveRunRoster,
   createNativeWorkspaceStore,
+  createQueuedMessageHandoffHandlers,
   createWorkspaceFocusHandler,
   createWorkspaceIdentityIpcManager,
   createWorkspaceOpenProjectHandler,
   isNativeWorkspaceIdentity,
   nativeWorkspaceRestorationOrder,
   NATIVE_WORKSPACE_STATE_FILENAME,
+  QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL,
+  QUEUED_MESSAGE_HANDOFF_CHANNEL,
   shouldRetainNativeWorkspaceOnClose,
   WORKSPACE_FOCUS_CHANNEL,
   WORKSPACE_OPEN_PROJECT_CHANNEL,
@@ -113,6 +118,16 @@ let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
+const activeRunRoster = createActiveRunRoster({
+  isAuthorized: isAuthorizedNativeEvent,
+  identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+})
+const queuedMessageHandoffs = createQueuedMessageHandoffHandlers({
+  isAuthorized: isAuthorizedNativeEvent,
+  identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+  activeRuns: activeRunRoster,
+  windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+})
 const workspaceIdentityIpc = createWorkspaceIdentityIpcManager({
   ipcMain,
   isAuthorized: isAuthorizedNativeEvent,
@@ -244,6 +259,7 @@ function registerNativeBridge() {
   // the rest of the bridge so a later native feature cannot leave it missing.
   workspaceIdentityIpc.register()
   if (nativeBridgeRegistered) return
+  ipcMain.handle(ACTIVE_RUNS_PUBLISH_CHANNEL, (event, entries) => activeRunRoster.publish(event, entries))
   ipcMain.handle(WORKSPACE_FOCUS_CHANNEL, createWorkspaceFocusHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -253,7 +269,10 @@ function registerNativeBridge() {
     notifyProjectFocus: (window, project) => {
       window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)
     },
+    activeRuns: activeRunRoster,
   }))
+  ipcMain.handle(QUEUED_MESSAGE_HANDOFF_CHANNEL, queuedMessageHandoffs.handoff)
+  ipcMain.on(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)
   ipcMain.handle(WORKSPACE_OPEN_PROJECT_CHANNEL, createWorkspaceOpenProjectHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -362,7 +381,10 @@ function unregisterNativeBridge() {
   if (!nativeBridgeRegistered) return true
   ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUNS_PUBLISH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
+  ipcMain.removeHandler(QUEUED_MESSAGE_HANDOFF_CHANNEL)
+  ipcMain.removeListener(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_OPEN_PATH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
@@ -581,6 +603,7 @@ async function createWindow(workspaceIdentity) {
       windowStateTimer = null
     }
     recovery.dispose()
+    queuedMessageHandoffs.removeWorkspace(workspaceIdentity.id)
     projectLaunchByWorkspace.delete(workspaceIdentity.id)
     const retainWorkspace = shouldRetainNativeWorkspaceOnClose({
       identity: workspaceIdentity,

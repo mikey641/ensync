@@ -191,6 +191,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   const source = await readFile(preloadPath, 'utf8')
   const exposed = []
   const invocations = []
+  const sends = []
   const pathLookups = []
   const listeners = new Map()
   const context = vm.createContext({
@@ -206,6 +207,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
             invocations.push(args)
             return Promise.resolve({ status: 'cancelled' })
           },
+          send: (...args) => sends.push(args),
           on: (channel, listener) => listeners.set(channel, listener),
           removeListener: (channel, listener) => {
             if (listeners.get(channel) === listener) listeners.delete(channel)
@@ -227,7 +229,10 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   assert.deepEqual(Object.keys(exposed[0].value), [
     'getPathForFile',
     'getWorkspaceIdentity',
+    'publishActiveRuns',
     'focusWorkspace',
+    'handoffQueuedMessage',
+    'onQueuedMessageHandoff',
     'openProjectWorkspace',
     'openPath',
     'onWorkspaceProjectFocus',
@@ -255,11 +260,19 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   assert.equal(exposed[0].value.getPathForFile(droppedFile), '/Users/example/dropped.png')
   assert.deepEqual(pathLookups, [droppedFile])
   await exposed[0].value.getWorkspaceIdentity()
+  await exposed[0].value.publishActiveRuns([{
+    workspaceId: '11111111-1111-4111-8111-111111111111',
+    projectId: 'relay',
+    projectPath: '/work/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-relay',
+  }])
   await exposed[0].value.focusWorkspace({
     workspaceId: '11111111-1111-4111-8111-111111111111',
     projectId: 'relay',
     projectPath: '/work/relay',
   })
+  await exposed[0].value.handoffQueuedMessage({ handoffId: 'handoff-relay' })
   await exposed[0].value.openProjectWorkspace({
     projectId: 'nadlan-desk',
     projectPath: '/work/nadlan-desk',
@@ -275,11 +288,19 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.chooseChatFiles()
   assert.deepEqual(invocations, [
     ['ensync:workspace:get-identity'],
+    ['ensync:workspace:publish-active-runs', [{
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      projectId: 'relay',
+      projectPath: '/work/relay',
+      chatId: 'chat-relay',
+      jobId: 'job-relay',
+    }]],
     ['ensync:workspace:focus', {
       workspaceId: '11111111-1111-4111-8111-111111111111',
       projectId: 'relay',
       projectPath: '/work/relay',
     }],
+    ['ensync:workspace:handoff-queued-message', { handoffId: 'handoff-relay' }],
     ['ensync:workspace:open-project', {
       projectId: 'nadlan-desk',
       projectPath: '/work/nadlan-desk',
@@ -300,7 +321,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
   await exposed[0].value.setUpdateChannel('beta')
-  assert.deepEqual(invocations.slice(12), [
+  assert.deepEqual(invocations.slice(14), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
@@ -326,6 +347,24 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   assert.deepEqual(focusedProjects, [{ projectId: 'relay', projectPath: '/work/relay' }])
   unsubscribeFocus()
   assert.equal(listeners.has('ensync:workspace:focus-project'), false)
+  const handoffPayload = {
+    handoffId: 'handoff-relay',
+    entry: { messageId: 'message-relay' },
+  }
+  const unsubscribeHandoff = exposed[0].value.onQueuedMessageHandoff((payload) => {
+    assert.deepEqual(payload, handoffPayload)
+    return { status: 'duplicate' }
+  })
+  listeners.get('ensync:workspace:queued-message-handoff')({}, handoffPayload)
+  await Promise.resolve()
+  await Promise.resolve()
+  assert.equal(sends.length, 1)
+  assert.equal(sends[0][0], 'ensync:workspace:queued-message-handoff-ack')
+  assert.equal(sends[0][1].handoffId, 'handoff-relay')
+  assert.equal(sends[0][1].status, 'accepted')
+  assert.equal(sends[0][1].messageId, 'message-relay')
+  unsubscribeHandoff()
+  assert.equal(listeners.has('ensync:workspace:queued-message-handoff'), false)
 })
 
 test('desktop package explicitly includes the preload and picker modules', async () => {
