@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
@@ -1021,4 +1021,24 @@ test('pending questions are rebuilt from a replayed event buffer and cleared whe
 test('a run that ends leaves no question waiting in the renderer', () => {
   const asked = { type: 'question', provider: 'claude', questionId: 'claude-1', questions: PENDING.questions, at: PENDING.askedAt }
   assert.deepEqual(pendingQuestionsFromEvents([asked, { type: 'finished', outcome: 'cancelled' }]), [])
+})
+
+// The card renders inside the chat panel, and the panel re-renders about once a
+// second for as long as a run is in flight — that is the "• Working (12s)"
+// clock. Every one of those renders rebuilds the pending question from the
+// replayed event buffer, so the object the card receives is new each time while
+// the question itself has not changed. A card that clears its selection
+// whenever that object changes throws the person's choice away within a second
+// of the click and shows "No answer yet" again, so the choice may only ever be
+// cleared when the question id changes.
+test('a chosen option survives the panel re-rendering the same question', async () => {
+  const asked = { type: 'question', provider: 'claude', questionId: 'claude-1', questions: PENDING.questions, at: PENDING.askedAt }
+  const [firstRender] = pendingQuestionsFromEvents([asked])
+  const [secondRender] = pendingQuestionsFromEvents([asked])
+  assert.notEqual(firstRender, secondRender)
+  assert.equal(firstRender.questionId, secondRender.questionId)
+
+  const card = await readFile(new URL('../src/components/ProviderQuestionCard.tsx', import.meta.url), 'utf8')
+  assert.match(card, /setSelection\(initialQuestionSelection\(pending\)\)\n(?:\s*\/\/[^\n]*\n)*\s*\}, \[pending\.questionId\]\)/)
+  assert.doesNotMatch(card, /\}, \[pending\]\)/)
 })
