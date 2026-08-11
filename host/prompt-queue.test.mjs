@@ -2,13 +2,17 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import * as promptQueueContract from '../src/lib/promptQueue.mjs'
+import { buildAutoContextPrompt } from '../src/lib/autoContextPrompt.mjs'
+import { chatAutoScrollContentRevision } from '../src/lib/chatAutoScroll.mjs'
 import {
+  acceptTransferredPrompt,
   activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
   liveSteerReadyAfterEvent,
   liveSteerWasSafelyRejected,
+  markQueuedMessageTransferred,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
@@ -18,6 +22,8 @@ import {
   queuedPromptCanStopAndSendNow,
   queueMayAdvanceAfterRun,
   promptQueueStatusPresentation,
+  occupiedRunCanHandoff,
+  occupiedRunCanNavigate,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -336,3 +342,109 @@ test('live push readiness follows only Host-authored ready and closed events', (
   assert.equal(liveSteerReadyAfterEvent(true, { type: 'finished' }), false)
 })
 
+test('transferred source prompts remain auditable but cannot feed execution context', () => {
+  const queued = entry('turn-2', 'turn-1')
+  const messages = [
+    { id: 'u1', role: 'user', turnId: 'turn-1', content: 'Transfer this prompt', deliveryStatus: 'queued' },
+    { id: 'u2', role: 'user', turnId: 'turn-2', content: 'Later prompt', deliveryStatus: 'queued' },
+  ]
+  const transferred = markQueuedMessageTransferred(messages, 'u1')
+
+  assert.notStrictEqual(transferred, messages)
+  assert.equal(transferred[0].deliveryStatus, 'transferred')
+  assert.strictEqual(transferred[1], messages[1])
+  assert.deepEqual(removePromptFromQueue({ 'chat-a': [queued] }, 'chat-a', queued.id), {})
+  assert.equal(queuedPromptGate({ messages: transferred }, queued).state, 'paused')
+  assert.deepEqual(transcriptMessagesBeforeTurn(transferred, 'turn-2').map((message) => message.id), [])
+  assert.equal(
+    chatAutoScrollContentRevision({ messages: [transferred[0]], queuedPrompts: [], executionEvents: [], sending: false, error: null }),
+    chatAutoScrollContentRevision({ messages: [], queuedPrompts: [], executionEvents: [], sending: false, error: null }),
+  )
+
+  const capsule = buildAutoContextPrompt({
+    project: { name: 'Ensync', path: '/repo', context: { files: [], featureFiles: [], instructionAdapters: [] } },
+    target: { kind: 'local' },
+    chat: { messages: transferred },
+    prompt: 'Current request',
+    includeTranscript: true,
+    gitStatus: null,
+    gitStatusReason: 'not sampled',
+  })
+  assert.doesNotMatch(capsule, /Transfer this prompt/)
+  assert.match(capsule, /Later prompt/)
+})
+
+test('transferred handoff accepts one canonical queue entry and rejects stable-ID conflicts', () => {
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    prompt: 'Push the correction now',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+  const chats = [{ id: 'chat-a', messages: [{ id: 'u1', role: 'user', turnId: 'turn-1', content: 'Active', deliveryStatus: 'pending' }] }]
+  const accepted = acceptTransferredPrompt({}, chats, 'chat-a', handoff)
+
+  assert.equal(accepted.status, 'accepted')
+  assert.deepEqual(accepted.queues['chat-a'], [handoff])
+  assert.deepEqual(accepted.chats[0].messages.at(-1), {
+    id: 'message-turn-2', role: 'user', turnId: 'turn-2', content: 'Push the correction now',
+    time: '2026-08-06T12:00:00.000Z', deliveryStatus: 'queued',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+  })
+
+  const duplicate = acceptTransferredPrompt(accepted.queues, accepted.chats, 'chat-a', handoff)
+  assert.equal(duplicate.status, 'duplicate')
+  assert.strictEqual(duplicate.queues, accepted.queues)
+  assert.strictEqual(duplicate.chats, accepted.chats)
+
+  for (const changed of [
+    { ...handoff, prompt: 'Different prompt' },
+    { ...handoff, attachments: [{ name: 'other.md', path: '/repo/other.md' }] },
+    { ...handoff, predecessorTurnId: 'other-turn' },
+    { ...handoff, preferences: { ...handoff.preferences, providerMode: 'auto' } },
+    { ...handoff, preferences: { ...handoff.preferences, executionTargetKey: 'ssh:worker' } },
+    { ...handoff, preferences: { ...handoff.preferences, projectPath: '/other-repo' } },
+  ]) {
+    const conflict = acceptTransferredPrompt(accepted.queues, accepted.chats, 'chat-a', changed)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, accepted.queues)
+    assert.strictEqual(conflict.chats, accepted.chats)
+  }
+})
+
+test('occupied owner navigation and handoff require every exact live binding', () => {
+  const owner = {
+    jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+    nativeWorkspaceId: '11111111-1111-4111-8111-111111111111', projectId: 'project-a',
+    projectPath: '/repo', chatId: 'chat-a', providerProcessStarted: true, steerable: true,
+  }
+  const binding = {
+    workspaceId: owner.nativeWorkspaceId, jobId: owner.jobId, provider: 'codex', targetKind: 'local',
+    projectId: 'project-a', projectPath: '/repo', chatId: 'chat-a', turnId: 'turn-1',
+  }
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+
+  assert.equal(occupiedRunCanNavigate(owner, binding), true)
+  assert.equal(occupiedRunCanHandoff(owner, handoff, binding), true)
+  for (const mismatch of [
+    { ...binding, workspaceId: '22222222-2222-4222-8222-222222222222' },
+    { ...binding, jobId: 'job_2222222222222222' },
+    { ...binding, projectPath: '/other' },
+    { ...binding, chatId: 'chat-b' },
+  ]) assert.equal(occupiedRunCanNavigate(owner, mismatch), false)
+  assert.equal(occupiedRunCanNavigate({ ...owner, projectId: undefined }, { ...binding, projectId: undefined }), false)
+  assert.equal(occupiedRunCanHandoff({ ...owner, provider: 'claude' }, handoff, binding), false)
+  assert.equal(occupiedRunCanHandoff(owner, { ...handoff, predecessorTurnId: 'turn-9' }, binding), false)
+  assert.equal(occupiedRunCanHandoff(owner, { ...handoff, preferences: { ...handoff.preferences, projectId: 'project-b' } }, binding), false)
+})

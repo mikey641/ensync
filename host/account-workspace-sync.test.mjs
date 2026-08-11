@@ -104,3 +104,24 @@ test('account workspace merge unions stable chats and messages without making re
   assert.equal(imported.verified, false)
   assert.deepEqual(imported.context.files, [])
 })
+
+test('transferred account messages become interrupted remotely while a local target queue remains stronger', () => {
+  const remote = prepareAccountWorkspace({
+    chats: [{
+      id: 'chat-a', projectId: 'project-a', title: 'Shared', subtitle: '', group: 'Today', provider: 'codex',
+      messages: [{ id: 'message-a', role: 'user', content: 'Transferred', time: '10:00', deliveryStatus: 'transferred' }],
+    }],
+    projects: [{ id: 'project-a', name: 'Project', path: '/repo' }],
+  })
+  assert.equal(remote.chats[0].messages[0].deliveryStatus, 'interrupted')
+  assert.equal(remote.chats[0].messages[0].handoffTransferred, true)
+
+  const merged = mergeAccountWorkspace({
+    chats: [{
+      id: 'chat-a', projectId: 'project-a', title: 'Shared', subtitle: '', group: 'Today', provider: 'codex',
+      messages: [{ id: 'message-a', role: 'user', content: 'Transferred', time: '10:00', deliveryStatus: 'queued' }],
+    }],
+    projects: [{ id: 'project-a', name: 'Project', path: '/repo', verified: true }],
+  }, remote)
+  assert.equal(merged.state.chats[0].messages[0].deliveryStatus, 'queued')
+})

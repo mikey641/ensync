@@ -79,7 +79,7 @@ export type Message = {
   timestamp?: string | null
   provider?: ProviderId
   turnId?: string
-  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'transferred'
   /** Exact model reported by the completed CLI, or null when the CLI did not report one. */
   model?: string | null
   /** Friendly effort tier requested for this run, or null when provider defaults were used. */

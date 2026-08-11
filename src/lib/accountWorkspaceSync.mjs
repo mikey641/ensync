@@ -18,12 +18,13 @@ const TERMINAL_DELIVERY_STATES = new Set([
 ])
 
 const DELIVERY_PRIORITY = Object.freeze({
-  queued: 0,
-  pending: 1,
-  failed: 2,
-  interrupted: 3,
-  cancelled: 4,
-  completed: 5,
+  transferred: 1,
+  queued: 2,
+  pending: 3,
+  failed: 4,
+  interrupted: 5,
+  cancelled: 6,
+  completed: 7,
 })
 
 function record(value) {
@@ -49,6 +50,9 @@ function portableMessage(value) {
       : deliveryStatus
         ? { deliveryStatus: 'interrupted' }
         : {}),
+    // Account sync cannot execute a native-window transfer. Preserve only this
+    // internal precedence marker so its target's local queued copy wins later.
+    ...(deliveryStatus === 'transferred' ? { handoffTransferred: true } : {}),
     // Local paths are never portable. The message text and attachment names
     // remain visible in the source workspace; another device cannot execute
     // or resolve the file reference.
@@ -132,6 +136,7 @@ export function isAccountWorkspace(value) {
 }
 
 function messagePriority(message) {
+  if (message?.handoffTransferred === true) return DELIVERY_PRIORITY.transferred
   return DELIVERY_PRIORITY[message?.deliveryStatus] ?? 0
 }
 
