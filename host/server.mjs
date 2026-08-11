@@ -24,7 +24,11 @@ import {
   SupportRepairService,
   supportRepairErrorPayload,
 } from './support-repair.mjs'
-import { RemoteSshError, RemoteSshService } from './remote-ssh.mjs'
+import {
+  remoteChatAdmissionCoordinate,
+  RemoteSshError,
+  RemoteSshService,
+} from './remote-ssh.mjs'
 import { SupportService, SupportValidationError } from './support.mjs'
 import { SyncBrokerHostWorker } from './sync-broker-host.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
@@ -196,6 +200,51 @@ function refreshRequested(url) {
   return ['1', 'true'].includes(url.searchParams.get('refresh')?.toLowerCase())
 }
 
+function boundedSshOwner(owner = {}) {
+  return {
+    jobId: typeof owner.jobId === 'string' && owner.jobId.length <= 128 ? owner.jobId : null,
+    provider: typeof owner.provider === 'string' && owner.provider.length <= 128 ? owner.provider : null,
+    targetKind: 'ssh',
+    startedAt: typeof owner.startedAt === 'string' && owner.startedAt.length <= 64 ? owner.startedAt : null,
+    providerProcessStarted: owner.providerProcessStarted === true,
+    // SSH admission never grants local-native View or live Push authority.
+    steerable: false,
+    nativeWorkspaceId: null,
+  }
+}
+
+function createSshChatAdmissions() {
+  const retained = new Map()
+  return async (request, owner) => {
+    const coordinate = await remoteChatAdmissionCoordinate(request)
+    const occupied = retained.get(coordinate)
+    if (occupied) {
+      return { disposition: 'occupied', owner: { ...occupied.owner } }
+    }
+
+    const token = Symbol('ssh-chat-admission')
+    const record = { token, owner: boundedSshOwner(owner) }
+    retained.set(coordinate, record)
+    return {
+      disposition: 'acquired',
+      lease: {
+        async updateOwner(patch = {}) {
+          const current = retained.get(coordinate)
+          if (current?.token !== token) return false
+          current.owner = boundedSshOwner({ ...current.owner, ...patch })
+          return true
+        },
+        async release() {
+          const current = retained.get(coordinate)
+          if (current?.token !== token) return false
+          retained.delete(coordinate)
+          return true
+        },
+      },
+    }
+  }
+}
+
 export function createEnsyncHost(options = {}) {
   const accountSync = options.accountSyncService ?? new AccountSyncService({
     baseUrl: options.accountSyncServiceUrl ?? process.env.ENSYNC_SYNC_SERVICE_URL ?? null,
@@ -238,6 +287,7 @@ export function createEnsyncHost(options = {}) {
     verifyLand: (details) => runLandCheck(details.repositoryPath),
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
+  const admitSshChat = createSshChatAdmissions()
   const chatJobJournal = options.chatJobJournal ?? (options.chatJobJournalPath
     ? new ChatJobJournal({
         filePath: options.chatJobJournalPath,
@@ -247,6 +297,9 @@ export function createEnsyncHost(options = {}) {
   const chatJobs = options.chatJobService ?? new ChatJobService({
     runLocal: (request, runOptions) => chats.run(request, runOptions),
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
+    admit: (input, owner) => input.kind === 'local'
+      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, { owner })
+      : admitSshChat(input.request, owner),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
     canSteerLocal: (jobId) => chats.canSteer(jobId),
     answerLocal: (jobId, input) => chats.answerQuestion(jobId, input),
@@ -463,8 +516,8 @@ export function createEnsyncHost(options = {}) {
 
       if (request.method === 'POST' && url.pathname === '/api/chat/jobs') {
         const body = await readJsonBody(request)
-        const job = chatJobs.start(body)
-        return sendJson(response, 202, { job }, origin)
+        const admission = await chatJobs.start(body)
+        return sendJson(response, admission.disposition === 'started' ? 202 : 200, admission, origin)
       }
 
       const chatJobStreamMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)\/stream$/)

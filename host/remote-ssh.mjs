@@ -428,6 +428,26 @@ function validateRemoteChatRequest(request) {
   }
 }
 
+/**
+ * Builds the same-Host admission coordinate before any SSH process starts.
+ * The remote bridge still owns the cross-Host filesystem lease; this key only
+ * prevents this Host from retaining a second waiter for one conversation.
+ */
+export async function remoteChatAdmissionCoordinate(request) {
+  validateRemoteChatRequest(request)
+  const connection = await validateRemoteSshConnection(request.connection)
+  const pathFlavor = posix.isAbsolute(connection.projectPath) ? posix : win32
+  const normalizedProjectPath = pathFlavor.normalize(connection.projectPath).replace(/[\\/]+$/, '')
+  return JSON.stringify([
+    connection.hostname,
+    connection.username,
+    connection.port,
+    connection.identityFile,
+    pathFlavor === win32 ? normalizedProjectPath.toLowerCase() : normalizedProjectPath,
+    request.workspaceKey,
+  ])
+}
+
 export class RemoteSshService {
   #adapter
   #inactivityTimeoutMs

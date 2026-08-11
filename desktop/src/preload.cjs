@@ -16,6 +16,11 @@ const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
 const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
 const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
 const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
+const ACTIVE_RUNS_PUBLISH_CHANNEL = 'ensync:workspace:publish-active-runs'
+const ACTIVE_RUN_MATCH_CHANNEL = 'ensync:workspace:match-active-run'
+const QUEUED_MESSAGE_HANDOFF_CHANNEL = 'ensync:workspace:handoff-queued-message'
+const QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL = 'ensync:workspace:queued-message-handoff-ack'
+const QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL = 'ensync:workspace:queued-message-handoff'
 const WORKSPACE_RECOVERY_CHANNEL = 'ensync:workspace:get-recovery-candidate'
 const CODEX_CONVERSATION_IMPORT_CHANNEL = 'ensync:workspace:get-codex-conversation-import'
 const RECENT_PROJECTS_GET_CHANNEL = 'ensync:recent-projects:get'
@@ -29,7 +34,29 @@ const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferenc
 contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
   getWorkspaceIdentity: () => ipcRenderer.invoke(WORKSPACE_IDENTITY_CHANNEL),
+  publishActiveRuns: (entries) => ipcRenderer.invoke(ACTIVE_RUNS_PUBLISH_CHANNEL, entries),
+  matchesActiveRun: (request) => ipcRenderer.invoke(ACTIVE_RUN_MATCH_CHANNEL, request),
   focusWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_FOCUS_CHANNEL, request),
+  handoffQueuedMessage: (request) => ipcRenderer.invoke(QUEUED_MESSAGE_HANDOFF_CHANNEL, request),
+  onQueuedMessageHandoff: (callback) => {
+    if (typeof callback !== 'function') return () => {}
+    const listener = (_event, payload) => {
+      Promise.resolve()
+        .then(() => callback(payload))
+        .then((result) => ipcRenderer.send(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, {
+          handoffId: payload?.handoffId,
+          status: result?.status === 'accepted' || result?.status === 'duplicate' ? 'accepted' : 'rejected',
+          messageId: payload?.entry?.messageId,
+        }))
+        .catch(() => ipcRenderer.send(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, {
+          handoffId: payload?.handoffId,
+          status: 'rejected',
+          messageId: payload?.entry?.messageId,
+        }))
+    }
+    ipcRenderer.on(QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, listener)
+    return () => ipcRenderer.removeListener(QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, listener)
+  },
   openProjectWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PROJECT_CHANNEL, request),
   openPath: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PATH_CHANNEL, request),
   onWorkspaceProjectFocus: (callback) => {

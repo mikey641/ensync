@@ -104,3 +104,67 @@ test('account workspace merge unions stable chats and messages without making re
   assert.equal(imported.verified, false)
   assert.deepEqual(imported.context.files, [])
 })
+
+test('transferred account messages become interrupted remotely while a local target queue remains stronger', () => {
+  const remote = prepareAccountWorkspace({
+    chats: [{
+      id: 'chat-a', projectId: 'project-a', title: 'Shared', subtitle: '', group: 'Today', provider: 'codex',
+      messages: [{ id: 'message-a', role: 'user', content: 'Transferred', time: '10:00', deliveryStatus: 'transferred' }],
+    }],
+    projects: [{ id: 'project-a', name: 'Project', path: '/repo' }],
+  })
+  assert.equal(remote.chats[0].messages[0].deliveryStatus, 'interrupted')
+  assert.equal(remote.chats[0].messages[0].handoffTransferred, true)
+
+  const merged = mergeAccountWorkspace({
+    chats: [{
+      id: 'chat-a', projectId: 'project-a', title: 'Shared', subtitle: '', group: 'Today', provider: 'codex',
+      messages: [{ id: 'message-a', role: 'user', content: 'Transferred', time: '10:00', deliveryStatus: 'queued' }],
+    }],
+    projects: [{ id: 'project-a', name: 'Project', path: '/repo', verified: true }],
+  }, remote)
+  assert.equal(merged.state.chats[0].messages[0].deliveryStatus, 'queued')
+})
+
+test('transferred precedence never contaminates stronger target states or regresses completion', () => {
+  const chatWithStatus = (deliveryStatus) => ({
+    id: 'chat-a', projectId: 'project-a', title: 'Shared', subtitle: '', group: 'Today', provider: 'codex',
+    messages: [{ id: 'message-a', role: 'user', content: 'Transferred', time: '10:00', deliveryStatus }],
+  })
+  const projects = [{ id: 'project-a', name: 'Project', path: '/repo', verified: true }]
+  const remoteTransferred = prepareAccountWorkspace({
+    chats: [chatWithStatus('transferred')],
+    projects,
+  })
+
+  for (const deliveryStatus of ['queued', 'pending', 'completed']) {
+    const targetMerge = mergeAccountWorkspace({ chats: [chatWithStatus(deliveryStatus)], projects }, remoteTransferred)
+    const targetMessage = targetMerge.state.chats[0].messages[0]
+    assert.equal(targetMessage.deliveryStatus, deliveryStatus)
+    assert.equal('handoffTransferred' in targetMessage, false)
+  }
+
+  const acceptedTarget = mergeAccountWorkspace({ chats: [chatWithStatus('queued')], projects }, remoteTransferred)
+  const completedTarget = {
+    ...acceptedTarget.state,
+    chats: [{
+      ...acceptedTarget.state.chats[0],
+      messages: [{
+        ...acceptedTarget.state.chats[0].messages[0],
+        deliveryStatus: 'completed',
+        handoffTombstone: {
+          handoffId: 'queue-turn-2',
+          queuedPromptIdentity: '{"local":"machine metadata must not sync"}',
+        },
+      }],
+    }],
+  }
+  const portableCompleted = prepareAccountWorkspace(completedTarget)
+  assert.equal(portableCompleted.chats[0].messages[0].deliveryStatus, 'completed')
+  assert.equal('handoffTransferred' in portableCompleted.chats[0].messages[0], false)
+  assert.equal('handoffTombstone' in portableCompleted.chats[0].messages[0], false)
+
+  const afterStaleQueueMerge = mergeAccountWorkspace({ chats: [chatWithStatus('queued')], projects }, portableCompleted)
+  assert.equal(afterStaleQueueMerge.state.chats[0].messages[0].deliveryStatus, 'completed')
+  assert.equal('handoffTransferred' in afterStaleQueueMerge.state.chats[0].messages[0], false)
+})

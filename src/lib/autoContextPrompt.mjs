@@ -21,6 +21,7 @@ function executionDetails(project, target) {
 
 function transcriptFrom(chat) {
   return chat.messages
+    .filter((item) => item.deliveryStatus !== 'transferred')
     .map((item) => `${item.role === 'user'
       ? item.deliveryStatus === 'queued'
         ? 'User (queued future prompt; context only, do not execute)'

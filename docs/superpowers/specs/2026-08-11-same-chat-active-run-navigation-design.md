@@ -98,10 +98,14 @@ Stop action.
 
 The `occupied` result includes only bounded public ownership metadata: owner job
 ID, provider, target kind, start time, provider-started state, steerable state,
-and an optional shell-issued native workspace identity. It never includes a
-prompt, provider output, attachment path, repository path, lease token, or raw
-request. Lookup is possible only through the exact authenticated start request;
-there is no global active-job listing.
+an optional shell-issued native workspace identity, and an optional logical
+turn ID when the owner is retained by this exact Host process. The turn ID is
+live-memory-only: it is never written to the filesystem owner record or job
+journal, never reaches a provider request, and is always `null` for a
+cross-Host description. The result never includes a prompt, provider output,
+attachment path, repository path, lease token, or raw request. Lookup is
+possible only through the exact authenticated start request; there is no global
+active-job listing.
 
 The filesystem lease remains the cross-process safety boundary. Its owner
 record gains only the bounded job/navigation identifiers needed to produce an
@@ -143,7 +147,10 @@ Native windows publish a bounded live roster entry to the main process:
 shell-issued workspace ID, verified project ID/path, chat ID, and active Host
 job ID. The main process accepts entries only from the authorized live
 `webContents` that owns that workspace identity and removes them when the
-window closes or replaces its entry.
+window closes or replaces its entry. A waiting renderer may query only one
+complete exact target; the shell returns a boolean and never exposes a global
+roster. View, Push, and Stop controls remain absent until both the same-Host job
+probe and this exact shell query succeed.
 
 **View active run** sends the existing authorized focus IPC an exact workspace,
 project, chat, and job target. The main process verifies the retained live
@@ -190,10 +197,21 @@ The stable handoff/message ID is also the steering idempotency key. Repeating an
 acknowledged handoff or steering request cannot deliver the prompt twice;
 reusing the ID with different content is a hard conflict.
 
+Target persistence is strict and synchronous: a failed workspace commit cannot
+ACK the source or invoke Push/Stop. If an ACK times out after the target may
+have committed, the shell may redeliver only the original normalized request
+for the same authenticated source, target, action, and content. The target's
+local immutable tombstone acknowledges either a still-queued or already-
+consumed duplicate without repeating Push/Stop, after which the source can
+safely become `transferred`. A changed action, prompt, attachment, preference,
+source, or target remains a hard conflict.
+
 When live steering is unavailable, **Stop & send now** remains a distinct
 two-step action performed by the active renderer. It records the existing
 explicit approval before stopping and advances only the transferred FIFO head.
-A plain Stop never advances the queue.
+That approval travels only in the target-bound handoff payload; rejection or
+timeout leaves the source FIFO byte-for-byte unchanged and unapproved. A plain
+Stop never advances the queue.
 
 ### 5. Compatibility and failure handling
 

@@ -18,12 +18,13 @@ const TERMINAL_DELIVERY_STATES = new Set([
 ])
 
 const DELIVERY_PRIORITY = Object.freeze({
-  queued: 0,
-  pending: 1,
-  failed: 2,
-  interrupted: 3,
-  cancelled: 4,
-  completed: 5,
+  transferred: 1,
+  queued: 2,
+  pending: 3,
+  failed: 4,
+  interrupted: 5,
+  cancelled: 6,
+  completed: 7,
 })
 
 function record(value) {
@@ -40,7 +41,9 @@ function portableMessage(value) {
   const deliveryStatus = typeof message.deliveryStatus === 'string'
     ? message.deliveryStatus
     : undefined
-  return {
+  const transferredHandoff = deliveryStatus === 'transferred'
+    || (deliveryStatus === 'interrupted' && message.handoffTransferred === true)
+  const portable = {
     ...message,
     content: text(message.content),
     time: text(message.time),
@@ -49,12 +52,20 @@ function portableMessage(value) {
       : deliveryStatus
         ? { deliveryStatus: 'interrupted' }
         : {}),
+    // Account sync cannot execute a native-window transfer. Preserve only this
+    // internal precedence marker so its target's local queued copy wins later.
+    ...(transferredHandoff ? { handoffTransferred: true } : {}),
     // Local paths are never portable. The message text and attachment names
     // remain visible in the source workspace; another device cannot execute
     // or resolve the file reference.
     attachments: undefined,
     sessionResumable: false,
   }
+  if (!transferredHandoff) delete portable.handoffTransferred
+  // This receipt can contain local project and attachment identity. It remains
+  // in the originating workspace snapshot and never enters account sync.
+  delete portable.handoffTombstone
+  return portable
 }
 
 function portableContinuation(value) {
@@ -132,6 +143,9 @@ export function isAccountWorkspace(value) {
 }
 
 function messagePriority(message) {
+  if (message?.deliveryStatus === 'interrupted' && message.handoffTransferred === true) {
+    return DELIVERY_PRIORITY.transferred
+  }
   return DELIVERY_PRIORITY[message?.deliveryStatus] ?? 0
 }
 
@@ -145,6 +159,9 @@ function mergeMessage(authoritative, local) {
     : authoritative
   const secondary = preferred === local ? authoritative : local
   const merged = { ...secondary, ...preferred }
+  if (!(preferred.deliveryStatus === 'interrupted' && preferred.handoffTransferred === true)) {
+    delete merged.handoffTransferred
+  }
   // Attachment paths never come from the remote document, but the originating
   // computer must retain its richer local message after a sync merge.
   if (Array.isArray(local.attachments)) merged.attachments = local.attachments

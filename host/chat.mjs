@@ -1184,20 +1184,23 @@ export class ChatRunService {
       )
     }
 
-    let workspaceLease = null
+    let workspaceLease = options.preAcquiredWorkspaceLease ?? null
+    const ownsWorkspaceLease = workspaceLease === null
     let workspace = null
     let combinedSignal = { signal: options.signal, dispose() {} }
-    if (this.#projectIsolation) {
+    if (workspaceLease || this.#projectIsolation) {
       try {
-        workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
-          signal: options.signal,
-          onWait: () => options.onEvent?.({
-            type: 'notice',
-            code: 'workspace_write_lock_waiting',
-            message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
-            at: new Date().toISOString(),
-          }),
-        })
+        if (!workspaceLease) {
+          workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
+            signal: options.signal,
+            onWait: () => options.onEvent?.({
+              type: 'notice',
+              code: 'workspace_write_lock_waiting',
+              message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
+              at: new Date().toISOString(),
+            }),
+          })
+        }
         workspace = workspaceLease.workspace
         combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
         const baseSummary = workspaceBaseSummary(workspace)
@@ -1629,7 +1632,7 @@ export class ChatRunService {
           await this.#autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options)
         }
       }
-      const leaseRelease = await workspaceLease?.release()
+      const leaseRelease = ownsWorkspaceLease ? await workspaceLease?.release() : null
       // A lease that could not be deleted is the one failure nobody sees from
       // the outside: this run ends normally while the next message in the same
       // conversation waits on a lock with nothing behind it.

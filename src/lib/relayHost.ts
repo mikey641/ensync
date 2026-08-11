@@ -448,6 +448,39 @@ export type ChatJobSnapshot = {
   pendingQuestions: PendingProviderQuestion[]
 }
 
+export type OccupiedChatJobOwner = {
+  jobId: string | null
+  provider: string | null
+  targetKind: ChatJobKind | null
+  startedAt: string | null
+  providerProcessStarted: boolean
+  steerable: boolean
+  nativeWorkspaceId: string | null
+  /** Present only when this Host still retains the exact live job in memory. */
+  turnId: string | null
+}
+
+export type ChatJobNavigation = {
+  nativeWorkspaceId: string | null
+  projectId: string
+  chatId: string
+  turnId: string
+}
+
+export type ChatJobAdmission =
+  | { disposition: 'started' | 'reconnected'; job: ChatJobSnapshot }
+  | { disposition: 'occupied'; owner: OccupiedChatJobOwner }
+
+export class ChatJobOccupiedError extends Error {
+  owner: OccupiedChatJobOwner
+
+  constructor(owner: OccupiedChatJobOwner) {
+    super('Another run is already active in this conversation.')
+    this.name = 'ChatJobOccupiedError'
+    this.owner = owner
+  }
+}
+
 export type ChatSteerResponse = {
   job: ChatJobSnapshot
   delivery: { turnId: string }
@@ -632,10 +665,15 @@ export class EnsyncHostClient {
     })
   }
 
-  startChatJob(jobId: string, kind: ChatJobKind, request: object) {
-    return this.request<{ job: ChatJobSnapshot }>('/chat/jobs', {
+  startChatJob(
+    jobId: string,
+    kind: ChatJobKind,
+    request: object,
+    navigation?: ChatJobNavigation,
+  ) {
+    return this.request<ChatJobAdmission>('/chat/jobs', {
       method: 'POST',
-      body: JSON.stringify({ jobId, kind, request }),
+      body: JSON.stringify({ jobId, kind, request, navigation }),
     })
   }
 
@@ -649,10 +687,10 @@ export class EnsyncHostClient {
     })
   }
 
-  steerChatJob(jobId: string, prompt: string, attachments: string[] = []) {
+  steerChatJob(jobId: string, prompt: string, idempotencyKey: string, attachments: string[] = []) {
     return this.request<ChatSteerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/steer`, {
       method: 'POST',
-      body: JSON.stringify({ prompt, attachments }),
+      body: JSON.stringify({ prompt, attachments, idempotencyKey }),
     })
   }
 
@@ -819,8 +857,10 @@ export class EnsyncHostClient {
     request: object,
     onEvent: (event: ChatExecutionEvent) => void,
     signal?: AbortSignal,
+    navigation?: ChatJobNavigation,
   ): Promise<ChatRunResponse> {
-    await this.startChatJob(jobId, kind, request)
+    const admission = await this.startChatJob(jobId, kind, request, navigation)
+    if (admission.disposition === 'occupied') throw new ChatJobOccupiedError(admission.owner)
     let cursor = 0
     for (;;) {
       try {

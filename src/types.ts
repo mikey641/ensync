@@ -79,7 +79,7 @@ export type Message = {
   timestamp?: string | null
   provider?: ProviderId
   turnId?: string
-  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'transferred'
   /** Exact model reported by the completed CLI, or null when the CLI did not report one. */
   model?: string | null
   /** Friendly effort tier requested for this run, or null when provider defaults were used. */
@@ -88,6 +88,11 @@ export type Message = {
   sessionResumable?: boolean
   /** Local files explicitly attached by the user for this turn. */
   attachments?: FileAttachment[]
+  /** Local-only immutable receipt for idempotent cross-window handoff retries. */
+  handoffTombstone?: Readonly<{
+    handoffId: string
+    queuedPromptIdentity: string
+  }>
 }
 
 export type FileAttachment = {

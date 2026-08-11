@@ -34,6 +34,48 @@ export function normalizePromptQueues(value) {
   return normalized
 }
 
+function normalizedQueuedPrompt(value) {
+  return normalizePromptQueues({ handoff: [value] }).handoff?.[0] ?? null
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** Stable delivery identity; timestamps are audit metadata, not prompt content. */
+function queuedPromptIdentity(entry) {
+  return canonicalJson({
+    id: entry.id,
+    turnId: entry.turnId,
+    messageId: entry.messageId,
+    predecessorTurnId: entry.predecessorTurnId ?? null,
+    prompt: entry.prompt,
+    attachments: entry.attachments,
+    preferences: entry.preferences,
+  })
+}
+
+const TRANSFERRED_HANDOFF_IDENTITY_LIMIT = 512_000
+
+function handoffTombstone(entry) {
+  const queuedPromptIdentityValue = queuedPromptIdentity(entry)
+  if (queuedPromptIdentityValue.length > TRANSFERRED_HANDOFF_IDENTITY_LIMIT) return null
+  return Object.freeze({
+    handoffId: entry.id,
+    queuedPromptIdentity: queuedPromptIdentityValue,
+  })
+}
+
+function messageMatchesHandoffTombstone(message, messageId, tombstone) {
+  return message?.id === messageId
+    && message.handoffTombstone?.handoffId === tombstone.handoffId
+    && message.handoffTombstone?.queuedPromptIdentity === tombstone.queuedPromptIdentity
+}
+
 export function appendPromptToQueue(queues, chatId, entry) {
   return { ...queues, [chatId]: [...(queues[chatId] ?? []), entry] }
 }
@@ -45,6 +87,84 @@ export function removePromptFromQueue(queues, chatId, entryId) {
   if (retained.length > 0) next[chatId] = retained
   else delete next[chatId]
   return next
+}
+
+/**
+ * The source retains this audit record after a target has durably accepted its
+ * queue entry. It is intentionally not an executable queue state.
+ */
+export function markQueuedMessageTransferred(messages, messageId) {
+  return messages.map((message) => message.id === messageId
+    && message.role === 'user'
+    && message.deliveryStatus === 'queued'
+    ? { ...message, deliveryStatus: 'transferred' }
+    : message)
+}
+
+/**
+ * Persist a target-first handoff once. Every stable ID collision is checked
+ * against the full queue snapshot so a retry cannot silently change a prompt.
+ */
+export function acceptTransferredPrompt(queues, chats, chatId, entry) {
+  const normalized = normalizedQueuedPrompt(entry)
+  const targetIndex = Array.isArray(chats)
+    ? chats.findIndex((chat) => chat?.id === chatId)
+    : -1
+  const tombstone = normalized ? handoffTombstone(normalized) : null
+  if (!normalized || !tombstone || targetIndex < 0) return { status: 'conflict', queues, chats }
+
+  const target = chats[targetIndex]
+  const existingEntries = Array.isArray(queues?.[chatId]) ? queues[chatId] : []
+  const collisions = existingEntries.filter((existing) =>
+    existing?.id === normalized.id
+    || existing?.turnId === normalized.turnId
+    || existing?.messageId === normalized.messageId)
+  const sameIdentity = collisions.length === 1
+    && queuedPromptIdentity(collisions[0]) === queuedPromptIdentity(normalized)
+  if (collisions.length > 0) {
+    const existingMessage = target.messages?.find((message) => message?.id === normalized.messageId)
+    return sameIdentity && existingMessage?.role === 'user'
+      && existingMessage.turnId === normalized.turnId
+      && existingMessage.content === normalized.prompt
+      && existingMessage.deliveryStatus === 'queued'
+      && canonicalJson(normalizedAttachments(existingMessage.attachments))
+        === canonicalJson(normalized.attachments)
+      && messageMatchesHandoffTombstone(existingMessage, normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: false, queues, chats }
+      : { status: 'conflict', queues, chats }
+  }
+
+  const acceptedMessages = (target.messages ?? []).filter((message) =>
+    message?.id === normalized.messageId
+    || message?.handoffTombstone?.handoffId === normalized.id)
+  if (acceptedMessages.length > 0) {
+    return acceptedMessages.length === 1
+      && messageMatchesHandoffTombstone(acceptedMessages[0], normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: true, queues, chats }
+      : { status: 'conflict', queues, chats }
+  }
+
+  if ((target.messages ?? []).some((message) => message?.turnId === normalized.turnId)) {
+    return { status: 'conflict', queues, chats }
+  }
+
+  const message = {
+    id: normalized.messageId,
+    role: 'user',
+    turnId: normalized.turnId,
+    content: normalized.prompt,
+    time: normalized.enqueuedAt,
+    deliveryStatus: 'queued',
+    handoffTombstone: tombstone,
+    ...(normalized.attachments.length > 0 ? { attachments: normalized.attachments } : {}),
+  }
+  return {
+    status: 'accepted',
+    queues: { ...queues, [chatId]: [...existingEntries, normalized] },
+    chats: chats.map((chat, index) => index === targetIndex
+      ? { ...chat, messages: [...(chat.messages ?? []), message] }
+      : chat),
+  }
 }
 
 /**
@@ -118,6 +238,48 @@ export function queuedPromptCanStopAndSendNow(entry, activeRun, { liveSteerAvail
     && entry?.preferences?.executionTargetKey === activeRun.executionTarget
     && entry?.preferences?.projectId === activeRun.projectId
     && entry?.preferences?.projectPath === activeRun.projectPath
+}
+
+function exactOwnerJobId(owner) {
+  const ownerJobId = nonEmptyString(owner?.ownerJobId)
+  const hostJobId = nonEmptyString(owner?.jobId)
+  if (ownerJobId && hostJobId && ownerJobId !== hostJobId) return null
+  return ownerJobId ?? hostJobId
+}
+
+function sameNonEmptyString(left, right) {
+  const normalizedLeft = nonEmptyString(left)
+  const normalizedRight = nonEmptyString(right)
+  return Boolean(normalizedLeft) && normalizedLeft === normalizedRight
+}
+
+/** Exact live native roster bindings are required before focusing another window. */
+export function occupiedRunCanNavigate(owner, currentBinding) {
+  const jobId = exactOwnerJobId(owner)
+  return owner?.targetKind === 'local'
+    && currentBinding?.targetKind === 'local'
+    && Boolean(jobId)
+    && jobId === currentBinding?.jobId
+    && sameNonEmptyString(owner?.nativeWorkspaceId, currentBinding?.workspaceId)
+    && sameNonEmptyString(owner?.projectId, currentBinding?.projectId)
+    && sameNonEmptyString(owner?.projectPath, currentBinding?.projectPath)
+    && sameNonEmptyString(owner?.chatId, currentBinding?.chatId)
+    && sameNonEmptyString(owner?.provider, currentBinding?.provider)
+}
+
+/** Push handoff adds exact local-Codex turn and queue-snapshot checks to navigation. */
+export function occupiedRunCanHandoff(owner, entry, currentBinding) {
+  const normalized = normalizedQueuedPrompt(entry)
+  return occupiedRunCanNavigate(owner, currentBinding)
+    && owner?.provider === 'codex'
+    && owner?.providerProcessStarted === true
+    && owner?.steerable === true
+    && Boolean(normalized)
+    && sameNonEmptyString(normalized.predecessorTurnId, currentBinding?.turnId)
+    && normalized.preferences.provider === 'codex'
+    && normalized.preferences.executionTargetKey === currentBinding?.targetKind
+    && normalized.preferences.projectId === currentBinding?.projectId
+    && normalized.preferences.projectPath === currentBinding?.projectPath
 }
 
 /**
@@ -219,7 +381,7 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
 export function transcriptMessagesBeforeTurn(messages, turnId) {
   const index = messages.findIndex((message) => message.role === 'user' && message.turnId === turnId)
   if (index < 0) return []
-  return messages.slice(0, index)
+  return messages.slice(0, index).filter((message) => message.deliveryStatus !== 'transferred')
 }
 
 /** Keep logical transcript order even when later user prompts were pre-enqueued. */

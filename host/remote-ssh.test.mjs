@@ -6,6 +6,7 @@ import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import {
   buildSshArguments,
+  remoteChatAdmissionCoordinate,
   RemoteSshError,
   RemoteSshProcessAdapter,
   RemoteSshService,
@@ -149,6 +150,31 @@ test('SSH connection validation accepts only strict host, user, port, key-path, 
   await assert.rejects(
     validateRemoteSshConnection(connection({ password: 'not accepted' })),
     (error) => error instanceof RemoteSshError && error.code === 'credentials_not_supported',
+  )
+})
+
+test('SSH chat admission coordinates normalize target and project while preserving exact conversation identity', async () => {
+  const base = {
+    connection: connection({
+      hostname: 'Worker.EXAMPLE.com.',
+      projectPath: '/srv/projects/ensync/',
+    }),
+    provider: 'codex',
+    workspaceKey: WORKSPACE_KEY,
+    prompt: 'Continue',
+  }
+  const normalized = {
+    ...base,
+    connection: connection({ hostname: 'worker.example.com', projectPath: '/srv/projects/ensync' }),
+  }
+
+  assert.equal(
+    await remoteChatAdmissionCoordinate(base),
+    await remoteChatAdmissionCoordinate(normalized),
+  )
+  assert.notEqual(
+    await remoteChatAdmissionCoordinate(base),
+    await remoteChatAdmissionCoordinate({ ...normalized, workspaceKey: 'canonical-window:remote-chat-2' }),
   )
 })
 
