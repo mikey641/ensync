@@ -43,27 +43,6 @@ export function fileDragContainsFiles(value) {
   }
 }
 
-export function droppedFileAttachments(files, pathForFile) {
-  const attachments = []
-  const unavailable = []
-  if (typeof pathForFile !== 'function') {
-    return { attachments, unavailable: Array.from(files ?? [], (file) => file?.name ?? 'file') }
-  }
-
-  for (const file of Array.from(files ?? [])) {
-    const name = nonEmptyString(file?.name) ?? 'file'
-    let path = null
-    try {
-      path = nonEmptyString(pathForFile(file))
-    } catch {
-      path = null
-    }
-    if (path) attachments.push({ name, path })
-    else unavailable.push(name)
-  }
-  return { attachments: normalizeFileAttachments(attachments), unavailable }
-}
-
 // Drop time is the only moment the renderer can read files the OS hides from
 // other processes (macOS screenshot drag temp dirs, for example). Paths the
 // host cannot open are copied through the host right away and attached at the

@@ -12,10 +12,6 @@ export function fileDragContainsFiles(value:
   | null
   | undefined
 ): boolean
-export function droppedFileAttachments(
-  files: ArrayLike<File> | Iterable<File> | null | undefined,
-  pathForFile?: ((file: File) => string) | null,
-): { attachments: FileAttachment[]; unavailable: string[] }
 export type ChatAttachmentHostOps = {
   probeAttachmentPaths(paths: string[]): Promise<{ results: { path: string; readable: boolean }[] }>
   storeChatAttachment(name: string, bytes: ArrayBuffer): Promise<{ attachment: { path: string; name: string } }>

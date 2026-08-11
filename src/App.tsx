@@ -219,9 +219,9 @@ import {
 } from './lib/nativeRecentProjects.mjs'
 import {
   appendFileAttachments,
-  droppedFileAttachments,
   messageTextWithAttachments,
   normalizeFileAttachments,
+  resolveDroppedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
 import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
@@ -2247,7 +2247,7 @@ function App() {
     chatRunCancellationRef.current.stop(chatId)
   }
 
-  const handleFilesDrop = (chatId: string, files: FileList) => {
+  const handleFilesDrop = async (chatId: string, files: FileList) => {
     if (executionTargetRef.current.kind !== 'local') {
       setAttachmentErrors((current) => ({
         ...current,
@@ -2256,7 +2256,33 @@ function App() {
       return
     }
 
-    const dropped = droppedFileAttachments(files, window.ensyncDesktop?.getPathForFile)
+    // Snapshot synchronously: the DataTransfer list empties as soon as this
+    // handler yields, and a file the OS hides from every other process (a
+    // screenshot dragged from the macOS thumbnail, for example) is readable
+    // only through these File objects, only right now. resolveDroppedAttachments
+    // copies exactly those through the host so the agent gets a readable path.
+    const droppedFiles = Array.from(files)
+    // Nothing awaits this handler, so an escaping rejection would drop the
+    // files with no visible trace at all.
+    const dropped = await resolveDroppedAttachments(droppedFiles, window.ensyncDesktop?.getPathForFile, {
+      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
+      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
+    }).catch(() => null)
+    if (!dropped) {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'Ensync could not attach the dropped files. Drop them again.',
+      }))
+      return
+    }
+    if (!chatsRef.current.some((chat) => chat.id === chatId)) return
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'The execution target changed while these files were being attached. Switch back to the local Ensync Host to attach them.',
+      }))
+      return
+    }
     if (dropped.attachments.length > 0) {
       const nextAttachments = {
         ...draftAttachmentsRef.current,
@@ -2273,7 +2299,7 @@ function App() {
       setAttachmentErrors((current) => ({
         ...current,
         [chatId]: window.ensyncDesktop?.getPathForFile
-          ? `Ensync could not read the local path for ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
+          ? `Ensync could not attach ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}. Drop them again, or save them somewhere Ensync can read.`
           : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.',
       }))
     }
