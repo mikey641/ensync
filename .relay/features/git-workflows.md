@@ -15,6 +15,14 @@ The renderer persists an explicit `conversation:<chat-id>` agent-workspace key o
 
 One renewable write lease in the repository's shared Git directory covers each conversation workspace for the entire provider run across local windows and Host processes. Different chats use different worktrees and run concurrently even inside the same repository; only duplicate runs targeting the same conversation workspace wait before provider start. For a first-time conversation, a dirty shared checkout is captured through a temporary private index and synthetic transport commit, used to seed the protected worktree, then immediately mixed-reset to the real shared `HEAD`; the inherited tracked and non-ignored untracked files therefore remain uncommitted inside the protected workspace. The synthetic commit is not retained on the conversation branch, and the shared checkout, index, branch, and history remain untouched. Ensync never cleans, stashes, commits into user history, deletes, or auto-merges those changes. Managed worktrees and branches survive run completion and failure so the user can verify and reconcile them before any future explicit cleanup workflow.
 
+## Cross-conversation edit awareness
+
+Local protected workspaces publish bounded, content-free active-edit records under Git's shared common directory. Ensync compares exact normalized repository-relative paths across conversations, shows a non-blocking warning in every affected conversation, and supplies the same advisory to providers at Host-controlled prompt boundaries. Sharing only a directory never warns. Activity records are atomic, renewable, cross-process, removed on release, and ignored when stale; failures in this advisory channel never stop isolated provider work.
+
+Before a provider starts and immediately before a land, Ensync also checks completed-but-unlanded `ensync/chat-*` branches so a finished peer cannot disappear from overlap awareness. The provider is told to re-read and preserve compatible work, never to access another worktree or perform the Host-owned push/land. Mid-turn UI warnings are immediate, but Ensync does not claim universal mid-turn agent delivery where a provider CLI has no steering channel. Remote SSH remains unsupported for live overlap warnings until its one-shot bridge gains remote activity records and a remote landing operation.
+
+All local explicit and automatic land operations serialize through one renewable repository-scoped lease in Git's common directory. After entering that queue, the land operation freshly rechecks the checkout, branch, overlaps, merge conflicts, and repository land gate. File overlap stays advisory; dirty shared state, Git conflicts, and semantic verification failures continue to fail closed.
+
 ## Repository import
 
 - Import requires an allowlisted HTTP, HTTPS, SSH, or Git-protocol URL, a strict `user@host:path` SSH location, or an absolute local repository path.
