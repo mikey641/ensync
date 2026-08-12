@@ -365,6 +365,13 @@ export type ChatExecutionEvent =
         path: string
         branch: string
       }
+      overlap?: {
+        peerBranch: string
+        state: 'detected' | 'cleared'
+        source: 'active' | 'unlanded'
+        paths: string[]
+        totalCount: number
+      }
       at: string
       /** Monotonic Host job sequence used to resume a detached stream without duplication. */
       sequence?: number
