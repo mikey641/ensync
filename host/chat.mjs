@@ -339,7 +339,53 @@ export function workspaceBaseSummary(workspace) {
   return `Base: ${base.sha}.`
 }
 
-function isolatedPrompt(prompt, workspace) {
+export function workspaceOverlapPrompt(overlaps) {
+  if (!Array.isArray(overlaps) || overlaps.length === 0) return ''
+  const paths = [...new Set(overlaps.flatMap((overlap) => Array.isArray(overlap?.paths) ? overlap.paths : []))]
+    .filter((path) => typeof path === 'string' && path.length > 0)
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, 20)
+  if (paths.length === 0) return ''
+  return `[ENSYNC HOST CROSS-CONVERSATION FILE AWARENESS]
+Another Ensync conversation is actively editing or has unlanded changes in files this branch also changes:
+${paths.map((path) => `- ${path}`).join('\n')}
+Before changing these paths, re-read their current contents and preserve compatible work. Do not access another checkout or worktree, and do not push or land; Ensync Host rechecks and lands this branch.
+`
+}
+
+function overlapUnavailableNotice(error) {
+  return {
+    type: 'notice',
+    code: 'workspace_overlap_unavailable',
+    message: `Ensync could not refresh cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
+    at: new Date().toISOString(),
+  }
+}
+
+async function refreshOverlapSession(session, onEvent) {
+  if (!session) return []
+  try {
+    return await session.refresh()
+  } catch (error) {
+    onEvent?.(overlapUnavailableNotice(error))
+    try {
+      return session.current()
+    } catch {
+      return []
+    }
+  }
+}
+
+async function stopOverlapSession(session, onEvent) {
+  if (!session) return
+  try {
+    await session.stop()
+  } catch (error) {
+    onEvent?.(overlapUnavailableNotice(error))
+  }
+}
+
+function isolatedPrompt(prompt, workspace, overlaps = []) {
   if (!workspace) return prompt
   const base = workspaceBaseSummary(workspace)
   const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
@@ -352,11 +398,11 @@ Treat the current working directory as the only writable project for this task. 
 Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-${base ? `${base}\n` : ''}${unintegrated}
-${prompt}`
+  ${base ? `${base}\n` : ''}${unintegrated}${workspaceOverlapPrompt(overlaps)}
+  ${prompt}`
 }
 
-function conflictResolutionPrompt({ branch, baselineSha, conflictFiles }) {
+function conflictResolutionPrompt({ branch, baselineSha, conflictFiles, overlaps = [] }) {
   return `[ENSYNC HOST CONFLICT RESOLUTION]
 Ensync merged baseline commit ${baselineSha} into this conversation's protected branch ${branch} so the finished work can land, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
 1. Inspect the conflicts with \`git status\` and \`git diff\`.
@@ -365,17 +411,19 @@ Ensync merged baseline commit ${baselineSha} into this conversation's protected 
 4. Conclude the merge with \`git commit --no-verify --no-edit\`.
 Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
 Conflicted files:
-${conflictFiles.map((file) => `- ${file}`).join('\n')}`
+  ${conflictFiles.map((file) => `- ${file}`).join('\n')}
+  ${workspaceOverlapPrompt(overlaps)}`
 }
 
-function landCheckRepairPrompt({ branch, baselineSha, reason, output }) {
+function landCheckRepairPrompt({ branch, baselineSha, reason, output, overlaps = [] }) {
   return `[ENSYNC HOST LAND CHECK REPAIR]
 Ensync merged this conversation's branch ${branch} into the baseline and ran the repository's land check (npm run land:check). The check failed, so the merge was rolled back. Baseline commit ${baselineSha} is already merged into the protected worktree that is the current working directory. Your only task is to make the land check pass here:
 1. Reproduce the failure if possible (npm run land:check) or work from the failure output below.
 2. This failure usually means the merge silently dropped code one side depends on — for example a declaration or import whose usages survived. Compare this branch with the baseline (git log, git show, git diff) and restore the missing code. Do not delete working features just to silence the check.
 3. Commit the fix with git add and git commit --no-verify.
 Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
-Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}`
+  Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}
+  ${workspaceOverlapPrompt(overlaps)}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -1106,6 +1154,7 @@ export class ChatRunService {
   /** Live Claude interactive channels, keyed by the retained job that owns them. */
   #claudeQuestionChannels = new Map()
   #projectIsolation
+  #workspaceOverlapMonitor
   #autoLand
   #autoPushLanded
   #gitExecutable
@@ -1123,6 +1172,7 @@ export class ChatRunService {
     this.#hardTimeoutMs = options.hardTimeoutMs
       ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
+    this.#workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? null
     this.#autoLand = options.autoLand !== false
     this.#autoPushLanded = options.autoPushLanded !== false
     this.#gitExecutable = options.gitExecutable
@@ -1187,6 +1237,8 @@ export class ChatRunService {
     let workspaceLease = options.preAcquiredWorkspaceLease ?? null
     const ownsWorkspaceLease = workspaceLease === null
     let workspace = null
+    let workspaceOverlapSession = null
+    let workspaceOverlaps = []
     let combinedSignal = { signal: options.signal, dispose() {} }
     if (workspaceLease || this.#projectIsolation) {
       try {
@@ -1227,6 +1279,25 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
+    if (workspace && this.#workspaceOverlapMonitor) {
+      try {
+        workspaceOverlapSession = await this.#workspaceOverlapMonitor.start(workspace, {
+          jobId: typeof options.liveTurnId === 'string' && options.liveTurnId
+            ? options.liveTurnId
+            : workspace.branch,
+          signal: combinedSignal.signal,
+          onEvent: (event) => options.onEvent?.(event),
+        })
+        workspaceOverlaps = workspaceOverlapSession.current()
+      } catch (error) {
+        options.onEvent?.({
+          type: 'notice',
+          code: 'workspace_overlap_unavailable',
+          message: `Ensync could not start cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
+          at: new Date().toISOString(),
+        })
+      }
+    }
     // Every provider runner — codex exec, the codex live turn, claude resume,
     // and droid — receives the same bundled Ensync multi-agent/Superpowers
     // contract ahead of the user's prompt (and ahead of any workspace
@@ -1234,7 +1305,7 @@ export class ChatRunService {
     const executionRequest = {
       ...request,
       prompt: withEnsyncMultiAgentInstructions(
-        workspace ? isolatedPrompt(request.prompt, workspace) : request.prompt,
+        workspace ? isolatedPrompt(request.prompt, workspace, workspaceOverlaps) : request.prompt,
       ),
     }
     const publicWorkspace = workspace ? {
@@ -1628,10 +1699,20 @@ export class ChatRunService {
         } catch {
           // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
         }
+        await refreshOverlapSession(workspaceOverlapSession, options.onEvent)
         if (runOutcome === 'succeeded' && this.#autoLand && agentWorkSaved && !options.signal?.aborted) {
-          await this.#autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options)
+          await this.#autoLandAfterRun(
+            provider,
+            request,
+            workspace,
+            containment,
+            workspaceLease,
+            workspaceOverlapSession,
+            options,
+          )
         }
       }
+      await stopOverlapSession(workspaceOverlapSession, options.onEvent)
       const leaseRelease = ownsWorkspaceLease ? await workspaceLease?.release() : null
       // A lease that could not be deleted is the one failure nobody sees from
       // the outside: this run ends normally while the next message in the same
@@ -1653,7 +1734,7 @@ export class ChatRunService {
    * branches unlanded for explicit review. Any failure here is reported as a
    * notice and never changes the finished run's outcome.
    */
-  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, options) {
+  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, overlapSession, options) {
     const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal)
     try {
       await autoLandWorkspace(workspace, {
@@ -1666,18 +1747,30 @@ export class ChatRunService {
           message,
           at: new Date().toISOString(),
         }),
-        runConflictAgent: (details) => this.#runConflictResolutionAgent(provider, request, workspace, containment, details, {
-          onEvent: options.onEvent,
-          signal: landSignal.signal,
-        }),
+        runConflictAgent: async (details) => {
+          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
+          return this.#runConflictResolutionAgent(provider, request, workspace, containment, {
+            ...details,
+            overlaps,
+          }, {
+            onEvent: options.onEvent,
+            signal: landSignal.signal,
+          })
+        },
         verifyLand: (details) => this.#landCheck(details.repositoryPath, {
           environment: this.#environment,
           signal: landSignal.signal,
         }),
-        runRepairAgent: (details) => this.#runLandCheckRepairAgent(provider, request, workspace, containment, details, {
-          onEvent: options.onEvent,
-          signal: landSignal.signal,
-        }),
+        runRepairAgent: async (details) => {
+          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
+          return this.#runLandCheckRepairAgent(provider, request, workspace, containment, {
+            ...details,
+            overlaps,
+          }, {
+            onEvent: options.onEvent,
+            signal: landSignal.signal,
+          })
+        },
         autoPush: this.#autoPushLanded,
       })
     } catch (error) {

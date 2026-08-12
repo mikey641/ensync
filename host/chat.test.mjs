@@ -120,6 +120,140 @@ test('ChatRunService uses a pre-acquired workspace lease without acquiring or re
   assert.equal(processCwd, projectPath)
 })
 
+test('ChatRunService shows live overlap events, advises the provider, and stops monitoring', async (context) => {
+  const projectPath = await projectFixture(context)
+  const overlap = {
+    peerBranch: 'ensync/chat-bbbbbbbbbbbbbbbbbbbbbbbb',
+    source: 'active',
+    paths: ['src/App.tsx'],
+    totalCount: 1,
+  }
+  const events = []
+  let seenPrompt = ''
+  let stopCalls = 0
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    workspaceOverlapMonitor: {
+      async start(_workspace, options) {
+        options.onEvent({
+          type: 'notice',
+          code: 'workspace_file_overlap_detected',
+          message: 'Another conversation is editing src/App.tsx.',
+          overlap: { ...overlap, state: 'detected' },
+          at: '2026-08-12T00:00:00.000Z',
+        })
+        return {
+          current: () => [overlap],
+          async refresh() { return [overlap] },
+          async stop() { stopCalls += 1 },
+        }
+      },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      seenPrompt = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:overlap-lifecycle',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.match(seenPrompt, /CROSS-CONVERSATION FILE AWARENESS/)
+  assert.match(seenPrompt, /src\/App\.tsx/)
+  assert.match(seenPrompt, /re-read/i)
+  assert.doesNotMatch(seenPrompt, /another worktree at/)
+  assert.equal(events.some((event) => event.code === 'workspace_file_overlap_detected'), true)
+  assert.equal(stopCalls, 1)
+})
+
+test('overlap refresh failures never replace a completed provider result', async (context) => {
+  const projectPath = await projectFixture(context)
+  let stopCalls = 0
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    workspaceOverlapMonitor: {
+      async start() {
+        return {
+          current: () => [],
+          async refresh() { throw new Error('overlap metadata unavailable') },
+          async stop() { stopCalls += 1 },
+        }
+      },
+    },
+    autoLand: false,
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done despite advisory failure' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+  const events = []
+
+  const result = await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:overlap-failure',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.equal(result.response, 'done despite advisory failure')
+  assert.equal(stopCalls, 1)
+  assert.equal(events.some((event) => event.code === 'workspace_overlap_unavailable'), true)
+})
+
 test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON only', async (context) => {
   const projectPath = await projectFixture(context)
   const calls = []

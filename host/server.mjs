@@ -18,6 +18,7 @@ import { runLandCheck } from './land-check.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
+import { WorkspaceOverlapMonitor } from './workspace-overlap.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
   SupportRepairError,
@@ -256,6 +257,7 @@ export function createEnsyncHost(options = {}) {
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
   })
+  const workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? new WorkspaceOverlapMonitor()
   const chatImages = options.chatImageService ?? new ChatImageService({
     workspaceRoot: options.projectIsolationRoot,
   })
@@ -263,6 +265,7 @@ export function createEnsyncHost(options = {}) {
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
+    workspaceOverlapMonitor,
   })
   const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
     rootPath: options.chatAttachmentsRoot,
