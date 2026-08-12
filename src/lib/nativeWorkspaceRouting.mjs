@@ -8,6 +8,8 @@ import {
 } from './workspacePersistence.mjs'
 
 const MAX_RETAINED_WORKSPACES = 32
+const PROTECTED_CONVERSATION_BRANCH_PATTERN = /^ensync\/chat-([0-9a-f]{24})$/i
+const PROTECTED_CONVERSATION_REFERENCE_PATTERN = /\bensync\/chat-([0-9a-f]{6,24})(?=$|[^0-9a-f])/i
 
 export function nativeProjectPathKey(value) {
   if (typeof value !== 'string') return ''
@@ -98,4 +100,80 @@ export function findRetainedWorkspaceForProject(storage, options = {}) {
     || right.revision - left.revision
     || left.workspace.id.localeCompare(right.workspace.id))
   return candidates[0] ?? null
+}
+
+function referencedConversationPrefix(chat) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : []
+  const latest = messages.at(-1)
+  if (latest?.role !== 'agent' || typeof latest.content !== 'string') return null
+  return PROTECTED_CONVERSATION_REFERENCE_PATTERN.exec(latest.content)?.[1]?.toLowerCase() ?? null
+}
+
+function conversationBranchSuffix(branch) {
+  if (typeof branch !== 'string') return null
+  return PROTECTED_CONVERSATION_BRANCH_PATTERN.exec(branch)?.[1]?.toLowerCase() ?? null
+}
+
+function projectDisplayName(project) {
+  if (typeof project?.name === 'string' && project.name.trim()) return project.name.trim()
+  if (typeof project?.path !== 'string') return 'Project'
+  return project.path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? 'Project'
+}
+
+/**
+ * Resolves only a unique protected branch named by the latest completed agent
+ * response. Candidate chats come from checksummed snapshots for shell-retained
+ * workspaces; no worktree path is opened or inspected.
+ */
+export function findReferencedOwningConversation(storage, options = {}) {
+  if (!storage || typeof storage.getItem !== 'function'
+    || !isNativeWorkspaceIdentity(options.currentWorkspace)) return null
+  const prefix = referencedConversationPrefix(options.chat)
+  const currentSuffix = conversationBranchSuffix(options.chat?.workspace?.branch)
+  if (!prefix || currentSuffix?.startsWith(prefix)) return null
+
+  const retainedWorkspaces = Array.isArray(options.retainedWorkspaces)
+    ? options.retainedWorkspaces.slice(0, MAX_RETAINED_WORKSPACES)
+    : []
+  const candidates = []
+  for (const workspace of retainedWorkspaces) {
+    if (!isNativeWorkspaceIdentity(workspace)
+      || workspace.id === options.currentWorkspace.id) continue
+    const keys = createWorkspaceSnapshotKeys((key) => workspaceStorageKey(key, workspace))
+    const snapshot = readWorkspaceSnapshot(storage, { keys })
+    if (!snapshot) continue
+    const projects = Array.isArray(snapshot.state.projects) ? snapshot.state.projects : []
+    for (const chat of Array.isArray(snapshot.state.chats) ? snapshot.state.chats : []) {
+      const suffix = conversationBranchSuffix(chat?.workspace?.branch)
+      if (!suffix?.startsWith(prefix) || typeof chat?.id !== 'string' || !chat.id) continue
+      const project = projects.find((candidate) => candidate?.id === chat.projectId)
+      if (!project || typeof project.id !== 'string' || !project.id
+        || typeof project.path !== 'string' || !nativeProjectPathKey(project.path)) continue
+      candidates.push({
+        workspaceId: workspace.id,
+        projectId: project.id,
+        projectPath: project.path,
+        projectName: projectDisplayName(project),
+        chatId: chat.id,
+        chatTitle: typeof chat.title === 'string' && chat.title.trim()
+          ? chat.title.trim()
+          : 'Conversation',
+        branch: chat.workspace.branch,
+      })
+    }
+  }
+  return candidates.length === 1 ? candidates[0] : null
+}
+
+/** Target-renderer guard for navigation to a retained chat without a live job. */
+export function exactNativeChatFocusCanApply(request, current) {
+  if (!request || !current || request.jobId !== undefined
+    || typeof request.workspaceId !== 'string'
+    || typeof request.projectId !== 'string'
+    || typeof request.projectPath !== 'string'
+    || typeof request.chatId !== 'string') return false
+  return request.workspaceId.toLowerCase() === current.workspaceId?.toLowerCase()
+    && request.projectId === current.projectId
+    && nativeProjectPathKey(request.projectPath) === nativeProjectPathKey(current.projectPath)
+    && request.chatId === current.chatId
 }

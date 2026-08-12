@@ -16,3 +16,27 @@ export function findRetainedWorkspaceForProject(storage: StorageReader, options:
   revision: number
   committedAt: string
 } | null
+
+export type NativeExactChatTarget = {
+  workspaceId: string
+  projectId: string
+  projectPath: string
+  chatId: string
+}
+
+export type ReferencedOwningConversation = NativeExactChatTarget & {
+  projectName: string
+  chatTitle: string
+  branch: string
+}
+
+export function findReferencedOwningConversation(storage: StorageReader, options: {
+  currentWorkspace: NativeWorkspaceIdentity
+  retainedWorkspaces: NativeWorkspaceIdentity[]
+  chat: unknown
+}): ReferencedOwningConversation | null
+
+export function exactNativeChatFocusCanApply(
+  request: unknown,
+  current: NativeExactChatTarget,
+): boolean
