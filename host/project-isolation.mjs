@@ -13,6 +13,8 @@ const DEFAULT_FETCH_TIMEOUT_MS = 120_000
 const PREFERRED_CANONICAL_REMOTE = 'origin'
 const CANONICAL_BRANCH_FALLBACKS = ['main', 'master']
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
+const MAX_BASELINE_CONFLICT_FILES = 50
+const MAX_BASELINE_CONFLICT_PATH_CHARACTERS = 1_024
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
 const OCCUPIED_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/
 const OCCUPIED_NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
@@ -56,6 +58,16 @@ function pathIsWithin(root, candidate) {
 
 function firstLine(value) {
   return String(value ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''
+}
+
+function boundedConflictFiles(value) {
+  return [...new Set(String(value ?? '').split('\0').filter((file) => (
+    file.length > 0
+    && file.length <= MAX_BASELINE_CONFLICT_PATH_CHARACTERS
+    && !WORKSPACE_KEY_CONTROL_CHARACTERS.test(file)
+  )))]
+    .sort((left, right) => left.localeCompare(right))
+    .slice(0, MAX_BASELINE_CONFLICT_FILES)
 }
 
 function cancellationError() {
@@ -889,8 +901,8 @@ export class ProjectIsolationService {
    * base. This merges rather than rebases so committed agent work is never
    * rewritten, and it refuses instead of forcing whenever Git reports a
    * conflict or an unfinished operation. It runs after the baseline sync with
-   * the shared checkout commit, so a canonical-only conflict defers softly
-   * while a shared-checkout conflict keeps main's hard workspace_baseline_conflict.
+   * the shared checkout commit. Conflicts are reported as deferred base state;
+   * they are reconciled by the landing workflow after the provider turn.
    */
   async #refreshReusedWorkspace(worktreePath, branch, base) {
     if (base.source !== 'remote_default_branch') return { refreshed: false, reason: base.reason }
@@ -982,6 +994,7 @@ export class ProjectIsolationService {
     let seededFromSharedCheckout = false
     let branchExistedBeforeAcquire
     let baseRefresh
+    let baselineConflict = null
 
     if (registered) {
       if (registered.prunable) {
@@ -1109,22 +1122,50 @@ export class ProjectIsolationService {
           },
         )
         if (merge.exitCode !== 0) {
-          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U'], {
+          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U', '-z'], {
             cwd: worktreePath,
             allowFailure: true,
           })
-          const files = conflicted.stdout.split(/\r?\n/).filter(Boolean)
-          await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
-          throw new ProjectIsolationError(
-            'workspace_baseline_conflict',
-            `New baseline changes conflict with this conversation's work in: ${files.join(', ') || 'unknown files'}. Resolve the conflict in the protected worktree at ${worktreePath}, commit it, then run again.`,
-            409,
-          )
+          const files = boundedConflictFiles(conflicted.stdout)
+          const aborted = await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
+          const mergeHead = await this.#git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const unmerged = await this.#git(['diff', '--name-only', '--diff-filter=U', '-z'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const recoveredStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          if (
+            aborted.exitCode !== 0
+            || mergeHead.exitCode === 0
+            || unmerged.exitCode !== 0
+            || unmerged.stdout !== ''
+            || recoveredStatus.exitCode !== 0
+            || recoveredStatus.stdout !== ''
+          ) {
+            throw new ProjectIsolationError(
+              'workspace_baseline_recovery_failed',
+              `New baseline changes conflict with this conversation's work, and Ensync could not restore the protected branch ${branch} to a clean state. Inspect ${worktreePath} before continuing.`,
+              409,
+            )
+          }
+          const reason = 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.'
+          baselineConflict = {
+            baselineSha: repository.head,
+            files,
+            reason,
+          }
+          baseRefresh = { refreshed: false, reason }
         }
       }
     }
 
-    if (!createdThisAcquire) {
+    if (!createdThisAcquire && !baselineConflict) {
       baseRefresh = await this.#refreshReusedWorkspace(worktreePath, branch, base)
     }
 
@@ -1185,7 +1226,11 @@ export class ProjectIsolationService {
       statusEntries: sharedStatus.stdout.split('\0').filter(Boolean),
     }
 
-    if (!baseRefresh.refreshed && baseRefresh.reason && base.source === 'remote_default_branch') {
+    if (baselineConflict) {
+      base.source = 'base_refresh_deferred'
+      base.sha = firstLine(head.stdout)
+      base.reason = baselineConflict.reason
+    } else if (!baseRefresh.refreshed && baseRefresh.reason && base.source === 'remote_default_branch') {
       // Ensync could not bring this existing worktree onto the canonical commit,
       // so it still stands on its own base. Report that rather than the commit
       // Ensync wanted it to have.
@@ -1202,6 +1247,7 @@ export class ProjectIsolationService {
       branch,
       reused,
       seededFromSharedCheckout,
+      baselineConflict,
       shared,
       base: {
         sha: base.sha,
@@ -1212,7 +1258,10 @@ export class ProjectIsolationService {
         branch: base.branch,
         refreshed: baseRefresh.refreshed,
       },
-      integration: await this.#integrationState(worktreePath, base.canonicalSha),
+      integration: await this.#integrationState(
+        worktreePath,
+        baselineConflict?.baselineSha ?? base.canonicalSha,
+      ),
       gitBefore: {
         branch,
         head: firstLine(head.stdout),
