@@ -353,6 +353,36 @@ Before changing these paths, re-read their current contents and preserve compati
 `
 }
 
+function boundedBaselineConflict(workspace) {
+  const conflict = workspace?.baselineConflict
+  if (!conflict || !/^[0-9a-f]{40,64}$/i.test(conflict.baselineSha ?? '')) return null
+  const files = Array.isArray(conflict.files)
+    ? [...new Set(conflict.files.filter((file) => (
+      typeof file === 'string'
+      && file.length > 0
+      && file.length <= 1_024
+      && !/[\u0000-\u001f\u007f]/.test(file)
+    )))].slice(0, 50)
+    : []
+  const reason = typeof conflict.reason === 'string'
+    && conflict.reason.length <= 1_024
+    && !/[\u0000-\u001f\u007f]/.test(conflict.reason)
+    ? conflict.reason
+    : 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.'
+  return { baselineSha: conflict.baselineSha, files, reason }
+}
+
+function deferredBaselinePrompt(workspace) {
+  const conflict = boundedBaselineConflict(workspace)
+  if (!conflict) return ''
+  const { files } = conflict
+  return `[ENSYNC HOST DEFERRED BASELINE RECONCILIATION]
+Baseline commit ${conflict.baselineSha} conflicts with this conversation's committed work${files.length > 0 ? ' in:' : '.'}
+${files.map((file) => `- ${file}`).join('\n')}
+Ensync aborted the failed merge and verified that this exact conversation branch is clean. Continue the user's requested work in the current worktree, re-read these files before editing them, and preserve compatible existing changes. Do not access another checkout or try to merge the baseline now; Ensync will reconcile this branch before landing.
+`
+}
+
 function overlapUnavailableNotice(error) {
   return {
     type: 'notice',
@@ -398,7 +428,7 @@ Treat the current working directory as the only writable project for this task. 
 Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-  ${base ? `${base}\n` : ''}${unintegrated}${workspaceOverlapPrompt(overlaps)}
+  ${base ? `${base}\n` : ''}${deferredBaselinePrompt(workspace)}${unintegrated}${workspaceOverlapPrompt(overlaps)}
   ${prompt}`
 }
 
@@ -1256,15 +1286,20 @@ export class ChatRunService {
         workspace = workspaceLease.workspace
         combinedSignal = combinedAbortSignal(options.signal, workspaceLease.signal)
         const baseSummary = workspaceBaseSummary(workspace)
+        const baselineConflict = boundedBaselineConflict(workspace)
+        const deferredBaselineSummary = baselineConflict
+          ? ` Baseline reconciliation is deferred until landing; Ensync restored this exact conversation branch to a clean state so work can continue now.`
+          : ''
         options.onEvent?.({
           type: 'notice',
           code: 'project_workspace_ready',
-          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}`,
+          message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}${deferredBaselineSummary}`,
           workspace: {
             path: workspace.projectPath,
             branch: workspace.branch,
             base: workspace.base ?? null,
             integration: workspace.integration ?? null,
+            baselineConflict,
           },
           at: new Date().toISOString(),
         })
@@ -1315,6 +1350,7 @@ export class ChatRunService {
       reused: workspace.reused,
       base: workspace.base ?? null,
       integration: workspace.integration ?? null,
+      baselineConflict: boundedBaselineConflict(workspace),
       gitBefore: workspace.gitBefore,
     } : null
     // workspace.repositoryPath is the writable worktree; workspace.shared.repositoryPath is the
