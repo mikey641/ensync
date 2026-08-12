@@ -227,8 +227,11 @@ import {
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
 import {
+  exactNativeChatFocusCanApply,
+  findReferencedOwningConversation,
   findRetainedWorkspaceForProject,
   nativeProjectPathKey,
+  type ReferencedOwningConversation,
   workspaceProjectHistoryScore,
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
@@ -1147,6 +1150,19 @@ function App() {
   const workspaceBranchTitles = useMemo(() => Object.fromEntries(
     chats.flatMap((chat) => chat.workspace?.branch ? [[chat.workspace.branch, chat.title]] : []),
   ), [chats])
+  const owningConversationTargets = useMemo<Record<string, ReferencedOwningConversation>>(() => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return {}
+    const retainedWorkspaces = getRetainedNativeWorkspaces()
+    return Object.fromEntries(chats.flatMap((chat) => {
+      const target = findReferencedOwningConversation(window.localStorage, {
+        currentWorkspace: nativeWorkspaceIdentity,
+        retainedWorkspaces,
+        currentState: { projects, chats },
+        chat,
+      })
+      return target ? [[chat.id, target]] : []
+    }))
+  }, [chats, nativeWorkspaceIdentity, projects])
   const accountWorkspaceFingerprint = useMemo(
     () => JSON.stringify(accountWorkspaceDocument),
     [accountWorkspaceDocument],
@@ -2001,14 +2017,29 @@ function App() {
   useEffect(() => window.ensyncDesktop?.onWorkspaceProjectFocus?.((request) => {
     if (!request || typeof request.projectId !== 'string' || typeof request.projectPath !== 'string') return
     if ('chatId' in request && typeof request.chatId === 'string'
-      && typeof request.jobId === 'string' && typeof request.workspaceId === 'string') {
+      && typeof request.workspaceId === 'string') {
       if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
-      const run = inFlightRunsRef.current[request.chatId]
       const chat = chatsRef.current.find((candidate) => candidate.id === request.chatId
         && candidate.projectId === request.projectId)
       const project = projectsRef.current.find((candidate) => candidate.id === request.projectId
-        && candidate.path === request.projectPath)
-      if (!chat || !project || !run || !chatRunRegistryRef.current.has(chat.id)
+        && nativeProjectPathKey(candidate.path) === nativeProjectPathKey(request.projectPath))
+      if (!chat || !project) return
+      if (!('jobId' in request) || request.jobId === undefined) {
+        if (!exactNativeChatFocusCanApply(request, {
+          workspaceId: nativeWorkspaceIdentity.id,
+          projectId: project.id,
+          projectPath: project.path,
+          chatId: chat.id,
+        })) return
+        setProjects((current) => [project, ...current.filter((candidate) => candidate.id !== project.id)])
+        setActiveProjectId(project.id)
+        openChatRef.current(chat.id)
+        setProjectError(null)
+        return
+      }
+      if (typeof request.jobId !== 'string') return
+      const run = inFlightRunsRef.current[request.chatId]
+      if (!run || !chatRunRegistryRef.current.has(chat.id)
         || run.projectId !== project.id || run.projectPath !== project.path
         || !exactNativeFocusCanApply(request, {
           workspaceId: nativeWorkspaceIdentity.id,
@@ -3950,6 +3981,7 @@ function App() {
               const activeRunProviderName = activeProviderId
                 ? executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? activeProviderId
                 : null
+              const owningConversation = owningConversationTargets[chat.id] ?? null
               return (
               <ConversationPane
                 chat={chat}
@@ -3999,6 +4031,7 @@ function App() {
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
                 workspaceBranchTitles={workspaceBranchTitles}
+                owningConversation={owningConversation}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
                 onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
@@ -4038,6 +4071,33 @@ function App() {
                 onExecutionPanelOpenChange={(open) => setExecutionPanelOpenByChat((current) =>
                   setExecutionPanelOpenForChat(current, chat.id, open),
                 )}
+                onOpenOwningConversation={async (target) => {
+                  if (isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+                    && target.workspaceId === nativeWorkspaceIdentity.id) {
+                    const targetChat = chatsRef.current.find((candidate) => candidate.id === target.chatId
+                      && candidate.projectId === target.projectId)
+                    const targetProject = projectsRef.current.find((candidate) => candidate.id === target.projectId
+                      && nativeProjectPathKey(candidate.path) === nativeProjectPathKey(target.projectPath))
+                    if (!targetChat || !targetProject || !exactNativeChatFocusCanApply(target, {
+                      workspaceId: nativeWorkspaceIdentity.id,
+                      projectId: targetProject.id,
+                      projectPath: targetProject.path,
+                      chatId: targetChat.id,
+                    })) return false
+                    setProjects((current) => [targetProject, ...current.filter((candidate) => candidate.id !== targetProject.id)])
+                    setActiveProjectId(targetProject.id)
+                    openChatRef.current(targetChat.id)
+                    setProjectError(null)
+                    return true
+                  }
+                  if (typeof window.ensyncDesktop?.focusWorkspace !== 'function') return false
+                  try {
+                    return await window.ensyncDesktop.focusWorkspace(target)
+                  } catch (error) {
+                    console.error('[ensync-owning-conversation-focus]', error)
+                    return false
+                  }
+                }}
                 onSettings={() => setSettingsOpen(true)}
               />
               )
@@ -4120,6 +4180,7 @@ function ConversationPane({
   fallbackProviders,
   executionEvents,
   workspaceBranchTitles,
+  owningConversation,
   executionPanelOpen,
   onAnswerQuestion,
   onDraftChange,
@@ -4142,6 +4203,7 @@ function ConversationPane({
   onContext,
   onAutoContextSkillChange,
   onExecutionPanelOpenChange,
+  onOpenOwningConversation,
   onSettings,
   onOpenFile,
 }: {
@@ -4179,6 +4241,7 @@ function ConversationPane({
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
   workspaceBranchTitles: Record<string, string>
+  owningConversation: ReferencedOwningConversation | null
   executionPanelOpen: boolean
   onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
   onDraftChange: (value: string) => void
@@ -4201,6 +4264,7 @@ function ConversationPane({
   onContext: () => void
   onAutoContextSkillChange: () => void
   onExecutionPanelOpenChange: (open: boolean) => void
+  onOpenOwningConversation: (target: ReferencedOwningConversation) => Promise<boolean>
   onSettings: () => void
   onOpenFile: (path: string) => void
 }) {
@@ -4568,6 +4632,13 @@ function ConversationPane({
         />
       )}
 
+      {owningConversation && (
+        <OwningConversationBanner
+          target={owningConversation}
+          onOpen={onOpenOwningConversation}
+        />
+      )}
+
       {workspaceOverlap && <WorkspaceOverlapBanner summary={workspaceOverlap} />}
 
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
@@ -4638,6 +4709,47 @@ function WorkspaceOverlapBanner({
     <div className="workspace-overlap-banner" role="status" aria-live="polite">
       <AlertTriangle size={16} aria-hidden="true" />
       <span>{summary.message}</span>
+    </div>
+  )
+}
+
+function OwningConversationBanner({
+  target,
+  onOpen,
+}: {
+  target: ReferencedOwningConversation
+  onOpen: (target: ReferencedOwningConversation) => Promise<boolean>
+}) {
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setOpening(false)
+    setError(null)
+  }, [target.chatId, target.workspaceId])
+
+  const open = async () => {
+    if (opening) return
+    setOpening(true)
+    setError(null)
+    const focused = await onOpen(target)
+    if (!focused) {
+      setError('Ensync could not open that retained conversation. Quit Ensync completely and reopen it, then try again.')
+      setOpening(false)
+    }
+  }
+
+  return (
+    <div className="owning-conversation-banner" role={error ? 'alert' : 'status'} aria-live="polite">
+      <GitBranch size={16} aria-hidden="true" />
+      <span>
+        <strong>This task belongs to “{target.chatTitle}”</strong>
+        <small>{target.projectName} · protected conversation {target.branch}</small>
+        {error && <em>{error}</em>}
+      </span>
+      <button type="button" onClick={() => void open()} disabled={opening}>
+        {opening ? 'Opening…' : 'Open owning conversation'}
+      </button>
     </div>
   )
 }

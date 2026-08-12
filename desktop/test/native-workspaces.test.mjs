@@ -301,6 +301,41 @@ test('active run match queries require an authorized exact live roster binding',
   assert.equal(match({ sender: {} }, binding), false)
 })
 
+test('exact retained idle-chat focus needs no live job but keeps every chat coordinate intact', async () => {
+  const source = { id: IDS[0], kind: 'isolated' }
+  const target = { id: IDS[1], kind: 'canonical' }
+  const sourceSender = { id: 7 }
+  const targetWindow = {}
+  const actions = []
+  const handler = createWorkspaceFocusHandler({
+    isAuthorized: (event) => event.sender === sourceSender,
+    identityForWebContents: (sender) => sender === sourceSender ? source : null,
+    retainedIdentities: () => [source, target],
+    windowForWorkspace: (id) => id === target.id ? targetWindow : null,
+    focusWindow: (window) => { actions.push(['focus', window]); return true },
+    notifyProjectFocus: (window, request) => { actions.push(['notify', window, request]) },
+  })
+  const exactChat = {
+    workspaceId: target.id,
+    projectId: 'project-nadlan',
+    projectPath: '/Users/example/nadlan-desk',
+    chatId: 'chat-task-7',
+  }
+
+  assert.equal(await handler({ sender: sourceSender }, exactChat), true)
+  assert.deepEqual(actions, [
+    ['focus', targetWindow],
+    ['notify', targetWindow, exactChat],
+  ])
+  assert.equal(await handler({ sender: sourceSender }, { ...exactChat, chatId: '' }), false)
+  assert.equal(await handler({ sender: sourceSender }, {
+    workspaceId: target.id,
+    projectId: exactChat.projectId,
+    projectPath: exactChat.projectPath,
+    jobId: 'job-without-chat',
+  }), false)
+})
+
 test('exact active run focus requires the authenticated workspace, project, path, chat, and job binding', async () => {
   const source = { id: IDS[0], kind: 'isolated' }
   const target = { id: IDS[1], kind: 'canonical' }
@@ -343,7 +378,7 @@ test('exact active run focus requires the authenticated workspace, project, path
     projectId: exact.projectId,
     projectPath: exact.projectPath,
     chatId: exact.chatId,
-  }), false)
+  }), true)
   activeRuns.removeWorkspace(target.id)
   assert.equal(await handler({ sender: sourceSender }, exact), false)
 })

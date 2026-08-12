@@ -73,11 +73,12 @@ test('preload exposes only fixed active-run and queued-message handoff bridge me
   assert.equal(source.includes('send: (...args) => ipcRenderer.send(...args)'), false)
 })
 
-test('renderer bridge types distinguish legacy project focus from exact active-run focus', async () => {
+test('renderer bridge types distinguish project, exact idle-chat, and exact active-run focus', async () => {
   const source = await readFile(resolve(import.meta.dirname, '../../src/vite-env.d.ts'), 'utf8')
   assert.ok(source.includes('type NativeExactRunTarget = {'))
-  assert.ok(source.includes('type NativeWorkspaceFocusRequest = NativeLegacyWorkspaceFocusTarget | NativeExactRunTarget'))
-  assert.ok(source.includes('type NativeWorkspaceProjectFocusRequest = NativeLegacyProjectFocusRequest | NativeExactRunTarget'))
+  assert.ok(source.includes('type NativeExactChatTarget = {'))
+  assert.ok(source.includes('type NativeWorkspaceFocusRequest = NativeLegacyWorkspaceFocusTarget | NativeExactChatTarget | NativeExactRunTarget'))
+  assert.ok(source.includes('type NativeWorkspaceProjectFocusRequest = NativeLegacyProjectFocusRequest | NativeExactChatTarget | NativeExactRunTarget'))
   assert.ok(source.includes('chatId?: never'))
   assert.ok(source.includes('jobId?: never'))
   assert.ok(source.includes('focusWorkspace?: (request: NativeWorkspaceFocusRequest) => Promise<boolean>'))

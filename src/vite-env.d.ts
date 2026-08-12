@@ -8,6 +8,14 @@ type NativeExactRunTarget = {
   jobId: string
 }
 
+type NativeExactChatTarget = {
+  workspaceId: string
+  projectId: string
+  projectPath: string
+  chatId: string
+  jobId?: never
+}
+
 type NativeLegacyWorkspaceFocusTarget = {
   workspaceId: string
   projectId: string
@@ -24,8 +32,8 @@ type NativeLegacyProjectFocusRequest = {
   jobId?: never
 }
 
-type NativeWorkspaceFocusRequest = NativeLegacyWorkspaceFocusTarget | NativeExactRunTarget
-type NativeWorkspaceProjectFocusRequest = NativeLegacyProjectFocusRequest | NativeExactRunTarget
+type NativeWorkspaceFocusRequest = NativeLegacyWorkspaceFocusTarget | NativeExactChatTarget | NativeExactRunTarget
+type NativeWorkspaceProjectFocusRequest = NativeLegacyProjectFocusRequest | NativeExactChatTarget | NativeExactRunTarget
 
 interface Window {
   ensyncDesktop?: {
