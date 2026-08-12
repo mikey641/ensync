@@ -221,6 +221,22 @@ export function normalizeExactRunTarget(request) {
   }
 }
 
+/** Exact retained-chat coordinates deliberately carry no live job authority. */
+export function normalizeExactChatTarget(request) {
+  const project = normalizeProjectRequest(request)
+  const workspaceId = typeof request?.workspaceId === 'string'
+    ? request.workspaceId.toLowerCase()
+    : ''
+  if (!project || !NATIVE_WORKSPACE_ID_PATTERN.test(workspaceId)
+    || !nonEmptyString(request?.chatId) || request?.jobId !== undefined) return null
+  return {
+    workspaceId,
+    projectId: project.projectId,
+    projectPath: project.projectPath,
+    chatId: request.chatId,
+  }
+}
+
 function sameExactRunTarget(left, right) {
   return left.workspaceId === right.workspaceId
     && left.projectId === right.projectId
@@ -579,8 +595,12 @@ export function createWorkspaceFocusHandler({
     const targetWorkspaceId = typeof request.workspaceId === 'string'
       ? request.workspaceId.toLowerCase()
       : ''
-    const hasExactBinding = request.chatId !== undefined || request.jobId !== undefined
-    const exact = hasExactBinding ? normalizeExactRunTarget(request) : null
+    const hasChatBinding = request.chatId !== undefined
+    const hasJobBinding = request.jobId !== undefined
+    const hasExactBinding = hasChatBinding || hasJobBinding
+    const exactRun = hasJobBinding ? normalizeExactRunTarget(request) : null
+    const exactChat = hasChatBinding && !hasJobBinding ? normalizeExactChatTarget(request) : null
+    const exact = exactRun ?? exactChat
     if (!isNativeWorkspaceIdentity(source)
       || !NATIVE_WORKSPACE_ID_PATTERN.test(targetWorkspaceId)
       || source.id === targetWorkspaceId
@@ -588,7 +608,8 @@ export function createWorkspaceFocusHandler({
       || request.projectId.length === 0
       || request.projectId.length > 256
       || !absoluteLocalPath(request.projectPath)
-      || (hasExactBinding && (!exact || !activeRuns?.matches(exact)))) return false
+      || (hasExactBinding && !exact)
+      || (hasJobBinding && !activeRuns?.matches(exactRun))) return false
     const targetIdentity = retainedIdentities()
       .find((identity) => isNativeWorkspaceIdentity(identity) && identity.id === targetWorkspaceId)
     if (!targetIdentity) return false
