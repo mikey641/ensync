@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -118,6 +119,10 @@ import {
 } from './lib/nativeProjectFolder.mjs'
 import { createChatRunRegistry } from './lib/chatRunRegistry.mjs'
 import { createChatRunCancellationRegistry } from './lib/chatRunCancellation.mjs'
+import {
+  activeWorkspaceOverlaps,
+  workspaceOverlapSummary,
+} from './lib/workspaceOverlap.mjs'
 import {
   adoptReconnectableHostJobState,
   runningHostJobCandidates,
@@ -1139,6 +1144,9 @@ function App() {
     () => prepareAccountWorkspace({ chats, projects }),
     [chats, projects],
   )
+  const workspaceBranchTitles = useMemo(() => Object.fromEntries(
+    chats.flatMap((chat) => chat.workspace?.branch ? [[chat.workspace.branch, chat.title]] : []),
+  ), [chats])
   const accountWorkspaceFingerprint = useMemo(
     () => JSON.stringify(accountWorkspaceDocument),
     [accountWorkspaceDocument],
@@ -3990,6 +3998,7 @@ function App() {
                 autoContextSkill={autoContextSkill}
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
+                workspaceBranchTitles={workspaceBranchTitles}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
                 onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
@@ -4110,6 +4119,7 @@ function ConversationPane({
   autoContextSkill,
   fallbackProviders,
   executionEvents,
+  workspaceBranchTitles,
   executionPanelOpen,
   onAnswerQuestion,
   onDraftChange,
@@ -4168,6 +4178,7 @@ function ConversationPane({
   autoContextSkill: boolean
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
+  workspaceBranchTitles: Record<string, string>
   executionPanelOpen: boolean
   onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
   onDraftChange: (value: string) => void
@@ -4241,6 +4252,10 @@ function ConversationPane({
   // Derived from the same replayed event buffer the panel reads, so a window
   // that reconnects mid-turn still sees the question the provider is blocked on.
   const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
+  const workspaceOverlap = useMemo(() => workspaceOverlapSummary(
+    activeWorkspaceOverlaps(executionEvents),
+    workspaceBranchTitles,
+  ), [executionEvents, workspaceBranchTitles])
   const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null)
   const [questionError, setQuestionError] = useState<string | null>(null)
   const submitQuestionAnswer = useCallback(async (
@@ -4553,6 +4568,8 @@ function ConversationPane({
         />
       )}
 
+      {workspaceOverlap && <WorkspaceOverlapBanner summary={workspaceOverlap} />}
+
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
         <div className="composer">
           {attachments.length > 0 && (
@@ -4608,6 +4625,19 @@ function ConversationPane({
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+function WorkspaceOverlapBanner({
+  summary,
+}: {
+  summary: NonNullable<ReturnType<typeof workspaceOverlapSummary>>
+}) {
+  return (
+    <div className="workspace-overlap-banner" role="status" aria-live="polite">
+      <AlertTriangle size={16} aria-hidden="true" />
+      <span>{summary.message}</span>
     </div>
   )
 }

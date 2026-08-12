@@ -234,11 +234,19 @@ export async function autoLandWorkspace(workspace, options = {}) {
     } catch { /* notices are best-effort */ }
   }
   const gitOptions = { gitExecutable: options.gitExecutable }
+  let landWaitNotified = false
   const landInput = { projectPath: workspace.canonicalProjectPath, branch }
   const landOptions = {
     allowedRoots: options.allowedRoots,
     gitExecutable: options.gitExecutable,
     verifyLand: options.verifyLand,
+    signal: options.signal,
+    landLeaseOptions: options.landLeaseOptions,
+    onWait: () => {
+      if (landWaitNotified) return
+      landWaitNotified = true
+      notify('repository_land_waiting', `Waiting for another Ensync conversation to finish landing into ${workspace.shared?.repositoryPath ?? 'the repository'}. Protected work stays on ${branch}.`)
+    },
   }
 
   const first = await tryLand(landInput, landOptions)

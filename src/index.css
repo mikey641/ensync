@@ -292,6 +292,10 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .execution-panel__host--completed { color: var(--accent); }
 @keyframes execution-pulse { 0%, 100% { opacity: .35; } 50% { opacity: 1; } }
 
+.workspace-overlap-banner { width: min(720px, calc(100% - 44px)); min-width: 0; flex: 0 0 auto; align-self: center; margin: 0 0 10px; padding: 9px 11px; display: flex; align-items: flex-start; gap: 8px; border: 1px solid color-mix(in srgb, #e5ac46 54%, var(--line)); border-radius: 8px; background: color-mix(in srgb, #d9962b 11%, var(--surface-control)); color: color-mix(in srgb, #f5c66f 76%, var(--text-primary)); font-size: var(--font-label); line-height: 1.45; overflow-wrap: anywhere; word-break: break-word; }
+.workspace-overlap-banner > svg { flex: 0 0 auto; margin-top: 1px; color: #e8ad45; }
+.workspace-overlap-banner > span { min-width: 0; unicode-bidi: plaintext; text-align: start; }
+
 .composer-zone { width: 100%; min-width: 0; padding: 0 22px 14px; flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; background: linear-gradient(180deg, rgba(16,18,16,0), #101210 18%); }
 .composer { width: min(720px, 100%); min-width: 0; border: 1px solid #343a34; border-radius: 10px; background: #191c19; box-shadow: 0 8px 28px rgba(0,0,0,.18); overflow: hidden; }
 .composer:focus-within { border-color: #59665a; box-shadow: 0 0 0 1px rgba(158,230,166,.06), 0 10px 32px rgba(0,0,0,.22); }
@@ -607,6 +611,10 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
   }
 
   .conversation .execution-panel {
+    width: calc(100% - 20px);
+  }
+
+  .conversation .workspace-overlap-banner {
     width: calc(100% - 20px);
   }
 

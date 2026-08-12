@@ -223,6 +223,56 @@ test('landAgentBranch merges a clean agent branch into the baseline with a non-f
   assert.equal(after.branches.length, 0)
 })
 
+test('simultaneous agent lands serialize through verification and recheck the new HEAD', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  const secondBranch = 'ensync/chat-bbbbbbbbbbbbbbbbbbbbbbbb'
+  await git(['branch', secondBranch], { cwd: fixture.seed })
+  await git(['checkout', secondBranch], { cwd: fixture.seed })
+  await writeFile(join(fixture.seed, 'second-feature.txt'), 'built by another chat\n')
+  await git(['add', 'second-feature.txt'], { cwd: fixture.seed })
+  await git(['commit', '-m', 'Second Ensync agent work'], { cwd: fixture.seed })
+  await git(['checkout', 'main'], { cwd: fixture.seed })
+
+  let activeVerifications = 0
+  let maximumActiveVerifications = 0
+  let releaseFirst
+  const firstVerification = new Promise((resolve) => { releaseFirst = resolve })
+  let firstEntered
+  const firstStartedVerification = new Promise((resolve) => { firstEntered = resolve })
+  const verifyLand = async ({ branch }) => {
+    activeVerifications += 1
+    maximumActiveVerifications = Math.max(maximumActiveVerifications, activeVerifications)
+    if (branch === 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa') {
+      firstEntered()
+      await firstVerification
+    }
+    activeVerifications -= 1
+    return { ok: true }
+  }
+  const options = {
+    allowedRoots: [fixture.root],
+    verifyLand,
+    landLeaseOptions: { pollMs: 5, heartbeatMs: 10 },
+  }
+
+  const first = landAgentBranch(
+    { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+    options,
+  )
+  await firstStartedVerification
+  const second = landAgentBranch({ projectPath: fixture.seed, branch: secondBranch }, options)
+  await new Promise((resolve) => setTimeout(resolve, 30))
+  releaseFirst()
+  const [firstResult, secondResult] = await Promise.all([first, second])
+
+  assert.equal(maximumActiveVerifications, 1)
+  assert.notEqual(firstResult.land.mergeHead, secondResult.land.mergeHead)
+  await git(['merge-base', '--is-ancestor', firstResult.land.mergeHead, secondResult.land.mergeHead], {
+    cwd: fixture.seed,
+  })
+})
+
 test('landAgentBranch fails closed on dirty checkout, conflicts, and non-agent branches', async (context) => {
   const fixture = await agentBranchFixture(context)
   if (!fixture) return
@@ -324,6 +374,35 @@ test('landAgentBranch rolls the merge back when the land verification fails', as
   assert.equal((await git(['status', '--porcelain'], { cwd: fixture.seed })).stdout.trim(), '')
   const after = await listUnlandedAgentWork(fixture.seed, { allowedRoots: [fixture.root] })
   assert.equal(after.branches.length, 1)
+})
+
+test('losing the repository lease after merge rolls the canonical checkout back', async (context) => {
+  const fixture = await agentBranchFixture(context)
+  if (!fixture) return
+  const headBefore = (await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim()
+  const ownerPath = join(fixture.seed, '.git', 'ensync', 'repository-land.lock', 'owner.json')
+
+  await assert.rejects(
+    landAgentBranch(
+      { projectPath: fixture.seed, branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa' },
+      {
+        allowedRoots: [fixture.root],
+        verifyLand: async () => {
+          await writeFile(ownerPath, JSON.stringify({
+            schemaVersion: 1,
+            token: 'foreign-owner-token',
+            pid: process.pid,
+            updatedAt: new Date().toISOString(),
+          }))
+          return { ok: true }
+        },
+      },
+    ),
+    (error) => error?.code === 'repository_land_lease_lost',
+  )
+
+  assert.equal((await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim(), headBefore)
+  assert.equal((await git(['status', '--porcelain'], { cwd: fixture.seed })).stdout.trim(), '')
 })
 
 test('landAgentBranch lands normally when the land verification passes', async (context) => {

@@ -313,13 +313,31 @@ test('a baseline that moves mid-run is auto-resolved by a conflict-resolution ag
   const f = await isolationFixture(context)
   if (!f) return
   const runnerCalls = []
+  let overlapStops = 0
+  const overlap = {
+    peerBranch: 'ensync/chat-bbbbbbbbbbbbbbbbbbbbbbbb',
+    source: 'active',
+    paths: ['shared.txt'],
+    totalCount: 1,
+  }
   const service = new ChatRunService({
     statusService: statusServiceFor(readyClaude()),
     allowedRoots: [f.root],
     projectIsolation: f.isolation,
+    workspaceOverlapMonitor: {
+      async start() {
+        return {
+          current: () => [overlap],
+          async refresh() { return [overlap] },
+          async stop() { overlapStops += 1 },
+        }
+      },
+    },
     processRunner: async (_executable, _args, options) => {
       if (typeof options.input === 'string' && options.input.includes('[ENSYNC HOST CONFLICT RESOLUTION]')) {
         runnerCalls.push('conflict-resolution')
+        assert.match(options.input, /CROSS-CONVERSATION FILE AWARENESS/)
+        assert.match(options.input, /shared\.txt/)
         await writeFile(join(options.cwd, 'shared.txt'), 'resolved by agent\n')
         await git(['add', 'shared.txt'], { cwd: options.cwd })
         return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: claudeStdout('conflicts resolved') }
@@ -338,6 +356,7 @@ test('a baseline that moves mid-run is auto-resolved by a conflict-resolution ag
   )
 
   assert.deepEqual(runnerCalls, ['chat', 'conflict-resolution'])
+  assert.equal(overlapStops, 1)
   const codes = events.filter((event) => event.type === 'notice').map((event) => event.code)
   assert.equal(codes.includes('auto_land_conflict'), true)
   assert.equal(codes.includes('agent_work_landed'), true)
