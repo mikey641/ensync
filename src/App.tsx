@@ -4732,9 +4732,13 @@ function OwningConversationBanner({
     if (opening) return
     setOpening(true)
     setError(null)
-    const focused = await onOpen(target)
-    if (!focused) {
+    try {
+      const focused = await onOpen(target)
+      if (focused) return
       setError('Ensync could not open that retained conversation. Quit Ensync completely and reopen it, then try again.')
+    } catch {
+      setError('Ensync could not open that retained conversation. Quit Ensync completely and reopen it, then try again.')
+    } finally {
       setOpening(false)
     }
   }
