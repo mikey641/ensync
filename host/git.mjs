@@ -3,6 +3,7 @@ import { lstat, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { inspectProject } from './projects.mjs'
 import { validateProjectPath } from './chat.mjs'
+import { withRepositoryLandLease } from './repository-land-lease.mjs'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const MAX_OUTPUT_BYTES = 512 * 1024
@@ -605,15 +606,8 @@ export async function listUnlandedAgentWork(projectPath, options = {}) {
   }
 }
 
-export async function landAgentBranch(input, options = {}) {
-  const branch = typeof input?.branch === 'string' ? input.branch : ''
-  if (!AGENT_BRANCH_PATTERN.test(branch)) {
-    throw new GitWorkflowError('Only Ensync agent conversation branches (ensync/chat-…) can be landed.', {
-      code: 'invalid_agent_branch',
-      status: 400,
-    })
-  }
-  const repositoryPath = await gitRepositoryRoot(input.projectPath, options)
+async function landAgentBranchLocked(input, branch, repositoryPath, options, lease) {
+  await lease.assertHeld()
   await checkedGit(['show-ref', '--verify', `refs/heads/${branch}`], {
     cwd: repositoryPath,
     gitExecutable: options.gitExecutable,
@@ -672,6 +666,11 @@ export async function landAgentBranch(input, options = {}) {
     conflictError.files = files
     throw conflictError
   }
+  await lease.assertHeld()
+  const preMergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+  })
   const merge = await checkedGit(
     ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', `${LAND_MESSAGE_PREFIX}${branch}`, branch],
     { cwd: repositoryPath, gitExecutable: options.gitExecutable, allowFailure: true },
@@ -683,43 +682,75 @@ export async function landAgentBranch(input, options = {}) {
       status: 409,
     })
   }
-  if (typeof options.verifyLand === 'function') {
-    // A textually clean merge can still drop code one side depends on, so the
-    // land is verified semantically after the merge commit exists. A failed
-    // verification rolls the checkout back to its pre-merge state exactly; the
-    // checkout was verified clean above, so the reset cannot destroy user work.
-    let verification
-    try {
-      verification = await options.verifyLand({ repositoryPath, branch, mergedInto })
-    } catch (error) {
-      verification = { ok: false, reason: error instanceof Error ? error.message : 'The land verification could not run.' }
+  try {
+    if (typeof options.verifyLand === 'function') {
+      // A textually clean merge can still drop code one side depends on, so the
+      // land is verified semantically after the merge commit exists. A failed
+      // verification rolls the checkout back to its pre-merge state exactly; the
+      // checkout was verified clean above, so the reset cannot destroy user work.
+      let verification
+      try {
+        verification = await options.verifyLand({ repositoryPath, branch, mergedInto })
+      } catch (error) {
+        verification = { ok: false, reason: error instanceof Error ? error.message : 'The land verification could not run.' }
+      }
+      if (verification && verification.ok === false) {
+        const verificationError = new GitWorkflowError(
+          `Landing ${branch} was rolled back because the land verification failed: ${verification.reason ?? 'no reason was reported'}`,
+          { code: 'agent_branch_verification_failed', status: 409 },
+        )
+        verificationError.verification = verification
+        throw verificationError
+      }
     }
-    if (verification && verification.ok === false) {
-      await checkedGit(['reset', '--hard', 'ORIG_HEAD'], {
-        cwd: repositoryPath,
-        gitExecutable: options.gitExecutable,
-      })
-      const verificationError = new GitWorkflowError(
-        `Landing ${branch} was rolled back because the land verification failed: ${verification.reason ?? 'no reason was reported'}`,
-        { code: 'agent_branch_verification_failed', status: 409 },
-      )
-      verificationError.verification = verification
-      throw verificationError
+    await lease.assertHeld()
+    const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    })
+    return {
+      land: {
+        branch,
+        mergedInto,
+        mergeHead: mergeHead.stdout.trim(),
+        completedAt: new Date().toISOString(),
+      },
+      git: await getGitStatus(input.projectPath, options),
     }
+  } catch (error) {
+    await checkedGit(['reset', '--hard', preMergeHead.stdout.trim()], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    })
+    throw error
   }
-  const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
+}
+
+export async function landAgentBranch(input, options = {}) {
+  const branch = typeof input?.branch === 'string' ? input.branch : ''
+  if (!AGENT_BRANCH_PATTERN.test(branch)) {
+    throw new GitWorkflowError('Only Ensync agent conversation branches (ensync/chat-…) can be landed.', {
+      code: 'invalid_agent_branch',
+      status: 400,
+    })
+  }
+  const repositoryPath = await gitRepositoryRoot(input.projectPath, options)
+  const common = await checkedGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
     cwd: repositoryPath,
     gitExecutable: options.gitExecutable,
+    code: 'git_baseline_unavailable',
+    failureMessage: 'Git could not resolve the shared repository directory for landing.',
   })
-  return {
-    land: {
-      branch,
-      mergedInto,
-      mergeHead: mergeHead.stdout.trim(),
-      completedAt: new Date().toISOString(),
+  const commonGitDirectory = await realpath(common.stdout.trim())
+  return withRepositoryLandLease(
+    commonGitDirectory,
+    (lease) => landAgentBranchLocked(input, branch, repositoryPath, options, lease),
+    {
+      ...options.landLeaseOptions,
+      signal: options.signal,
+      onWait: options.onWait,
     },
-    git: await getGitStatus(input.projectPath, options),
-  }
+  )
 }
 
 export class GitWorkflowService {
@@ -727,10 +758,16 @@ export class GitWorkflowService {
     this.allowedRoots = options.allowedRoots
     this.gitExecutable = options.gitExecutable
     this.verifyLand = options.verifyLand
+    this.landLeaseOptions = options.landLeaseOptions
   }
 
   options() {
-    return { allowedRoots: this.allowedRoots, gitExecutable: this.gitExecutable, verifyLand: this.verifyLand }
+    return {
+      allowedRoots: this.allowedRoots,
+      gitExecutable: this.gitExecutable,
+      verifyLand: this.verifyLand,
+      landLeaseOptions: this.landLeaseOptions,
+    }
   }
 
   status(projectPath) {
