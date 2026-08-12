@@ -6,7 +6,7 @@ When a provider recognizes that the requested task belongs to another protected 
 
 ## Decision
 
-Ensync will derive a navigation offer from the latest completed agent message when it references another protected conversation branch. The resolver reads only checksummed snapshots for shell-retained native workspaces and accepts a full branch ID or a shortened hexadecimal prefix of at least six characters. It returns a target only when exactly one different conversation matches.
+Ensync will derive a navigation offer from the latest completed agent message when it references another protected conversation branch or workspace ID. The resolver uses the current renderer's live state plus checksummed snapshots for other shell-retained native workspaces. It accepts a full ID, an `ensync/chat-` prefix of at least six hexadecimal characters, or a context-labelled `workspace`/`worktree` prefix of at least four characters. It returns a target only when exactly one different conversation matches.
 
 The conversation pane will show a persistent **Open owning conversation** action with the matched conversation and project names. The action focuses the target native window and opens the exact retained chat. It does not copy, queue, send, or replay the user's message and does not start a provider process.
 
@@ -14,6 +14,7 @@ The conversation pane will show a persistent **Open owning conversation** action
 
 - The resolver never searches arbitrary directories or enters another conversation's worktree.
 - Corrupt or unchecksummed storage, an unretained workspace, an ambiguous prefix, a missing project, the current chat, and browser-only mode produce no action.
+- A conversation already owned by the current native window is activated locally; a conversation in another retained window uses native focus.
 - Native IPC accepts exact idle-chat navigation as a distinct target shape without a job ID. Exact active-run navigation continues to require the live shell roster.
 - The target renderer verifies the native workspace ID, project ID, normalized project path, and chat/project relationship before changing selection.
 - Path comparison remains case-insensitive for Windows drive and UNC paths.
@@ -21,4 +22,3 @@ The conversation pane will show a persistent **Open owning conversation** action
 ## User experience
 
 The banner explains that the task belongs to the named conversation and offers **Open owning conversation**. A failed focus leaves the current chat unchanged and reports an inline error. Ensync never silently transfers a draft or executes `continue` elsewhere.
-

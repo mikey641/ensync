@@ -33,6 +33,7 @@ export type ReferencedOwningConversation = NativeExactChatTarget & {
 export function findReferencedOwningConversation(storage: StorageReader, options: {
   currentWorkspace: NativeWorkspaceIdentity
   retainedWorkspaces: NativeWorkspaceIdentity[]
+  currentState?: unknown
   chat: unknown
 }): ReferencedOwningConversation | null
 

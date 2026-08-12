@@ -15,6 +15,7 @@ test('the conversation pane offers exact owning-chat navigation without transfer
   assert.match(app, /exactNativeChatFocusCanApply/)
   assert.match(app, /<OwningConversationBanner/)
   assert.match(app, /'Open owning conversation'/)
+  assert.match(app, /target\.workspaceId === nativeWorkspaceIdentity\.id/)
   assert.match(app, /focusWorkspace\(target\)/)
   const handlerStart = app.indexOf('onOpenOwningConversation={async')
   const handlerEnd = app.indexOf('onSettings=', handlerStart)

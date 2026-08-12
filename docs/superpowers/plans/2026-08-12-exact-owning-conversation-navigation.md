@@ -4,7 +4,7 @@
 
 **Goal:** Let a user reopen the exact retained conversation named by a provider instead of repeatedly continuing in the wrong Ensync chat.
 
-**Architecture:** A pure renderer-side resolver extracts a protected-branch reference from the latest agent message and uniquely matches it against checksummed retained-workspace snapshots. The existing authenticated native focus IPC gains a separate exact idle-chat target, and the target renderer revalidates the workspace, project, path, and chat before selection. The UI presents an explicit action and never transfers or executes text automatically.
+**Architecture:** A pure renderer-side resolver extracts a protected branch or workspace-ID reference from the latest agent message and uniquely matches it against live chats in the current window plus checksummed snapshots for other retained workspaces. The existing authenticated native focus IPC gains a separate exact idle-chat target, and the receiving renderer revalidates the workspace, project, path, and chat before selection. The UI presents an explicit action and never transfers or executes text automatically.
 
 **Tech Stack:** React, TypeScript, Electron IPC, Node test runner, checksummed localStorage snapshots.
 
@@ -26,7 +26,7 @@
 - Test: `host/native-workspace-routing.test.mjs`
 
 **Interfaces:**
-- Produces: `findReferencedOwningConversation(storage, options)` returning exact workspace/project/chat coordinates and display labels, or `null`.
+- Produces: `findReferencedOwningConversation(storage, options)` returning exact workspace/project/chat coordinates and display labels from either the current live window or another retained snapshot, or `null`.
 - Produces: `exactNativeChatFocusCanApply(request, current)` for target-renderer validation.
 
 - [ ] **Step 1: Write failing tests** for a shortened unique branch reference, ambiguous prefixes, corrupt snapshots, current-chat exclusion, and Windows path validation.

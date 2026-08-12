@@ -118,6 +118,44 @@ test('a shortened protected branch in the latest agent response resolves one exa
   })
 })
 
+test('a shortened workspace ID resolves another conversation in the current native window', () => {
+  const storage = createStorage()
+  const currentState = {
+    projects: [{ id: 'relay', name: 'Ensync', path: 'C:\\Work\\Relay' }],
+    chats: [{
+      id: 'chat-wrong',
+      projectId: 'relay',
+      title: 'Wrong retry',
+      workspace: { branch: 'ensync/chat-6fc99d71e61fe26545171e10' },
+      messages: [{
+        role: 'agent',
+        content: 'This run is bound to the 6fc99… worktree. The conflicted files exist in the protected 0f96… conversation workspace.',
+      }],
+    }, {
+      id: 'chat-conflict-owner',
+      projectId: 'relay',
+      title: 'Land and reconcile changes',
+      workspace: { branch: 'ensync/chat-0f96d38ffe0c213a56274a16' },
+      messages: [{ role: 'user', content: 'land and reconcile any change' }],
+    }],
+  }
+
+  assert.deepEqual(findReferencedOwningConversation(storage, {
+    currentWorkspace: canonical,
+    retainedWorkspaces: [canonical],
+    currentState,
+    chat: currentState.chats[0],
+  }), {
+    workspaceId: canonical.id,
+    projectId: 'relay',
+    projectPath: 'C:\\Work\\Relay',
+    projectName: 'Ensync',
+    chatId: 'chat-conflict-owner',
+    chatTitle: 'Land and reconcile changes',
+    branch: 'ensync/chat-0f96d38ffe0c213a56274a16',
+  })
+})
+
 test('owning conversation resolution fails closed for ambiguous prefixes, stale roles, and unchecked storage', () => {
   const storage = createStorage()
   for (const [workspace, suffix] of [[isolated, '9b90feb1'], [anotherIsolated, 'aaaaaaaa']]) {

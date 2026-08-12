@@ -1157,11 +1157,12 @@ function App() {
       const target = findReferencedOwningConversation(window.localStorage, {
         currentWorkspace: nativeWorkspaceIdentity,
         retainedWorkspaces,
+        currentState: { projects, chats },
         chat,
       })
       return target ? [[chat.id, target]] : []
     }))
-  }, [chats, nativeWorkspaceIdentity])
+  }, [chats, nativeWorkspaceIdentity, projects])
   const accountWorkspaceFingerprint = useMemo(
     () => JSON.stringify(accountWorkspaceDocument),
     [accountWorkspaceDocument],
@@ -4071,6 +4072,24 @@ function App() {
                   setExecutionPanelOpenForChat(current, chat.id, open),
                 )}
                 onOpenOwningConversation={async (target) => {
+                  if (isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+                    && target.workspaceId === nativeWorkspaceIdentity.id) {
+                    const targetChat = chatsRef.current.find((candidate) => candidate.id === target.chatId
+                      && candidate.projectId === target.projectId)
+                    const targetProject = projectsRef.current.find((candidate) => candidate.id === target.projectId
+                      && nativeProjectPathKey(candidate.path) === nativeProjectPathKey(target.projectPath))
+                    if (!targetChat || !targetProject || !exactNativeChatFocusCanApply(target, {
+                      workspaceId: nativeWorkspaceIdentity.id,
+                      projectId: targetProject.id,
+                      projectPath: targetProject.path,
+                      chatId: targetChat.id,
+                    })) return false
+                    setProjects((current) => [targetProject, ...current.filter((candidate) => candidate.id !== targetProject.id)])
+                    setActiveProjectId(targetProject.id)
+                    openChatRef.current(targetChat.id)
+                    setProjectError(null)
+                    return true
+                  }
                   if (typeof window.ensyncDesktop?.focusWorkspace !== 'function') return false
                   try {
                     return await window.ensyncDesktop.focusWorkspace(target)
