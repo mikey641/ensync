@@ -120,6 +120,85 @@ test('ChatRunService uses a pre-acquired workspace lease without acquiring or re
   assert.equal(processCwd, projectPath)
 })
 
+test('ChatRunService tells the provider and renderer that baseline reconciliation is deferred until landing', async (context) => {
+  const projectPath = await projectFixture(context)
+  const baselineConflict = {
+    baselineSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    files: ['TODO.md', 'components/views/UnitDetail.tsx', 'package.json'],
+    reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+  }
+  const events = []
+  let seenPrompt = ''
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-deferred',
+      baselineConflict,
+      base: {
+        sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        canonicalSha: baselineConflict.baselineSha,
+        source: 'base_refresh_deferred',
+        reason: baselineConflict.reason,
+        remote: 'origin',
+        branch: 'main',
+        refreshed: false,
+      },
+      integration: {
+        canonicalSha: baselineConflict.baselineSha,
+        integrated: false,
+        unintegratedCommits: 1,
+      },
+      gitBefore: {
+        dirty: false,
+        changedFiles: 0,
+        head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      seenPrompt = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  const result = await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:deferred-baseline',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.match(seenPrompt, /DEFERRED BASELINE RECONCILIATION/)
+  assert.match(seenPrompt, /bbbbbbbbbbbb/)
+  assert.match(seenPrompt, /components\/views\/UnitDetail\.tsx/)
+  assert.match(seenPrompt, /continue/i)
+  assert.match(seenPrompt, /before landing/i)
+  assert.doesNotMatch(seenPrompt, /never merges them for you/i)
+  const ready = events.find((event) => event.code === 'project_workspace_ready')
+  assert.match(ready.message, /reconciliation is deferred until landing/i)
+  assert.deepEqual(ready.workspace.baselineConflict, baselineConflict)
+  assert.deepEqual(result.workspace.baselineConflict, baselineConflict)
+})
+
 test('ChatRunService shows live overlap events, advises the provider, and stops monitoring', async (context) => {
   const projectPath = await projectFixture(context)
   const overlap = {

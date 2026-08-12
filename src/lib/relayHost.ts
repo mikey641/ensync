@@ -275,11 +275,19 @@ export type ChatOutputRecovery = {
   discardedLineCount: number
 }
 
+export type ChatWorkspaceBaselineConflict = {
+  baselineSha: string
+  files: string[]
+  reason: string
+}
+
 export type ChatRunWorkspace = {
   path: string
   repositoryPath: string
   branch: string
   reused: boolean
+  /** A cleanly aborted baseline merge that Ensync will retry during landing. */
+  baselineConflict?: ChatWorkspaceBaselineConflict | null
   gitBefore: {
     branch: string
     head: string
@@ -364,6 +372,7 @@ export type ChatExecutionEvent =
       workspace?: {
         path: string
         branch: string
+        baselineConflict?: ChatWorkspaceBaselineConflict | null
       }
       overlap?: {
         peerBranch: string

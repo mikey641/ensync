@@ -885,31 +885,38 @@ test('acquire merges new baseline commits into a reused conversation branch', as
   assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
 })
 
-test('acquire fails closed with the conflicting files when baseline sync conflicts', async (context) => {
+test('acquire defers conflicting baseline synchronization and preserves the exact clean conversation branch', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
 
   const first = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  const originalBranch = first.workspace.branch
+  const originalPath = first.workspace.repositoryPath
   await writeFile(join(first.workspace.projectPath, 'tracked.txt'), 'agent version\n')
   await first.release()
 
   await writeFile(join(fixture.repository, 'tracked.txt'), 'baseline version\n')
   await git(fixture.repository, ['add', 'tracked.txt'])
   await git(fixture.repository, ['commit', '-m', 'baseline change'])
+  const baselineSha = await git(fixture.repository, ['rev-parse', 'HEAD'])
 
-  await assert.rejects(
-    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
-    (error) => error instanceof ProjectIsolationError
-      && error.code === 'workspace_baseline_conflict'
-      && /tracked\.txt/.test(error.message),
-  )
-
-  // The aborted merge leaves no merge in progress, so a retry fails the same
-  // clean way instead of erroring on a half-merged worktree.
-  await assert.rejects(
-    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
-    (error) => error instanceof ProjectIsolationError && error.code === 'workspace_baseline_conflict',
-  )
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  context.after(() => resumed.release())
+  assert.equal(resumed.workspace.branch, originalBranch)
+  assert.equal(resumed.workspace.repositoryPath, originalPath)
+  assert.equal(await readFile(join(resumed.workspace.projectPath, 'tracked.txt'), 'utf8'), 'agent version\n')
+  assert.deepEqual(resumed.workspace.baselineConflict, {
+    baselineSha,
+    files: ['tracked.txt'],
+    reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+  })
+  const mergeHead = await runGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+    cwd: resumed.workspace.repositoryPath,
+  })
+  assert.notEqual(mergeHead.exitCode, 0)
+  assert.equal(await git(resumed.workspace.repositoryPath, ['diff', '--name-only', '--diff-filter=U']), '')
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+  assert.equal(resumed.workspace.integration.integrated, false)
 })
 
 test('commitAgentWork on a clean worktree commits nothing', async (context) => {
