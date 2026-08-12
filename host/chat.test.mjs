@@ -192,6 +192,7 @@ test('ChatRunService tells the provider and renderer that baseline reconciliatio
   assert.match(seenPrompt, /components\/views\/UnitDetail\.tsx/)
   assert.match(seenPrompt, /continue/i)
   assert.match(seenPrompt, /before landing/i)
+  assert.doesNotMatch(seenPrompt, /never merges them for you/i)
   const ready = events.find((event) => event.code === 'project_workspace_ready')
   assert.match(ready.message, /reconciliation is deferred until landing/i)
   assert.deepEqual(ready.workspace.baselineConflict, baselineConflict)

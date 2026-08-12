@@ -420,6 +420,7 @@ function isolatedPrompt(prompt, workspace, overlaps = []) {
   const base = workspaceBaseSummary(workspace)
   const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
     && workspace.integration.unintegratedCommits > 0
+    && !boundedBaselineConflict(workspace)
     ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
     : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]

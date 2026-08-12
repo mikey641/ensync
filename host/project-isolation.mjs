@@ -66,7 +66,7 @@ function boundedConflictFiles(value) {
     && file.length <= MAX_BASELINE_CONFLICT_PATH_CHARACTERS
     && !WORKSPACE_KEY_CONTROL_CHARACTERS.test(file)
   )))]
-    .sort((left, right) => left.localeCompare(right))
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
     .slice(0, MAX_BASELINE_CONFLICT_FILES)
 }
 
