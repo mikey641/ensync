@@ -1196,6 +1196,7 @@ export class ProjectIsolationService {
 
     return {
       canonicalProjectPath,
+      commonGitDirectory: repository.commonGitDirectory,
       repositoryPath: worktreePath,
       projectPath: workspaceProjectPath,
       branch,
