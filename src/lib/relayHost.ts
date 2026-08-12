@@ -233,6 +233,8 @@ export type ChatRunRequest = {
   model?: string | null
   effort?: ChatModelEffort | null
   timeoutMs?: number
+  /** False keeps this run's work unlanded for explicit review; the host-wide switch still wins. */
+  autoLand?: boolean
 }
 
 export type ChatRunUsage = {

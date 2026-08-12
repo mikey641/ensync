@@ -397,3 +397,54 @@ test('automatic landing can be disabled per service', async (context) => {
   assert.equal(codes.includes('agent_work_landed'), false)
   assert.equal(await subjectOf(f.seed), 'Initial commit')
 })
+
+test('a run request can opt out of automatic landing', async (context) => {
+  const f = await isolationFixture(context)
+  if (!f) return
+  const service = new ChatRunService({
+    statusService: statusServiceFor(readyClaude()),
+    allowedRoots: [f.root],
+    projectIsolation: f.isolation,
+    processRunner: async (_executable, _args, options) => {
+      await writeFile(join(options.cwd, 'agent-note.txt'), 'from agent\n')
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: claudeStdout('done') }
+    },
+  })
+  const events = []
+
+  await service.run(
+    { provider: 'claude', projectPath: f.seed, prompt: 'do work', workspaceKey: 'conversation:autoland-request-opt-out', autoLand: false },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  const codes = events.filter((event) => event.type === 'notice').map((event) => event.code)
+  assert.equal(codes.includes('agent_work_committed'), true)
+  assert.equal(codes.includes('agent_work_landed'), false)
+  assert.equal(await subjectOf(f.seed), 'Initial commit')
+})
+
+test('a run request cannot re-enable automatic landing disabled host-wide', async (context) => {
+  const f = await isolationFixture(context)
+  if (!f) return
+  const service = new ChatRunService({
+    statusService: statusServiceFor(readyClaude()),
+    allowedRoots: [f.root],
+    projectIsolation: f.isolation,
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      await writeFile(join(options.cwd, 'agent-note.txt'), 'from agent\n')
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: claudeStdout('done') }
+    },
+  })
+  const events = []
+
+  await service.run(
+    { provider: 'claude', projectPath: f.seed, prompt: 'do work', workspaceKey: 'conversation:autoland-request-no-override', autoLand: true },
+    { onEvent: (event) => events.push(event) },
+  )
+
+  const codes = events.filter((event) => event.type === 'notice').map((event) => event.code)
+  assert.equal(codes.includes('agent_work_committed'), true)
+  assert.equal(codes.includes('agent_work_landed'), false)
+  assert.equal(await subjectOf(f.seed), 'Initial commit')
+})
