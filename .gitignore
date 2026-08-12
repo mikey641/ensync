@@ -15,3 +15,4 @@ test-results/
 .ensync-sync-data.json
 .ensync-sync-data.json.staging
 .claude/
+.worktrees/
