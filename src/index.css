@@ -296,6 +296,18 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .workspace-overlap-banner > svg { flex: 0 0 auto; margin-top: 1px; color: #e8ad45; }
 .workspace-overlap-banner > span { min-width: 0; unicode-bidi: plaintext; text-align: start; }
 
+.owning-conversation-banner { width: min(720px, calc(100% - 44px)); min-width: 0; flex: 0 0 auto; align-self: center; margin: 0 0 10px; padding: 10px 11px; display: flex; align-items: center; gap: 9px; border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 9%, var(--surface-control)); color: var(--text-primary); font-size: var(--font-label); line-height: 1.4; }
+.owning-conversation-banner > svg { flex: 0 0 auto; color: var(--accent); }
+.owning-conversation-banner > span { min-width: 0; flex: 1 1 auto; unicode-bidi: plaintext; text-align: start; }
+.owning-conversation-banner strong,
+.owning-conversation-banner small,
+.owning-conversation-banner em { display: block; min-width: 0; overflow-wrap: anywhere; word-break: break-word; }
+.owning-conversation-banner small { margin-top: 2px; color: var(--text-muted); font-style: normal; }
+.owning-conversation-banner em { margin-top: 4px; color: #d89a8f; font-style: normal; }
+.owning-conversation-banner button { flex: 0 0 auto; min-height: 30px; padding: 0 10px; border: 1px solid color-mix(in srgb, var(--accent) 48%, var(--line)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 14%, var(--surface-control)); color: var(--text-primary); font: inherit; font-weight: 600; cursor: pointer; }
+.owning-conversation-banner button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, var(--surface-hover)); }
+.owning-conversation-banner button:disabled { cursor: wait; opacity: .7; }
+
 .composer-zone { width: 100%; min-width: 0; padding: 0 22px 14px; flex: 0 0 auto; display: flex; flex-direction: column; align-items: center; background: linear-gradient(180deg, rgba(16,18,16,0), #101210 18%); }
 .composer { width: min(720px, 100%); min-width: 0; border: 1px solid #343a34; border-radius: 10px; background: #191c19; box-shadow: 0 8px 28px rgba(0,0,0,.18); overflow: hidden; }
 .composer:focus-within { border-color: #59665a; box-shadow: 0 0 0 1px rgba(158,230,166,.06), 0 10px 32px rgba(0,0,0,.22); }
@@ -616,6 +628,20 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 
   .conversation .workspace-overlap-banner {
     width: calc(100% - 20px);
+  }
+
+  .conversation .owning-conversation-banner {
+    width: calc(100% - 20px);
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .conversation .owning-conversation-banner > span {
+    flex-basis: calc(100% - 28px);
+  }
+
+  .conversation .owning-conversation-banner button {
+    margin-inline-start: 25px;
   }
 
   .conversation .execution-panel__header > small {
