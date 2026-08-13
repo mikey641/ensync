@@ -14,7 +14,10 @@ import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionCha
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
-import { withEnsyncMultiAgentInstructions } from './multi-agent-prompt.mjs'
+import {
+  withoutLeadingEnsyncMultiAgentInstructions,
+  withEnsyncMultiAgentInstructions,
+} from './multi-agent-prompt.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid', 'cursor'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
@@ -1335,13 +1338,15 @@ export class ChatRunService {
       }
     }
     // Every provider runner — codex exec, the codex live turn, claude resume,
-    // and droid — receives the same bundled Ensync multi-agent/Superpowers
-    // contract ahead of the user's prompt (and ahead of any workspace
-    // isolation header). Wrapping is idempotent for an already-wrapped prompt.
+    // and droid — receives the same bundled Ensync agent-coordination contract
+    // ahead of the user's prompt (and ahead of any workspace isolation header).
+    // Remove a renderer-supplied complete envelope before adding isolation, then
+    // always apply the current contract so marker-shaped user text cannot bypass it.
+    const promptBody = withoutLeadingEnsyncMultiAgentInstructions(request.prompt)
     const executionRequest = {
       ...request,
       prompt: withEnsyncMultiAgentInstructions(
-        workspace ? isolatedPrompt(request.prompt, workspace, workspaceOverlaps) : request.prompt,
+        workspace ? isolatedPrompt(promptBody, workspace, workspaceOverlaps) : promptBody,
       ),
     }
     const publicWorkspace = workspace ? {

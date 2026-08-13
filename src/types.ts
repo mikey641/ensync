@@ -18,9 +18,8 @@ export type ProviderId =
   | 'ollama'
 
 export type AgentCoordinationPolicy = {
-  policy: 'ensync_superpowers_v1'
+  policy: 'ensync_agent_coordination_v1'
   delivery: 'ensync_prompt'
-  nativePlugin: 'optional'
 }
 
 export type Provider = {
@@ -65,7 +64,7 @@ export type Provider = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
-  /** Universal Ensync behavior; provider-native Superpowers installation is optional. */
+  /** Universal Ensync agent-coordination behavior delivered in every provider prompt. */
   agentCoordination: AgentCoordinationPolicy
   checkedAt: string | null
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { ENSYNC_MULTI_AGENT_MARKER, ENSYNC_SUPERPOWERS_POLICY } from './multi-agent-prompt.mjs'
+import { ENSYNC_AGENT_COORDINATION_POLICY, ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
 import {
   providerRunnerIds,
   supportsAnyProviderRunner,
@@ -8,7 +8,7 @@ import {
 } from './provider-runner-contract.mjs'
 import { getProviderCatalog } from './providers.mjs'
 
-test('every enabled provider runner is catalog-supported and bound to Superpowers locally', () => {
+test('every enabled provider runner is catalog-supported and bound to Ensync agent coordination locally', () => {
   const catalog = getProviderCatalog()
   const supported = catalog
     .filter((provider) => provider.chatExecution === 'supported')
@@ -19,11 +19,11 @@ test('every enabled provider runner is catalog-supported and bound to Superpower
   for (const providerId of supported) {
     const prompt = withProviderRunnerInstructions(providerId, 'local', 'Implement safely.')
     assert.match(prompt, new RegExp(`^${ENSYNC_MULTI_AGENT_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
-    assert.match(prompt, /bundled Superpowers contract applies to every Ensync provider runner/)
+    assert.match(prompt, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
     assert.match(prompt, /Implement safely\.$/)
     assert.equal(
       catalog.find((provider) => provider.id === providerId)?.agentCoordination.policy,
-      ENSYNC_SUPERPOWERS_POLICY,
+      ENSYNC_AGENT_COORDINATION_POLICY,
     )
   }
   for (const provider of catalog) {

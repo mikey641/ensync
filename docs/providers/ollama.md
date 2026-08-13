@@ -161,7 +161,7 @@ chat provider, not merely an unfinished one.**
 This is the outcome the investigation was told to report if it found it, and it is what the
 evidence shows. Ensync chat providers must carry out coding work inside a protected git
 worktree: read and edit files, run builds and tests, and act on the bundled Ensync
-multi-agent/Superpowers contract that every prompt is wrapped in. Ollama cannot do any of
+agent-coordination contract that every prompt is wrapped in. Ollama cannot do any of
 it — not because a flag is missing, but because it is an inference server, not an agent.
 
 Wiring it in as a chat provider would be actively harmful rather than merely useless: every

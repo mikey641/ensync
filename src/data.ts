@@ -1,9 +1,8 @@
 import type { AgentCoordinationPolicy, Chat, Provider } from './types'
 
 const defaultAgentCoordination: AgentCoordinationPolicy = {
-  policy: 'ensync_superpowers_v1',
+  policy: 'ensync_agent_coordination_v1',
   delivery: 'ensync_prompt',
-  nativePlugin: 'optional',
 }
 
 const defaultProviderCatalog: Array<Omit<Provider, 'agentCoordination'>> = [

@@ -18,6 +18,7 @@ import {
 import { createRelayHost } from './server.mjs'
 import { CursorAgentError } from './cursor-agent.mjs'
 import { ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
+import { withProviderRunnerInstructions } from './provider-runner-contract.mjs'
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-chat-test-'))
@@ -118,6 +119,57 @@ test('ChatRunService uses a pre-acquired workspace lease without acquiring or re
   assert.equal(acquireCalls, 0)
   assert.equal(releaseCalls, 0)
   assert.equal(processCwd, projectPath)
+})
+
+test('ChatRunService normalizes a renderer-wrapped prompt before protected-workspace isolation', async (context) => {
+  const projectPath = await projectFixture(context)
+  let processInput = ''
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-renderer-envelope',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      processInput = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+  const prompt = withProviderRunnerInstructions('codex', 'local', 'Continue the renderer-started task.')
+
+  await service.run({
+    provider: 'codex', projectPath, prompt, workspaceKey: 'conversation:renderer-envelope',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+  })
+
+  assert.equal(processInput.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 1)
+  assert.equal(processInput.match(/This bundled Ensync agent-coordination contract applies to every Ensync provider runner/g)?.length, 1)
+  assert.match(processInput, /\[ENSYNC HOST WORKSPACE ISOLATION\]/)
+  assert.match(processInput, /Protected branch: ensync\/chat-renderer-envelope/)
+  assert.match(processInput, /Continue the renderer-started task\.$/)
 })
 
 test('ChatRunService tells the provider and renderer that baseline reconciliation is deferred until landing', async (context) => {
@@ -381,7 +433,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   assert.deepEqual(args, ['exec', '--json', '--color', 'never', '--skip-git-repo-check', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="high"', '-'])
   assert.equal(options.cwd, await realpath(projectPath))
   assert.equal(options.input.startsWith(ENSYNC_MULTI_AGENT_MARKER), true)
-  assert.match(options.input, /bundled Superpowers contract applies to every Ensync provider runner/)
+  assert.match(options.input, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
   assert.match(options.input, /Inspect this project and explain \[ENSYNC SAFE MULTI-AGENT v1\]$/)
   assert.equal(options.input.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 2)
   assert.equal(options.inactivityTimeoutMs, 2_000)
