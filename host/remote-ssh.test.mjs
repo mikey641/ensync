@@ -337,7 +337,7 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
   const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
   assert.match(remotePayload.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
-  assert.match(remotePayload.prompt, /bundled Superpowers contract applies to every Ensync provider runner/)
+  assert.match(remotePayload.prompt, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
   assert.match(remotePayload.prompt, /Continue the remote implementation and explain \[ENSYNC SAFE MULTI-AGENT v1\]\.$/)
   assert.equal(remotePayload.prompt.split('[ENSYNC SAFE MULTI-AGENT v1]').length - 1, 2)
   assert.equal(remotePayload.inactivityTimeoutMs, 2_000)
