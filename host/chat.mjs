@@ -806,6 +806,9 @@ function validateRequest(request) {
       `The timeout must be between 1,000 and ${MAX_TIMEOUT_MS.toLocaleString()} milliseconds.`,
     )
   }
+  if (request.autoLand != null && typeof request.autoLand !== 'boolean') {
+    throw new ChatRunError('invalid_auto_land', 'The automatic landing preference must be true or false.')
+  }
 }
 
 function subscriptionAuthenticationAllowed(provider) {
@@ -1742,7 +1745,7 @@ export class ChatRunService {
           // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
         }
         await refreshOverlapSession(workspaceOverlapSession, options.onEvent)
-        if (runOutcome === 'succeeded' && this.#autoLand && agentWorkSaved && !options.signal?.aborted) {
+        if (runOutcome === 'succeeded' && this.#autoLand && request.autoLand !== false && agentWorkSaved && !options.signal?.aborted) {
           await this.#autoLandAfterRun(
             provider,
             request,

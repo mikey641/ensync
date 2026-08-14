@@ -1062,6 +1062,10 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     service.run({ provider: 'codex', projectPath, prompt: 'Hello', effort: 'ultra' }),
     (error) => error instanceof ChatRunError && error.code === 'invalid_effort',
   )
+  await assert.rejects(
+    service.run({ provider: 'codex', projectPath, prompt: 'Hello', autoLand: 'yes' }),
+    (error) => error instanceof ChatRunError && error.code === 'invalid_auto_land',
+  )
   assert.equal(processCalls, 0)
 })
 

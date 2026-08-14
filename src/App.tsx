@@ -315,6 +315,8 @@ type StoredState = {
   conversationLayout?: ConversationLayoutMode
   autoFallback: boolean
   autoContextSkill?: boolean
+  /** Whether verified successful local runs land their work automatically. */
+  autoLandAgentWork?: boolean
   fallbackProviderOrder?: ProviderId[]
   /** Latest completed agent-message ID the user opened, keyed by stable chat ID. */
   readCompletionByChat?: Record<string, string>
@@ -787,6 +789,7 @@ function App() {
   const [conversationLayout, setConversationLayout] = useState<ConversationLayoutMode>(hydrated?.conversationLayout === 'tabs' ? 'tabs' : 'split')
   const [autoFallback, setAutoFallback] = useState(hydrated?.autoFallback ?? true)
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
+  const [autoLandAgentWork, setAutoLandAgentWork] = useState(hydrated?.autoLandAgentWork ?? true)
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
     resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
@@ -922,6 +925,7 @@ function App() {
     conversationLayout,
     autoFallback,
     autoContextSkill,
+    autoLandAgentWork,
     readCompletionByChat,
     executionPanelOpenByChat,
     drafts,
@@ -2936,6 +2940,7 @@ function App() {
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
             effort: requestedEffort,
+            autoLand: autoLandAgentWork,
           }
         : {
             provider: target.id,
@@ -2946,6 +2951,7 @@ function App() {
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
             effort: requestedEffort,
+            autoLand: autoLandAgentWork,
           }
       return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
         if (event.type === 'started') providerProcessStarted = true
@@ -4123,7 +4129,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -5071,7 +5077,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, autoLandAgentWork, setAutoLandAgentWork, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; autoLandAgentWork: boolean; setAutoLandAgentWork: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -5116,6 +5122,9 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <UIVisibilityPreferences />
           <NativeUpdatePreferences />
           <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
+          <section className="setting-section">
+            <div className="setting-title"><div><h3>Automatic landing</h3><p>Merge each verified successful run on this computer into the project history automatically. When the baseline moved during the run, an agent resolves the conflict inside the conversation's protected workspace before landing. Turn off to review and land agent work yourself from Git workflows.</p></div><Toggle enabled={autoLandAgentWork} onChange={() => setAutoLandAgentWork(!autoLandAgentWork)} label="Automatic landing" /></div>
+          </section>
           <section className="setting-section">
             <div className="setting-title"><div><h3>Ensync Auto Context skill</h3><p>Keep one task synchronized with Auto or a provider you pin, on this computer or the selected SSH/VM worker.</p></div><Toggle enabled={autoContextSkill} onChange={() => setAutoContextSkill(!autoContextSkill)} label="Ensync Auto Context skill" /></div>
             <div className={`auto-context-summary ${autoContextSkill ? 'auto-context-summary--active' : ''}`}>
