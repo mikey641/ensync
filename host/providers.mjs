@@ -3,14 +3,21 @@ import { parseCodexAppServerProbe, probeCodexAppServer } from './codex-app-serve
 import { probeClaudeUsage } from './claude-usage.mjs'
 import { probeCopilotAuthentication } from './copilot-auth.mjs'
 import { probeDroidAuthentication } from './droid-auth.mjs'
+import { probeDroidLimits } from './droid-limits.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
+import { rankProvidersByAvailability } from './provider-availability.mjs'
+import { ENSYNC_AGENT_COORDINATION_POLICY } from './multi-agent-prompt.mjs'
 
-// Product-navigation heuristic: broadly recognized subscription coding agents
-// appear first, followed by progressively more specialist discovery candidates.
-// Ollama stays last because it is a separate local runtime, not a subscription.
+// Tie-breaker only. Live provider lists are ordered by real availability (see
+// provider-availability.mjs); this order decides what happens when two
+// providers are equally available, and what the list looks like before any
+// usage has been probed. Broadly recognized subscription coding agents appear
+// first, followed by progressively more specialist discovery candidates. Ollama
+// stays last because it is a separate local runtime, not a subscription.
 const providerNavigationOrder = [
+  'droid',
   'codex',
   'claude',
   'copilot',
@@ -22,7 +29,6 @@ const providerNavigationOrder = [
   'junie',
   'gitlab_duo',
   'oz',
-  'droid',
   'amp',
   'auggie',
   'qoder',
@@ -172,7 +178,7 @@ const providerDefinitions = [
     authentication: probeDroidAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
-      'Factory Droid exposes plan windows, Droid Core, and Extra Usage in its interactive /limits view, but Ensync has no tested machine-readable quota adapter.',
+      'Factory Droid reports Standard usage only in its interactive /limits view. Ensync drives that view in a disposable PTY and strictly parses the panel; the capture could not be completed and verified on this machine, so remaining capacity is unknown.',
   },
   {
     id: 'auggie',
@@ -308,10 +314,10 @@ const providerCatalog = {
   },
   cursor: {
     routeKind: 'subscription',
-    chatExecution: 'discovery_only',
+    chatExecution: 'supported',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.cursor.com/en/cli/installation',
-    catalogReason: 'Discovery and login are wired, but Ensync Host does not yet have a tested Cursor event runner.',
+    catalogReason: 'Chat runs headless through `--print --output-format stream-json` with the prompt on stdin and the stored Cursor login, and a turn counts as finished only when the CLI emits its terminal success result. Containment is the pinned `--sandbox enabled` OS sandbox, which a headless run refuses to start without. Verified against cursor-agent 2026.08.04 from its own bundled sources; no live end-to-end run was observed, because this machine reports the CLI as signed out.',
   },
   kiro: {
     routeKind: 'subscription',
@@ -332,28 +338,28 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://www.codebuddy.ai/docs/cli/quickstart',
-    catalogReason: 'Ensync can open CodeBuddy onboarding, but does not yet have a tested event runner or CLI quota adapter.',
+    catalogReason: 'Ensync has a complete CodeBuddy runner (stdin prompt, stream-json result event, permission mode and cwd verified from the session init echo before the prompt is sent), but CodeBuddy is not signed in on this machine, so no authenticated turn has been verified — in particular whether a headless permission request is denied rather than left waiting. Chat stays gated until it is. No CLI quota adapter exists; credits live in the web dashboard.',
   },
   droid: {
     routeKind: 'subscription',
     chatExecution: 'supported',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Ensync still has no /limits quota adapter, so remaining capacity is unknown.',
+    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Usage comes from the TUI /limits panel, driven in a disposable PTY and strictly parsed (verified against droid 0.191.1); an unverifiable capture degrades to honest-unknown capacity.',
   },
   auggie: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli',
-    catalogReason: 'Discovery and account login are wired, but Ensync does not yet have a tested Auggie runner or provider-wide quota adapter.',
+    catalogReason: 'Ensync has a complete Auggie runner (prompt on stdin in --print mode, a single terminal type:"result" object, and per-tool deny rules pinned with --permission), but Auggie is not signed in on this machine, so no authenticated turn has been verified — in particular whether a denied tool in a headless run is refused and reported rather than left waiting. Chat stays gated until it is. No provider-wide quota adapter exists; credits live in auggie account status and per-session stats.',
   },
   amp: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://ampcode.com/manual',
-    catalogReason: 'Discovery and account login are wired, but Ensync does not yet have a tested Amp runner or paid-credit guard.',
+    catalogReason: 'Discovery and account login are wired, but the Amp binary produces no output at all on this machine — even amp --version blocks indefinitely — so no runner could be verified. Amp is also not signed in, and its own log shows an unauthenticated run opening a browser login and blocking for five minutes before failing, so Ensync will not launch it. No paid-credit guard exists either.',
   },
   gitlab_duo: {
     routeKind: 'subscription',
@@ -367,7 +373,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.warp.dev/reference/cli',
-    catalogReason: 'Discovery and browser login are wired, but Ensync does not yet have a tested local/cloud runner, quota adapter, or paid-credit guard.',
+    catalogReason: 'Discovery and browser login are wired, but Oz can only take a prompt as a command-line argument or a server-stored prompt ID, publishes no terminal event for its ndjson stream, and expresses agent permissions only as Warp-synced execution profiles that no run flag can pin — so Ensync has no runner, quota adapter, or paid-credit guard.',
   },
   junie: {
     routeKind: 'subscription',
@@ -381,11 +387,22 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'none',
     documentationUrl: 'https://ollama.com/download',
-    catalogReason: 'Ensync detects the local runtime, but no tested local-model chat adapter is available yet.',
+    catalogReason: 'Ensync detects the local runtime and reports server reachability plus installed models. Ollama is an inference server rather than a coding agent — it cannot read or write files, run commands, or hold a session — so it is not a chat provider and is not gated pending work; local model discovery is the whole supported surface.',
   },
 }
 
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
+const universalAgentCoordination = Object.freeze({
+  policy: ENSYNC_AGENT_COORDINATION_POLICY,
+  delivery: 'ensync_prompt',
+})
+
+function providerCatalogEntry(id) {
+  return {
+    ...providerCatalog[id],
+    agentCoordination: universalAgentCoordination,
+  }
+}
 
 function now() {
   return new Date().toISOString()
@@ -658,7 +675,7 @@ async function inspectProvider(provider) {
       break
     }
   }
-  const catalog = providerCatalog[provider.id]
+  const catalog = providerCatalogEntry(provider.id)
 
   if (!executable) {
     const authentication = unavailableAuthentication(
@@ -675,6 +692,7 @@ async function inspectProvider(provider) {
       command: provider.command,
       installed: false,
       executable: null,
+      mcp,
       version: null,
       connectionState: 'unavailable',
       authentication,
@@ -687,7 +705,6 @@ async function inspectProvider(provider) {
       canUpdate: false,
       updateStrategy: providerUpdateStrategy(provider),
       updateReason: providerUpdateReason(provider, false),
-      mcp,
       ...catalog,
       checkedAt,
     }
@@ -706,6 +723,9 @@ async function inspectProvider(provider) {
   const claudeUsage = provider.id === 'claude' && authentication.state === 'authenticated'
     ? await probeClaudeUsage(executable, checkedAt, authentication.exactPlan ?? null)
     : null
+  const droidLimits = provider.id === 'droid' && authentication.state === 'authenticated'
+    ? await probeDroidLimits(executable, checkedAt)
+    : null
   const ollamaProbe = provider.id === 'ollama'
     ? await probeOllamaRuntime(executable, checkedAt)
     : null
@@ -716,13 +736,14 @@ async function inspectProvider(provider) {
   return {
     id: provider.id,
     name: provider.name,
+    mcp,
     command: detectedCommand,
     installed: true,
     executable,
     version,
     connectionState: connectionState(true, authentication),
     authentication,
-    usage: codexProbe?.usage ?? claudeUsage ?? ollamaProbe?.usage ?? usageFor(provider, authentication, checkedAt),
+    usage: codexProbe?.usage ?? claudeUsage ?? droidLimits ?? ollamaProbe?.usage ?? usageFor(provider, authentication, checkedAt),
     availableModels: codexProbe?.models ?? ollamaProbe?.models ?? [],
     canConnect: Array.isArray(provider.loginArgs),
     connectReason: Array.isArray(provider.loginArgs)
@@ -737,7 +758,6 @@ async function inspectProvider(provider) {
     canUpdate: Array.isArray(provider.updateArgs),
     updateStrategy: providerUpdateStrategy(provider),
     updateReason: providerUpdateReason(provider, true),
-    mcp,
     ...catalog,
     checkedAt,
   }
@@ -755,8 +775,40 @@ export function getProviderCatalog() {
   return providerDefinitions.map((provider) => ({
     id: provider.id,
     name: provider.name,
-    ...providerCatalog[provider.id],
+    ...providerCatalogEntry(provider.id),
   }))
+}
+
+// A usage probe drives a real CLI, so it can lose a race it has no stake in: a
+// busy machine, a manual refresh landing on a scheduled one, a CLI that dies on
+// startup. Discarding a percentage the CLI already verified because the *next*
+// read failed tells the person their quota is unknown when Ensync knows it, and
+// the card visibly flips between a number and "quota unavailable".
+//
+// A verified reading is therefore kept across a failed refresh, but never
+// laundered as fresh: it keeps the checkedAt of the read that produced it, says
+// so in its reason, and carries stale: true. It is dropped as soon as it stops
+// being evidence — the account logged out, the CLI disappeared, or the reading
+// aged past the retention window — because a frozen percentage would be a
+// worse lie than an honest blank.
+const VERIFIED_USAGE_RETENTION_MS = 30 * 60_000
+
+function isVerifiedUsage(usage) {
+  return usage?.source === 'cli' && typeof usage.usedPercent === 'number'
+}
+
+// Only the state that made the old reading true. A percentage captured while
+// authenticated says nothing about a provider that has since logged out.
+function usageEvidenceKey(provider) {
+  return `${provider?.installed === true ? 'installed' : 'absent'}:${provider?.authentication?.state ?? 'unknown'}`
+}
+
+function retainedUsage(usage) {
+  return {
+    ...usage,
+    stale: true,
+    reason: `${usage.reason} This refresh's quota probe returned nothing, so Ensync kept the last verified reading rather than blanking it; it was measured at ${usage.checkedAt}.`,
+  }
 }
 
 export class ProviderStatusService {
@@ -766,11 +818,35 @@ export class ProviderStatusService {
   #inspect
   #inFlight = null
   #invalidatedWhileRefreshing = false
+  #verifiedUsage = new Map()
+  #verifiedUsageRetentionMs
+  #now
 
   constructor(options = {}) {
     this.#cacheDurationMs = options.cacheDurationMs ?? 60_000
     this.#definitions = options.definitions ?? providerDefinitions
     this.#inspect = options.inspectProvider ?? inspectProvider
+    this.#verifiedUsageRetentionMs = options.verifiedUsageRetentionMs ?? VERIFIED_USAGE_RETENTION_MS
+    this.#now = options.now ?? (() => Date.now())
+  }
+
+  #keepVerifiedUsage(providers) {
+    const currentMs = this.#now()
+    return providers.map((provider) => {
+      const evidenceKey = usageEvidenceKey(provider)
+      if (isVerifiedUsage(provider?.usage)) {
+        this.#verifiedUsage.set(provider.id, { usage: provider.usage, evidenceKey, capturedAtMs: currentMs })
+        return provider
+      }
+      const retained = this.#verifiedUsage.get(provider?.id)
+      if (!retained) return provider
+      if (retained.evidenceKey !== evidenceKey
+        || currentMs - retained.capturedAtMs > this.#verifiedUsageRetentionMs) {
+        this.#verifiedUsage.delete(provider.id)
+        return provider
+      }
+      return { ...provider, usage: retainedUsage(retained.usage) }
+    })
   }
 
   async list(options = {}) {
@@ -795,8 +871,11 @@ export class ProviderStatusService {
       providers = await Promise.all(this.#definitions.map((provider) => this.#inspect(provider)))
     } while (this.#invalidatedWhileRefreshing)
 
-    this.#cache = { createdAt: Date.now(), providers }
-    return providers
+    // Retention runs before ranking so a provider whose probe lost a race keeps
+    // its place in the list instead of sinking to "capacity unknown".
+    const ranked = rankProvidersByAvailability(this.#keepVerifiedUsage(providers), providerNavigationOrder)
+    this.#cache = { createdAt: Date.now(), providers: ranked }
+    return ranked
   }
 
   async get(id, options = {}) {

@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import test from 'node:test'
 
 import { runGit } from './git.mjs'
@@ -204,6 +204,85 @@ test('a rapid lease heartbeat never corrupts its owner record', async (context) 
   await acquired.release()
 })
 
+test('non-blocking admission describes the active conversation without waiting', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const serviceA = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), lockPollMs: 10 })
+  const serviceB = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), lockPollMs: 10 })
+  const owner = {
+    jobId: 'job_1111111111111111',
+    provider: 'codex',
+    targetKind: 'local',
+    startedAt: '2026-08-11T10:00:00.000Z',
+    providerProcessStarted: false,
+    steerable: false,
+    nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+  }
+  const first = await serviceA.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', { owner })
+  try {
+    let waiting = false
+    const startedAt = Date.now()
+    const second = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', {
+      owner: { jobId: 'job_2222222222222222', provider: 'claude', targetKind: 'local' },
+      onWait: () => { waiting = true },
+    })
+    assert.ok(Date.now() - startedAt < 500)
+    assert.equal(waiting, false)
+    assert.equal(first.disposition, 'acquired')
+    assert.deepEqual(second, { disposition: 'occupied', owner })
+
+    const different = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-b', { owner })
+    assert.equal(different.disposition, 'acquired')
+    if (different.disposition === 'acquired') await different.lease.release()
+  } finally {
+    if (first.disposition === 'acquired') await first.lease.release()
+  }
+})
+
+test('bounded occupied owner reflects heartbeat updates only', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const serviceA = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-a'), heartbeatMs: 5 })
+  const serviceB = new ProjectIsolationService({ rootPath: join(fixture.root, 'host-b'), heartbeatMs: 5 })
+  const first = await serviceA.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a', {
+    owner: {
+      jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+      startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: false,
+      steerable: false, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111', extra: 'not-public',
+    },
+  })
+  try {
+    assert.equal(first.disposition, 'acquired')
+    if (first.disposition !== 'acquired') return
+    await first.lease.updateOwner({ providerProcessStarted: true, steerable: true, token: 'not-public' })
+
+    const second = await serviceB.tryAcquireOrDescribe(fixture.repository, 'workspace:chat-a')
+    assert.deepEqual(second, {
+      disposition: 'occupied',
+      owner: {
+        jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+        startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: true,
+        steerable: true, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+      },
+    })
+  } finally {
+    if (first.disposition === 'acquired') await first.lease.release()
+  }
+})
+
+test('release fences an unawaited owner update before removing its lock', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
+  const service = new ProjectIsolationService({ rootPath: fixture.workspaceRoot, heartbeatMs: 1 })
+  const key = 'workspace:chat-a'
+  const acquired = await service.tryAcquireOrDescribe(fixture.repository, key, {
+    owner: { jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local' },
+  })
+  assert.equal(acquired.disposition, 'acquired')
+  if (acquired.disposition !== 'acquired') return
+  acquired.lease.updateOwner({ providerProcessStarted: true })
+  await acquired.lease.release()
+  await assert.rejects(stat(workspaceLockPath(fixture.repository, commonDirectory, key)), { code: 'ENOENT' })
+})
+
 test('separate Host instances serialize duplicate runs against the same conversation worktree', async (context) => {
   const fixture = await repositoryFixture(context)
   const firstService = new ProjectIsolationService({
@@ -293,7 +372,7 @@ test('an abandoned stale lease is quarantined before a new Host proceeds', async
   await assert.rejects(stat(lockPath), { code: 'ENOENT' })
 })
 
-test('a stale heartbeat is never stolen while its Host process is still alive', async (context) => {
+test('a stale heartbeat is never stolen while another Host process is still alive', async (context) => {
   const fixture = await repositoryFixture(context)
   const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
   const key = 'window-a:chat-a'
@@ -303,7 +382,9 @@ test('a stale heartbeat is never stolen while its Host process is still alive', 
   await writeFile(ownerPath, JSON.stringify({
     version: 2,
     token: 'suspended-live-host',
-    pid: process.pid,
+    // Process 1 exists on every supported platform, so this stands in for
+    // another Host that is alive but suspended.
+    pid: 1,
     workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
     acquiredAt: '2020-01-01T00:00:00.000Z',
     heartbeatAt: '2020-01-01T00:00:00.000Z',
@@ -325,6 +406,120 @@ test('a stale heartbeat is never stolen while its Host process is still alive', 
 
   await assert.rejects(pending, (error) => error.code === 'run_cancelled')
   assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'suspended-live-host')
+})
+
+test('a lease this Host still holds is never stolen when its own heartbeat freezes', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const key = 'window-a:chat-a'
+  const holder = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    // Long enough that no tick rewrites the record this test freezes.
+    heartbeatMs: 60_000,
+    lockPollMs: 5,
+  })
+  const lease = await holder.acquire(fixture.repository, key)
+  context.after(() => lease.release())
+  const lockPath = workspaceLockPath(fixture.repository, '.git', key)
+  const ownerPath = join(lockPath, 'owner.json')
+  const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
+  await writeFile(ownerPath, JSON.stringify({ ...owner, heartbeatAt: '2020-01-01T00:00:00.000Z' }))
+  const old = new Date('2020-01-01T00:00:00.000Z')
+  await utimes(ownerPath, old, old)
+  await utimes(lockPath, old, old)
+
+  const controller = new AbortController()
+  const waiter = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    lockStaleMs: 10,
+    lockPollMs: 5,
+  })
+  const pending = waiter.acquire(fixture.repository, key, {
+    signal: controller.signal,
+    onWait: () => controller.abort(),
+  })
+
+  await assert.rejects(pending, (error) => error.code === 'run_cancelled')
+  assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, owner.token)
+  lease.assertHeld()
+})
+
+test('a lease this Host leaked is reclaimed instead of being guarded by its own pid forever', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
+  const key = 'window-a:chat-a'
+  const lockPath = workspaceLockPath(fixture.repository, commonDirectory, key)
+  const ownerPath = join(lockPath, 'owner.json')
+  await mkdir(lockPath, { recursive: true })
+  // Every lease records the shared Host daemon's pid, so a lock this very
+  // process abandoned looks exactly like one it is still using. Only the token
+  // separates them, and this one was never handed out.
+  await writeFile(ownerPath, JSON.stringify({
+    version: 2,
+    token: 'leaked-by-this-host',
+    pid: process.pid,
+    workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
+    acquiredAt: '2020-01-01T00:00:00.000Z',
+    heartbeatAt: '2020-01-01T00:00:00.000Z',
+  }))
+  const old = new Date('2020-01-01T00:00:00.000Z')
+  await utimes(ownerPath, old, old)
+  await utimes(lockPath, old, old)
+
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    lockStaleMs: 10,
+    lockPollMs: 5,
+  })
+  const lease = await isolation.acquire(fixture.repository, key)
+  lease.assertHeld()
+  assert.notEqual(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'leaked-by-this-host')
+  await lease.release()
+})
+
+test('a release that cannot remove the lock reports it instead of reporting a clean release', async (context) => {
+  if (process.getuid?.() === 0) return // root ignores the directory permission this test relies on
+  const fixture = await repositoryFixture(context)
+  const key = 'window-a:chat-a'
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    heartbeatMs: 60_000,
+    lockPollMs: 5,
+  })
+  const lease = await isolation.acquire(fixture.repository, key)
+  const lockPath = workspaceLockPath(fixture.repository, '.git', key)
+  const lockParent = dirname(lockPath)
+
+  await chmod(lockParent, 0o500)
+  let outcome
+  try {
+    outcome = await lease.release()
+  } finally {
+    await chmod(lockParent, 0o700)
+  }
+
+  assert.equal(outcome.removed, false)
+  assert.match(outcome.reason, /lease/i)
+  await stat(lockPath)
+  await rm(lockPath, { recursive: true, force: true })
+})
+
+test('a lease released while its heartbeat is writing leaves no lock behind', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    // A tick every millisecond puts a write in flight across the release.
+    heartbeatMs: 1,
+    lockPollMs: 5,
+  })
+  const lockPath = workspaceLockPath(fixture.repository, '.git', 'window-a:chat-a')
+
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    const lease = await isolation.acquire(fixture.repository, 'window-a:chat-a')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 3))
+    const outcome = await lease.release()
+    assert.equal(outcome.removed, true, `release ${attempt} reported a lock it could not remove`)
+    await assert.rejects(stat(lockPath), { code: 'ENOENT' }, `release ${attempt} left a lock behind`)
+  }
 })
 
 test('non-Git projects fail closed before provider execution', async (context) => {
@@ -690,31 +885,38 @@ test('acquire merges new baseline commits into a reused conversation branch', as
   assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
 })
 
-test('acquire fails closed with the conflicting files when baseline sync conflicts', async (context) => {
+test('acquire defers conflicting baseline synchronization and preserves the exact clean conversation branch', async (context) => {
   const fixture = await repositoryFixture(context)
   const isolation = new ProjectIsolationService({ rootPath: fixture.workspaceRoot })
 
   const first = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  const originalBranch = first.workspace.branch
+  const originalPath = first.workspace.repositoryPath
   await writeFile(join(first.workspace.projectPath, 'tracked.txt'), 'agent version\n')
   await first.release()
 
   await writeFile(join(fixture.repository, 'tracked.txt'), 'baseline version\n')
   await git(fixture.repository, ['add', 'tracked.txt'])
   await git(fixture.repository, ['commit', '-m', 'baseline change'])
+  const baselineSha = await git(fixture.repository, ['rev-parse', 'HEAD'])
 
-  await assert.rejects(
-    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
-    (error) => error instanceof ProjectIsolationError
-      && error.code === 'workspace_baseline_conflict'
-      && /tracked\.txt/.test(error.message),
-  )
-
-  // The aborted merge leaves no merge in progress, so a retry fails the same
-  // clean way instead of erroring on a half-merged worktree.
-  await assert.rejects(
-    isolation.acquire(fixture.repository, 'window-a:chat-conflict'),
-    (error) => error instanceof ProjectIsolationError && error.code === 'workspace_baseline_conflict',
-  )
+  const resumed = await isolation.acquire(fixture.repository, 'window-a:chat-conflict')
+  context.after(() => resumed.release())
+  assert.equal(resumed.workspace.branch, originalBranch)
+  assert.equal(resumed.workspace.repositoryPath, originalPath)
+  assert.equal(await readFile(join(resumed.workspace.projectPath, 'tracked.txt'), 'utf8'), 'agent version\n')
+  assert.deepEqual(resumed.workspace.baselineConflict, {
+    baselineSha,
+    files: ['tracked.txt'],
+    reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+  })
+  const mergeHead = await runGit(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], {
+    cwd: resumed.workspace.repositoryPath,
+  })
+  assert.notEqual(mergeHead.exitCode, 0)
+  assert.equal(await git(resumed.workspace.repositoryPath, ['diff', '--name-only', '--diff-filter=U']), '')
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+  assert.equal(resumed.workspace.integration.integrated, false)
 })
 
 test('commitAgentWork on a clean worktree commits nothing', async (context) => {

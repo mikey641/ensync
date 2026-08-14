@@ -23,6 +23,8 @@
     "start:foreground": "npm run build:ui && electron .",
     "test": "node test/run-tests.mjs",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:win-packaged": "node scripts/smoke-windows-package.mjs",
+    "verify:local-install-scope": "node scripts/verify-local-install-scope.mjs",
     "verify": "npm run build:ui && npm test && npm run smoke",
     "release:preflight": "node scripts/release-preflight.mjs",
     "package:mac": "npm run verify && node scripts/package-native.mjs --platform macos && node scripts/attest-build.mjs --platform macos",
@@ -31,6 +33,7 @@
     "manifest": "node scripts/generate-release.mjs"
   },
   "devDependencies": {
+    "@electron/asar": "3.4.1",
     "@electron/notarize": "3.1.1",
     "electron": "43.3.0",
     "electron-builder": "26.15.3"
@@ -53,8 +56,11 @@
       "src/native-workspaces.mjs",
       "src/recent-projects.mjs",
       "src/device-preferences.mjs",
+      "src/window-state.mjs",
+      "src/local-file-open.mjs",
       "src/workspace-recovery.mjs",
       "src/codex-conversation-import.mjs",
+      "src/build-info.mjs",
       "src/native-updates.mjs",
       "src/runtime.mjs",
       "package.json"
@@ -79,6 +85,10 @@
       {
         "from": "src/host-bootstrap.mjs",
         "to": "desktop-host-bootstrap.mjs"
+      },
+      {
+        "from": "build/generated/build-info.json",
+        "to": "build-info.json"
       }
     ],
     "afterSign": "scripts/notarize.cjs",

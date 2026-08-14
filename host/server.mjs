@@ -1,5 +1,6 @@
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
+import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
 import {
@@ -7,21 +8,30 @@ import {
   MAX_STORED_ATTACHMENT_BYTES,
   probeAttachmentPaths,
 } from './chat-attachments.mjs'
+import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
+import { runLandCheck } from './land-check.mjs'
+import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
+import { WorkspaceOverlapMonitor } from './workspace-overlap.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
   SupportRepairError,
   SupportRepairService,
   supportRepairErrorPayload,
 } from './support-repair.mjs'
-import { RemoteSshError, RemoteSshService } from './remote-ssh.mjs'
+import {
+  remoteChatAdmissionCoordinate,
+  RemoteSshError,
+  RemoteSshService,
+} from './remote-ssh.mjs'
 import { SupportService, SupportValidationError } from './support.mjs'
+import { SyncBrokerHostWorker } from './sync-broker-host.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
 import { TelegramChatRouter } from './telegram-router.mjs'
 import { displayCommand, launchTerminalCommand } from './terminal.mjs'
@@ -69,6 +79,30 @@ function sendJson(response, statusCode, payload, origin) {
   if (response.destroyed || response.writableEnded) return
   response.writeHead(statusCode, responseHeaders(origin))
   response.end(JSON.stringify(payload))
+}
+
+function sendImage(response, image, origin) {
+  if (response.destroyed || response.writableEnded) return
+  const headers = {
+    'Cache-Control': 'no-store',
+    'Content-Length': String(image.size),
+    'Content-Type': image.contentType,
+    'X-Content-Type-Options': 'nosniff',
+  }
+  if (origin && isAllowedOrigin(origin)) {
+    headers['Access-Control-Allow-Origin'] = origin
+    headers.Vary = 'Origin'
+  }
+  response.writeHead(200, headers)
+  const stream = createReadStream(image.path)
+  const stop = () => stream.destroy()
+  response.once('close', stop)
+  stream.once('error', () => {
+    response.removeListener('close', stop)
+    if (!response.destroyed) response.destroy()
+  })
+  stream.once('end', () => response.removeListener('close', stop))
+  stream.pipe(response)
 }
 
 function streamHeaders(origin) {
@@ -167,6 +201,51 @@ function refreshRequested(url) {
   return ['1', 'true'].includes(url.searchParams.get('refresh')?.toLowerCase())
 }
 
+function boundedSshOwner(owner = {}) {
+  return {
+    jobId: typeof owner.jobId === 'string' && owner.jobId.length <= 128 ? owner.jobId : null,
+    provider: typeof owner.provider === 'string' && owner.provider.length <= 128 ? owner.provider : null,
+    targetKind: 'ssh',
+    startedAt: typeof owner.startedAt === 'string' && owner.startedAt.length <= 64 ? owner.startedAt : null,
+    providerProcessStarted: owner.providerProcessStarted === true,
+    // SSH admission never grants local-native View or live Push authority.
+    steerable: false,
+    nativeWorkspaceId: null,
+  }
+}
+
+function createSshChatAdmissions() {
+  const retained = new Map()
+  return async (request, owner) => {
+    const coordinate = await remoteChatAdmissionCoordinate(request)
+    const occupied = retained.get(coordinate)
+    if (occupied) {
+      return { disposition: 'occupied', owner: { ...occupied.owner } }
+    }
+
+    const token = Symbol('ssh-chat-admission')
+    const record = { token, owner: boundedSshOwner(owner) }
+    retained.set(coordinate, record)
+    return {
+      disposition: 'acquired',
+      lease: {
+        async updateOwner(patch = {}) {
+          const current = retained.get(coordinate)
+          if (current?.token !== token) return false
+          current.owner = boundedSshOwner({ ...current.owner, ...patch })
+          return true
+        },
+        async release() {
+          const current = retained.get(coordinate)
+          if (current?.token !== token) return false
+          retained.delete(coordinate)
+          return true
+        },
+      },
+    }
+  }
+}
+
 export function createEnsyncHost(options = {}) {
   const accountSync = options.accountSyncService ?? new AccountSyncService({
     baseUrl: options.accountSyncServiceUrl ?? process.env.ENSYNC_SYNC_SERVICE_URL ?? null,
@@ -178,11 +257,15 @@ export function createEnsyncHost(options = {}) {
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
   })
+  const workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? new WorkspaceOverlapMonitor()
+  const chatImages = options.chatImageService ?? new ChatImageService({
+    workspaceRoot: options.projectIsolationRoot,
+  })
   const chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
-    autoLand: options.autoLandAgentWork ?? process.env.ENSYNC_AUTO_LAND !== '0',
+    workspaceOverlapMonitor,
   })
   const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
     rootPath: options.chatAttachmentsRoot,
@@ -204,8 +287,10 @@ export function createEnsyncHost(options = {}) {
   })
   const git = options.gitService ?? new GitWorkflowService({
     allowedRoots: options.allowedProjectRoots,
+    verifyLand: (details) => runLandCheck(details.repositoryPath),
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
+  const admitSshChat = createSshChatAdmissions()
   const chatJobJournal = options.chatJobJournal ?? (options.chatJobJournalPath
     ? new ChatJobJournal({
         filePath: options.chatJobJournalPath,
@@ -215,9 +300,20 @@ export function createEnsyncHost(options = {}) {
   const chatJobs = options.chatJobService ?? new ChatJobService({
     runLocal: (request, runOptions) => chats.run(request, runOptions),
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
+    admit: (input, owner) => input.kind === 'local'
+      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, { owner })
+      : admitSshChat(input.request, owner),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
+    canSteerLocal: (jobId) => chats.canSteer(jobId),
+    answerLocal: (jobId, input) => chats.answerQuestion(jobId, input),
+    pendingQuestionsLocal: (jobId) => chats.pendingQuestions(jobId),
     normalizeError: chatJobErrorPayload,
     journal: chatJobJournal,
+  })
+  const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({
+    accountSyncService: accountSync,
+    chatJobService: chatJobs,
+    pollIntervalMs: options.syncBrokerPollIntervalMs,
   })
   const daemonLeases = options.daemonLeaseService ?? null
   const authToken = typeof options.authToken === 'string' && options.authToken.length >= 32
@@ -249,7 +345,7 @@ export function createEnsyncHost(options = {}) {
     if (request.method === 'OPTIONS') {
       const headers = responseHeaders(origin)
       headers['Access-Control-Allow-Headers'] = 'Content-Type'
-      headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+      headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, OPTIONS'
       response.writeHead(204, headers)
       return response.end()
     }
@@ -349,6 +445,12 @@ export function createEnsyncHost(options = {}) {
         return sendJson(response, 200, { project }, origin)
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/local-file') {
+        const body = await readJsonBody(request)
+        const file = await readLocalFileForDisplay(body.path)
+        return sendJson(response, 200, { file }, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/git/clone') {
         const body = await readJsonBody(request)
         const result = await git.clone(body)
@@ -407,10 +509,18 @@ export function createEnsyncHost(options = {}) {
         }
       }
 
+      if (request.method === 'GET' && url.pathname === '/api/chat/image') {
+        const image = await chatImages.open({
+          workspacePath: url.searchParams.get('workspacePath'),
+          imagePath: url.searchParams.get('path'),
+        })
+        return sendImage(response, image, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/chat/jobs') {
         const body = await readJsonBody(request)
-        const job = chatJobs.start(body)
-        return sendJson(response, 202, { job }, origin)
+        const admission = await chatJobs.start(body)
+        return sendJson(response, admission.disposition === 'started' ? 202 : 200, admission, origin)
       }
 
       const chatJobStreamMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)\/stream$/)
@@ -444,6 +554,14 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const delivery = await chatJobs.steer(jobId, body)
         return sendJson(response, 200, { job: chatJobs.get(jobId), delivery }, origin)
+      }
+
+      const chatJobAnswerMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)\/answer$/)
+      if (request.method === 'POST' && chatJobAnswerMatch) {
+        const jobId = decodeURIComponent(chatJobAnswerMatch[1])
+        const body = await readJsonBody(request)
+        const answer = chatJobs.answer(jobId, body)
+        return sendJson(response, 200, { job: chatJobs.get(jobId), answer }, origin)
       }
 
       const chatJobMatch = url.pathname.match(/^\/api\/chat\/jobs\/([^/]+)$/)
@@ -839,6 +957,12 @@ export function createEnsyncHost(options = {}) {
           code: error.code,
         }, origin)
       }
+      if (error instanceof ChatImageError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
       if (error instanceof SupportRepairError) {
         return sendJson(response, error.status, supportRepairErrorPayload(error), origin)
       }
@@ -880,8 +1004,9 @@ export function createEnsyncHost(options = {}) {
   })
   server.once('close', () => {
     void telegram.stopPolling?.()
+    void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
   return server
 }
 

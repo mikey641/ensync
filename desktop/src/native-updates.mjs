@@ -371,7 +371,7 @@ export function createNativeUpdateManager({
         canChangeChannel: true,
       })
     }
-    let signature = null
+    let signature
     try {
       signature = await verifyInstalledBuild({ platform, executablePath })
     } catch {

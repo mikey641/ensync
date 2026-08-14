@@ -1,16 +1,29 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
+import * as promptQueueContract from '../src/lib/promptQueue.mjs'
+import { buildAutoContextPrompt } from '../src/lib/autoContextPrompt.mjs'
+import { chatAutoScrollContentRevision } from '../src/lib/chatAutoScroll.mjs'
 import {
+  acceptTransferredPrompt,
+  activeCodexTurnCanAcceptSteering,
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerReadyAfterEvent,
+  liveSteerWasSafelyRejected,
+  markQueuedMessageTransferred,
   normalizePromptQueues,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
+  queuedPromptCanSteerActiveTurn,
+  queuedPromptCanStopAndSendNow,
+  queueMayAdvanceAfterRun,
   promptQueueStatusPresentation,
+  occupiedRunCanHandoff,
+  occupiedRunCanNavigate,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
@@ -162,6 +175,125 @@ test('predecessors chain through the active turn and then queued tail', () => {
   assert.equal(predecessorTurnIdForPrompt([entry('queued')], [], { turnId: 'active' }), 'queued')
 })
 
+test('live steering is offered only for the exact Host-started local Codex turn', () => {
+  const queued = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      ...entry('turn-2', 'turn-1').preferences,
+      executionTargetKey: 'local',
+      projectId: 'project-1',
+      projectPath: '/repo',
+    },
+  }
+  const activeRun = {
+    turnId: 'turn-1',
+    provider: 'codex',
+    executionTarget: 'local',
+    providerProcessStarted: false,
+    jobId: 'job-turn-1-codex-1',
+    projectId: 'project-1',
+    projectPath: '/repo',
+  }
+
+  assert.equal(activeCodexTurnCanAcceptSteering(activeRun), false)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, activeRun), false)
+
+  const startedRun = { ...activeRun, providerProcessStarted: true }
+  assert.equal(activeCodexTurnCanAcceptSteering(startedRun), true)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, startedRun), true)
+  assert.equal(queuedPromptCanSteerActiveTurn(queued, { ...startedRun, projectPath: '/other' }), false)
+})
+
+test('stop-and-send is offered only when live steering is genuinely unavailable', () => {
+  const queued = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      ...entry('turn-2', 'turn-1').preferences,
+      executionTargetKey: 'local',
+      projectId: 'project-1',
+      projectPath: '/repo',
+    },
+  }
+  const claudeRun = {
+    turnId: 'turn-1',
+    provider: 'claude',
+    executionTarget: 'local',
+    providerProcessStarted: true,
+    projectId: 'project-1',
+    projectPath: '/repo',
+  }
+
+  // Claude cannot be steered at all, so the destructive action is the only one.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, claudeRun), true)
+  // Never offer a destructive stop when the non-destructive push exists.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, {
+    ...claudeRun,
+    provider: 'codex',
+    jobId: 'job-1',
+  }, { liveSteerAvailable: true }), false)
+  // A Codex turn that is not yet steerable may still be stopped and re-sent.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, {
+    ...claudeRun,
+    provider: 'codex',
+  }, { liveSteerAvailable: false }), true)
+
+  // The same exact-snapshot binding as Push now: a drifted queue head is never
+  // worth discarding a running turn for.
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, turnId: 'turn-9' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, projectPath: '/other' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, projectId: 'project-9' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, executionTarget: 'ssh:box' }), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, null), false)
+  assert.equal(queuedPromptCanStopAndSendNow(null, claudeRun), false)
+  assert.equal(queuedPromptCanStopAndSendNow(queued, { ...claudeRun, turnId: '  ' }), false)
+})
+
+test('only a successful run or a confirmed stop-and-send advances the queue', () => {
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: true }), true)
+  // A plain Stop pauses the tail; that safety rule is unchanged.
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: false }), false)
+  assert.equal(queueMayAdvanceAfterRun({}), false)
+  assert.equal(queueMayAdvanceAfterRun({ completedSuccessfully: false, stopAndSendArmed: true }), true)
+})
+
+test('a waiting queue names stop-and-send as an explicitly destructive escape', () => {
+  const detail = promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: false,
+    activeProviderName: 'Claude Code',
+    stopAndSendAvailable: true,
+  }).detail
+  assert.equal(
+    detail,
+    'Claude Code cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully. Stop & send now ends the current turn instead, discarding its in-progress work.',
+  )
+  // Without the action the copy must not describe a control the user cannot see.
+  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: false,
+    activeProviderName: 'Claude Code',
+  }).detail.includes('Stop & send now'), false)
+  // Steerable turns keep the plain copy; Push now is the non-destructive answer.
+  assert.equal(promptQueueStatusPresentation({ state: 'waiting', reason: null }, 1, {
+    liveDeliverySupported: true,
+    activeProviderName: 'Codex',
+    stopAndSendAvailable: true,
+  }).detail, 'It will run automatically after the current turn finishes successfully.')
+})
+
+test('only a confirmed unavailable live turn silently falls back to FIFO', () => {
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'live_steer_unavailable',
+    safeToRetry: true,
+  }), true)
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'live_steer_unconfirmed',
+    safeToRetry: false,
+  }), false)
+  assert.equal(liveSteerWasSafelyRejected({
+    code: 'invalid_prompt',
+    safeToRetry: true,
+  }), false)
+})
+
 test('normalization keeps only structurally complete persisted entries', () => {
   const queues = normalizePromptQueues({
     good: [{ ...entry('turn-1'), attachments: [
@@ -180,10 +312,15 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
   assert.deepEqual(promptQueueComposerState({ sending: true, draft: 'next prompt', canRun: true }), {
     sendEnabled: true,
     sendLabel: 'Queue message in this chat',
+    sendText: null,
     stopVisible: true,
     hint: '↵ queue · stop ends current only',
   })
   assert.equal(promptQueueComposerState({ sending: true, draft: '   ', canRun: true }).sendEnabled, false)
+})
+
+test('active-run submissions always queue before an explicit Push now action', () => {
+  assert.equal(promptQueueContract.promptSubmissionMode?.({ hasActiveRun: true }), 'queue')
   assert.deepEqual(promptQueueComposerState({
     sending: true,
     draft: 'correct the active task',
@@ -191,8 +328,202 @@ test('composer keeps separate Stop and enabled Send controls while a chat is run
     liveSteering: true,
   }), {
     sendEnabled: true,
-    sendLabel: 'Steer the active Codex turn',
+    sendLabel: 'Queue message in this chat',
     stopVisible: true,
-    hint: '↵ steer now · stop ends turn',
+    hint: '↵ queue · stop ends current only',
   })
+})
+
+test('live push readiness follows only Host-authored ready and closed events', () => {
+  assert.equal(liveSteerReadyAfterEvent(false, { type: 'started' }), false)
+  assert.equal(liveSteerReadyAfterEvent(false, { type: 'notice', code: 'live_steer_ready' }), true)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'note' }), true)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'notice', code: 'live_steer_closed' }), false)
+  assert.equal(liveSteerReadyAfterEvent(true, { type: 'finished' }), false)
+})
+
+test('transferred source prompts remain auditable but cannot feed execution context', () => {
+  const queued = entry('turn-2', 'turn-1')
+  const messages = [
+    { id: 'u1', role: 'user', turnId: 'turn-1', content: 'Transfer this prompt', deliveryStatus: 'queued' },
+    { id: 'u2', role: 'user', turnId: 'turn-2', content: 'Later prompt', deliveryStatus: 'queued' },
+  ]
+  const transferred = markQueuedMessageTransferred(messages, 'u1')
+
+  assert.notStrictEqual(transferred, messages)
+  assert.equal(transferred[0].deliveryStatus, 'transferred')
+  assert.strictEqual(transferred[1], messages[1])
+  assert.deepEqual(removePromptFromQueue({ 'chat-a': [queued] }, 'chat-a', queued.id), {})
+  assert.equal(queuedPromptGate({ messages: transferred }, queued).state, 'paused')
+  assert.deepEqual(transcriptMessagesBeforeTurn(transferred, 'turn-2').map((message) => message.id), [])
+  assert.equal(
+    chatAutoScrollContentRevision({ messages: [transferred[0]], queuedPrompts: [], executionEvents: [], sending: false, error: null }),
+    chatAutoScrollContentRevision({ messages: [], queuedPrompts: [], executionEvents: [], sending: false, error: null }),
+  )
+
+  const capsule = buildAutoContextPrompt({
+    project: { name: 'Ensync', path: '/repo', context: { files: [], featureFiles: [], instructionAdapters: [] } },
+    target: { kind: 'local' },
+    chat: { messages: transferred },
+    prompt: 'Current request',
+    includeTranscript: true,
+    gitStatus: null,
+    gitStatusReason: 'not sampled',
+  })
+  assert.doesNotMatch(capsule, /Transfer this prompt/)
+  assert.match(capsule, /Later prompt/)
+})
+
+test('transferred handoff accepts one canonical queue entry and rejects stable-ID conflicts', () => {
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    id: 'handoff-stable-turn-2',
+    prompt: 'Push the correction now',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+  const chats = [{ id: 'chat-a', messages: [{ id: 'u1', role: 'user', turnId: 'turn-1', content: 'Active', deliveryStatus: 'pending' }] }]
+  const accepted = acceptTransferredPrompt({}, chats, 'chat-a', handoff)
+
+  assert.equal(accepted.status, 'accepted')
+  assert.deepEqual(accepted.queues['chat-a'], [handoff])
+  const { handoffTombstone, ...acceptedMessage } = accepted.chats[0].messages.at(-1)
+  assert.deepEqual(acceptedMessage, {
+    id: 'message-turn-2', role: 'user', turnId: 'turn-2', content: 'Push the correction now',
+    time: '2026-08-06T12:00:00.000Z', deliveryStatus: 'queued',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+  })
+  assert.equal(handoffTombstone?.handoffId, handoff.id)
+
+  const duplicate = acceptTransferredPrompt(accepted.queues, accepted.chats, 'chat-a', handoff)
+  assert.equal(duplicate.status, 'duplicate')
+  assert.equal(duplicate.alreadyConsumed, false)
+  assert.strictEqual(duplicate.queues, accepted.queues)
+  assert.strictEqual(duplicate.chats, accepted.chats)
+
+  for (const attachments of [
+    undefined,
+    [{ name: 'brief.md', path: '/repo/mutated.md' }],
+  ]) {
+    const driftedChats = accepted.chats.map((chat) => ({
+      ...chat,
+      messages: chat.messages.map((message) => message.id === handoff.messageId
+        ? { ...message, attachments }
+        : message),
+    }))
+    const conflict = acceptTransferredPrompt(accepted.queues, driftedChats, 'chat-a', handoff)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, accepted.queues)
+    assert.strictEqual(conflict.chats, driftedChats)
+  }
+
+  for (const changed of [
+    { ...handoff, prompt: 'Different prompt' },
+    { ...handoff, attachments: [{ name: 'other.md', path: '/repo/other.md' }] },
+    { ...handoff, predecessorTurnId: 'other-turn' },
+    { ...handoff, preferences: { ...handoff.preferences, providerMode: 'auto' } },
+    { ...handoff, preferences: { ...handoff.preferences, executionTargetKey: 'ssh:worker' } },
+    { ...handoff, preferences: { ...handoff.preferences, projectPath: '/other-repo' } },
+  ]) {
+    const conflict = acceptTransferredPrompt(accepted.queues, accepted.chats, 'chat-a', changed)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, accepted.queues)
+    assert.strictEqual(conflict.chats, accepted.chats)
+  }
+})
+
+test('consumed transferred handoff retries use the immutable target tombstone without reinsertion', () => {
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    prompt: 'Push the correction now',
+    attachments: [{ name: 'brief.md', path: '/repo/brief.md' }],
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+  const chats = [{ id: 'chat-a', messages: [
+    { id: 'u1', role: 'user', turnId: 'turn-1', content: 'Active', deliveryStatus: 'pending' },
+  ] }]
+  const accepted = acceptTransferredPrompt({}, chats, 'chat-a', handoff)
+  const acceptedMessage = accepted.chats[0].messages.at(-1)
+  assert.equal(typeof acceptedMessage.handoffTombstone, 'object')
+  assert.equal(acceptedMessage.handoffTombstone.handoffId, handoff.id)
+  assert.equal(typeof acceptedMessage.handoffTombstone.queuedPromptIdentity, 'string')
+  assert.ok(acceptedMessage.handoffTombstone.queuedPromptIdentity.length <= 512_000)
+  assert.equal(Object.isFrozen(acceptedMessage.handoffTombstone), true)
+
+  const promotedChats = accepted.chats.map((chat) => ({
+    ...chat,
+    messages: promoteQueuedMessageToActiveTurn(chat.messages, handoff.messageId, 'turn-1'),
+  }))
+  const consumedQueues = promoteQueuedPromptToActiveTurn(accepted.queues, 'chat-a', handoff.id, 'turn-1')
+  const promotedMessage = promotedChats[0].messages.find((message) => message.id === handoff.messageId)
+  assert.strictEqual(promotedMessage.handoffTombstone, acceptedMessage.handoffTombstone)
+  assert.deepEqual(consumedQueues, {})
+
+  const retry = acceptTransferredPrompt(consumedQueues, promotedChats, 'chat-a', handoff)
+  assert.equal(retry.status, 'duplicate')
+  assert.equal(retry.alreadyConsumed, true)
+  assert.strictEqual(retry.queues, consumedQueues)
+  assert.strictEqual(retry.chats, promotedChats)
+  assert.deepEqual(retry.queues, {})
+
+  for (const changed of [
+    { ...handoff, messageId: 'message-conflicting-id' },
+    { ...handoff, turnId: 'turn-conflicting-id' },
+    { ...handoff, prompt: 'Altered prompt' },
+    { ...handoff, attachments: [{ name: 'other.md', path: '/repo/other.md' }] },
+    { ...handoff, preferences: { ...handoff.preferences, automaticFallback: false } },
+  ]) {
+    const conflict = acceptTransferredPrompt(consumedQueues, promotedChats, 'chat-a', changed)
+    assert.equal(conflict.status, 'conflict')
+    assert.strictEqual(conflict.queues, consumedQueues)
+    assert.strictEqual(conflict.chats, promotedChats)
+  }
+})
+
+test('occupied owner navigation and handoff require every exact live binding', () => {
+  const owner = {
+    jobId: 'job_1111111111111111', provider: 'codex', targetKind: 'local',
+    nativeWorkspaceId: '11111111-1111-4111-8111-111111111111', projectId: 'project-a',
+    projectPath: '/repo', chatId: 'chat-a', providerProcessStarted: true, steerable: true,
+  }
+  const binding = {
+    workspaceId: owner.nativeWorkspaceId, jobId: owner.jobId, provider: 'codex', targetKind: 'local',
+    projectId: 'project-a', projectPath: '/repo', chatId: 'chat-a', turnId: 'turn-1',
+  }
+  const handoff = {
+    ...entry('turn-2', 'turn-1'),
+    preferences: {
+      providerMode: 'fixed', provider: 'codex', sizeTier: null, automaticFallback: true,
+      autoContextSkill: true, fallbackProviderOrder: ['codex'], executionTargetKey: 'local',
+      projectId: 'project-a', projectPath: '/repo',
+    },
+  }
+
+  assert.equal(occupiedRunCanNavigate(owner, binding), true)
+  assert.equal(occupiedRunCanHandoff(owner, handoff, binding), true)
+  for (const mismatch of [
+    { ...binding, workspaceId: '22222222-2222-4222-8222-222222222222' },
+    { ...binding, jobId: 'job_2222222222222222' },
+    { ...binding, projectPath: '/other' },
+    { ...binding, chatId: 'chat-b' },
+  ]) assert.equal(occupiedRunCanNavigate(owner, mismatch), false)
+  assert.equal(occupiedRunCanNavigate({ ...owner, projectId: undefined }, { ...binding, projectId: undefined }), false)
+  for (const invalidTurnId of [undefined, null, '', '   ']) {
+    assert.equal(occupiedRunCanHandoff(
+      owner,
+      { ...handoff, predecessorTurnId: invalidTurnId },
+      { ...binding, turnId: invalidTurnId },
+    ), false)
+  }
+  assert.equal(occupiedRunCanHandoff({ ...owner, provider: 'claude' }, handoff, binding), false)
+  assert.equal(occupiedRunCanHandoff(owner, { ...handoff, predecessorTurnId: 'turn-9' }, binding), false)
+  assert.equal(occupiedRunCanHandoff(owner, { ...handoff, preferences: { ...handoff.preferences, projectId: 'project-b' } }, binding), false)
 })

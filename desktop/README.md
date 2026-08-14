@@ -9,7 +9,7 @@ This package wraps the existing Ensync Host and built Vite interface in Electron
 - Every window uses the same detached Host and privileged standard `ensync://app` origin. That origin stays identical when the private Host port changes, so browser-local workspace tabs, split layout, and display preferences survive native app relaunches. Windows load the same canonical device-local snapshot instead of using ephemeral per-window storage partitions.
 - The custom protocol proxies only `ensync://app/api/*` to the loopback Host. It does not open a UI listener or expose the renderer to the Host port.
 - App exit stops the custom protocol handler and releases the shell lease, but it does not stop active Host-owned provider jobs. The detached Host exits only after no shell or run remains; retained terminal results stay available through the checksummed job journal.
-- Renderer Node integration is disabled; context isolation and sandboxing are enabled. A sandboxed preload exposes one fixed `chooseProjectFolder()` request—no general IPC or filesystem API—to each registered Ensync window, so the project switcher can open Finder on macOS or the native Windows directory dialog. The returned path still passes through Ensync Host inspection. HTTPS links open in the system browser.
+- Renderer Node integration is disabled; context isolation and sandboxing are enabled. A sandboxed preload exposes fixed `chooseProjectFolder()` and `chooseChatFiles()` requests—no general IPC or filesystem API—to each registered Ensync window, so the project switcher and composer can open the native macOS or Windows chooser. Project and attachment paths still pass through Ensync Host inspection. HTTPS links open in the system browser.
 
 The native menu reserves `Cmd/Ctrl+N` for New Window and `Cmd/Ctrl+Shift+W` for Close Window. It intentionally does not claim `Cmd/Ctrl+T`, `Cmd/Ctrl+W`, or any in-workspace `+`; those continue to create and close Ensync conversation tabs according to the saved placement setting. View → Reload / Force Reload and `Cmd/Ctrl+R` / `Cmd/Ctrl+Shift+R` are available because the renderer synchronously checkpoints active Host-job reconnect metadata before unloading. Manual and programmatic renderer reloads reconnect to the same Host-owned jobs instead of cancelling or replaying them. The desktop shell also uses an authenticated detached Host with renewable leases and a checksummed job journal, so a normal whole-app quit/reopen can reclaim a running job or its retained terminal result; only an actual Host or machine failure during provider execution requires reconciliation.
 
@@ -36,7 +36,7 @@ The packaged host still launches the user's installed coding CLIs. Provider subs
 
 ## Native updates
 
-Settings shows `app.getVersion()` and the exact native update phase. Ensync does not check in the background. **Check for updates** fetches `https://ensync.vercel.app/releases.json` with cache disabled only after a click. It offers a release only when the current packaged app is signed and the manifest has a newer matching platform version, a real HTTPS installer, a valid SHA-256, verified signing, and explicit macOS notarization.
+Settings shows `app.getVersion()`, the embedded build ID, full source revision, clean/dirty flag, build time, packaging channel, selected update channel, and exact native update phase. Stable uses `https://ensync.vercel.app/releases.json`; opt-in beta uses `https://ensync.vercel.app/releases-beta.json`. Ensync does not check in the background. **Check for updates** fetches only the selected channel with cache disabled after a click. It offers a release only when the current packaged app is signed and the matching-channel manifest has a newer matching platform version, a real HTTPS installer, a valid SHA-256, verified signing, and explicit macOS notarization. Stable rejects prerelease versions, and changing channels clears any downloaded candidate.
 
 **Download update** is a second action for direct releases. Progress uses only received bytes and a real `Content-Length`; when the total is absent, no percentage is invented. After download, Ensync verifies the manifest checksum and requires the installer publisher to match the installed app: macOS compares the Developer ID team and Gatekeeper-assesses the signed/notarized DMG. A mismatch deletes the temporary installer and never enables opening it.
 
@@ -74,9 +74,9 @@ npm --prefix desktop run package:mac
 npm --prefix desktop run package:win-store
 ```
 
-The macOS command creates a universal DMG and ZIP. The Store command creates one x64 AppX whose manifest identity must exactly match Partner Center. Outputs and a build attestation are written under `desktop/release/`. The AppX attestation deliberately says certification is pending; the file remains private until Microsoft accepts it. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
+The macOS command creates a universal DMG and ZIP. The Windows command creates an x64 NSIS installer and ZIP. Each command first records semantic version, exact Git commit, dirty flag, build time, and channel in ignored generated metadata; the same identity is embedded in the app and copied into the attestation under `desktop/release/`. Local builds default to `dev`. Cross-platform package output is not claimed or substituted when the corresponding native build did not run.
 
-## Release credentials and Store identity
+## Signing and notarization secrets
 
 Unsigned local builds work for testing, but their generated site manifest remains unavailable. Signing is activated only when these secrets are supplied to the release workflow:
 
@@ -90,7 +90,9 @@ Unsigned local builds work for testing, but their generated site manifest remain
 | `VERCEL_TOKEN` | release publish job | Deploy the verified release manifest to the public site/update feed |
 | `VERCEL_ORG_ID` | release publish job | Exact Vercel team/account containing the Ensync project |
 | `VERCEL_PROJECT_ID` | release publish job | Exact Vercel `ensync` project identifier |
-| `ENSYNC_RELEASE_TOKEN` | release preflight/publish jobs | Least-privilege token with release-write access to the separate public binary repository |
+| `ENSYNC_RELEASE_GITHUB_TOKEN` | release publish job | Least-privilege release access to the separate public binary repository |
+
+Set the non-secret GitHub repository variable `ENSYNC_RELEASE_REPOSITORY` to the public binary repository in `owner/repository` form. It must differ from the private source repository.
 
 Set these non-secret GitHub Actions repository variables:
 
@@ -107,17 +109,17 @@ The Windows Store package wrapper disables certificate auto-discovery, injects o
 
 ## Release workflow
 
-Pushing a semantic version tag such as `v0.1.0` starts `.github/workflows/desktop-release.yml`. A preflight job first confirms that the separately configured binary repository exists and is public, its dedicated token exists, macOS signing/notarization is complete, all three exact Partner Center identity values exist, and Vercel deployment credentials exist without printing their values. The source repository remains private. The remaining jobs:
+Pushing a stable tag such as `v0.1.0` or a beta tag such as `v0.2.0-beta.1` starts `.github/workflows/desktop-release.yml` only after release infrastructure is intentionally configured. A preflight job confirms that the separate binary repository is public and different from the private source repository, macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The remaining jobs:
 
 1. build and test on native macOS and Windows runners;
-2. retain the AppX and its pending-certification attestation as a private, short-lived Actions artifact;
-3. compare the DMG and ZIP hashes and sizes against the signed/notarized macOS attestation;
-4. generate `SHA256SUMS.txt` and the schema-v1 manifest only after both public macOS artifacts pass;
-5. create the release in the separate public binary repository with only those verified macOS files;
-6. copy that exact generated manifest into `site/public/releases.json` for stable or `site/public/releases-beta.json` for prerelease tags, recover the opposite channel's current manifest from production when present, validate both feeds together, and deploy the production Vercel site.
+2. upload only the signed/notarized DMG, signed NSIS EXE, ZIP archives, and verification attestations produced by those jobs;
+3. compare every artifact's hash and size against its attestation;
+4. require verified Windows signing plus verified macOS signing and notarization;
+5. generate `SHA256SUMS.txt` and the channel-specific schema-v1 manifest only after all four production artifacts pass those checks;
+6. fetch both production feeds, retain prior same-channel releases for rollback, and preserve the untouched channel;
+7. create or repair the release in the separate public binary repository and upload those real files;
+8. validate both exact feeds and deploy the production Vercel site using the explicit Vercel release secrets.
 
 If macOS signing or notarization cannot be verified, the publish job fails before creating a GitHub release. The AppX is never copied into public release assets. Upload it to Partner Center and use Private audience for the first beta submission; package flights are available for later beta updates after the initial submission is published. Publish a separately certified listing for stable. Only after Microsoft provides the real `https://apps.microsoft.com/detail/...` product URL may `site/public/site-config.json` enable the Windows button. If Vercel deployment fails, installed apps and the site continue to see the previous production configuration.
 
-While Apple approval is pending, `.github/workflows/windows-store-package.yml` can be run manually with a semantic version. It creates the same private AppX without tagging or publishing a GitHub release. Download that Actions artifact and submit it in Partner Center; do not upload the attestation JSON as a Store package.
-
-The direct macOS flow follows Electron's requirement that updates use signed apps while deliberately avoiding background `autoUpdater` behavior. Windows uses Store-managed updates instead: [Electron updates](https://www.electronjs.org/docs/latest/tutorial/updates) and [electron-builder AppX](https://www.electron.build/appx.html).
+The full inactive-to-beta-to-stable process and review-only rollback command are in `docs/release-runbook.md`. The manual flow follows Electron's requirement that macOS updates use signed apps and electron-builder's signed macOS/NSIS artifact guidance, while deliberately avoiding background `autoUpdater` behavior: [Electron updates](https://www.electronjs.org/docs/latest/tutorial/updates) and [electron-builder auto update](https://www.electron.build/docs/features/auto-update/).

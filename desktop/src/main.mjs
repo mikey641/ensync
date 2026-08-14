@@ -1,8 +1,10 @@
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
 
 import {
   APP_HOST,
@@ -13,6 +15,8 @@ import {
   HostProcessController,
 } from './runtime.mjs'
 import {
+  CHAT_FILE_PICKER_CHANNEL,
+  createChatFilePickerHandler,
   createProjectFolderPickerHandler,
   PROJECT_FOLDER_PICKER_CHANNEL,
 } from './project-picker.mjs'
@@ -23,13 +27,20 @@ import {
   createNativeWindowRegistry,
 } from './native-windows.mjs'
 import {
+  ACTIVE_RUN_MATCH_CHANNEL,
+  ACTIVE_RUNS_PUBLISH_CHANNEL,
+  createActiveRunMatchHandler,
+  createActiveRunRoster,
   createNativeWorkspaceStore,
+  createQueuedMessageHandoffHandlers,
   createWorkspaceFocusHandler,
   createWorkspaceIdentityIpcManager,
   createWorkspaceOpenProjectHandler,
   isNativeWorkspaceIdentity,
   nativeWorkspaceRestorationOrder,
   NATIVE_WORKSPACE_STATE_FILENAME,
+  QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL,
+  QUEUED_MESSAGE_HANDOFF_CHANNEL,
   shouldRetainNativeWorkspaceOnClose,
   WORKSPACE_FOCUS_CHANNEL,
   WORKSPACE_OPEN_PROJECT_CHANNEL,
@@ -60,6 +71,17 @@ import {
   DEVICE_PREFERENCES_GET_CHANNEL,
 } from './device-preferences.mjs'
 import {
+  createLocalFileOpenHandler,
+  LOCAL_FILE_OPEN_CHANNEL,
+} from './local-file-open.mjs'
+import {
+  createWindowStateStore,
+  MINIMUM_WINDOW_BOUNDS,
+  NATIVE_WINDOW_STATE_FILENAME,
+  readNativeWindowState,
+  resolveWindowPlacement,
+} from './window-state.mjs'
+import {
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -70,12 +92,15 @@ import {
   UPDATE_SET_CHANNEL_CHANNEL,
   UPDATE_STATE_CHANNEL,
 } from './native-updates.mjs'
+import { readBuildInfoFile } from './build-info.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
-const HOST_CHAT_ATTACHMENTS_DIRECTORY = 'chat-attachments-v1'
+// A drag emits a resize event per frame. Waiting out the gesture keeps the
+// window-state file from being rewritten hundreds of times per drag.
+const WINDOW_STATE_PERSIST_DELAY_MS = 400
 protocol.registerSchemesAsPrivileged([{
   scheme: APP_SCHEME,
   privileges: APP_SCHEME_PRIVILEGES,
@@ -91,9 +116,20 @@ let updateManager = null
 let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
+let windowStateStore = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
+const activeRunRoster = createActiveRunRoster({
+  isAuthorized: isAuthorizedNativeEvent,
+  identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+})
+const queuedMessageHandoffs = createQueuedMessageHandoffHandlers({
+  isAuthorized: isAuthorizedNativeEvent,
+  identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+  activeRuns: activeRunRoster,
+  windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+})
 const workspaceIdentityIpc = createWorkspaceIdentityIpcManager({
   ipcMain,
   isAuthorized: isAuthorizedNativeEvent,
@@ -195,11 +231,41 @@ function installApplicationMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
+
+// Resolves a message file reference to something that exists on disk: the raw
+// text first, then with a trailing :line[:column] stripped; ~ expands to the
+// home directory and relative paths resolve against the chat's project.
+function resolveOpenablePath(request) {
+  const raw = typeof request?.path === 'string' ? request.path.trim() : ''
+  if (!raw) return null
+  const withoutLine = raw.replace(/:\d+(?::\d+)?$/, '')
+  const candidates = withoutLine === raw ? [raw] : [raw, withoutLine]
+  const projectPath = typeof request?.projectPath === 'string' && isAbsolute(request.projectPath)
+    ? request.projectPath
+    : null
+  for (const candidate of candidates) {
+    const expanded = candidate === '~'
+      ? homedir()
+      : candidate.startsWith('~/') ? join(homedir(), candidate.slice(2)) : candidate
+    const absolute = isAbsolute(expanded)
+      ? expanded
+      : projectPath ? join(projectPath, expanded) : null
+    if (absolute && existsSync(absolute)) return absolute
+  }
+  return null
+}
+
 function registerNativeBridge() {
   // Identity is the renderer bootstrap prerequisite. Keep it independent from
   // the rest of the bridge so a later native feature cannot leave it missing.
   workspaceIdentityIpc.register()
   if (nativeBridgeRegistered) return
+  ipcMain.handle(ACTIVE_RUNS_PUBLISH_CHANNEL, (event, entries) => activeRunRoster.publish(event, entries))
+  ipcMain.handle(ACTIVE_RUN_MATCH_CHANNEL, createActiveRunMatchHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    activeRuns: activeRunRoster,
+  }))
   ipcMain.handle(WORKSPACE_FOCUS_CHANNEL, createWorkspaceFocusHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -209,12 +275,22 @@ function registerNativeBridge() {
     notifyProjectFocus: (window, project) => {
       window.webContents.send(WORKSPACE_PROJECT_FOCUS_CHANNEL, project)
     },
+    activeRuns: activeRunRoster,
   }))
+  ipcMain.handle(QUEUED_MESSAGE_HANDOFF_CHANNEL, queuedMessageHandoffs.handoff)
+  ipcMain.on(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)
   ipcMain.handle(WORKSPACE_OPEN_PROJECT_CHANNEL, createWorkspaceOpenProjectHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
     openProjectWindow,
   }))
+  ipcMain.handle(WORKSPACE_OPEN_PATH_CHANNEL, async (event, request) => {
+    if (!isAuthorizedNativeEvent(event)) return { ok: false, error: 'unauthorized' }
+    const target = resolveOpenablePath(request)
+    if (!target) return { ok: false, error: 'not-found' }
+    const failure = await shell.openPath(target)
+    return failure ? { ok: false, error: failure } : { ok: true }
+  })
   ipcMain.handle(WORKSPACE_RECOVERY_CHANNEL, createWorkspaceRecoveryHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -229,6 +305,16 @@ function registerNativeBridge() {
     targetWorkspaceId: process.env.ENSYNC_CODEX_IMPORT_TARGET ?? null,
     confirmation: process.env.ENSYNC_CODEX_IMPORT_CONFIRM ?? null,
   }))
+  ipcMain.handle(CHAT_FILE_PICKER_CHANNEL, createChatFilePickerHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    openDialog: async (event, options) => {
+      const parent = BrowserWindow.fromWebContents(event.sender)
+      return parent
+        ? dialog.showOpenDialog(parent, options)
+        : dialog.showOpenDialog(options)
+    },
+    onError: (error) => console.error('[ensync-file-picker]', error),
+  }))
   ipcMain.handle(PROJECT_FOLDER_PICKER_CHANNEL, createProjectFolderPickerHandler({
     isAuthorized: isAuthorizedNativeEvent,
     openDialog: async (event, options) => {
@@ -238,6 +324,20 @@ function registerNativeBridge() {
         : dialog.showOpenDialog(options)
     },
     onError: (error) => console.error('[ensync-folder-picker]', error),
+  }))
+  ipcMain.handle(LOCAL_FILE_OPEN_CHANNEL, createLocalFileOpenHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    describePath: async (path) => {
+      try {
+        const stats = await stat(path)
+        return { exists: true, directory: stats.isDirectory() }
+      } catch {
+        return { exists: false, directory: false }
+      }
+    },
+    openPath: (path) => shell.openPath(path),
+    revealPath: (path) => shell.showItemInFolder(path),
+    onError: (error) => console.error('[ensync-open-local-file]', error),
   }))
   const recentProjectHandlers = createRecentProjectHandlers({
     isAuthorized: isAuthorizedNativeEvent,
@@ -285,11 +385,18 @@ function unregisterNativeBridge() {
   if (nativeWindows.size > 0) return false
   workspaceIdentityIpc.dispose()
   if (!nativeBridgeRegistered) return true
+  ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUNS_PUBLISH_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUN_MATCH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
+  ipcMain.removeHandler(QUEUED_MESSAGE_HANDOFF_CHANNEL)
+  ipcMain.removeListener(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)
   ipcMain.removeHandler(WORKSPACE_OPEN_PROJECT_CHANNEL)
+  ipcMain.removeHandler(WORKSPACE_OPEN_PATH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_RECOVERY_CHANNEL)
   ipcMain.removeHandler(CODEX_CONVERSATION_IMPORT_CHANNEL)
+  ipcMain.removeHandler(LOCAL_FILE_OPEN_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_GET_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_MIGRATE_CHANNEL)
   ipcMain.removeHandler(RECENT_PROJECTS_REMEMBER_CHANNEL)
@@ -343,7 +450,6 @@ async function ensureRuntime() {
       env: {
         ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
         ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
-        ENSYNC_HOST_CHAT_ATTACHMENTS_ROOT: join(app.getPath('userData'), HOST_CHAT_ATTACHMENTS_DIRECTORY),
       },
       stateFilePath: join(app.getPath('userData'), HOST_DAEMON_STATE_FILENAME),
       journalFilePath: join(app.getPath('userData'), HOST_JOB_JOURNAL_FILENAME),
@@ -402,11 +508,15 @@ async function createWindow(workspaceIdentity) {
     return existingWindowAfterRuntimeStart
   }
 
+  const placement = resolveWindowPlacement({
+    state: windowStateStore?.get(workspaceIdentity.id) ?? null,
+    displays: screen.getAllDisplays(),
+  })
   const window = new BrowserWindow({
-    width: 1440,
-    height: 940,
-    minWidth: 900,
-    minHeight: 620,
+    ...placement.bounds,
+    minWidth: MINIMUM_WINDOW_BOUNDS.width,
+    minHeight: MINIMUM_WINDOW_BOUNDS.height,
+    fullscreen: placement.fullScreen,
     show: false,
     backgroundColor: '#17181c',
     title: 'Ensync',
@@ -418,6 +528,9 @@ async function createWindow(workspaceIdentity) {
       spellcheck: true,
     },
   })
+  // Maximize before the window is shown so restoration never flashes at the
+  // restored size first. Full screen is already applied by the constructor.
+  if (placement.maximized && !placement.fullScreen) window.maximize()
   nativeWindows.add(window, workspaceIdentity)
   const recovery = createRendererCrashRecovery()
   let recoveryBlockedNoticeShown = false
@@ -466,13 +579,38 @@ async function createWindow(workspaceIdentity) {
         }
       })
   })
+  let windowStateTimer = null
+  const persistWindowState = () => {
+    if (windowStateTimer) {
+      clearTimeout(windowStateTimer)
+      windowStateTimer = null
+    }
+    const state = readNativeWindowState(window)
+    if (state) windowStateStore?.save(workspaceIdentity.id, state)
+  }
+  const scheduleWindowStatePersist = () => {
+    if (windowStateTimer) clearTimeout(windowStateTimer)
+    windowStateTimer = setTimeout(persistWindowState, WINDOW_STATE_PERSIST_DELAY_MS)
+  }
+  for (const event of ['resize', 'move']) window.on(event, scheduleWindowStatePersist)
+  for (const event of ['maximize', 'unmaximize', 'enter-full-screen', 'leave-full-screen']) {
+    window.on(event, persistWindowState)
+  }
+  // 'close' still has live geometry; 'closed' does not.
+  window.on('close', persistWindowState)
+
   window.on('focus', () => {
     nativeWindows.focus(window)
     nativeWorkspaceStore?.touch(workspaceIdentity.id)
   })
   window.once('ready-to-show', () => showWindow(window))
   window.on('closed', () => {
+    if (windowStateTimer) {
+      clearTimeout(windowStateTimer)
+      windowStateTimer = null
+    }
     recovery.dispose()
+    queuedMessageHandoffs.removeWorkspace(workspaceIdentity.id)
     projectLaunchByWorkspace.delete(workspaceIdentity.id)
     const retainWorkspace = shouldRetainNativeWorkspaceOnClose({
       identity: workspaceIdentity,
@@ -482,6 +620,9 @@ async function createWindow(workspaceIdentity) {
     })
     if (!retainWorkspace) {
       nativeWorkspaceStore?.remove(workspaceIdentity.id)
+      // A workspace that will never reopen must not leave its geometry behind as
+      // the shape the next new window inherits.
+      windowStateStore?.remove(workspaceIdentity.id)
     }
     nativeWindows.remove(window)
   })
@@ -513,7 +654,7 @@ if (!singleInstance) {
   app.on('activate', () => {
     if (nativeWindows.size > 0) showWindow()
     else {
-      const identity = nativeWorkspaceStore?.ensureCanonical()
+      const identity = nativeWorkspaceStore?.ensureRestorable()
       if (identity) void createWindow(identity).catch(handleStartupFailure)
     }
   })
@@ -530,8 +671,15 @@ if (!singleInstance) {
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),
     })
+    windowStateStore = createWindowStateStore({
+      filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
+    })
+    const installedBuildInfo = app.isPackaged
+      ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
+      : null
     updateManager = createNativeUpdateManager({
       installedVersion: app.getVersion(),
+      installedBuildInfo,
       platform: process.platform,
       storeManaged: process.windowsStore === true,
       isPackaged: app.isPackaged,
@@ -547,9 +695,15 @@ if (!singleInstance) {
     // activate event may create a window while that async work is in flight.
     registerNativeBridge()
     installApplicationMenu()
-    nativeWorkspaceStore.ensureCanonical()
+    nativeWorkspaceStore.ensureRestorable()
     return updateManager.initialize()
   }).then(() => {
+    // Auto-check for updates shortly after startup, then every hour,
+    // like VS Code's background update checker. Non-blocking — if the
+    // build is unsigned or no feed is configured, canCheck is false and
+    // these calls are no-ops.
+    setTimeout(() => { updateManager.check().catch(() => {}) }, 5_000)
+    setInterval(() => { updateManager.check().catch(() => {}) }, 3_600_000)
     const retainedIdentities = nativeWorkspaceStore.list()
     const startupFocusIdentity = retainedIdentities.at(-1)
     const identities = nativeWorkspaceRestorationOrder(retainedIdentities)

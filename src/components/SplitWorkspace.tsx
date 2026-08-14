@@ -12,10 +12,12 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react'
-import { Columns3, Eye, EyeOff, GripVertical, MoveHorizontal, Plus, X } from 'lucide-react'
+import { Columns3, Eye, EyeOff, GripVertical, MoveHorizontal, Paperclip, Plus, X } from 'lucide-react'
 import type { Chat, ConversationLayoutMode, Provider, WorkspaceTab } from '../types'
 import type { CompletionIndicatorPreference } from '../display-preferences'
+import { fileDragContainsFiles } from '../lib/fileAttachments.mjs'
 import {
+  largestPaneScrollLeft,
   selectSplitLayoutSource,
   splitPaneDisplayWeights,
 } from '../lib/splitLayoutPersistence.mjs'
@@ -71,6 +73,12 @@ export type SplitWorkspaceProps = {
   onCloseTab?: (tabId: string) => void
   /** Creates a conversation relative to the specific visible tab whose action was used. */
   onNewTab?: (relativeToTabId: string) => void
+  /** Adds operating-system file drops to the exact conversation under the pointer. */
+  onFilesDrop?: (chatId: string, files: FileList) => void
+  /** Controls the pointer feedback without pretending unsupported drops can be attached. */
+  fileDropAvailable?: boolean
+  /** Explains why a recognized file drop is unavailable for the current target or surface. */
+  fileDropUnavailableMessage?: string
   /** Normal tabs show one active conversation; split shows every visible pane side by side. */
   viewMode?: ConversationLayoutMode
   /** Hides only pane tab headers; conversations and pane geometry remain mounted. */
@@ -286,6 +294,9 @@ export function SplitWorkspace({
   onTabReorder,
   onCloseTab,
   onNewTab,
+  onFilesDrop,
+  fileDropAvailable = false,
+  fileDropUnavailableMessage = 'Local file drops are unavailable here',
   viewMode = 'split',
   showTabHeaders = true,
   onLayoutChange,
@@ -296,10 +307,13 @@ export function SplitWorkspace({
   )
   const [resizeDragState, setResizeDragState] = useState<ResizeDragState | null>(null)
   const [tabDragState, setTabDragState] = useState<TabDragState | null>(null)
+  const [fileDragTabId, setFileDragTabId] = useState<string | null>(null)
+  const fileDragDepthRef = useRef(new Map<string, number>())
   const [reorderAnnouncement, setReorderAnnouncement] = useState('')
   const blockTabDragRef = useRef(false)
   const suppressMaximizeAfterDragRef = useRef(false)
   const dragSuppressionTimerRef = useRef<number | null>(null)
+  const viewportRef = useRef<HTMLDivElement | null>(null)
   const {
     layout,
     hidePane,
@@ -366,11 +380,27 @@ export function SplitWorkspace({
     setTabDragState(null)
   }, [])
 
+  const finishFileDrag = useCallback((tabId?: string) => {
+    if (tabId) fileDragDepthRef.current.delete(tabId)
+    else fileDragDepthRef.current.clear()
+    setFileDragTabId((current) => !tabId || current === tabId ? null : current)
+  }, [])
+
   useEffect(() => () => {
     if (dragSuppressionTimerRef.current !== null) {
       window.clearTimeout(dragSuppressionTimerRef.current)
     }
   }, [])
+
+  useEffect(() => {
+    const finish = () => finishFileDrag()
+    window.addEventListener('dragend', finish)
+    window.addEventListener('blur', finish)
+    return () => {
+      window.removeEventListener('dragend', finish)
+      window.removeEventListener('blur', finish)
+    }
+  }, [finishFileDrag])
 
   useEffect(() => {
     if (tabs.length === 0) return
@@ -420,6 +450,40 @@ export function SplitWorkspace({
       window.removeEventListener('pointercancel', finishDrag)
     }
   }, [resizeDragState, minPaneWidth, setPanePairSizes])
+
+  const renderedTabIdsKey = renderedTabs.map((tab) => tab.id).join('\n')
+
+  // Sibling minimum widths lay the enlarged pane out past the viewport's
+  // right edge; keep it fully in view on maximize and while sizes change.
+  useLayoutEffect(() => {
+    const viewport = viewportRef.current
+    const largestTabId = viewMode === 'split' ? layout.maximizedTabId : null
+    if (!viewport || !largestTabId
+      || !renderedTabIdsKey.split('\n').includes(largestTabId)) return undefined
+
+    const alignLargestPane = () => {
+      const row = viewport.firstElementChild
+      const pane = Array.from(viewport.querySelectorAll<HTMLElement>('[data-tab-id]'))
+        .find((element) => element.dataset.tabId === largestTabId)
+      if (!row || !pane) return
+      const paneBounds = pane.getBoundingClientRect()
+      const target = largestPaneScrollLeft({
+        scrollLeft: viewport.scrollLeft,
+        paneLeft: paneBounds.left - row.getBoundingClientRect().left,
+        paneWidth: paneBounds.width,
+        viewportWidth: viewport.clientWidth,
+        scrollWidth: viewport.scrollWidth,
+      })
+      if (target !== viewport.scrollLeft) viewport.scrollLeft = target
+    }
+
+    alignLargestPane()
+    if (typeof ResizeObserver === 'undefined') return undefined
+    const observer = new ResizeObserver(alignLargestPane)
+    observer.observe(viewport)
+    if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+    return () => observer.disconnect()
+  }, [viewMode, layout.maximizedTabId, renderedTabIdsKey])
 
   useEffect(() => {
     if (!tabDragState) return undefined
@@ -485,7 +549,53 @@ export function SplitWorkspace({
     setTabDragState({ tabId, overTabId: null, position: null })
   }
 
+  const beginFileDrag = (event: ReactDragEvent<HTMLElement>, tabId: string) => {
+    if (!onFilesDrop || !fileDragContainsFiles(event.dataTransfer)) return false
+    event.preventDefault()
+    event.stopPropagation()
+    for (const currentTabId of fileDragDepthRef.current.keys()) {
+      if (currentTabId !== tabId) fileDragDepthRef.current.delete(currentTabId)
+    }
+    fileDragDepthRef.current.set(tabId, (fileDragDepthRef.current.get(tabId) ?? 0) + 1)
+    setFileDragTabId(tabId)
+    return true
+  }
+
+  const continueFileDrag = (event: ReactDragEvent<HTMLElement>, tabId: string) => {
+    if (!onFilesDrop || !fileDragContainsFiles(event.dataTransfer)) return false
+    event.preventDefault()
+    event.stopPropagation()
+    event.dataTransfer.dropEffect = fileDropAvailable ? 'copy' : 'none'
+    setFileDragTabId(tabId)
+    return true
+  }
+
+  const leaveFileDrag = (event: ReactDragEvent<HTMLElement>, tabId: string) => {
+    if (!onFilesDrop || !fileDragContainsFiles(event.dataTransfer)) return false
+    event.preventDefault()
+    event.stopPropagation()
+    const depth = Math.max(0, (fileDragDepthRef.current.get(tabId) ?? 1) - 1)
+    if (depth > 0) fileDragDepthRef.current.set(tabId, depth)
+    else finishFileDrag(tabId)
+    return true
+  }
+
+  const dropFiles = (
+    event: ReactDragEvent<HTMLElement>,
+    tabId: string,
+    chatId: string,
+  ) => {
+    if (!onFilesDrop || !fileDragContainsFiles(event.dataTransfer)) return false
+    event.preventDefault()
+    event.stopPropagation()
+    finishFileDrag()
+    activateTab(tabId)
+    onFilesDrop(chatId, event.dataTransfer.files)
+    return true
+  }
+
   const updateTabDropTarget = (event: ReactDragEvent<HTMLDivElement>, targetTabId: string) => {
+    if (continueFileDrag(event, targetTabId)) return
     if (!tabDragState || tabDragState.tabId === targetTabId || !onTabReorder) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'move'
@@ -498,6 +608,7 @@ export function SplitWorkspace({
   }
 
   const leaveTabDropTarget = (event: ReactDragEvent<HTMLDivElement>, targetTabId: string) => {
+    if (leaveFileDrag(event, targetTabId)) return
     const relatedTarget = event.relatedTarget
     if (relatedTarget instanceof Node && event.currentTarget.contains(relatedTarget)) return
     setTabDragState((current) => current?.overTabId === targetTabId
@@ -506,6 +617,8 @@ export function SplitWorkspace({
   }
 
   const dropTab = (event: ReactDragEvent<HTMLDivElement>, targetTabId: string) => {
+    const targetChatId = tabs.find((tab) => tab.id === targetTabId)?.chatId
+    if (targetChatId && dropFiles(event, targetTabId, targetChatId)) return
     event.preventDefault()
     const sourceTabId = tabDragState?.tabId || event.dataTransfer.getData('text/plain')
     const bounds = event.currentTarget.getBoundingClientRect()
@@ -601,7 +714,7 @@ export function SplitWorkspace({
               return (
                 <div
                   key={tab.id}
-                  className={`relay-tabs-mode-tab ${isActive ? 'relay-tabs-mode-tab--active' : ''} ${isCompleted ? 'relay-tabs-mode-tab--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-tabs-mode-tab--dragging' : ''} ${tabDragState?.overTabId === tab.id && tabDragState.position ? `relay-tabs-mode-tab--drop-${tabDragState.position}` : ''}`}
+                  className={`relay-tabs-mode-tab ${isActive ? 'relay-tabs-mode-tab--active' : ''} ${isCompleted ? 'relay-tabs-mode-tab--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-tabs-mode-tab--dragging' : ''} ${fileDragTabId === tab.id ? 'relay-tabs-mode-tab--file-drag' : ''} ${tabDragState?.overTabId === tab.id && tabDragState.position ? `relay-tabs-mode-tab--drop-${tabDragState.position}` : ''}`}
                   draggable={Boolean(onTabReorder && workspaceTabs.length > 1)}
                   onPointerDownCapture={(event) => {
                     blockTabDragRef.current = Boolean(
@@ -610,6 +723,7 @@ export function SplitWorkspace({
                   }}
                   onPointerUp={() => { blockTabDragRef.current = false }}
                   onDragStart={(event) => beginTabDrag(event, tab.id)}
+                  onDragEnter={(event) => { beginFileDrag(event, tab.id) }}
                   onDragOver={(event) => updateTabDropTarget(event, tab.id)}
                   onDragLeave={(event) => leaveTabDropTarget(event, tab.id)}
                   onDrop={(event) => dropTab(event, tab.id)}
@@ -703,7 +817,7 @@ export function SplitWorkspace({
           )}
         </div>
       ) : (
-        <div className="relay-split-viewport">
+        <div className="relay-split-viewport" ref={viewportRef}>
           <div className={`relay-split-panes ${viewMode === 'tabs' ? 'relay-split-panes--tabs' : ''}`}>
             {renderedTabs.map((tab, index) => {
               const chat = chatById.get(tab.chatId)
@@ -722,11 +836,21 @@ export function SplitWorkspace({
               return (
                 <Fragment key={tab.id}>
                   <article
-                    className={`relay-split-pane ${viewMode === 'tabs' ? 'relay-split-pane--tabs' : ''} ${isMaximized ? 'relay-split-pane--largest' : ''} ${isActive ? 'relay-split-pane--active' : ''} ${isCompleted ? 'relay-split-pane--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-split-pane--dragging' : ''}`}
+                    className={`relay-split-pane ${viewMode === 'tabs' ? 'relay-split-pane--tabs' : ''} ${isMaximized ? 'relay-split-pane--largest' : ''} ${isActive ? 'relay-split-pane--active' : ''} ${isCompleted ? 'relay-split-pane--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-split-pane--dragging' : ''} ${fileDragTabId === tab.id ? 'relay-split-pane--file-drag' : ''}`}
                     style={paneStyle}
                     data-tab-id={tab.id}
                     aria-label={`${chat.title} conversation pane`}
+                    onDragEnterCapture={(event) => { beginFileDrag(event, tab.id) }}
+                    onDragOverCapture={(event) => { continueFileDrag(event, tab.id) }}
+                    onDragLeaveCapture={(event) => { leaveFileDrag(event, tab.id) }}
+                    onDropCapture={(event) => { dropFiles(event, tab.id, chat.id) }}
                   >
+                    {fileDragTabId === tab.id && (
+                      <div className="relay-split-file-drop-overlay" aria-hidden="true">
+                        <Paperclip size={24} />
+                        <strong>{fileDropAvailable ? 'Drop files to attach' : fileDropUnavailableMessage}</strong>
+                      </div>
+                    )}
                     {viewMode === 'split' && showTabHeaders && (
                       <div
                         className={`relay-split-pane-tab ${tabDragState?.overTabId === tab.id && tabDragState.position ? `relay-split-pane-tab--drop-${tabDragState.position}` : ''}`}

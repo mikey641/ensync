@@ -1,16 +1,26 @@
 import {
-  ENSYNC_SUPERPOWERS_POLICY,
+  ENSYNC_AGENT_COORDINATION_POLICY,
   withEnsyncMultiAgentInstructions,
 } from './multi-agent-prompt.mjs'
 
 const providerRunners = Object.freeze({
   local: Object.freeze([
-    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
-    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
+    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
+    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
+    Object.freeze({ id: 'droid', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
+    Object.freeze({ id: 'cursor', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
   ]),
+  // Droid has no ssh runner: remote-ssh.mjs drives plain argv+stdin CLIs, while
+  // droid needs its stream-jsonrpc session adapter. Listing it here before that
+  // bridge exists would let Auto routing dispatch runs that can only fail.
+  //
+  // Cursor has no ssh runner either, for a different reason: its containment is
+  // the argv-pinned `--sandbox enabled` flag that host/cursor-agent.mjs adds, and
+  // the ssh bridge builds its own argv without those flags. Listing it here would
+  // ship a remote Cursor run with no recorded containment at all.
   ssh: Object.freeze([
-    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
-    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_SUPERPOWERS_POLICY }),
+    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
+    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
   ]),
 })
 
@@ -37,8 +47,8 @@ export function withProviderRunnerInstructions(providerId, topology, prompt) {
   if (!runner) {
     throw new TypeError(`${providerId} does not have a tested ${topology} runner.`)
   }
-  if (runner.coordinationPolicy !== ENSYNC_SUPERPOWERS_POLICY) {
-    throw new TypeError(`${providerId} does not implement Ensync's required Superpowers policy.`)
+  if (runner.coordinationPolicy !== ENSYNC_AGENT_COORDINATION_POLICY) {
+    throw new TypeError(`${providerId} does not implement Ensync's required agent-coordination policy.`)
   }
   return withEnsyncMultiAgentInstructions(prompt)
 }

@@ -7,7 +7,6 @@ import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
-const DEFAULT_HARD_TIMEOUT_MS = 24 * 60 * 60 * 1_000
 const MAX_STDERR_CHARACTERS = 256 * 1024
 
 export class CodexLiveTurnError extends Error {
@@ -75,6 +74,7 @@ class CodexLiveSession {
   #turnId = null
   #activatedTurnId = null
   #turnStarted = false
+  #steerReady = false
   #settled = false
   #readySettled = false
   #agentMessages = []
@@ -100,7 +100,7 @@ class CodexLiveSession {
     this.signal = options.signal
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
-    this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
+    this.hardTimeoutMs = options.hardTimeoutMs ?? null
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
@@ -168,13 +168,15 @@ class CodexLiveSession {
     })
 
     this.#touch()
-    this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
-      'run_timed_out',
-      "Codex reached Ensync Host's hard run limit and was stopped. Partial work may exist; review the project before retrying.",
-      504,
-      false,
-    )), this.hardTimeoutMs)
-    this.#hardTimer.unref?.()
+    if (Number.isFinite(this.hardTimeoutMs) && this.hardTimeoutMs > 0) {
+      this.#hardTimer = setTimeout(() => this.#fail(new CodexLiveTurnError(
+        'run_timed_out',
+        "Codex reached Ensync Host's explicit run limit and was stopped. Partial work may exist; review the project before retrying.",
+        504,
+        false,
+      )), this.hardTimeoutMs)
+      this.#hardTimer.unref?.()
+    }
     this.signal?.addEventListener('abort', this.#abort, { once: true })
     if (this.signal?.aborted) this.#abort()
 
@@ -287,7 +289,7 @@ class CodexLiveSession {
       )
     }
     await this.#ready
-    if (this.#settled || !this.#threadId || !this.#turnId) {
+    if (this.#settled || !this.#steerReady || !this.#threadId || !this.#turnId) {
       throw new CodexLiveTurnError(
         'live_steer_unavailable',
         'There is no active Codex turn to steer. The message was not delivered.',
@@ -324,6 +326,10 @@ class CodexLiveSession {
         false,
       )
     }
+  }
+
+  canSteer() {
+    return this.#steerReady && !this.#settled && Boolean(this.#threadId) && Boolean(this.#turnId)
   }
 
   #abort = () => {
@@ -418,21 +424,9 @@ class CodexLiveSession {
     }
 
     const params = message.params
-    // Notifications tagged with another thread's ID (for example, child
-    // threads Codex spawns for subagents) must never touch this session's
-    // turn identity, transcript, usage, or event stream.
-    if (typeof params?.threadId === 'string' && params.threadId !== this.#threadId) return
-
-    if (message.method === 'turn/started' && params?.turn?.id) {
-      if (this.#turnId && this.#turnId !== params.turn.id) {
-        this.#fail(new CodexLiveTurnError(
-          'invalid_cli_output',
-          'Codex app-server activated a different turn than the one Ensync started.',
-          502,
-          false,
-        ))
-        return
-      }
+    if (message.method === 'turn/started'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id) {
       this.#turnId = params.turn.id
       this.#activatedTurnId = params.turn.id
       this.#turnStarted = true
@@ -456,7 +450,10 @@ class CodexLiveSession {
       this.#usage = usageFromNotification(params?.tokenUsage) ?? this.#usage
     } else if (message.method === 'model/rerouted' && typeof params?.toModel === 'string') {
       this.#model = params.toModel
-    } else if (message.method === 'turn/completed' && params?.turn?.id === this.#turnId) {
+    } else if (message.method === 'turn/completed'
+      && params?.threadId === this.#threadId
+      && params?.turn?.id === this.#turnId) {
+      this.#closeSteering('The Codex turn finished; new messages will queue normally.')
       this.#settled = true
       this.#rejectReadyOnce(new CodexLiveTurnError(
         'live_steer_unavailable',
@@ -500,9 +497,6 @@ class CodexLiveSession {
     this.#inactivityTimer.unref?.()
   }
 
-  // Steering readiness requires the turn identity to be fully established:
-  // the turn/start response and the turn/started activation notification must
-  // both have arrived and agree before any turn/steer can be trusted.
   #resolveReadyIfActive() {
     if (this.#readySettled
       || this.#settled
@@ -510,6 +504,16 @@ class CodexLiveSession {
       || !this.#turnId
       || this.#activatedTurnId !== this.#turnId) return
     this.#readySettled = true
+    // Steering opens only once the app-server both returned the started turn
+    // and reported that exact turn active; a Host-authored ready notice lets
+    // the renderer offer Push now for precisely this turn.
+    this.#steerReady = true
+    this.onEvent?.({
+      type: 'notice',
+      code: 'live_steer_ready',
+      message: 'Codex can accept a new instruction in this active turn.',
+      at: new Date().toISOString(),
+    })
     this.#resolveReady({ threadId: this.#threadId, turnId: this.#turnId })
   }
 
@@ -521,6 +525,7 @@ class CodexLiveSession {
 
   #fail(error) {
     if (this.#settled) return
+    this.#closeSteering('Codex can no longer accept messages in this active turn.')
     this.#settled = true
     this.#rejectReadyOnce(error)
     this.#rejectDone(error)
@@ -529,8 +534,19 @@ class CodexLiveSession {
     this.#terminate()
   }
 
+  #closeSteering(message) {
+    if (!this.#steerReady) return
+    this.#steerReady = false
+    this.onEvent?.({
+      type: 'notice',
+      code: 'live_steer_closed',
+      message,
+      at: new Date().toISOString(),
+    })
+  }
+
   #finishProcess() {
-    clearTimeout(this.#hardTimer)
+    if (this.#hardTimer) clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.signal?.removeEventListener('abort', this.#abort)
     if (!this.#child) return
@@ -608,5 +624,9 @@ export class CodexLiveTurnRunner {
       )
     }
     return session.steer(prompt, attachmentPaths)
+  }
+
+  canSteer(id) {
+    return this.#sessions.get(id)?.canSteer() === true
   }
 }

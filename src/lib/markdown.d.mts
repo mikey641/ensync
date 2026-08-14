@@ -1,26 +1,32 @@
-export type MarkdownAlignment = 'left' | 'right' | 'center' | null
-
-export type MarkdownInline =
+export type InlineNode =
   | { type: 'text'; text: string }
+  | { type: 'strong'; content: InlineNode[] }
+  | { type: 'em'; content: InlineNode[] }
+  | { type: 'del'; content: InlineNode[] }
   | { type: 'code'; text: string }
-  | { type: 'strong'; inline: MarkdownInline[] }
-  | { type: 'emphasis'; inline: MarkdownInline[] }
-  | { type: 'strike'; inline: MarkdownInline[] }
-  | { type: 'link'; href: string; inline: MarkdownInline[] }
+  | { type: 'link'; href: string; content: InlineNode[] }
+  | { type: 'image'; src: string; alt: string }
+
+export type TableAlignment = 'left' | 'center' | 'right' | null
+
+export type MarkdownListItem = { content: InlineNode[]; children: MarkdownBlock[] }
 
 export type MarkdownBlock =
-  | { type: 'paragraph'; inline: MarkdownInline[] }
-  | { type: 'heading'; level: number; inline: MarkdownInline[] }
+  | { type: 'paragraph'; content: InlineNode[] }
+  | { type: 'heading'; level: 1 | 2 | 3 | 4 | 5 | 6; content: InlineNode[] }
+  | { type: 'code'; code: string; language: string | null }
+  | { type: 'table'; align: TableAlignment[]; header: InlineNode[][]; rows: InlineNode[][][] }
+  | { type: 'list'; ordered: boolean; start: number | null; items: MarkdownListItem[] }
+  | { type: 'blockquote'; blocks: MarkdownBlock[] }
   | { type: 'rule' }
-  | { type: 'quote'; blocks: MarkdownBlock[] }
-  | { type: 'list'; ordered: boolean; start: number; items: MarkdownBlock[][] }
-  | {
-      type: 'table'
-      align: MarkdownAlignment[]
-      header: MarkdownInline[][]
-      rows: MarkdownInline[][][]
-    }
 
-export function safeMarkdownHref(value: unknown): string | null
-export function parseInline(value: unknown): MarkdownInline[]
+export type LinkTarget =
+  | { kind: 'external'; url: string }
+  | { kind: 'file'; path: string }
+  | { kind: 'none' }
+
 export function parseMarkdown(value: unknown): MarkdownBlock[]
+export function parseInline(value: unknown): InlineNode[]
+export function safeMarkdownHref(value: unknown): string | null
+export function classifyLinkTarget(href: unknown): LinkTarget
+export function filePathFromText(value: unknown): { path: string; line: number | null } | null

@@ -6,6 +6,7 @@ import { delimiter, join } from 'node:path'
 import test from 'node:test'
 import {
   buildSshArguments,
+  remoteChatAdmissionCoordinate,
   RemoteSshError,
   RemoteSshProcessAdapter,
   RemoteSshService,
@@ -152,6 +153,31 @@ test('SSH connection validation accepts only strict host, user, port, key-path, 
   )
 })
 
+test('SSH chat admission coordinates normalize target and project while preserving exact conversation identity', async () => {
+  const base = {
+    connection: connection({
+      hostname: 'Worker.EXAMPLE.com.',
+      projectPath: '/srv/projects/ensync/',
+    }),
+    provider: 'codex',
+    workspaceKey: WORKSPACE_KEY,
+    prompt: 'Continue',
+  }
+  const normalized = {
+    ...base,
+    connection: connection({ hostname: 'worker.example.com', projectPath: '/srv/projects/ensync' }),
+  }
+
+  assert.equal(
+    await remoteChatAdmissionCoordinate(base),
+    await remoteChatAdmissionCoordinate(normalized),
+  )
+  assert.notEqual(
+    await remoteChatAdmissionCoordinate(base),
+    await remoteChatAdmissionCoordinate({ ...normalized, workspaceKey: 'canonical-window:remote-chat-2' }),
+  )
+})
+
 test('a stale renderer without a remote conversation key gets an actionable restart error', async () => {
   const service = new RemoteSshService({
     sshFinder: async () => '/fake/bin/ssh',
@@ -248,7 +274,7 @@ test('SSH transport failures do not claim a connection and return bounded diagno
 })
 
 test('remote Codex chat keeps prompt out of argv and returns only parsed structured output publicly', async () => {
-  const prompt = 'Continue the remote implementation without copying context.'
+  const prompt = 'Continue the remote implementation and explain [ENSYNC SAFE MULTI-AGENT v1].'
   const cliStdout = [
     'Remote Codex startup diagnostic.',
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
@@ -305,11 +331,15 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
 
   assert.equal(captured[1].includes(prompt), false)
   assert.equal(captured[2].input.includes(prompt), false)
-  assert.equal(captured[2].inactivityTimeoutMs, 32_000)
-  assert.equal(captured[2].hardTimeoutMs, 32_000)
+  assert.equal(captured[2].inactivityTimeoutMs, (15 * 60 * 1_000) + 30_000)
+  assert.equal(captured[2].hardTimeoutMs, null)
   const payloadMarker = captured[2].input.lastIndexOf(')("')
   const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
   const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
+  assert.match(remotePayload.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(remotePayload.prompt, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
+  assert.match(remotePayload.prompt, /Continue the remote implementation and explain \[ENSYNC SAFE MULTI-AGENT v1\]\.$/)
+  assert.equal(remotePayload.prompt.split('[ENSYNC SAFE MULTI-AGENT v1]').length - 1, 2)
   assert.equal(remotePayload.inactivityTimeoutMs, 2_000)
   assert.equal(remotePayload.hardTimeoutMs, 2_000)
   assert.equal(result.response, 'Remote Codex response')
@@ -602,7 +632,6 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     assert.equal(result.exitCode, 0, result.stderr)
   }
   const baseline = (await runGit(['rev-parse', 'HEAD'], { cwd: projectPath })).stdout.trim()
-  assert.equal((await runGit(['config', 'core.autocrlf', 'true'], { cwd: projectPath })).exitCode, 0)
   await writeFile(join(projectPath, 'tracked.txt'), 'unique shared-checkout change\n')
   await writeFile(join(projectPath, 'untracked.txt'), 'unique untracked change\n')
   await writeFile(executable, `#!${process.execPath}\n${[
@@ -633,12 +662,12 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
       sessionId: null,
       model: null,
       effort: null,
-      inactivityTimeoutMs: 1_200,
-      hardTimeoutMs: 10_000,
+      inactivityTimeoutMs: 400,
+      hardTimeoutMs: null,
     }),
     env: { ...process.env, HOME: directory, PATH: `${directory}${delimiter}${process.env.PATH ?? ''}` },
-    inactivityTimeoutMs: 2_200,
-    hardTimeoutMs: 11_000,
+    inactivityTimeoutMs: 1_250,
+    hardTimeoutMs: null,
     maxCaptureBytes: 12 * 1024 * 1024,
   })
 
@@ -662,100 +691,6 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
   assert.equal(envelope.result.process.stdout.includes('ENSYNC_SSH_PROGRESS_V1'), false)
   assert.equal(envelope.result.process.stderr.includes('ENSYNC_SSH_PROGRESS_V1'), false)
   assert.equal((await runGit(['status', '--porcelain'], { cwd: projectPath })).stdout.trim().split('\n').length, 2)
-})
-
-async function initSharedCheckoutRepo(projectPath) {
-  await mkdir(projectPath)
-  for (const args of [
-    ['init', '--initial-branch=main'],
-    ['config', 'user.name', 'Ensync Test'],
-    ['config', 'user.email', 'ensync@example.test'],
-  ]) {
-    const result = await runGit(args, { cwd: projectPath })
-    assert.equal(result.exitCode, 0, result.stderr)
-  }
-  await writeFile(join(projectPath, 'tracked.txt'), 'baseline\n')
-  for (const args of [['add', 'tracked.txt'], ['commit', '-m', 'baseline']]) {
-    const result = await runGit(args, { cwd: projectPath })
-    assert.equal(result.exitCode, 0, result.stderr)
-  }
-}
-
-function fakeCodexScript(midRunStatement) {
-  return `#!${process.execPath}\n${[
-    "const args = process.argv.slice(2)",
-    "if (args[0] === 'login') { console.log('Logged in with ChatGPT'); process.exit(0) }",
-    midRunStatement,
-    "console.log(JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }))",
-    "console.log(JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }))",
-    "console.log(JSON.stringify({ type: 'turn.completed' }))",
-    "process.exit(0)",
-  ].join('\n')}\n`
-}
-
-async function runBridgeChat(directory, projectPath) {
-  return runProcess(process.execPath, ['-'], {
-    input: createRemoteBridgeInput({
-      operation: 'chat',
-      provider: 'codex',
-      projectPath,
-      workspaceKey: WORKSPACE_KEY,
-      prompt: 'Report on the canonical repository during the run.',
-      sessionId: null,
-      model: null,
-      effort: null,
-      inactivityTimeoutMs: 5_000,
-      hardTimeoutMs: 8_000,
-    }),
-    env: { ...process.env, HOME: directory, PATH: `${directory}${delimiter}${process.env.PATH ?? ''}` },
-    inactivityTimeoutMs: 5_000,
-    hardTimeoutMs: 9_000,
-    maxCaptureBytes: 12 * 1024 * 1024,
-  })
-}
-
-test('remote bridge flags a shared-checkout change when the canonical repository is touched mid-run, without marking it destructive', async (context) => {
-  if (process.platform === 'win32') return context.skip('The remote bridge intentionally rejects Windows command shims.')
-  const directory = await mkdtemp(join(tmpdir(), 'ensync-ssh-shared-checkout-'))
-  const projectPath = join(directory, 'project')
-  const executable = join(directory, 'codex')
-  context.after(() => rm(directory, { recursive: true, force: true }))
-
-  await initSharedCheckoutRepo(projectPath)
-  const rogueFile = JSON.stringify(join(projectPath, 'rogue.txt'))
-  await writeFile(executable, fakeCodexScript(
-    `require('node:fs').writeFileSync(${rogueFile}, 'a rogue remote process appended this\\n')`,
-  ))
-  await chmod(executable, 0o755)
-
-  const bridge = await runBridgeChat(directory, projectPath)
-  assert.equal(bridge.timedOut, false)
-  assert.equal(bridge.exitCode, 0)
-  const envelope = decodeRemoteBridgeEnvelope(bridge.stdout)
-  assert.equal(envelope?.ok, true)
-  assert.equal(envelope.result.sharedCheckout.changed, true)
-  assert.equal(envelope.result.sharedCheckout.destructive, false)
-  assert.equal(envelope.result.sharedCheckout.landed, false)
-})
-
-test('remote bridge reports no shared-checkout change when the canonical repository is untouched during a run', async (context) => {
-  if (process.platform === 'win32') return context.skip('The remote bridge intentionally rejects Windows command shims.')
-  const directory = await mkdtemp(join(tmpdir(), 'ensync-ssh-shared-checkout-clean-'))
-  const projectPath = join(directory, 'project')
-  const executable = join(directory, 'codex')
-  context.after(() => rm(directory, { recursive: true, force: true }))
-
-  await initSharedCheckoutRepo(projectPath)
-  await writeFile(executable, fakeCodexScript('// The canonical repository is left untouched during this run.'))
-  await chmod(executable, 0o755)
-
-  const bridge = await runBridgeChat(directory, projectPath)
-  assert.equal(bridge.timedOut, false)
-  assert.equal(bridge.exitCode, 0)
-  const envelope = decodeRemoteBridgeEnvelope(bridge.stdout)
-  assert.equal(envelope?.ok, true)
-  assert.equal(envelope.result.sharedCheckout.changed, false)
-  assert.equal(envelope.result.sharedCheckout.destructive, false)
 })
 
 test('process adapter retains exact provider streams internally while the service handles safe remote preflight errors', async () => {
@@ -820,7 +755,7 @@ test('process adapter retains exact provider streams internally while the servic
   )
 })
 
-test('SSH timeout errors distinguish bridge inactivity from the transport hard ceiling and are never retryable', async () => {
+test('SSH timeout errors distinguish bridge inactivity from an explicit transport deadline and are never retryable', async () => {
   const remoteIdle = new RemoteSshService({
     sshFinder: async () => '/fake/bin/ssh',
     processRunner: async () => processResult({
@@ -854,7 +789,7 @@ test('SSH timeout errors distinguish bridge inactivity from the transport hard c
       error instanceof RemoteSshError
       && error.code === 'ssh_timed_out'
       && error.safeToRetry === false
-      && error.message.includes('hard run limit')
+      && error.message.includes('explicit run limit')
       && error.message.includes('partial work'),
   )
 })

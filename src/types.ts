@@ -17,6 +17,11 @@ export type ProviderId =
   | 'junie'
   | 'ollama'
 
+export type AgentCoordinationPolicy = {
+  policy: 'ensync_agent_coordination_v1'
+  delivery: 'ensync_prompt'
+}
+
 export type Provider = {
   id: ProviderId
   name: string
@@ -41,8 +46,13 @@ export type Provider = {
   resetsIn: string | null
   /** Exact CLI-rendered schedule retained when the CLI omits an absolute timestamp. */
   resetLabel?: string | null
+  /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   usageReason: string
+  /** True when the shown percentage is the last verified reading, not this refresh's. */
+  usageStale?: boolean
+  /** Exact time the shown percentage was measured by the CLI. */
+  usageCheckedAt?: string | null
   canConnect: boolean
   /** True only when Ensync has a fixed, verified provider-owned self-update command. */
   canUpdate?: boolean
@@ -54,6 +64,8 @@ export type Provider = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
+  /** Universal Ensync agent-coordination behavior delivered in every provider prompt. */
+  agentCoordination: AgentCoordinationPolicy
   checkedAt: string | null
 }
 
@@ -66,7 +78,7 @@ export type Message = {
   timestamp?: string | null
   provider?: ProviderId
   turnId?: string
-  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'transferred'
   /** Exact model reported by the completed CLI, or null when the CLI did not report one. */
   model?: string | null
   /** Friendly effort tier requested for this run, or null when provider defaults were used. */
@@ -75,6 +87,11 @@ export type Message = {
   sessionResumable?: boolean
   /** Local files explicitly attached by the user for this turn. */
   attachments?: FileAttachment[]
+  /** Local-only immutable receipt for idempotent cross-window handoff retries. */
+  handoffTombstone?: Readonly<{
+    handoffId: string
+    queuedPromptIdentity: string
+  }>
 }
 
 export type FileAttachment = {

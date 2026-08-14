@@ -20,7 +20,7 @@ export function buildAutoContextPrompt(input: {
   chat: {
     messages: Array<{
       role: 'user' | 'agent'
-      deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+      deliveryStatus?: 'queued' | 'pending' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'transferred'
       provider?: string
       content: string
     }>

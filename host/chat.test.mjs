@@ -16,6 +16,9 @@ import {
   validateProjectPath,
 } from './chat.mjs'
 import { createRelayHost } from './server.mjs'
+import { CursorAgentError } from './cursor-agent.mjs'
+import { ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
+import { withProviderRunnerInstructions } from './provider-runner-contract.mjs'
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-chat-test-'))
@@ -34,8 +37,8 @@ function statusService(provider) {
 }
 
 function readyProvider(id) {
-  const labels = { codex: 'Codex', claude: 'Claude Code', droid: 'Factory Droid' }
-  const methods = { codex: 'ChatGPT login', claude: 'claude.ai OAuth', droid: 'Factory browser login' }
+  const labels = { codex: 'Codex', claude: 'Claude Code', droid: 'Factory Droid', cursor: 'Cursor Agent' }
+  const methods = { codex: 'ChatGPT login', claude: 'claude.ai OAuth', droid: 'Factory browser login', cursor: 'Cursor login' }
   return {
     id,
     name: labels[id] ?? id,
@@ -71,6 +74,315 @@ test('project validation enforces configured host roots', async (context) => {
     validateProjectPath(outsideRoot, { allowedRoots: [allowedRoot] }),
     (error) => error instanceof ChatRunError && error.code === 'project_not_allowed',
   )
+})
+
+test('ChatRunService uses a pre-acquired workspace lease without acquiring or releasing it', async (context) => {
+  const projectPath = await projectFixture(context)
+  let acquireCalls = 0
+  let releaseCalls = 0
+  let processCwd = null
+  const lease = {
+    workspace: {
+      projectPath, repositoryPath: projectPath, branch: 'ensync/chat-a', base: null, integration: null,
+      gitBefore: { dirty: false, changedFiles: 0 },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() { releaseCalls += 1 },
+  }
+  const projectIsolation = {
+    async acquire() { acquireCalls += 1; return lease },
+    async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+    async checkSharedCheckout() { return { available: false } },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation,
+    processRunner: async (_executable, _args, options) => {
+      processCwd = options.cwd
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.run({ provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-a' }, {
+    preAcquiredWorkspaceLease: lease,
+  })
+
+  assert.equal(acquireCalls, 0)
+  assert.equal(releaseCalls, 0)
+  assert.equal(processCwd, projectPath)
+})
+
+test('ChatRunService normalizes a renderer-wrapped prompt before protected-workspace isolation', async (context) => {
+  const projectPath = await projectFixture(context)
+  let processInput = ''
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-renderer-envelope',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      processInput = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+  const prompt = withProviderRunnerInstructions('codex', 'local', 'Continue the renderer-started task.')
+
+  await service.run({
+    provider: 'codex', projectPath, prompt, workspaceKey: 'conversation:renderer-envelope',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+  })
+
+  assert.equal(processInput.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 1)
+  assert.equal(processInput.match(/This bundled Ensync agent-coordination contract applies to every Ensync provider runner/g)?.length, 1)
+  assert.match(processInput, /\[ENSYNC HOST WORKSPACE ISOLATION\]/)
+  assert.match(processInput, /Protected branch: ensync\/chat-renderer-envelope/)
+  assert.match(processInput, /Continue the renderer-started task\.$/)
+})
+
+test('ChatRunService tells the provider and renderer that baseline reconciliation is deferred until landing', async (context) => {
+  const projectPath = await projectFixture(context)
+  const baselineConflict = {
+    baselineSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    files: ['TODO.md', 'components/views/UnitDetail.tsx', 'package.json'],
+    reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+  }
+  const events = []
+  let seenPrompt = ''
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-deferred',
+      baselineConflict,
+      base: {
+        sha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        canonicalSha: baselineConflict.baselineSha,
+        source: 'base_refresh_deferred',
+        reason: baselineConflict.reason,
+        remote: 'origin',
+        branch: 'main',
+        refreshed: false,
+      },
+      integration: {
+        canonicalSha: baselineConflict.baselineSha,
+        integrated: false,
+        unintegratedCommits: 1,
+      },
+      gitBefore: {
+        dirty: false,
+        changedFiles: 0,
+        head: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+      },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      seenPrompt = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  const result = await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:deferred-baseline',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.match(seenPrompt, /DEFERRED BASELINE RECONCILIATION/)
+  assert.match(seenPrompt, /bbbbbbbbbbbb/)
+  assert.match(seenPrompt, /components\/views\/UnitDetail\.tsx/)
+  assert.match(seenPrompt, /continue/i)
+  assert.match(seenPrompt, /before landing/i)
+  assert.doesNotMatch(seenPrompt, /never merges them for you/i)
+  const ready = events.find((event) => event.code === 'project_workspace_ready')
+  assert.match(ready.message, /reconciliation is deferred until landing/i)
+  assert.deepEqual(ready.workspace.baselineConflict, baselineConflict)
+  assert.deepEqual(result.workspace.baselineConflict, baselineConflict)
+})
+
+test('ChatRunService shows live overlap events, advises the provider, and stops monitoring', async (context) => {
+  const projectPath = await projectFixture(context)
+  const overlap = {
+    peerBranch: 'ensync/chat-bbbbbbbbbbbbbbbbbbbbbbbb',
+    source: 'active',
+    paths: ['src/App.tsx'],
+    totalCount: 1,
+  }
+  const events = []
+  let seenPrompt = ''
+  let stopCalls = 0
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    workspaceOverlapMonitor: {
+      async start(_workspace, options) {
+        options.onEvent({
+          type: 'notice',
+          code: 'workspace_file_overlap_detected',
+          message: 'Another conversation is editing src/App.tsx.',
+          overlap: { ...overlap, state: 'detected' },
+          at: '2026-08-12T00:00:00.000Z',
+        })
+        return {
+          current: () => [overlap],
+          async refresh() { return [overlap] },
+          async stop() { stopCalls += 1 },
+        }
+      },
+    },
+    autoLand: false,
+    processRunner: async (_executable, _args, options) => {
+      seenPrompt = options.input
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:overlap-lifecycle',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.match(seenPrompt, /CROSS-CONVERSATION FILE AWARENESS/)
+  assert.match(seenPrompt, /src\/App\.tsx/)
+  assert.match(seenPrompt, /re-read/i)
+  assert.doesNotMatch(seenPrompt, /another worktree at/)
+  assert.equal(events.some((event) => event.code === 'workspace_file_overlap_detected'), true)
+  assert.equal(stopCalls, 1)
+})
+
+test('overlap refresh failures never replace a completed provider result', async (context) => {
+  const projectPath = await projectFixture(context)
+  let stopCalls = 0
+  const lease = {
+    workspace: {
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    workspaceOverlapMonitor: {
+      async start() {
+        return {
+          current: () => [],
+          async refresh() { throw new Error('overlap metadata unavailable') },
+          async stop() { stopCalls += 1 },
+        }
+      },
+    },
+    autoLand: false,
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done despite advisory failure' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+  const events = []
+
+  const result = await service.run({
+    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:overlap-failure',
+  }, {
+    preAcquiredWorkspaceLease: lease,
+    onEvent: (event) => events.push(event),
+  })
+
+  assert.equal(result.response, 'done despite advisory failure')
+  assert.equal(stopCalls, 1)
+  assert.equal(events.some((event) => event.code === 'workspace_overlap_unavailable'), true)
 })
 
 test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON only', async (context) => {
@@ -109,7 +421,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   const result = await service.run({
     provider: 'codex',
     projectPath,
-    prompt: 'Inspect this project',
+    prompt: `Inspect this project and explain ${ENSYNC_MULTI_AGENT_MARKER}`,
     model: 'gpt-5.4',
     effort: 'high',
     timeoutMs: 2_000,
@@ -120,7 +432,10 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   assert.equal(executable, '/test/bin/codex')
   assert.deepEqual(args, ['exec', '--json', '--color', 'never', '--skip-git-repo-check', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="high"', '-'])
   assert.equal(options.cwd, await realpath(projectPath))
-  assert.equal(options.input, 'Inspect this project')
+  assert.equal(options.input.startsWith(ENSYNC_MULTI_AGENT_MARKER), true)
+  assert.match(options.input, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
+  assert.match(options.input, /Inspect this project and explain \[ENSYNC SAFE MULTI-AGENT v1\]$/)
+  assert.equal(options.input.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 2)
   assert.equal(options.inactivityTimeoutMs, 2_000)
   assert.equal(options.hardTimeoutMs, 2_000)
   assert.equal(options.env.OPENAI_API_KEY, undefined)
@@ -137,7 +452,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   })
 })
 
-test('Codex provider default omits the model argument', async (context) => {
+test('Codex provider default omits model and absolute run limits', async (context) => {
   const projectPath = await projectFixture(context)
   let capturedArgs
   let capturedOptions
@@ -163,7 +478,7 @@ test('Codex provider default omits the model argument', async (context) => {
   assert.equal(capturedArgs.includes('--model'), false)
   assert.equal(capturedArgs.includes('-c'), false)
   assert.equal(capturedOptions.inactivityTimeoutMs, 15 * 60 * 1_000)
-  assert.equal(capturedOptions.hardTimeoutMs, 24 * 60 * 60 * 1_000)
+  assert.equal(capturedOptions.hardTimeoutMs, null)
   assert.equal(result.requestedModel, null)
   assert.equal(result.requestedEffort, null)
 })
@@ -226,6 +541,7 @@ test('retained Codex jobs use the live runner and validate steering through the 
         steers.push({ jobId, prompt, attachments })
         return { turnId: 'provider-turn-1' }
       },
+      canSteer: (jobId) => jobId === 'job_1111111111111111',
     },
   })
 
@@ -239,7 +555,8 @@ test('retained Codex jobs use the live runner and validate steering through the 
 
   assert.equal(service.hasRunningRuns(), true)
   assert.equal(liveInput.id, 'job_1111111111111111')
-  assert.equal(liveInput.prompt, 'Start live')
+  assert.match(liveInput.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(liveInput.prompt, /Start live$/)
   assert.equal(liveInput.effort, 'medium')
   assert.equal(liveInput.env.OPENAI_API_KEY, undefined)
   assert.deepEqual(await service.steer('job_1111111111111111', { prompt: 'Correct it now' }), {
@@ -542,7 +859,8 @@ test('Claude chat resumes a verified session without putting the prompt in argum
     '--resume',
     sessionId,
   ])
-  assert.equal(captured[2].input, 'Continue the implementation')
+  assert.match(captured[2].input, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(captured[2].input, /Continue the implementation$/)
   assert.equal(result.response, 'Real Claude response')
   assert.equal(result.model, 'claude-opus-4-6')
   assert.equal(result.requestedEffort, 'max')
@@ -719,8 +1037,18 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     },
   })
 
+  // Copilot is gated rather than unsupported: its runner is deliberately not
+  // built, so the refusal carries the exact outstanding requirement instead of a
+  // generic "not supported" message.
   await assert.rejects(
     service.run({ provider: 'copilot', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && error.status === 422
+      && /never puts a prompt in argv/.test(error.message),
+  )
+  await assert.rejects(
+    service.run({ provider: 'kiro', projectPath, prompt: 'Hello' }),
     (error) => error instanceof ChatRunError && error.code === 'unsupported_provider',
   )
   await assert.rejects(
@@ -738,6 +1066,41 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     service.run({ provider: 'codex', projectPath, prompt: 'Hello', autoLand: 'yes' }),
     (error) => error instanceof ChatRunError && error.code === 'invalid_auto_land',
   )
+  assert.equal(processCalls, 0)
+})
+
+test('codebuddy and ollama are refused with their own exact outstanding requirement', async (context) => {
+  const projectPath = await projectFixture(context)
+  let processCalls = 0
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    processRunner: async () => {
+      processCalls += 1
+      throw new Error('process must not run')
+    },
+  })
+
+  // CodeBuddy's runner is complete and its containment is recorded, but the CLI
+  // has never completed an authenticated turn, so the headless-approval
+  // behaviour is unverified. The refusal says exactly that.
+  await assert.rejects(
+    service.run({ provider: 'codebuddy', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && error.status === 422
+      && /not signed in/.test(error.message)
+      && /CodeBuddy Code/.test(error.message),
+  )
+
+  // Ollama is not an unfinished integration: it is an inference server with no
+  // tool execution, so it cannot carry out a task at all.
+  await assert.rejects(
+    service.run({ provider: 'ollama', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_execution_gated'
+      && /local model runtime, not a coding agent/.test(error.message),
+  )
+
   assert.equal(processCalls, 0)
 })
 
@@ -772,6 +1135,76 @@ test('a supported droid run reaches the exec runner and returns its result', asy
   assert.equal(droidRuns, 1)
   assert.equal(result.provider, 'droid')
   assert.equal(result.response, 'pong')
+})
+
+test('a supported cursor run reaches the cursor runner with the contained cwd and the wrapped prompt', async (context) => {
+  const projectPath = await projectFixture(context)
+  const seen = []
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('cursor')),
+    environment: { PATH: '/usr/bin', CURSOR_API_KEY: 'must-not-reach-the-run' },
+    processRunner: async () => {
+      throw new Error('process must not run')
+    },
+    cursorAgentRunner: {
+      run: async (input) => {
+        seen.push(input)
+        return {
+          provider: 'cursor',
+          response: 'pong',
+          sessionId: '0f3b1d94-6a4e-4c2f-9a7d-2b8c5e1f0a63',
+          model: 'claude-opus-5',
+          requestedModel: null,
+          requestedEffort: null,
+          usage: null,
+          outputRecovery: null,
+          durationMs: 100,
+          completedAt: '2026-08-10T00:00:00.000Z',
+        }
+      },
+    },
+  })
+
+  const result = await service.run({ provider: 'cursor', projectPath, prompt: 'Hello' })
+  assert.equal(seen.length, 1)
+  assert.equal(result.provider, 'cursor')
+  assert.equal(result.response, 'pong')
+  assert.equal(seen[0].executable, '/test/bin/cursor')
+  assert.equal(seen[0].projectPath, await realpath(projectPath))
+  // The prompt reaches the runner already carrying the shared Ensync
+  // multi-agent contract, exactly as the droid path does.
+  assert.notEqual(seen[0].prompt, 'Hello')
+  assert.match(seen[0].prompt, /Hello/)
+  // A paid-credential override must never reach a subscription run.
+  assert.equal('CURSOR_API_KEY' in seen[0].env, false)
+})
+
+test('a cursor runner failure keeps its own code, status, and retry safety', async (context) => {
+  const projectPath = await projectFixture(context)
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('cursor')),
+    processRunner: async () => {
+      throw new Error('process must not run')
+    },
+    cursorAgentRunner: {
+      run: async () => {
+        throw new CursorAgentError(
+          'provider_containment_unverified',
+          'Cursor Agent could not apply the pinned sandbox.',
+          409,
+          false,
+        )
+      },
+    },
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'cursor', projectPath, prompt: 'Hello' }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'provider_containment_unverified'
+      && error.status === 409
+      && error.safeToRetry === false,
+  )
 })
 
 test('chat timeout and malformed CLI output are explicit failures', async (context) => {
@@ -1119,10 +1552,13 @@ test('ChatRunService passes cancellation to the exact process and never classifi
   const projectPath = await projectFixture(context)
   const controller = new AbortController()
   let receivedSignal
+  let processStarted
+  const started = new Promise((resolve) => { processStarted = resolve })
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
     processRunner: async (_executable, _args, options) => {
       receivedSignal = options.signal
+      processStarted()
       await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }))
       return { exitCode: null, signal: 'SIGTERM', error: null, timedOut: false, aborted: true, stdout: '', stderr: '' }
     },
@@ -1132,7 +1568,9 @@ test('ChatRunService passes cancellation to the exact process and never classifi
     { provider: 'codex', projectPath, prompt: 'Keep working' },
     { signal: controller.signal },
   )
-  setTimeout(() => controller.abort(), 10)
+  // Cancel only once the process is actually running: a wall-clock delay races the
+  // pre-spawn cancellation checks, which reject before any signal reaches the process.
+  void started.then(() => controller.abort())
 
   await assert.rejects(run, (error) =>
     error instanceof ChatRunError

@@ -8,6 +8,10 @@ import {
 } from './workspacePersistence.mjs'
 
 const MAX_RETAINED_WORKSPACES = 32
+const PROTECTED_CONVERSATION_BRANCH_PATTERN = /^ensync\/chat-([0-9a-f]{24})$/i
+const PROTECTED_CONVERSATION_REFERENCE_PATTERN = /\bensync\/chat-([0-9a-f]{6,24})(?=$|[^0-9a-f])/gi
+const SHORT_WORKSPACE_REFERENCE_PATTERN = /\b([0-9a-f]{4,24})(?:…|\.{3})\s*(?:(?:protected|conversation)\s+)*(?:workspace|worktree|conversation)\b/gi
+const FULL_WORKSPACE_PATH_REFERENCE_PATTERN = /(?:^|[\\/])([0-9a-f]{24})(?=$|[\\/\s,.;:)])/gi
 
 export function nativeProjectPathKey(value) {
   if (typeof value !== 'string') return ''
@@ -98,4 +102,106 @@ export function findRetainedWorkspaceForProject(storage, options = {}) {
     || right.revision - left.revision
     || left.workspace.id.localeCompare(right.workspace.id))
   return candidates[0] ?? null
+}
+
+function referencedConversationPrefixes(chat) {
+  const messages = Array.isArray(chat?.messages) ? chat.messages : []
+  const latest = messages.at(-1)
+  if (latest?.role !== 'agent' || typeof latest.content !== 'string') return []
+  return [...new Set([
+    ...latest.content.matchAll(PROTECTED_CONVERSATION_REFERENCE_PATTERN),
+    ...latest.content.matchAll(SHORT_WORKSPACE_REFERENCE_PATTERN),
+    ...latest.content.matchAll(FULL_WORKSPACE_PATH_REFERENCE_PATTERN),
+  ].map((match) => match[1]?.toLowerCase()).filter(Boolean))]
+}
+
+function conversationBranchSuffix(branch) {
+  if (typeof branch !== 'string') return null
+  return PROTECTED_CONVERSATION_BRANCH_PATTERN.exec(branch)?.[1]?.toLowerCase() ?? null
+}
+
+function projectDisplayName(project) {
+  if (typeof project?.name === 'string' && project.name.trim()) return project.name.trim()
+  if (typeof project?.path !== 'string') return 'Project'
+  return project.path.replaceAll('\\', '/').split('/').filter(Boolean).at(-1) ?? 'Project'
+}
+
+function absoluteLocalProjectPath(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 4096) return false
+  if (value.startsWith('/')) return value !== '/' && !/^\/+$/u.test(value)
+  if (/^[a-z]:[\\/]/i.test(value)) return !/^[a-z]:[\\/]*$/i.test(value)
+  return /^\\\\[^\\]+\\[^\\]+/.test(value)
+}
+
+function matchingConversationCandidates(state, workspace, prefixes, excludedChatId = null) {
+  const projects = Array.isArray(state?.projects) ? state.projects : []
+  return (Array.isArray(state?.chats) ? state.chats : []).flatMap((chat) => {
+    const suffix = conversationBranchSuffix(chat?.workspace?.branch)
+    if (chat?.id === excludedChatId || !suffix || !prefixes.some((prefix) => suffix.startsWith(prefix))
+      || typeof chat?.id !== 'string' || !chat.id) return []
+    const project = projects.find((candidate) => candidate?.id === chat.projectId)
+    if (!project || typeof project.id !== 'string' || !project.id
+      || !absoluteLocalProjectPath(project.path)) return []
+    return [{
+      workspaceId: workspace.id,
+      projectId: project.id,
+      projectPath: project.path,
+      projectName: projectDisplayName(project),
+      chatId: chat.id,
+      chatTitle: typeof chat.title === 'string' && chat.title.trim()
+        ? chat.title.trim()
+        : 'Conversation',
+      branch: chat.workspace.branch,
+    }]
+  })
+}
+
+/**
+ * Resolves only a unique protected branch named by the latest completed agent
+ * response. Candidate chats come from checksummed snapshots for shell-retained
+ * workspaces; no worktree path is opened or inspected.
+ */
+export function findReferencedOwningConversation(storage, options = {}) {
+  if (!isNativeWorkspaceIdentity(options.currentWorkspace)) return null
+  const prefixes = referencedConversationPrefixes(options.chat)
+  const currentSuffix = conversationBranchSuffix(options.chat?.workspace?.branch)
+  const targetPrefixes = prefixes.filter((prefix) => !currentSuffix?.startsWith(prefix))
+  if (targetPrefixes.length === 0) return null
+
+  const retainedWorkspaces = Array.isArray(options.retainedWorkspaces)
+    ? options.retainedWorkspaces.slice(0, MAX_RETAINED_WORKSPACES)
+    : []
+  const candidates = matchingConversationCandidates(
+    options.currentState,
+    options.currentWorkspace,
+    targetPrefixes,
+    options.chat?.id,
+  )
+  for (const workspace of retainedWorkspaces) {
+    if (!isNativeWorkspaceIdentity(workspace)
+      || workspace.id === options.currentWorkspace.id) continue
+    if (!storage || typeof storage.getItem !== 'function') continue
+    const keys = createWorkspaceSnapshotKeys((key) => workspaceStorageKey(key, workspace))
+    const snapshot = readWorkspaceSnapshot(storage, { keys })
+    if (!snapshot) continue
+    candidates.push(...matchingConversationCandidates(snapshot.state, workspace, targetPrefixes))
+  }
+  const unique = new Map(candidates.map((candidate) => [
+    `${candidate.workspaceId}\0${candidate.chatId}`,
+    candidate,
+  ]))
+  return unique.size === 1 ? [...unique.values()][0] : null
+}
+
+/** Target-renderer guard for navigation to a retained chat without a live job. */
+export function exactNativeChatFocusCanApply(request, current) {
+  if (!request || !current || request.jobId !== undefined
+    || typeof request.workspaceId !== 'string'
+    || typeof request.projectId !== 'string'
+    || typeof request.projectPath !== 'string'
+    || typeof request.chatId !== 'string') return false
+  return request.workspaceId.toLowerCase() === current.workspaceId?.toLowerCase()
+    && request.projectId === current.projectId
+    && nativeProjectPathKey(request.projectPath) === nativeProjectPathKey(current.projectPath)
+    && request.chatId === current.chatId
 }

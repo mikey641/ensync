@@ -1,10 +1,16 @@
 const HOST_JOB_TURN_PATTERN = /^turn-[A-Za-z0-9_-]{8,96}$/
-const SUPPORTED_CHAT_PROVIDERS = Object.freeze(['codex', 'claude', 'droid'])
+// The deterministic probe covers only the two structured local CLI runners a
+// renderer routes retained Host jobs through, and only the attempts it
+// actually creates (the initial dispatch plus one automatic fallback). This
+// keeps the candidate set small, bounded, and free of identities this
+// renderer could never have started.
+const PROBED_JOB_PROVIDERS = Object.freeze(['codex', 'claude'])
+const DEFAULT_MAXIMUM_ATTEMPTS = 2
 
 function providerOrder(chatProvider) {
-  return SUPPORTED_CHAT_PROVIDERS.includes(chatProvider)
-    ? [chatProvider, ...SUPPORTED_CHAT_PROVIDERS.filter((provider) => provider !== chatProvider)]
-    : [...SUPPORTED_CHAT_PROVIDERS]
+  return PROBED_JOB_PROVIDERS.includes(chatProvider)
+    ? [chatProvider, ...PROBED_JOB_PROVIDERS.filter((provider) => provider !== chatProvider)]
+    : [...PROBED_JOB_PROVIDERS]
 }
 
 /**
@@ -19,7 +25,7 @@ export function runningHostJobCandidates(chats, options = {}) {
     : 12
   const maximumAttempts = Number.isSafeInteger(options.maximumAttempts) && options.maximumAttempts > 0
     ? options.maximumAttempts
-    : SUPPORTED_CHAT_PROVIDERS.length
+    : DEFAULT_MAXIMUM_ATTEMPTS
   const candidates = []
   const seen = new Set()
 

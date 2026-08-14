@@ -13,7 +13,11 @@ const DEFAULT_FETCH_TIMEOUT_MS = 120_000
 const PREFERRED_CANONICAL_REMOTE = 'origin'
 const CANONICAL_BRANCH_FALLBACKS = ['main', 'master']
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
+const MAX_BASELINE_CONFLICT_FILES = 50
+const MAX_BASELINE_CONFLICT_PATH_CHARACTERS = 1_024
 const WORKSPACE_KEY_CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/
+const OCCUPIED_JOB_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/
+const OCCUPIED_NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
 
 const AGENT_COMMIT_IDENTITY = {
@@ -56,6 +60,16 @@ function firstLine(value) {
   return String(value ?? '').split(/\r?\n/).map((line) => line.trim()).find(Boolean) ?? ''
 }
 
+function boundedConflictFiles(value) {
+  return [...new Set(String(value ?? '').split('\0').filter((file) => (
+    file.length > 0
+    && file.length <= MAX_BASELINE_CONFLICT_PATH_CHARACTERS
+    && !WORKSPACE_KEY_CONTROL_CHARACTERS.test(file)
+  )))]
+    .sort((left, right) => left < right ? -1 : left > right ? 1 : 0)
+    .slice(0, MAX_BASELINE_CONFLICT_FILES)
+}
+
 function cancellationError() {
   return new ProjectIsolationError(
     'run_cancelled',
@@ -88,6 +102,12 @@ function waitFor(milliseconds, signal) {
   })
 }
 
+// Every lease token this OS process currently holds. A lock file records the
+// shared Host daemon's pid, never the run's, so the pid alone cannot tell a
+// lease this Host is using from one it leaked: both stay "alive" until the
+// daemon dies. The token can, and it is the only thing that can.
+const heldLeaseTokens = new Set()
+
 function processIsAlive(pid) {
   if (!Number.isInteger(pid) || pid < 1) return false
   try {
@@ -119,6 +139,27 @@ function workspaceKey(value) {
     )
   }
   return value
+}
+
+function boundedOwner(value) {
+  const owner = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
+  const startedAt = typeof owner.startedAt === 'string' && Number.isFinite(Date.parse(owner.startedAt))
+    ? owner.startedAt
+    : null
+  return {
+    jobId: typeof owner.jobId === 'string' && OCCUPIED_JOB_ID_PATTERN.test(owner.jobId) ? owner.jobId : null,
+    provider: typeof owner.provider === 'string' && /^[a-z0-9][a-z0-9._-]{0,127}$/i.test(owner.provider)
+      ? owner.provider
+      : null,
+    targetKind: owner.targetKind === 'local' || owner.targetKind === 'ssh' ? owner.targetKind : null,
+    startedAt,
+    providerProcessStarted: owner.providerProcessStarted === true,
+    steerable: owner.steerable === true,
+    nativeWorkspaceId: typeof owner.nativeWorkspaceId === 'string'
+      && OCCUPIED_NATIVE_WORKSPACE_ID_PATTERN.test(owner.nativeWorkspaceId)
+      ? owner.nativeWorkspaceId
+      : null,
+  }
 }
 
 async function canonicalDirectory(value, code, message) {
@@ -228,6 +269,31 @@ export class ProjectIsolationService {
       }
     } catch (error) {
       await lease.release()
+      throw error
+    }
+  }
+
+  async tryAcquireOrDescribe(projectPath, rawWorkspaceKey, options = {}) {
+    const key = workspaceKey(rawWorkspaceKey)
+    throwIfCancelled(options.signal)
+    const canonicalProjectPath = await canonicalDirectory(
+      projectPath,
+      'invalid_project',
+      'The selected project folder does not exist or cannot be accessed.',
+    )
+    const repository = await this.#repository(canonicalProjectPath)
+    const admission = await this.#tryAcquireWorkspaceLease(repository.commonGitDirectory, key, options)
+    if (admission.disposition === 'occupied') return admission
+
+    try {
+      throwIfCancelled(options.signal)
+      const base = await this.#canonicalBase(repository, options)
+      throwIfCancelled(options.signal)
+      const workspace = await this.#ensureWorkspace(repository, canonicalProjectPath, key, base)
+      admission.lease.assertHeld()
+      return { disposition: 'acquired', lease: { ...admission.lease, workspace } }
+    } catch (error) {
+      await admission.lease.release()
       throw error
     }
   }
@@ -435,6 +501,13 @@ export class ProjectIsolationService {
     return this.#acquireLease(join(commonGitDirectory, 'ensync', 'workspace-write-locks'), digest(key), options)
   }
 
+  async #tryAcquireWorkspaceLease(commonGitDirectory, key, options) {
+    return this.#acquireLease(join(commonGitDirectory, 'ensync', 'workspace-write-locks'), digest(key), {
+      ...options,
+      nonBlocking: true,
+    })
+  }
+
   async #acquireLease(lockParent, workspaceHash, options) {
     const lockPath = join(lockParent, `${workspaceHash}.lock`)
     const ownerPath = join(lockPath, 'owner.json')
@@ -449,6 +522,10 @@ export class ProjectIsolationService {
         await mkdir(lockPath, { mode: 0o700 })
       } catch (error) {
         if (error?.code !== 'EEXIST') throw error
+        if (options.nonBlocking) {
+          if (await this.#quarantineStaleLock(lockPath, ownerPath)) continue
+          return { disposition: 'occupied', owner: await this.#occupiedOwner(ownerPath) }
+        }
         if (!waitingReported) {
           waitingReported = true
           options.onWait?.()
@@ -462,6 +539,7 @@ export class ProjectIsolationService {
         const controller = new AbortController()
         let released = false
         let failure = null
+        let ownerMetadata = boundedOwner(options.owner)
         const owner = () => ({
           version: 2,
           token,
@@ -469,6 +547,7 @@ export class ProjectIsolationService {
           workspaceHash,
           acquiredAt,
           heartbeatAt: new Date(this.#now()).toISOString(),
+          owner: ownerMetadata,
         })
         // Replace the record atomically so no reader — this heartbeat, release,
         // or another Host's staleness probe — can observe a file between
@@ -481,18 +560,22 @@ export class ProjectIsolationService {
         }
         await writeOwner()
 
+        heldLeaseTokens.add(token)
+
         // Ticks are serialized: a write delayed by fs load must not race the
-        // next tick's read into a false lease loss.
-        let heartbeatTicking = false
-        const heartbeat = setInterval(() => {
-          if (heartbeatTicking) return
-          heartbeatTicking = true
-          void (async () => {
+        // next tick's read into a false lease loss. The in-flight tick is also
+        // what release waits on, so a write can never outlive its own lease.
+        let pendingTick = null
+        const refreshOwner = () => {
+          if (pendingTick || released) return pendingTick ?? Promise.resolve()
+          pendingTick = (async () => {
             try {
               const current = JSON.parse(await readFile(ownerPath, 'utf8'))
+              if (released) return
               if (current?.token !== token) throw new Error('Protected workspace write lease ownership changed unexpectedly.')
               await writeOwner()
             } catch (error) {
+              if (released) return
               failure = new ProjectIsolationError(
                 'workspace_write_lock_lost',
                 error instanceof Error
@@ -502,30 +585,84 @@ export class ProjectIsolationService {
               )
               controller.abort(failure)
               clearInterval(heartbeat)
-            } finally {
-              heartbeatTicking = false
+              heldLeaseTokens.delete(token)
             }
-          })()
+          })().finally(() => { pendingTick = null })
+          return pendingTick
+        }
+        const heartbeat = setInterval(() => {
+          void refreshOwner()
         }, this.#heartbeatMs)
         heartbeat.unref?.()
 
-        return {
+        // Removal is verified rather than assumed. A lock this Host stopped
+        // heartbeating but left standing blocks every later run in the same
+        // conversation, so a failure to delete it is reported, never swallowed.
+        const removeOwnedLock = async () => {
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            let current = null
+            try {
+              current = JSON.parse(await readFile(ownerPath, 'utf8'))
+            } catch (error) {
+              if (error?.code !== 'ENOENT') {
+                return {
+                  removed: false,
+                  reason: `Ensync could not read this workspace lease record to release it: ${error instanceof Error ? error.message : 'unknown error'}`,
+                }
+              }
+            }
+            // A missing or replaced record belongs to whoever holds the lock
+            // now, and is never authority to delete another owner's lease.
+            if (!current || current.token !== token) return { removed: true, reason: null }
+            try {
+              await rm(lockPath, { recursive: true, force: true, maxRetries: 5, retryDelay: 25 })
+            } catch (error) {
+              return {
+                removed: false,
+                reason: `Ensync could not remove this conversation's workspace lease at ${lockPath}: ${error instanceof Error ? error.message : 'unknown error'}`,
+              }
+            }
+            try {
+              await stat(lockPath)
+            } catch {
+              return { removed: true, reason: null }
+            }
+          }
+          return {
+            removed: false,
+            reason: `This conversation's workspace lease at ${lockPath} reappeared while Ensync was releasing it.`,
+          }
+        }
+
+        let releaseOutcome = null
+        const lease = {
           signal: controller.signal,
           assertHeld() {
             if (failure) throw failure
           },
+          updateOwner(patch) {
+            ownerMetadata = boundedOwner({ ...ownerMetadata, ...patch })
+            return refreshOwner()
+          },
           release: async () => {
-            if (released) return
+            if (released) return releaseOutcome ?? { removed: true, reason: null }
             released = true
             clearInterval(heartbeat)
+            heldLeaseTokens.delete(token)
+            // A tick that already began its atomic replace has to finish first.
+            // Deleting the directory underneath it leaves the pending rename to
+            // recreate a lock nobody owns any more — with this Host's own pid
+            // inside it, which is exactly how a released lease becomes immortal.
             try {
-              const current = JSON.parse(await readFile(ownerPath, 'utf8'))
-              if (current?.token === token) await rm(lockPath, { recursive: true, force: true })
+              await pendingTick
             } catch {
-              // A missing or replaced lock is not authority to delete another owner's lease.
+              // A tick that failed has already reported the lost lease.
             }
+            releaseOutcome = await removeOwnedLock()
+            return releaseOutcome
           },
         }
+        return options.nonBlocking ? { disposition: 'acquired', lease } : lease
       } catch (error) {
         await rm(lockPath, { recursive: true, force: true }).catch(() => {})
         throw error
@@ -536,12 +673,14 @@ export class ProjectIsolationService {
   async #quarantineStaleLock(lockPath, ownerPath) {
     let freshest
     let ownerPid = null
+    let ownerToken = null
     try {
       const [ownerInfo, lockInfo] = await Promise.all([stat(ownerPath), stat(lockPath)])
       freshest = Math.max(ownerInfo.mtimeMs, lockInfo.mtimeMs)
       try {
         const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
         if (Number.isInteger(owner?.pid) && owner.pid > 0) ownerPid = owner.pid
+        if (typeof owner?.token === 'string' && owner.token) ownerToken = owner.token
         const heartbeat = Date.parse(owner?.heartbeatAt ?? '')
         if (Number.isFinite(heartbeat)) freshest = Math.max(freshest, heartbeat)
       } catch {
@@ -555,9 +694,14 @@ export class ProjectIsolationService {
       }
     }
     if (this.#now() - freshest <= this.#lockStaleMs) return false
+    // A lock this same process left behind is a leak, not work in progress:
+    // its token is gone from the live set the moment the lease ends. Without
+    // this, every lease the long-lived Host daemon leaks is guarded by that
+    // daemon's own pid until it dies, and its conversation never runs again.
+    const leakedByThisHost = ownerPid === process.pid && !heldLeaseTokens.has(ownerToken)
     // A live Host may be temporarily suspended while its provider child is
     // still mutating. Never steal that lease merely because timers paused.
-    if (processIsAlive(ownerPid)) return false
+    if (!leakedByThisHost && processIsAlive(ownerPid)) return false
 
     const quarantinePath = `${lockPath}.stale-${this.#uuid()}`
     try {
@@ -566,6 +710,15 @@ export class ProjectIsolationService {
       return true
     } catch (error) {
       return error?.code === 'ENOENT'
+    }
+  }
+
+  async #occupiedOwner(ownerPath) {
+    try {
+      const record = JSON.parse(await readFile(ownerPath, 'utf8'))
+      return boundedOwner(record?.owner)
+    } catch {
+      return boundedOwner(null)
     }
   }
 
@@ -748,8 +901,8 @@ export class ProjectIsolationService {
    * base. This merges rather than rebases so committed agent work is never
    * rewritten, and it refuses instead of forcing whenever Git reports a
    * conflict or an unfinished operation. It runs after the baseline sync with
-   * the shared checkout commit, so a canonical-only conflict defers softly
-   * while a shared-checkout conflict keeps main's hard workspace_baseline_conflict.
+   * the shared checkout commit. Conflicts are reported as deferred base state;
+   * they are reconciled by the landing workflow after the provider turn.
    */
   async #refreshReusedWorkspace(worktreePath, branch, base) {
     if (base.source !== 'remote_default_branch') return { refreshed: false, reason: base.reason }
@@ -841,6 +994,7 @@ export class ProjectIsolationService {
     let seededFromSharedCheckout = false
     let branchExistedBeforeAcquire
     let baseRefresh
+    let baselineConflict = null
 
     if (registered) {
       if (registered.prunable) {
@@ -968,22 +1122,50 @@ export class ProjectIsolationService {
           },
         )
         if (merge.exitCode !== 0) {
-          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U'], {
+          const conflicted = await this.#git(['diff', '--name-only', '--diff-filter=U', '-z'], {
             cwd: worktreePath,
             allowFailure: true,
           })
-          const files = conflicted.stdout.split(/\r?\n/).filter(Boolean)
-          await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
-          throw new ProjectIsolationError(
-            'workspace_baseline_conflict',
-            `New baseline changes conflict with this conversation's work in: ${files.join(', ') || 'unknown files'}. Resolve the conflict in the protected worktree at ${worktreePath}, commit it, then run again.`,
-            409,
-          )
+          const files = boundedConflictFiles(conflicted.stdout)
+          const aborted = await this.#git(['merge', '--abort'], { cwd: worktreePath, allowFailure: true })
+          const mergeHead = await this.#git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const unmerged = await this.#git(['diff', '--name-only', '--diff-filter=U', '-z'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          const recoveredStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
+            cwd: worktreePath,
+            allowFailure: true,
+          })
+          if (
+            aborted.exitCode !== 0
+            || mergeHead.exitCode === 0
+            || unmerged.exitCode !== 0
+            || unmerged.stdout !== ''
+            || recoveredStatus.exitCode !== 0
+            || recoveredStatus.stdout !== ''
+          ) {
+            throw new ProjectIsolationError(
+              'workspace_baseline_recovery_failed',
+              `New baseline changes conflict with this conversation's work, and Ensync could not restore the protected branch ${branch} to a clean state. Inspect ${worktreePath} before continuing.`,
+              409,
+            )
+          }
+          const reason = 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.'
+          baselineConflict = {
+            baselineSha: repository.head,
+            files,
+            reason,
+          }
+          baseRefresh = { refreshed: false, reason }
         }
       }
     }
 
-    if (!createdThisAcquire) {
+    if (!createdThisAcquire && !baselineConflict) {
       baseRefresh = await this.#refreshReusedWorkspace(worktreePath, branch, base)
     }
 
@@ -1044,7 +1226,11 @@ export class ProjectIsolationService {
       statusEntries: sharedStatus.stdout.split('\0').filter(Boolean),
     }
 
-    if (!baseRefresh.refreshed && baseRefresh.reason && base.source === 'remote_default_branch') {
+    if (baselineConflict) {
+      base.source = 'base_refresh_deferred'
+      base.sha = firstLine(head.stdout)
+      base.reason = baselineConflict.reason
+    } else if (!baseRefresh.refreshed && baseRefresh.reason && base.source === 'remote_default_branch') {
       // Ensync could not bring this existing worktree onto the canonical commit,
       // so it still stands on its own base. Report that rather than the commit
       // Ensync wanted it to have.
@@ -1055,11 +1241,13 @@ export class ProjectIsolationService {
 
     return {
       canonicalProjectPath,
+      commonGitDirectory: repository.commonGitDirectory,
       repositoryPath: worktreePath,
       projectPath: workspaceProjectPath,
       branch,
       reused,
       seededFromSharedCheckout,
+      baselineConflict,
       shared,
       base: {
         sha: base.sha,
@@ -1070,7 +1258,10 @@ export class ProjectIsolationService {
         branch: base.branch,
         refreshed: baseRefresh.refreshed,
       },
-      integration: await this.#integrationState(worktreePath, base.canonicalSha),
+      integration: await this.#integrationState(
+        worktreePath,
+        baselineConflict?.baselineSha ?? base.canonicalSha,
+      ),
       gitBefore: {
         branch,
         head: firstLine(head.stdout),

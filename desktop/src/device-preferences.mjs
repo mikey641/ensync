@@ -107,7 +107,7 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, candidates[0].encoded, { encoding: 'utf8', mode: 0o600 })
     if (candidates[0].path === stagingPath) {
-      try { rmSync(stagingPath) } catch {}
+      try { rmSync(stagingPath) } catch { /* best effort: a retained staging file is recovered on reopen */ }
     }
   }
 
@@ -119,7 +119,7 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
     const current = readCandidate(filePath, 3)
     if (current) writeFileSync(backupPath, current.encoded, { encoding: 'utf8', mode: 0o600 })
     writeFileSync(filePath, encoded, { encoding: 'utf8', mode: 0o600 })
-    try { rmSync(stagingPath) } catch {}
+    try { rmSync(stagingPath) } catch { /* best effort: a retained staging file is recovered on reopen */ }
     revision = nextRevision
     preferences = nextPreferences
     return publicPreferences(preferences)

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -53,17 +54,20 @@ import {
 import { SplitWorkspace, type SplitWorkspaceLayout } from './components/SplitWorkspace'
 import { ChatContextHeader } from './components/ChatContextHeader'
 import { MessageContent } from './components/MessageContent'
+import { isLongMessageContent } from './lib/messageContent.mjs'
 import { useChatAutoScroll } from './components/useChatAutoScroll'
 import { ResizableSidebar, readResizableSidebarPreferences } from './components/ResizableSidebar'
 import { RemoteSshSetup } from './components/RemoteSshSetup'
 import { TelegramSetup } from './components/TelegramSetup'
 import { VirtualBoxSetup } from './components/VirtualBoxSetup'
 import { GitWorkflowModal } from './components/GitWorkflowModal'
+import { FileViewerModal } from './components/FileViewerModal'
 import { NativeUpdatePreferences } from './components/NativeUpdatePreferences'
 import { SupportDesk } from './components/SupportDesk'
 import { UIVisibilityPreferences, useUIVisibility, type UIVisibilityState } from './ui-visibility'
 import {
   ensyncHost,
+  ChatJobOccupiedError,
   EnsyncHostError,
   type ChatProviderId,
   type ChatExecutionEvent,
@@ -90,13 +94,19 @@ import {
 } from './lib/accountWorkspaceSync.mjs'
 import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
+  conversationProviderId,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
   selectAutomaticFallbackProviderAfterRefresh,
   selectAutomaticProvider,
-  selectAutomaticProviderAfterRefresh,
 } from './lib/automaticRouting.mjs'
+import {
+  resolveFallbackProviderOrder,
+} from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
+import {
+  withProviderRunnerInstructions,
+} from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
 import {
   chatRunPreferences,
@@ -110,12 +120,17 @@ import {
 import { createChatRunRegistry } from './lib/chatRunRegistry.mjs'
 import { createChatRunCancellationRegistry } from './lib/chatRunCancellation.mjs'
 import {
+  activeWorkspaceOverlaps,
+  workspaceOverlapSummary,
+} from './lib/workspaceOverlap.mjs'
+import {
   adoptReconnectableHostJobState,
   runningHostJobCandidates,
 } from './lib/hostJobRecovery.mjs'
 import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
 import { nextProviderRefreshDelay } from './lib/providerRefreshPolicy.mjs'
+import { providerResetText } from './lib/providerResetText.mjs'
 import { PROJECT_COLORS, projectColor } from './lib/projectColors.mjs'
 import {
   conversationWorkspaceKey,
@@ -138,18 +153,47 @@ import {
   appendPromptToQueue,
   approveNextQueuedPrompt,
   insertAgentReplyBeforeLaterQueued,
+  liveSteerWasSafelyRejected,
+  liveSteerReadyAfterEvent,
   normalizePromptQueues,
+  markQueuedMessageTransferred,
   predecessorTurnIdForPrompt,
   promoteQueuedMessageToActiveTurn,
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  promptSubmissionMode,
+  queueMayAdvanceAfterRun,
+  queuedPromptCanStopAndSendNow,
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
   type PromptQueues,
   type QueuedPrompt,
 } from './lib/promptQueue.mjs'
+import {
+  activeNativeRunBindings,
+  applyOccupiedJobObservation,
+  commitHandoffAcceptance,
+  completedNativeRunBinding,
+  convertPendingTurnToOccupiedQueue,
+  exactNativeFocusCanApply,
+  handoffEntryForAction,
+  normalizeOccupiedRuns,
+  occupiedQueueSnapshotForAttempt,
+  occupiedRunControls,
+  reconcileQueuedMessageHandoff,
+  validateTerminalQueuedMessageHandoff,
+  validateQueuedMessageHandoff,
+  type CompletedNativeRunBinding,
+  type NativeExactRunBinding,
+  type OccupiedRuns,
+} from './lib/occupiedRunState.mjs'
+import {
+  pendingQuestionsFromEvents,
+  type ProviderQuestionAnswerPayload,
+} from './lib/providerQuestions.mjs'
+import { ProviderQuestionCard } from './components/ProviderQuestionCard'
 import {
   activeTabIdAfterClose,
   insertNewConversationTab,
@@ -183,8 +227,11 @@ import {
   workspaceStorageKey,
 } from './lib/nativeWorkspaceIdentity.mjs'
 import {
+  exactNativeChatFocusCanApply,
+  findReferencedOwningConversation,
   findRetainedWorkspaceForProject,
   nativeProjectPathKey,
+  type ReferencedOwningConversation,
   workspaceProjectHistoryScore,
 } from './lib/nativeWorkspaceRouting.mjs'
 import { recoverRecentProjectHistory } from './lib/recentProjectHistory.mjs'
@@ -201,12 +248,12 @@ import {
 } from './lib/nativeRecentProjects.mjs'
 import {
   appendFileAttachments,
-  fileDragContainsFiles,
   messageTextWithAttachments,
   normalizeFileAttachments,
   resolveDroppedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
+import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
 
 const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
@@ -292,6 +339,8 @@ type StoredState = {
   inFlightRuns?: Record<string, PersistedInFlightRun>
   /** Persisted same-chat FIFO prompts, including their enqueue-time routing/target choices. */
   promptQueues?: PromptQueues
+  /** Bounded owner coordinates for messages admitted behind another live renderer. */
+  occupiedRuns?: OccupiedRuns
   /** Hashes of explicitly merged external recovery artifacts. */
   workspaceRecoveryIds?: string[]
   /** Retired native snapshots already inspected for project-only history recovery. */
@@ -318,6 +367,8 @@ type PersistedInFlightRun = {
   lastEventSequence?: number
   projectId?: string
   projectPath?: string
+  /** True only while Ensync Host has observed an active Codex provider turn. */
+  liveSteerReady?: boolean
   continuityStateRequired?: boolean
   gitReason?: string
 }
@@ -431,6 +482,8 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     resetLabel: status.usage.resetLabel ?? null,
     resetWindow: status.usage.resetWindow ?? null,
     usageReason: status.usage.reason,
+    usageStale: status.usage.stale === true,
+    usageCheckedAt: status.usage.checkedAt ?? null,
     canConnect: status.canConnect,
     canUpdate: status.canUpdate,
     updateStrategy: status.updateStrategy,
@@ -440,21 +493,9 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     setupKind: status.setupKind,
     documentationUrl: status.documentationUrl,
     catalogReason: status.catalogReason,
+    agentCoordination: status.agentCoordination ?? current.agentCoordination,
     checkedAt: status.checkedAt,
   }
-}
-
-function providerResetText(provider: Provider) {
-  if (provider.resetsIn) {
-    const resetAt = new Date(provider.resetsIn)
-    if (!Number.isNaN(resetAt.getTime())) return resetAt.toLocaleString()
-  }
-  if (provider.resetLabel) {
-    return provider.resetWindow
-      ? `${provider.resetWindow} resets ${provider.resetLabel}`
-      : provider.resetLabel
-  }
-  return null
 }
 
 type RelayProject = ProjectInspection & {
@@ -534,6 +575,9 @@ function runNeedsReconciliation(error: unknown) {
     'ssh_timed_out',
     'invalid_cli_output',
     'empty_cli_response',
+    // Droid ends its turn as soon as Ensync declines a permission request, so
+    // committed work usually exists on the branch and needs reconciling.
+    'provider_permission_declined',
     'cli_failed',
     'execution_stream_disconnected',
     'chat_job_stream_disconnected',
@@ -582,11 +626,29 @@ function automaticProvider(providers: Provider[], priorityOrder: readonly Provid
     ?? defaultProviders[0]
 }
 
-function providerForChat(providers: Provider[], chat: Chat | undefined, priorityOrder: readonly ProviderId[]) {
+/**
+ * Display resolution for a conversation. `activeRun` pins the name to the provider
+ * that actually owns the running turn, so a mid-run usage refresh can no longer
+ * rename it. Routing call sites pass no run: they must resolve the next turn.
+ */
+function providerForChat(
+  providers: Provider[],
+  chat: Chat | undefined,
+  priorityOrder: readonly ProviderId[],
+  activeRun?: PersistedInFlightRun,
+) {
   if (!chat) return providers[0] ?? defaultProviders[0]
+  const displayedId = conversationProviderId({ chat, activeRun, providers, priorityOrder })
+  const displayed = displayedId ? providers.find((provider) => provider.id === displayedId) : undefined
+  if (displayed) return displayed
   return chat.providerMode === 'fixed'
     ? providers.find((provider) => provider.id === chat.provider) ?? providers[0] ?? defaultProviders[0]
     : automaticProvider(providers, priorityOrder, chat.provider)
+}
+
+/** True only when an executing run actually determines the displayed provider. */
+function runPinsDisplayedProvider(providers: Provider[], activeRun: PersistedInFlightRun | undefined) {
+  return Boolean(activeRun) && providers.some((provider) => provider.id === activeRun?.provider)
 }
 
 function ProviderMark({ provider, small = false }: { provider: Provider; small?: boolean }) {
@@ -729,7 +791,7 @@ function App() {
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
   const [autoLandAgentWork, setAutoLandAgentWork] = useState(hydrated?.autoLandAgentWork ?? true)
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
-    normalizeFallbackProviderOrder(hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
+    resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
   const [search, setSearch] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>(hydrated?.drafts ?? {})
@@ -743,6 +805,7 @@ function App() {
   const [modelMenuChatId, setModelMenuChatId] = useState<string | null>(null)
   const [wizardOpen, setWizardOpen] = useState(false)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [viewedFilePath, setViewedFilePath] = useState<string | null>(null)
   const [accountSyncStatus, setAccountSyncStatus] = useState<AccountSyncStatus>(EMPTY_ACCOUNT_SYNC_STATUS)
   const [accountSyncPhase, setAccountSyncPhase] = useState<'checking' | 'idle' | 'syncing' | 'error'>('checking')
   const [accountSyncMessage, setAccountSyncMessage] = useState<string | null>(null)
@@ -776,6 +839,14 @@ function App() {
   const rediscoveringHostJobsRef = useRef(false)
   const rediscoveredHostJobsRef = useRef(false)
   const steeringChatIdsRef = useRef(new Set<string>())
+  const occupiedOwnerProbeAttemptedRef = useRef(new Set<string>())
+  const occupiedOwnerPollCountRef = useRef(new Map<string, number>())
+  const completedNativeRunsRef = useRef(new Map<string, CompletedNativeRunBinding>())
+  const handoffActionsInvokedRef = useRef(new Set<string>())
+  const transferringChatIdsRef = useRef(new Set<string>())
+  // A stop-and-send arms exactly one cancellation to advance the queue. It is
+  // consumed by that run's teardown so a later unrelated stop never inherits it.
+  const stopAndSendChatIdsRef = useRef(new Set<string>())
   const activeTurnIdsRef = useRef<Record<string, string>>({})
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
@@ -785,6 +856,7 @@ function App() {
   )
   const [chatSessions, setChatSessions] = useState<Record<string, { provider: ChatProviderId; sessionId: string; targetKey?: string; syncedMessageCount?: number }>>(hydrated?.chatSessions ?? {})
   const [chatErrors, setChatErrors] = useState<Record<string, string | null>>(hydrated?.chatErrors ?? {})
+  const [attachmentErrors, setAttachmentErrors] = useState<Record<string, string | null>>({})
   const [chatExecutionEvents, setChatExecutionEvents] = useState<Record<string, ChatExecutionEvent[]>>(hydrated?.chatExecutionEvents ?? {})
   const [executionPanelOpenByChat, setExecutionPanelOpenByChat] = useState<Record<string, boolean>>(() =>
     normalizeExecutionPanelOpenByChat(hydrated?.executionPanelOpenByChat),
@@ -799,6 +871,9 @@ function App() {
   )
   const [hostJobRecoveryRetry, setHostJobRecoveryRetry] = useState(0)
   const [promptQueues, setPromptQueues] = useState<PromptQueues>(() => normalizePromptQueues(hydrated?.promptQueues))
+  const [occupiedRuns, setOccupiedRuns] = useState<OccupiedRuns>(() => normalizeOccupiedRuns(hydrated?.occupiedRuns))
+  // Shell reachability is live native authority, never retained workspace data.
+  const [occupiedShellReachability, setOccupiedShellReachability] = useState<Record<string, string>>({})
   const [executionTarget, setExecutionTarget] = useState<ExecutionTarget>({ kind: 'local' })
   const chatsRef = useRef(chats)
   const tabsRef = useRef(tabs)
@@ -812,11 +887,16 @@ function App() {
   const chatExecutionEventsRef = useRef(chatExecutionEvents)
   const inFlightRunsRef = useRef(inFlightRuns)
   const promptQueuesRef = useRef(promptQueues)
+  const occupiedRunsRef = useRef(occupiedRuns)
+  const occupiedShellReachabilityRef = useRef(occupiedShellReachability)
   const executionTargetRef = useRef(executionTarget)
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
   const focusProjectRequestRef = useRef<(project: RelayProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
+  const openChatRef = useRef<(chatId: string) => void>(() => {})
+  const pushQueuedNowRef = useRef<(chatId: string) => Promise<void>>(async () => {})
+  const stopAndSendNowRef = useRef<(chatId: string) => void>(() => {})
   chatsRef.current = chats
   tabsRef.current = tabs
   activeTabIdRef.current = activeTabId
@@ -829,6 +909,8 @@ function App() {
   chatExecutionEventsRef.current = chatExecutionEvents
   inFlightRunsRef.current = inFlightRuns
   promptQueuesRef.current = promptQueues
+  occupiedRunsRef.current = occupiedRuns
+  occupiedShellReachabilityRef.current = occupiedShellReachability
   executionTargetRef.current = executionTarget
 
   const workspaceSnapshot: StoredState = {
@@ -844,7 +926,6 @@ function App() {
     autoFallback,
     autoContextSkill,
     autoLandAgentWork,
-    fallbackProviderOrder,
     readCompletionByChat,
     executionPanelOpenByChat,
     drafts,
@@ -856,6 +937,7 @@ function App() {
     conversationSidebarWidth,
     inFlightRuns,
     promptQueues,
+    occupiedRuns,
     workspaceRecoveryIds,
     recentProjectRecoveryIds,
     conversationImportIds,
@@ -871,8 +953,10 @@ function App() {
         compactWorkspaceSnapshot({ ...workspaceSnapshotRef.current, ...overrides }),
         { keys: workspaceSnapshotKeys },
       )
+      return true
     } catch (error) {
       console.error('[ensync-workspace-persistence]', error)
+      return false
     }
   }, [workspaceSnapshotKeys])
 
@@ -1054,7 +1138,9 @@ function App() {
   const activeProvider = providerForChat(executionProviders, activeChat, fallbackProviderOrder)
   const fallbackProviders = orderedAutomaticProviders(executionProviders, fallbackProviderOrder)
     .filter((provider) => provider.connected && supportsChat(provider) && (provider.usage === null || provider.usage < 100))
-  const supportProvider = automaticProvider(executionProviders, fallbackProviderOrder, activeProvider.id)
+  // Support repair runs only the structured Codex or Claude runner (host/support-repair.mjs).
+  const repairCapableProviders = executionProviders.filter((provider) => provider.id === 'codex' || provider.id === 'claude')
+  const supportProvider = automaticProvider(repairCapableProviders, fallbackProviderOrder, activeProvider.id)
   const supportRepairAvailable = executionTarget.kind === 'local'
     && activeProject.verified
     && supportProvider.connected
@@ -1065,6 +1151,22 @@ function App() {
     () => prepareAccountWorkspace({ chats, projects }),
     [chats, projects],
   )
+  const workspaceBranchTitles = useMemo(() => Object.fromEntries(
+    chats.flatMap((chat) => chat.workspace?.branch ? [[chat.workspace.branch, chat.title]] : []),
+  ), [chats])
+  const owningConversationTargets = useMemo<Record<string, ReferencedOwningConversation>>(() => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return {}
+    const retainedWorkspaces = getRetainedNativeWorkspaces()
+    return Object.fromEntries(chats.flatMap((chat) => {
+      const target = findReferencedOwningConversation(window.localStorage, {
+        currentWorkspace: nativeWorkspaceIdentity,
+        retainedWorkspaces,
+        currentState: { projects, chats },
+        chat,
+      })
+      return target ? [[chat.id, target]] : []
+    }))
+  }, [chats, nativeWorkspaceIdentity, projects])
   const accountWorkspaceFingerprint = useMemo(
     () => JSON.stringify(accountWorkspaceDocument),
     [accountWorkspaceDocument],
@@ -1095,7 +1197,11 @@ function App() {
         ? candidate.text.length
         : candidate.type === 'started'
           ? candidate.command.length + candidate.cwd.length
-          : candidate.message.length
+          : candidate.type === 'question'
+            ? candidate.questions.reduce((total, question) => total + question.question.length, 0)
+            : candidate.type === 'question_resolved'
+              ? candidate.answers.reduce((total, answer) => total + answer.answer.length, 0)
+              : candidate.message.length
       if (retained.length > 0 && retainedCharacters + size > 1024 * 1024) break
       retained.unshift(candidate)
       retainedCharacters += size
@@ -1129,12 +1235,61 @@ function App() {
     return next
   }, [])
 
+  const updateOccupiedRuns = useCallback((next: OccupiedRuns) => {
+    occupiedRunsRef.current = next
+    setOccupiedRuns(next)
+    return next
+  }, [])
+
+  const updateOccupiedShellReachability = useCallback((chatId: string, ownerJobId: string, reachable: boolean) => {
+    const current = occupiedShellReachabilityRef.current
+    const next = { ...current }
+    if (reachable) next[chatId] = ownerJobId
+    else delete next[chatId]
+    occupiedShellReachabilityRef.current = next
+    setOccupiedShellReachability(next)
+  }, [])
+
+  const rememberCompletedNativeRun = useCallback((chatId: string, run: PersistedInFlightRun | undefined) => {
+    const completed = completedNativeRunBinding(
+      isNativeWorkspaceIdentity(nativeWorkspaceIdentity) ? nativeWorkspaceIdentity.id : null,
+      chatId,
+      run,
+    )
+    if (!completed) return
+    completedNativeRunsRef.current.delete(completed.jobId)
+    completedNativeRunsRef.current.set(completed.jobId, completed)
+    while (completedNativeRunsRef.current.size > 128) {
+      const oldest = completedNativeRunsRef.current.keys().next().value
+      if (typeof oldest !== 'string') break
+      completedNativeRunsRef.current.delete(oldest)
+    }
+  }, [nativeWorkspaceIdentity])
+
   const updateChatError = useCallback((chatId: string, error: string | null) => {
     const next = { ...chatErrorsRef.current, [chatId]: error }
     chatErrorsRef.current = next
     setChatErrors(next)
     return next
   }, [])
+
+  /**
+   * Delivers an answer to the provider run this conversation is blocked on.
+   * The run keeps its own event stream, so the resolved question arrives back
+   * as a Host event rather than being assumed here.
+   */
+  const handleAnswerQuestion = useCallback(async (
+    chatId: string,
+    answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true },
+  ) => {
+    const activeRun = inFlightRunsRef.current[chatId]
+    if (!activeRun?.jobId || activeRun.executionTarget !== 'local') {
+      updateChatError(chatId, 'This conversation has no live local run waiting on an answer, so it was not delivered.')
+      return
+    }
+    updateChatError(chatId, null)
+    await ensyncHost.answerChatQuestion(activeRun.jobId, answer)
+  }, [updateChatError])
 
   const toggleConversationSidebar = useCallback(() => {
     const mobileLayout = window.matchMedia('(max-width: 780px)').matches
@@ -1156,10 +1311,18 @@ function App() {
     const refresh = (async () => {
       try {
         const response = await ensyncHost.providers(force)
-        const nextProviders = providersRef.current.map((provider) => {
-          const status = response.providers.find((item) => item.id === provider.id)
-          return status ? providerFromStatus(status, provider) : provider
-        })
+        // The Host ranks providers by real availability, so adopt its order
+        // instead of keeping the pre-probe fallback order. A provider the Host
+        // did not report keeps its relative position at the end of the list.
+        const hostOrder = new Map(response.providers.map((item, index) => [item.id, index]))
+        const nextProviders = providersRef.current
+          .map((provider) => {
+            const status = response.providers.find((item) => item.id === provider.id)
+            return status ? providerFromStatus(status, provider) : provider
+          })
+          .sort((left, right) =>
+            (hostOrder.get(left.id) ?? Number.MAX_SAFE_INTEGER)
+              - (hostOrder.get(right.id) ?? Number.MAX_SAFE_INTEGER))
         providersRef.current = nextProviders
         setProviders(nextProviders)
         const firstRunnable = response.providers.find((status) =>
@@ -1351,7 +1514,7 @@ function App() {
 
   useLayoutEffect(() => {
     commitWorkspace()
-  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, fallbackProviderOrder, inFlightRuns, modelTelemetry, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
 
   useEffect(() => {
     const flush = () => commitWorkspace()
@@ -1500,6 +1663,7 @@ function App() {
     activateTab(tab.id)
     setMobileNavOpen(false)
   }
+  openChatRef.current = openChat
 
   const createChat = (relativeToTabId = activeTabIdRef.current) => {
     if (!activeProject.id || !activeProject.verified) {
@@ -1588,6 +1752,8 @@ function App() {
     const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
     const nextInFlightRuns = recovered.inFlightRuns ?? {}
     const nextPromptQueues = normalizePromptQueues(recovered.promptQueues)
+    // Recovery imports conversation history, not another renderer's live shell/Host authority.
+    const nextOccupiedRuns: OccupiedRuns = {}
 
     chatsRef.current = nextChats
     tabsRef.current = nextTabs
@@ -1600,6 +1766,7 @@ function App() {
     chatExecutionEventsRef.current = nextChatExecutionEvents
     inFlightRunsRef.current = nextInFlightRuns
     promptQueuesRef.current = nextPromptQueues
+    occupiedRunsRef.current = nextOccupiedRuns
 
     setProjects([project])
     setActiveProjectId(project.id)
@@ -1615,6 +1782,7 @@ function App() {
     setChatExecutionEvents(nextChatExecutionEvents)
     setInFlightRuns(nextInFlightRuns)
     setPromptQueues(nextPromptQueues)
+    setOccupiedRuns(nextOccupiedRuns)
     setSplitLayout(recovered.splitLayout)
     if (recovered.placement === 'adjacent' || recovered.placement === 'end') {
       setPlacement(recovered.placement)
@@ -1640,6 +1808,7 @@ function App() {
       chatExecutionEvents: nextChatExecutionEvents,
       inFlightRuns: nextInFlightRuns,
       promptQueues: nextPromptQueues,
+      occupiedRuns: nextOccupiedRuns,
       splitLayout: recovered.splitLayout,
       ...(recovered.placement ? { placement: recovered.placement } : {}),
       ...(recovered.conversationLayout ? { conversationLayout: recovered.conversationLayout } : {}),
@@ -1751,8 +1920,144 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    const publish = window.ensyncDesktop?.publishActiveRuns
+    if (typeof publish !== 'function' || !isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
+    const activeRuns = Object.fromEntries(Object.entries(inFlightRuns)
+      .filter(([chatId]) => sendingChatIds.has(chatId)))
+    void publish(activeNativeRunBindings(activeRuns, nativeWorkspaceIdentity.id))
+      .catch((error) => console.error('[ensync-active-run-roster]', error))
+  }, [inFlightRuns, nativeWorkspaceIdentity, sendingChatIds])
+
+  useEffect(() => {
+    const publish = window.ensyncDesktop?.publishActiveRuns
+    return () => {
+      if (typeof publish === 'function') void publish([]).catch(() => {})
+    }
+  }, [])
+
+  useEffect(() => {
+    if (hostOnline) {
+      occupiedOwnerProbeAttemptedRef.current.clear()
+      return
+    }
+    occupiedShellReachabilityRef.current = {}
+    setOccupiedShellReachability({})
+  }, [hostOnline])
+
+  useEffect(() => {
+    if (!hostOnline) return
+    const timers: number[] = []
+    let cancelled = false
+    for (const [chatId, owner] of Object.entries(occupiedRuns)) {
+      if (!owner.ownerJobId || !owner.turnId || owner.targetKind !== 'local') continue
+      const ownerKey = `${chatId}\0${owner.ownerJobId}`
+      if (!owner.controllable && occupiedOwnerProbeAttemptedRef.current.has(ownerKey)) continue
+      occupiedOwnerProbeAttemptedRef.current.add(ownerKey)
+      const pollCount = occupiedOwnerPollCountRef.current.get(ownerKey) ?? 0
+      const delay = owner.controllable
+        ? Math.min(10_000, 1_000 * (2 ** Math.min(pollCount, 3)))
+        : 0
+      occupiedOwnerPollCountRef.current.set(ownerKey, pollCount + 1)
+      timers.push(window.setTimeout(() => {
+        void (async () => {
+          try {
+            const response = await ensyncHost.chatJob(owner.ownerJobId)
+            if (cancelled || response.job.id !== owner.ownerJobId) return
+            if (response.job.state === 'running') {
+              let shellReachable = false
+              if (owner.nativeWorkspaceId && typeof window.ensyncDesktop?.matchesActiveRun === 'function') {
+                try {
+                  shellReachable = await window.ensyncDesktop.matchesActiveRun({
+                    workspaceId: owner.nativeWorkspaceId,
+                    projectId: owner.projectId,
+                    projectPath: owner.projectPath,
+                    chatId: owner.chatId,
+                    jobId: owner.ownerJobId,
+                  })
+                } catch {
+                  shellReachable = false
+                }
+              }
+              const current = occupiedRunsRef.current[chatId]
+              if (!current || current.ownerJobId !== owner.ownerJobId) return
+              updateOccupiedShellReachability(chatId, owner.ownerJobId, shellReachable)
+              const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, {
+                kind: 'running',
+                providerProcessStarted: response.job.providerProcessStarted,
+                steerable: response.job.steerable,
+              })
+              updateOccupiedRuns(next)
+              commitWorkspace({ occupiedRuns: next })
+              return
+            }
+            const current = occupiedRunsRef.current[chatId]
+            if (!current || current.ownerJobId !== owner.ownerJobId) return
+            const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'terminal' })
+            occupiedOwnerPollCountRef.current.delete(ownerKey)
+            updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+            updateOccupiedRuns(next)
+            commitWorkspace({ occupiedRuns: next })
+            queueMicrotask(() => drainPromptQueueRef.current(chatId))
+          } catch {
+            if (cancelled) return
+            const current = occupiedRunsRef.current[chatId]
+            if (!current || current.ownerJobId !== owner.ownerJobId) return
+            const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'unavailable' })
+            occupiedOwnerPollCountRef.current.delete(ownerKey)
+            updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+            updateOccupiedRuns(next)
+            commitWorkspace({ occupiedRuns: next })
+          }
+        })()
+      }, delay))
+    }
+    return () => {
+      cancelled = true
+      timers.forEach((timer) => window.clearTimeout(timer))
+    }
+  }, [commitWorkspace, hostOnline, occupiedRuns, updateOccupiedRuns, updateOccupiedShellReachability])
+
   useEffect(() => window.ensyncDesktop?.onWorkspaceProjectFocus?.((request) => {
     if (!request || typeof request.projectId !== 'string' || typeof request.projectPath !== 'string') return
+    if ('chatId' in request && typeof request.chatId === 'string'
+      && typeof request.workspaceId === 'string') {
+      if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
+      const chat = chatsRef.current.find((candidate) => candidate.id === request.chatId
+        && candidate.projectId === request.projectId)
+      const project = projectsRef.current.find((candidate) => candidate.id === request.projectId
+        && nativeProjectPathKey(candidate.path) === nativeProjectPathKey(request.projectPath))
+      if (!chat || !project) return
+      if (!('jobId' in request) || request.jobId === undefined) {
+        if (!exactNativeChatFocusCanApply(request, {
+          workspaceId: nativeWorkspaceIdentity.id,
+          projectId: project.id,
+          projectPath: project.path,
+          chatId: chat.id,
+        })) return
+        setProjects((current) => [project, ...current.filter((candidate) => candidate.id !== project.id)])
+        setActiveProjectId(project.id)
+        openChatRef.current(chat.id)
+        setProjectError(null)
+        return
+      }
+      if (typeof request.jobId !== 'string') return
+      const run = inFlightRunsRef.current[request.chatId]
+      if (!run || !chatRunRegistryRef.current.has(chat.id)
+        || run.projectId !== project.id || run.projectPath !== project.path
+        || !exactNativeFocusCanApply(request, {
+          workspaceId: nativeWorkspaceIdentity.id,
+          projectId: project.id,
+          projectPath: project.path,
+          chatId: chat.id,
+          jobId: run.jobId ?? '',
+        })) return
+      setProjects((current) => [project, ...current.filter((candidate) => candidate.id !== project.id)])
+      setActiveProjectId(project.id)
+      openChatRef.current(chat.id)
+      setProjectError(null)
+      return
+    }
     void (async () => {
       try {
         const response = await ensyncHost.inspectProject(request.projectPath)
@@ -1766,7 +2071,7 @@ function App() {
         setProjectError(error instanceof Error ? error.message : 'Ensync Host could not recheck the focused project.')
       }
     })()
-  }), [])
+  }), [nativeWorkspaceIdentity])
 
   const setChatProvider = (chatId: string, providerId: ProviderId) => {
     setChats((current) => current.map((chat) => (chat.id === chatId ? { ...chat, provider: providerId, providerMode: 'fixed', model: null } : chat)))
@@ -2153,7 +2458,154 @@ function App() {
   }, [updateChatError])
 
   const handleStop = (chatId: string) => {
+    // A plain Stop must never advance the queue; only stop-and-send arms that.
+    stopAndSendChatIdsRef.current.delete(chatId)
     chatRunCancellationRef.current.stop(chatId)
+  }
+
+  /**
+   * The honest analogue of Push now on providers that cannot be steered: end
+   * the running turn and run the queued head immediately. The turn's
+   * in-progress work is discarded, so this records the same explicit approval
+   * as "Run next message anyway" before stopping — the stopped predecessor is
+   * never retried, and only the head advances.
+   */
+  const handleStopAndSendNow = (chatId: string) => {
+    const entry = promptQueuesRef.current[chatId]?.[0]
+    const activeRun = inFlightRunsRef.current[chatId]
+    if (!entry || !activeRun) return
+    if (!queuedPromptCanStopAndSendNow(entry, activeRun, {
+      liveSteerAvailable: activeRun.liveSteerReady === true && activeRun.provider === 'codex',
+    })) {
+      updateChatError(chatId, 'This queued message can no longer be matched to the running turn. It remains safely queued.')
+      return
+    }
+
+    const nextQueues = approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString())
+    updatePromptQueues(nextQueues)
+    const nextErrors = updateChatError(chatId, null)
+    commitWorkspace({ promptQueues: nextQueues, chatErrors: nextErrors })
+    stopAndSendChatIdsRef.current.add(chatId)
+    chatRunCancellationRef.current.stop(chatId)
+  }
+  stopAndSendNowRef.current = handleStopAndSendNow
+
+  const handleFilesDrop = async (chatId: string, files: FileList) => {
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'These files are on this computer. Switch the chat to the local Ensync Host before attaching them.',
+      }))
+      return
+    }
+
+    // Snapshot synchronously: the DataTransfer list empties as soon as this
+    // handler yields, and a file the OS hides from every other process (a
+    // screenshot dragged from the macOS thumbnail, for example) is readable
+    // only through these File objects, only right now. resolveDroppedAttachments
+    // copies exactly those through the host so the agent gets a readable path.
+    const droppedFiles = Array.from(files)
+    // Nothing awaits this handler, so an escaping rejection would drop the
+    // files with no visible trace at all.
+    const dropped = await resolveDroppedAttachments(droppedFiles, window.ensyncDesktop?.getPathForFile, {
+      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
+      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
+    }).catch(() => null)
+    if (!dropped) {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'Ensync could not attach the dropped files. Drop them again.',
+      }))
+      return
+    }
+    if (!chatsRef.current.some((chat) => chat.id === chatId)) return
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'The execution target changed while these files were being attached. Switch back to the local Ensync Host to attach them.',
+      }))
+      return
+    }
+    if (dropped.attachments.length > 0) {
+      const nextAttachments = {
+        ...draftAttachmentsRef.current,
+        [chatId]: appendFileAttachments(draftAttachmentsRef.current[chatId], dropped.attachments),
+      }
+      draftAttachmentsRef.current = nextAttachments
+      setDraftAttachments(nextAttachments)
+      setAttachmentErrors((current) => ({ ...current, [chatId]: null }))
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLTextAreaElement>(`[data-chat-composer="${chatId}"]`)?.focus()
+      })
+    }
+    if (dropped.unavailable.length > 0) {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: window.ensyncDesktop?.getPathForFile
+          ? `Ensync could not attach ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}. Drop them again, or save them somewhere Ensync can read.`
+          : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.',
+      }))
+    }
+  }
+
+  const handleFilesChoose = async (chatId: string) => {
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'These files are on this computer. Switch the chat to the local Ensync Host before attaching them.',
+      }))
+      return
+    }
+
+    const chooseChatFiles = window.ensyncDesktop?.chooseChatFiles
+    if (typeof chooseChatFiles !== 'function') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'File selection is available in the native Ensync app; browsers do not expose safe local file paths.',
+      }))
+      return
+    }
+
+    try {
+      const result = await chooseChatFiles()
+      if (result?.status === 'cancelled') return
+      if (result?.status === 'error') {
+        setAttachmentErrors((current) => ({ ...current, [chatId]: result.message }))
+        return
+      }
+      const selected = normalizeFileAttachments(result?.status === 'selected' ? result.files : [])
+      if (!chatsRef.current.some((chat) => chat.id === chatId)) return
+      if (executionTargetRef.current.kind !== 'local') {
+        setAttachmentErrors((current) => ({
+          ...current,
+          [chatId]: 'The execution target changed while files were being selected. Switch back to the local Ensync Host to attach them.',
+        }))
+        return
+      }
+      if (selected.length === 0) {
+        setAttachmentErrors((current) => ({
+          ...current,
+          [chatId]: 'Ensync could not read the files returned by the system file chooser.',
+        }))
+        return
+      }
+
+      const nextAttachments = {
+        ...draftAttachmentsRef.current,
+        [chatId]: appendFileAttachments(draftAttachmentsRef.current[chatId], selected),
+      }
+      draftAttachmentsRef.current = nextAttachments
+      setDraftAttachments(nextAttachments)
+      setAttachmentErrors((current) => ({ ...current, [chatId]: null }))
+      requestAnimationFrame(() => {
+        document.querySelector<HTMLTextAreaElement>(`[data-chat-composer="${chatId}"]`)?.focus()
+      })
+    } catch {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'Ensync could not open the system file chooser.',
+      }))
+    }
   }
 
   const updatePromptQueues = (next: PromptQueues) => {
@@ -2176,7 +2628,10 @@ function App() {
         && project.path === queuedPrompt.preferences.projectPath)
       : projectsRef.current.find((project) => project.id === chatToSendCurrent.projectId)
     if (queuedPrompt && targetKey(runTarget) !== queuedPrompt.preferences.executionTargetKey) {
-      setChatErrors((current) => ({ ...current, [chatId]: `Queue paused: reconnect the exact ${queuedPrompt.preferences.executionTargetKey} target, then choose Run next after review.` }))
+      setChatErrors((current) => ({
+        ...current,
+        [chatId]: `Queue paused: reconnect the exact ${queuedPrompt.preferences.executionTargetKey} target. Ensync will not run this message on another computer.`,
+      }))
       return
     }
     if (attachments.length > 0 && runTarget.kind !== 'local') {
@@ -2232,115 +2687,20 @@ function App() {
     const runPreferences = chatRunPreferences(chatToSend, runAutoFallback)
     const agentWorkspaceKey = resolveConversationWorkspaceKey(chatToSend)
     const automaticMode = runPreferences.automaticProvider
-    const enqueueBehindActiveRun = !queuedPrompt && chatRunRegistryRef.current.has(chatId)
-    let selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
-    if (
-      automaticMode
-      && !selectedAutomaticProvider
-      && !enqueueBehindActiveRun
-      && runTarget.kind === 'local'
-    ) {
-      selectedAutomaticProvider = await selectAutomaticProviderAfterRefresh(
-        runExecutionProviders,
-        runFallbackOrder,
-        async () => {
-          const online = await refreshProviders(true)
-          if (!online) return null
-          runExecutionProviders = providersForTarget(providersRef.current, runTarget)
-          return runExecutionProviders
-        },
-      )
-    }
+    const enqueueBehindActiveRun = promptSubmissionMode({
+      hasActiveRun: !queuedPrompt && chatRunRegistryRef.current.has(chatId),
+    }) === 'queue'
+    const selectedAutomaticProvider = selectAutomaticProvider(runExecutionProviders, runFallbackOrder)
     if (automaticMode && !selectedAutomaticProvider && !enqueueBehindActiveRun) {
-      setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex or Claude Code.' }))
+      setChatErrors((current) => ({ ...current, [chatId]: 'Auto found no connected, tested provider with verified remaining or unreported subscription usage. Check Automatic fallback in Settings or connect Codex, Claude Code, or Factory Droid.' }))
       return
     }
     const provider = automaticMode
       ? selectedAutomaticProvider ?? providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
       : providerForChat(runExecutionProviders, chatToSend, runFallbackOrder)
     if (!supportsChat(provider) && !enqueueBehindActiveRun) {
-      setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex or Claude Code.` }))
+      setChatErrors((current) => ({ ...current, [chatId]: `${provider.name} chat execution is not supported by Ensync Host yet. Choose Codex, Claude Code, or Factory Droid.` }))
       return
-    }
-    const activeRun = inFlightRunsRef.current[chatId]
-    const canTryLiveSteer = enqueueBehindActiveRun
-      && (promptQueuesRef.current[chatId]?.length ?? 0) === 0
-      && runTarget.kind === 'local'
-      && activeRun?.provider === 'codex'
-      && activeRun.executionTarget === 'local'
-      && typeof activeRun.jobId === 'string'
-      && Boolean(activeRun.jobId)
-    if (canTryLiveSteer && activeRun?.jobId) {
-      if (steeringChatIdsRef.current.has(chatId)) return
-      steeringChatIdsRef.current.add(chatId)
-      try {
-        await ensyncHost.steerChatJob(
-          activeRun.jobId,
-          providerPrompt,
-          attachments.map((attachment) => attachment.path),
-        )
-        const activeTurnId = activeRun.turnId
-        const messageId = `msg-${turnId}`
-        let replyAlreadyVisible = false
-        const nextChats = chatsRef.current.map((chat) => {
-          if (chat.id !== chatId) return chat
-          const replyIndex = chat.messages.findIndex((item) =>
-            item.role === 'agent' && item.turnId === activeTurnId)
-          replyAlreadyVisible = replyIndex >= 0
-          const steeredMessage = {
-            id: messageId,
-            role: 'user' as const,
-            content: visibleMessageText(message, attachments),
-            attachments,
-            time: timeNow(),
-            turnId: activeTurnId,
-            deliveryStatus: replyAlreadyVisible ? 'completed' as const : 'pending' as const,
-          }
-          return {
-            ...chat,
-            messages: replyIndex >= 0
-              ? [...chat.messages.slice(0, replyIndex), steeredMessage, ...chat.messages.slice(replyIndex)]
-              : [...chat.messages, steeredMessage],
-          }
-        })
-        chatsRef.current = nextChats
-        setChats(nextChats)
-        if (replyAlreadyVisible) {
-          const session = chatSessionsRef.current[chatId]
-          if (session?.provider === 'codex' && typeof session.syncedMessageCount === 'number') {
-            const nextSessions = {
-              ...chatSessionsRef.current,
-              [chatId]: { ...session, syncedMessageCount: session.syncedMessageCount + 1 },
-            }
-            chatSessionsRef.current = nextSessions
-            setChatSessions(nextSessions)
-          }
-        }
-        if ((draftsRef.current[chatId] ?? '').trim() === message) {
-          draftsRef.current = { ...draftsRef.current, [chatId]: '' }
-          setDrafts(draftsRef.current)
-        }
-        if ((draftAttachmentsRef.current[chatId] ?? []).every((attachment, index) =>
-          attachment.path === attachments[index]?.path)) {
-          draftAttachmentsRef.current = { ...draftAttachmentsRef.current, [chatId]: [] }
-          setDraftAttachments(draftAttachmentsRef.current)
-        }
-        setChatErrors((current) => ({ ...current, [chatId]: null }))
-        return
-      } catch (steerError) {
-        const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
-        if (!safelyNotDelivered) {
-          setChatErrors((current) => ({
-            ...current,
-            [chatId]: steerError instanceof Error
-              ? steerError.message
-              : 'Ensync could not confirm whether Codex received the live instruction, so it was not queued again.',
-          }))
-          return
-        }
-      } finally {
-        steeringChatIdsRef.current.delete(chatId)
-      }
     }
     if (enqueueBehindActiveRun) {
       const queuedAt = new Date().toISOString()
@@ -2416,6 +2776,7 @@ function App() {
         gitBefore: continuationGit(null),
         projectId: runProject.id,
         projectPath: runProject.path,
+        liveSteerReady: false,
         continuityStateRequired: runAutoContext || runPreferences.fallbackEnabled,
         gitReason: runTarget.kind === 'ssh'
           ? 'the current SSH probe verifies Git availability but does not report branch/worktree status'
@@ -2462,6 +2823,7 @@ function App() {
         gitBefore: continuationGit(handoffGitStatus),
         projectId: runProject.id,
         projectPath: runProject.path,
+        liveSteerReady: false,
         continuityStateRequired: runAutoContext || fallbackReason !== null,
         gitReason: handoffGitStatusReason,
       }))
@@ -2519,7 +2881,7 @@ function App() {
       const continuityCapsuleRequired = runAutoContext
         || fallbackReason !== null
         || attemptedProviders.length > 1
-      const effectivePrompt = continuityCapsuleRequired
+      const basePrompt = continuityCapsuleRequired
         ? buildAutoContextPrompt({
             project: runProject,
             target: runTarget,
@@ -2531,6 +2893,11 @@ function App() {
             providerMode: chatToSend.providerMode ?? 'auto',
           })
         : canResume || !transcript ? prompt : `${transcript}\n\nUser: ${prompt}`
+      const effectivePrompt = withProviderRunnerInstructions(
+        targetProviderId,
+        runTarget.kind === 'local' ? 'local' : 'ssh',
+        basePrompt,
+      )
       const requestedModel = null
       const requestedEffort = runPreferences.requestedEffort
       const jobId = `job-${turnId}-${targetProviderId}-${attemptedProviders.length}`
@@ -2552,6 +2919,7 @@ function App() {
           lastEventSequence: 0,
           projectId: runProject.id,
           projectPath: runProject.path,
+          liveSteerReady: false,
           continuityStateRequired: continuityCapsuleRequired,
           gitReason: handoffGitStatusReason,
         }))
@@ -2572,6 +2940,7 @@ function App() {
             sessionId: canResume ? session.sessionId : null,
             model: requestedModel,
             effort: requestedEffort,
+            autoLand: autoLandAgentWork,
           }
         : {
             provider: target.id,
@@ -2590,11 +2959,19 @@ function App() {
           updateInFlightRun(chatId, (current) => current ? {
             ...current,
             providerProcessStarted: providerProcessStarted || current.providerProcessStarted,
+            liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
             lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
           } : current)
         }
         appendChatExecutionEvent(chatId, event)
-      }, runController.signal)
+      }, runController.signal, {
+        nativeWorkspaceId: isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+          ? nativeWorkspaceIdentity.id
+          : null,
+        projectId: runProject.id,
+        chatId,
+        turnId,
+      })
     }
 
     let queueMayAdvance = false
@@ -2648,6 +3025,61 @@ function App() {
       queueMayAdvance = true
     } catch (runError) {
       const failedAt = new Date().toISOString()
+      if (runError instanceof ChatJobOccupiedError) {
+        const owner = runError.owner as typeof runError.owner & { turnId?: string | null }
+        const occupiedQueueSnapshot = occupiedQueueSnapshotForAttempt(queuedPrompt, {
+          messageId: `msg-${turnId}`,
+          enqueuedAt: failedAt,
+          preferences: {
+            providerMode: chatToSendCurrent.providerMode ?? 'auto',
+            provider: routedProvider.id,
+            sizeTier: chatToSendCurrent.sizeTier ?? null,
+            automaticFallback: runAutoFallback,
+            autoContextSkill: runAutoContext,
+            fallbackProviderOrder: [...runFallbackOrder],
+            executionTargetKey: runTargetKey,
+            projectId: runProject.id,
+            projectPath: runProject.path,
+          },
+        })
+        const converted = convertPendingTurnToOccupiedQueue({
+          chats: chatsRef.current,
+          queues: promptQueuesRef.current,
+          inFlightRuns: inFlightRunsRef.current,
+          occupiedRuns: occupiedRunsRef.current,
+          chatId,
+          turnId,
+          queueId: occupiedQueueSnapshot.queueId,
+          messageId: occupiedQueueSnapshot.messageId,
+          prompt: message,
+          attachments,
+          enqueuedAt: occupiedQueueSnapshot.enqueuedAt,
+          preferences: occupiedQueueSnapshot.preferences,
+          owner,
+          binding: { projectId: runProject.id, projectPath: runProject.path, chatId },
+        })
+        if (converted.status !== 'invalid') {
+          chatsRef.current = converted.chats
+          promptQueuesRef.current = converted.queues
+          inFlightRunsRef.current = converted.inFlightRuns as Record<string, PersistedInFlightRun>
+          occupiedRunsRef.current = converted.occupiedRuns
+          updateOccupiedShellReachability(chatId, converted.occupiedRuns[chatId]?.ownerJobId ?? '', false)
+          setChats(converted.chats)
+          setPromptQueues(converted.queues)
+          setInFlightRuns(converted.inFlightRuns as Record<string, PersistedInFlightRun>)
+          setOccupiedRuns(converted.occupiedRuns)
+          const nextErrors = updateChatError(chatId, null)
+          commitWorkspace({
+            chats: converted.chats,
+            promptQueues: converted.queues,
+            inFlightRuns: converted.inFlightRuns as Record<string, PersistedInFlightRun>,
+            occupiedRuns: converted.occupiedRuns,
+            chatErrors: nextErrors,
+          })
+
+          return
+        }
+      }
       if (runWasCancelled(runError, runController.signal)) {
         const nextSessions = { ...chatSessionsRef.current }
         delete nextSessions[chatId]
@@ -2731,6 +3163,7 @@ function App() {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
       delete activeTurnIdsRef.current[chatId]
+      rememberCompletedNativeRun(chatId, inFlightRunsRef.current[chatId])
       const nextRuns = updateInFlightRun(chatId, () => undefined)
       commitWorkspace({
         chats: chatsRef.current,
@@ -2738,10 +3171,15 @@ function App() {
         chatErrors: chatErrorsRef.current,
         chatExecutionEvents: chatExecutionEventsRef.current,
         inFlightRuns: nextRuns,
+        occupiedRuns: occupiedRunsRef.current,
       })
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (runTarget.kind === 'local') void refreshProviders(false)
-      if (queueMayAdvance) queueMicrotask(() => void drainPromptQueue(chatId))
+      // Consume the arm unconditionally so it can never outlive its own run.
+      const stopAndSendArmed = stopAndSendChatIdsRef.current.delete(chatId)
+      if (queueMayAdvanceAfterRun({ completedSuccessfully: queueMayAdvance, stopAndSendArmed })) {
+        queueMicrotask(() => void drainPromptQueue(chatId))
+      }
     }
   }
 
@@ -2773,6 +3211,7 @@ function App() {
       await ensyncHost.steerChatJob(
         activeRun.jobId,
         messageTextWithAttachments(entry.prompt, entry.attachments),
+        entry.id,
         normalizeFileAttachments(entry.attachments).map((attachment) => attachment.path),
       )
 
@@ -2814,9 +3253,12 @@ function App() {
         chatErrors: nextErrors,
       })
     } catch (steerError) {
-      const safelyNotDelivered = steerError instanceof EnsyncHostError && steerError.safeToRetry
+      const safelyNotDelivered = liveSteerWasSafelyRejected(steerError)
       if (safelyNotDelivered) {
-        updateChatError(chatId, `${steerError.message} It remains queued.`)
+        const rejectionMessage = steerError instanceof Error
+          ? steerError.message
+          : 'The active turn did not accept this message.'
+        updateChatError(chatId, `${rejectionMessage} It remains queued.`)
       } else {
         // An unconfirmed live delivery must never execute later as a separate
         // queued turn, because that could duplicate project mutations.
@@ -2844,9 +3286,254 @@ function App() {
       })
     }
   }
+  pushQueuedNowRef.current = handlePushQueuedNow
+
+  const occupiedBinding = (owner: OccupiedRuns[string] | undefined) => owner ? {
+    workspaceId: owner.nativeWorkspaceId ?? '',
+    jobId: owner.ownerJobId,
+    turnId: owner.turnId ?? '',
+    provider: owner.provider,
+    targetKind: owner.targetKind,
+    projectId: owner.projectId,
+    projectPath: owner.projectPath,
+    chatId: owner.chatId,
+  } : null
+
+  const handleViewOccupiedRun = async (chatId: string) => {
+    const owner = occupiedRunsRef.current[chatId]
+    const entry = promptQueuesRef.current[chatId]?.[0]
+    const binding = occupiedBinding(owner)
+    const controls = occupiedRunControls(owner, entry, binding, {
+      nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+      shellReachable: Boolean(owner
+        && occupiedShellReachabilityRef.current[chatId] === owner.ownerJobId),
+    })
+    if (!owner || !binding || !controls.canView || !owner.nativeWorkspaceId
+      || typeof window.ensyncDesktop?.focusWorkspace !== 'function') {
+      updateChatError(chatId, 'Ensync cannot verify the active run window. The message remains queued here.')
+      return
+    }
+    try {
+      const focused = await window.ensyncDesktop.focusWorkspace({
+        workspaceId: owner.nativeWorkspaceId,
+        projectId: owner.projectId,
+        projectPath: owner.projectPath,
+        chatId: owner.chatId,
+        jobId: owner.ownerJobId,
+      })
+      updateChatError(chatId, focused
+        ? null
+        : 'The active run window is no longer available. The message remains queued here.')
+    } catch {
+      updateChatError(chatId, 'Ensync could not open the active run window. The message remains queued here.')
+    }
+  }
+
+  const handleTransferToOccupiedRun = async (chatId: string, stopAndSend = false) => {
+    const owner = occupiedRunsRef.current[chatId]
+    const originalEntry = promptQueuesRef.current[chatId]?.[0]
+    const binding = occupiedBinding(owner)
+    const controls = occupiedRunControls(owner, originalEntry, binding, {
+      nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+      shellReachable: Boolean(owner
+        && occupiedShellReachabilityRef.current[chatId] === owner.ownerJobId),
+    })
+    const bridge = window.ensyncDesktop
+    const authorized = stopAndSend ? controls.canStopAndSend : controls.canPush
+    if (!owner || !originalEntry || !binding || !owner.nativeWorkspaceId || !authorized
+      || typeof bridge?.handoffQueuedMessage !== 'function') {
+      updateChatError(chatId, 'The exact active run can no longer accept this handoff. The message remains safely queued.')
+      return
+    }
+    if (transferringChatIdsRef.current.has(chatId)) return
+    transferringChatIdsRef.current.add(chatId)
+    setPushingQueuedChatIds((current) => new Set(current).add(chatId))
+
+    const entry = handoffEntryForAction(originalEntry, stopAndSend, new Date().toISOString())
+    if (!entry) {
+      updateChatError(chatId, 'Ensync could not prepare the exact handoff. The source message remains unchanged and queued.')
+      transferringChatIdsRef.current.delete(chatId)
+      setPushingQueuedChatIds((current) => {
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
+      return
+    }
+
+    try {
+      const result = await bridge.handoffQueuedMessage({
+        handoffId: entry.id,
+        target: {
+          workspaceId: owner.nativeWorkspaceId,
+          projectId: owner.projectId,
+          projectPath: owner.projectPath,
+          chatId: owner.chatId,
+          jobId: owner.ownerJobId,
+        },
+        entry,
+      })
+      if (result.status !== 'accepted' || result.handoffId !== entry.id
+        || result.messageId !== entry.messageId) {
+        updateChatError(chatId, result.status === 'unavailable'
+          ? 'The active window did not acknowledge the handoff. The message remains queued here.'
+          : 'The active window rejected the handoff because its exact run changed. The message remains queued here.')
+        return
+      }
+
+      const currentHead = promptQueuesRef.current[chatId]?.[0]
+      if (!currentHead || currentHead.id !== originalEntry.id || currentHead.messageId !== originalEntry.messageId) {
+        updateChatError(chatId, 'The local queue changed during handoff. No additional message was removed.')
+        return
+      }
+      if (JSON.stringify(currentHead) !== JSON.stringify(originalEntry)) {
+        updateChatError(chatId, 'The queued message changed during handoff. No local message was removed.')
+        return
+      }
+      const nextQueues = removePromptFromQueue(promptQueuesRef.current, chatId, originalEntry.id)
+      const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
+        ...chat,
+        messages: markQueuedMessageTransferred(chat.messages, originalEntry.messageId),
+      } : chat)
+      const nextOccupied = { ...occupiedRunsRef.current }
+      delete nextOccupied[chatId]
+      chatsRef.current = nextChats
+      promptQueuesRef.current = nextQueues
+      occupiedRunsRef.current = nextOccupied
+      updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+      setChats(nextChats)
+      setPromptQueues(nextQueues)
+      setOccupiedRuns(nextOccupied)
+      const nextErrors = updateChatError(chatId, null)
+      commitWorkspace({
+        chats: nextChats,
+        promptQueues: nextQueues,
+        occupiedRuns: nextOccupied,
+        chatErrors: nextErrors,
+      })
+      if (typeof bridge.focusWorkspace === 'function') {
+        try {
+          const focused = await bridge.focusWorkspace({
+            workspaceId: owner.nativeWorkspaceId,
+            projectId: owner.projectId,
+            projectPath: owner.projectPath,
+            chatId: owner.chatId,
+            jobId: owner.ownerJobId,
+          })
+          if (!focused) updateChatError(chatId, 'The message was transferred, but its active window could not be focused.')
+        } catch {
+          updateChatError(chatId, 'The message was transferred, but Ensync could not focus its active window.')
+        }
+      }
+    } catch {
+      updateChatError(chatId, 'Ensync could not hand this message to the active window. It remains queued here.')
+    } finally {
+      transferringChatIdsRef.current.delete(chatId)
+      setPushingQueuedChatIds((current) => {
+        const next = new Set(current)
+        next.delete(chatId)
+        return next
+      })
+    }
+  }
+
+  useEffect(() => window.ensyncDesktop?.onQueuedMessageHandoff?.((request) => {
+    if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return { status: 'rejected' as const }
+    const typedRequest = request as { handoffId: string; target: NativeExactRunBinding; entry: QueuedPrompt }
+    const project = projectsRef.current.find((candidate) => candidate.id === request.target.projectId
+      && candidate.path === request.target.projectPath)
+    const chat = chatsRef.current.find((candidate) => candidate.id === request.target.chatId
+      && candidate.projectId === request.target.projectId)
+    if (!project || !chat) return { status: 'rejected' as const }
+
+    const entry = request.entry as QueuedPrompt
+    const reconciliation = reconcileQueuedMessageHandoff(typedRequest, {
+      workspaceId: nativeWorkspaceIdentity.id,
+      projectId: project.id,
+      projectPath: project.path,
+      chatId: chat.id,
+      chats: chatsRef.current,
+      queues: promptQueuesRef.current,
+    })
+    if (reconciliation.status === 'conflict') return { status: 'rejected' as const }
+    if (reconciliation.status === 'duplicate') {
+      // A byte-identical queue copy or immutable consumed tombstone already
+      // proves target ownership. ACK before ephemeral run checks and never
+      // repeat Push/Stop; the target FIFO/gates own future execution.
+      return { status: 'duplicate' as const }
+    }
+
+    const activeRun = inFlightRunsRef.current[chat.id]
+    const activeAuthorized = Boolean(activeRun
+      && chatRunRegistryRef.current.has(chat.id)
+      && activeRun.projectId === project.id
+      && activeRun.projectPath === project.path
+      && validateQueuedMessageHandoff(typedRequest, {
+        workspaceId: nativeWorkspaceIdentity.id,
+        projectId: project.id,
+        projectPath: project.path,
+        chatId: chat.id,
+        activeRun,
+        queue: promptQueuesRef.current[chat.id] ?? [],
+      }))
+    const completedRun = completedNativeRunsRef.current.get(request.target.jobId)
+    const terminalAuthorized = !activeAuthorized && validateTerminalQueuedMessageHandoff(typedRequest, {
+      workspaceId: nativeWorkspaceIdentity.id,
+      projectId: project.id,
+      projectPath: project.path,
+      chatId: chat.id,
+      completedRun,
+    })
+    if (!activeAuthorized && !terminalAuthorized) return { status: 'rejected' as const }
+
+    const stopAndSendApproved = Boolean(entry.resumeApprovedAt)
+    let action: 'push' | 'stop' | null = null
+    if (activeAuthorized && reconciliation.status === 'accepted' && activeRun) {
+      const liveSteerAvailable = activeRun.liveSteerReady === true
+        && activeRun.provider === 'codex'
+        && activeRun.executionTarget === 'local'
+      if (stopAndSendApproved) {
+        if (activeRun.providerProcessStarted !== true
+          || !queuedPromptCanStopAndSendNow(entry, activeRun, { liveSteerAvailable })) {
+          return { status: 'rejected' as const }
+        }
+        action = 'stop'
+      } else {
+        if (!liveSteerAvailable) return { status: 'rejected' as const }
+        action = 'push'
+      }
+    }
+
+    if (reconciliation.status === 'accepted') {
+      const committed = commitHandoffAcceptance(
+        reconciliation,
+        ({ chats, promptQueues }) => commitWorkspace({ chats, promptQueues }),
+        (accepted) => {
+          // Persistence is target-first: refs and render state move only after
+          // the synchronous snapshot commit has succeeded.
+          promptQueuesRef.current = accepted.queues
+          chatsRef.current = accepted.chats
+          setPromptQueues(accepted.queues)
+          setChats(accepted.chats)
+        },
+      )
+      if (!committed) return { status: 'rejected' as const }
+    }
+
+    const persistedHead = promptQueuesRef.current[chat.id]?.[0]
+    if (action && persistedHead?.id === entry.id && !handoffActionsInvokedRef.current.has(entry.id)) {
+      handoffActionsInvokedRef.current.add(entry.id)
+      queueMicrotask(() => {
+        if (action === 'stop') stopAndSendNowRef.current(chat.id)
+        else void pushQueuedNowRef.current(chat.id)
+      })
+    }
+    return { status: reconciliation.status === 'accepted' ? 'accepted' as const : 'duplicate' as const }
+  }), [commitWorkspace, nativeWorkspaceIdentity])
 
   function drainPromptQueue(chatId: string) {
     if (chatRunRegistryRef.current.has(chatId)) return
+    if (occupiedRunsRef.current[chatId]) return
     const entry = promptQueuesRef.current[chatId]?.[0]
     const chat = chatsRef.current.find((item) => item.id === chatId)
     if (!entry || !chat || queuedPromptGate(chat, entry).state !== 'ready') return
@@ -2900,6 +3587,7 @@ function App() {
           updateInFlightRun(chatId, (current) => current ? {
             ...current,
             providerProcessStarted: current.providerProcessStarted || job.providerProcessStarted,
+            liveSteerReady: job.steerable,
           } : current)
           const cursor = inFlightRunsRef.current[chatId]?.lastEventSequence ?? 0
           const result = await ensyncHost.attachChatJob(initialRun.jobId, (event) => {
@@ -2907,6 +3595,7 @@ function App() {
               updateInFlightRun(chatId, (current) => current ? {
                 ...current,
                 providerProcessStarted: current.providerProcessStarted || event.type === 'started',
+                liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
                 lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
               } : current)
             }
@@ -2959,6 +3648,7 @@ function App() {
       recoveringChatIdsRef.current.delete(chatId)
       delete activeTurnIdsRef.current[chatId]
       if (terminal) {
+        rememberCompletedNativeRun(chatId, inFlightRunsRef.current[chatId] ?? initialRun)
         const nextRuns = updateInFlightRun(chatId, () => undefined)
         commitWorkspace({
           chats: chatsRef.current,
@@ -2970,9 +3660,12 @@ function App() {
       }
       setSendingChatIds(chatRunRegistryRef.current.snapshot())
       if (initialRun.executionTarget === 'local') void refreshProviders(false)
-      if (queueMayAdvance) queueMicrotask(() => void drainPromptQueueRef.current(chatId))
+      const stopAndSendArmed = stopAndSendChatIdsRef.current.delete(chatId)
+      if (queueMayAdvanceAfterRun({ completedSuccessfully: queueMayAdvance, stopAndSendArmed })) {
+        queueMicrotask(() => void drainPromptQueueRef.current(chatId))
+      }
     }
-  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, updateInFlightRun])
+  }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, rememberCompletedNativeRun, updateInFlightRun])
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3101,12 +3794,14 @@ function App() {
     for (const chatId of Object.keys(promptQueuesRef.current)) {
       queueMicrotask(() => drainPromptQueueRef.current(chatId))
     }
-  }, [executionTarget, hostOnline, projects, providers])
+  }, [chats, executionTarget, hostOnline, projects, providers])
 
   return (
     <div className="app-shell">
       <header className="titlebar" {...getSectionProps('titleBar')}>
-        <div className="traffic-lights" aria-hidden="true"><span /><span /><span /></div>
+        {decorativeTrafficLightsVisible(window.ensyncDesktop) && (
+          <div className="traffic-lights" aria-hidden="true"><span /><span /><span /></div>
+        )}
         <div className="wordmark"><span className="wordmark__mark" aria-hidden="true"><span /><span /></span><span>ensync</span></div>
         <button
           className={`project-switcher ${activeProject.id ? 'project-switcher--selected' : ''}`}
@@ -3193,7 +3888,7 @@ function App() {
               <section className="history-group" key={group}>
                 <div className="history-group__label">{group}</div>
                 {groupChats.map((chat) => {
-                  const provider = providerForChat(executionProviders, chat, fallbackProviderOrder)
+                  const provider = providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])
                   return (
                     <button className={`history-item ${activeChat?.id === chat.id ? 'history-item--active' : ''}`} key={chat.id} onClick={() => openChat(chat.id)}>
                       <ProviderMark provider={provider} small />
@@ -3228,6 +3923,11 @@ function App() {
             onTabReorder={reorderTab}
             onCloseTab={closeTab}
             onNewTab={createChat}
+            onFilesDrop={handleFilesDrop}
+            fileDropAvailable={executionTarget.kind === 'local' && typeof window.ensyncDesktop?.getPathForFile === 'function'}
+            fileDropUnavailableMessage={executionTarget.kind === 'ssh'
+              ? 'Switch to the local Ensync Host to attach files'
+              : 'Local file drops need the native Ensync app'}
             viewMode={conversationLayout}
             showTabHeaders={visibility.tabStrip}
             storageKey={splitLayoutStorageKey}
@@ -3239,54 +3939,95 @@ function App() {
                 <button type="button" onClick={() => createChat()}><Plus size={15} /> New conversation</button>
               </>
             )}
-            renderPane={({ chat, isActive }) => (
+            renderPane={({ chat, isActive }) => {
+              const occupied = occupiedRuns[chat.id]
+              const occupiedHead = promptQueues[chat.id]?.[0]
+              const occupiedControls = occupiedRunControls(
+                occupied,
+                occupiedHead,
+                occupiedBinding(occupied),
+                {
+                  nativeAvailable: typeof window.ensyncDesktop?.focusWorkspace === 'function',
+                  shellReachable: Boolean(occupied
+                    && occupiedShellReachability[chat.id] === occupied.ownerJobId),
+                },
+              )
+              const nativeIdentityAvailable = isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+              const nativeFocusAvailable = typeof window.ensyncDesktop?.focusWorkspace === 'function'
+              const nativeHandoffAvailable = typeof window.ensyncDesktop?.handoffQueuedMessage === 'function'
+              const occupiedReason = !occupied
+                ? null
+                : !nativeIdentityAvailable
+                  ? 'This browser cannot open or control another Ensync window. The message remains queued.'
+                  : !nativeFocusAvailable || !nativeHandoffAvailable
+                    ? 'This Ensync window is missing the active-run bridge. Quit Ensync completely and reopen it; the message remains queued.'
+                    : !occupied.turnId
+                      ? 'The active run belongs to another Ensync Host, so this window cannot control it. The message remains queued.'
+                      : occupiedControls.reason
+              const localActiveRun = inFlightRuns[chat.id]
+              const localCanPush = Boolean(
+                sendingChatIds.has(chat.id)
+                && localActiveRun?.liveSteerReady === true
+                && localActiveRun?.provider === 'codex'
+                && localActiveRun.executionTarget === 'local'
+                && localActiveRun.jobId
+                && occupiedHead
+                && occupiedHead.predecessorTurnId === localActiveRun.turnId
+                && occupiedHead.preferences.executionTargetKey === localActiveRun.executionTarget
+                && occupiedHead.preferences.projectId === localActiveRun.projectId
+                && occupiedHead.preferences.projectPath === localActiveRun.projectPath,
+              )
+              const localCanStopAndSend = Boolean(
+                sendingChatIds.has(chat.id)
+                && queuedPromptCanStopAndSendNow(occupiedHead, localActiveRun, {
+                  liveSteerAvailable: localActiveRun?.liveSteerReady === true && localActiveRun.provider === 'codex',
+                }),
+              )
+              const activeProviderId = localActiveRun?.provider ?? occupied?.provider
+              const activeRunProviderName = activeProviderId
+                ? executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? activeProviderId
+                : null
+              const owningConversation = owningConversationTargets[chat.id] ?? null
+              return (
               <ConversationPane
                 chat={chat}
                 isActive={isActive}
-                provider={providerForChat(executionProviders, chat, fallbackProviderOrder)}
+                onOpenFile={setViewedFilePath}
+                provider={providerForChat(executionProviders, chat, fallbackProviderOrder, inFlightRuns[chat.id])}
+                autoProvider={automaticProvider(executionProviders, fallbackProviderOrder, chat.provider)}
+                runningProviderPinned={runPinsDisplayedProvider(executionProviders, inFlightRuns[chat.id])}
                 providers={executionProviders}
                 projectPath={executionTarget.kind === 'ssh' ? `${executionTarget.connection.username}@${executionTarget.connection.hostname}:${executionTarget.connection.projectPath}` : activeProject.path}
                 projectContextAvailable={activeProject.verified && activeProject.context.files.length > 0}
                 draft={drafts[chat.id] ?? ''}
                 attachments={draftAttachments[chat.id] ?? []}
-                fileAttachmentsEnabled={executionTarget.kind === 'local'}
+                attachmentError={attachmentErrors[chat.id] ?? null}
                 sending={sendingChatIds.has(chat.id)}
                 liveSteering={
                   sendingChatIds.has(chat.id)
+                  && Boolean(inFlightRuns[chat.id]?.liveSteerReady)
                   && executionTarget.kind === 'local'
                   && inFlightRuns[chat.id]?.provider === 'codex'
                   && inFlightRuns[chat.id]?.executionTarget === 'local'
                   && Boolean(inFlightRuns[chat.id]?.jobId)
                   && (promptQueues[chat.id]?.length ?? 0) === 0
                 }
-                canPushQueuedNow={(() => {
-                  const activeRun = inFlightRuns[chat.id]
-                  const entry = promptQueues[chat.id]?.[0]
-                  return Boolean(
-                    sendingChatIds.has(chat.id)
-                    && activeRun?.provider === 'codex'
-                    && activeRun.executionTarget === 'local'
-                    && activeRun.jobId
-                    && entry
-                    && entry.predecessorTurnId === activeRun.turnId
-                    && entry.preferences.executionTargetKey === activeRun.executionTarget
-                    && entry.preferences.projectId === activeRun.projectId
-                    && entry.preferences.projectPath === activeRun.projectPath,
-                  )
-                })()}
+                canPushQueuedNow={localCanPush || (occupiedControls.canPush && nativeHandoffAvailable)}
+                canStopAndSendNow={localCanStopAndSend || (occupiedControls.canStopAndSend && nativeHandoffAvailable)}
+                canViewOccupiedRun={occupiedControls.canView && nativeFocusAvailable}
+                occupiedRunReason={occupiedReason}
                 liveDeliverySupported={(() => {
-                  const activeRun = inFlightRuns[chat.id]
                   // With no active run there is no provider limit to report; keep the plain copy.
-                  if (!activeRun) return true
-                  return activeRun.provider === 'codex' && activeRun.executionTarget === 'local'
+                  if (localActiveRun) {
+                    return localActiveRun.provider === 'codex' && localActiveRun.executionTarget === 'local'
+                  }
+                  if (occupied) return occupied.provider === 'codex' && occupied.targetKind === 'local'
+                  return true
                 })()}
-                activeRunProviderName={(() => {
-                  const activeProviderId = inFlightRuns[chat.id]?.provider
-                  if (!activeProviderId) return null
-                  return executionProviders.find((candidate) => candidate.id === activeProviderId)?.name ?? null
-                })()}
+                activeRunProviderName={activeRunProviderName}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
-                runStartedAt={inFlightRuns[chat.id]?.startedAt ?? null}
+                runStartedAt={localActiveRun?.startedAt ?? occupied?.startedAt ?? null}
+                occupiedRun={occupied ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
                 error={chatErrors[chat.id] ?? null}
                 providerMenuOpen={providerMenuChatId === chat.id}
@@ -3295,12 +4036,11 @@ function App() {
                 autoContextSkill={autoContextSkill}
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
+                workspaceBranchTitles={workspaceBranchTitles}
+                owningConversation={owningConversation}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
+                onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
-                onAttachmentsAdd={(attachments) => setDraftAttachments((current) => ({
-                  ...current,
-                  [chat.id]: appendFileAttachments(current[chat.id], attachments),
-                }))}
                 onAttachmentRemove={(path) => setDraftAttachments((current) => ({
                   ...current,
                   [chat.id]: (current[chat.id] ?? []).filter((attachment) => attachment.path !== path),
@@ -3308,7 +4048,13 @@ function App() {
                 onSend={() => handleSend(chat.id)}
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
-                onPushQueuedNow={() => void handlePushQueuedNow(chat.id)}
+                onViewOccupiedRun={() => void handleViewOccupiedRun(chat.id)}
+                onPushQueuedNow={() => occupied
+                  ? void handleTransferToOccupiedRun(chat.id, false)
+                  : void handlePushQueuedNow(chat.id)}
+                onStopAndSendNow={() => occupied
+                  ? void handleTransferToOccupiedRun(chat.id, true)
+                  : handleStopAndSendNow(chat.id)}
                 onProviderMenu={() => {
                   setModelMenuChatId(null)
                   setProviderMenuChatId((current) => current === chat.id ? null : chat.id)
@@ -3321,14 +4067,47 @@ function App() {
                 onProviderChange={(providerId) => setChatProvider(chat.id, providerId)}
                 onSizeTierChange={(sizeTier) => setChatSizeTier(chat.id, sizeTier)}
                 onConnect={() => { setProviderMenuChatId(null); setModelMenuChatId(null); setWizardOpen(true) }}
+                filePickerAvailable={executionTarget.kind === 'local' && typeof window.ensyncDesktop?.chooseChatFiles === 'function'}
+                filePickerUnavailableMessage={executionTarget.kind === 'ssh'
+                  ? 'Switch to the local Ensync Host to attach files'
+                  : 'File selection needs the native Ensync app'}
+                onFilesChoose={() => void handleFilesChoose(chat.id)}
                 onContext={() => setContextOpen(true)}
                 onAutoContextSkillChange={() => setAutoContextSkillEnabled(!autoContextSkill)}
                 onExecutionPanelOpenChange={(open) => setExecutionPanelOpenByChat((current) =>
                   setExecutionPanelOpenForChat(current, chat.id, open),
                 )}
+                onOpenOwningConversation={async (target) => {
+                  if (isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+                    && target.workspaceId === nativeWorkspaceIdentity.id) {
+                    const targetChat = chatsRef.current.find((candidate) => candidate.id === target.chatId
+                      && candidate.projectId === target.projectId)
+                    const targetProject = projectsRef.current.find((candidate) => candidate.id === target.projectId
+                      && nativeProjectPathKey(candidate.path) === nativeProjectPathKey(target.projectPath))
+                    if (!targetChat || !targetProject || !exactNativeChatFocusCanApply(target, {
+                      workspaceId: nativeWorkspaceIdentity.id,
+                      projectId: targetProject.id,
+                      projectPath: targetProject.path,
+                      chatId: targetChat.id,
+                    })) return false
+                    setProjects((current) => [targetProject, ...current.filter((candidate) => candidate.id !== targetProject.id)])
+                    setActiveProjectId(targetProject.id)
+                    openChatRef.current(targetChat.id)
+                    setProjectError(null)
+                    return true
+                  }
+                  if (typeof window.ensyncDesktop?.focusWorkspace !== 'function') return false
+                  try {
+                    return await window.ensyncDesktop.focusWorkspace(target)
+                  } catch (error) {
+                    console.error('[ensync-owning-conversation-focus]', error)
+                    return false
+                  }
+                }}
                 onSettings={() => setSettingsOpen(true)}
               />
-            )}
+              )
+            }}
           />
         </main>
       </div>
@@ -3352,6 +4131,7 @@ function App() {
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
       {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
+      {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
       {gitWorkflowMode && <GitWorkflowModal mode={gitWorkflowMode} project={activeProject.verified ? activeProject : null} onImported={(project) => { focusProject(verifiedProject(project)); setGitWorkflowMode(null) }} onClose={() => setGitWorkflowMode(null)} />}
       {remoteOpen && <RemoteRuntimeModal hostOnline={hostOnline} providers={providers} project={activeProject} chat={activeChat ?? null} executionTarget={executionTarget} initialRuntime={remoteInitialRuntime} fallbackProviderOrder={fallbackProviderOrder} onExecutionTargetChange={setExecutionTarget} onClose={() => { setRemoteOpen(false); setRemoteInitialRuntime('local') }} />}
@@ -3378,19 +4158,25 @@ function ConversationPane({
   chat,
   isActive,
   provider,
+  autoProvider,
+  runningProviderPinned,
   providers,
   projectPath,
   projectContextAvailable,
   draft,
   attachments,
-  fileAttachmentsEnabled,
+  attachmentError,
   sending,
   liveSteering,
   canPushQueuedNow,
+  canStopAndSendNow,
+  canViewOccupiedRun,
+  occupiedRunReason,
   liveDeliverySupported,
   activeRunProviderName,
   pushingQueued,
   runStartedAt,
+  occupiedRun,
   queuedPrompts,
   error,
   providerMenuOpen,
@@ -3399,41 +4185,59 @@ function ConversationPane({
   autoContextSkill,
   fallbackProviders,
   executionEvents,
+  workspaceBranchTitles,
+  owningConversation,
   executionPanelOpen,
+  onAnswerQuestion,
   onDraftChange,
-  onAttachmentsAdd,
   onAttachmentRemove,
   onSend,
   onStop,
   onResumeQueue,
+  onViewOccupiedRun,
   onPushQueuedNow,
+  onStopAndSendNow,
   onProviderMenu,
   onModelMenu,
   onProviderAuto,
   onProviderChange,
   onSizeTierChange,
   onConnect,
+  filePickerAvailable,
+  filePickerUnavailableMessage,
+  onFilesChoose,
   onContext,
   onAutoContextSkillChange,
   onExecutionPanelOpenChange,
+  onOpenOwningConversation,
   onSettings,
+  onOpenFile,
 }: {
   chat: Chat
   isActive: boolean
+  /** Provider this conversation is actually on: the running turn, else its last verified turn. */
   provider: Provider
+  /** Provider Auto would choose for the next turn from current verified usage. */
+  autoProvider: Provider
+  /** True while a Host-owned run pins `provider` to the executing turn. */
+  runningProviderPinned: boolean
   providers: Provider[]
   projectPath: string
   projectContextAvailable: boolean
   draft: string
   attachments: FileAttachment[]
-  fileAttachmentsEnabled: boolean
+  attachmentError: string | null
   sending: boolean
   liveSteering: boolean
   canPushQueuedNow: boolean
+  canStopAndSendNow: boolean
+  canViewOccupiedRun: boolean
+  occupiedRunReason: string | null
   liveDeliverySupported: boolean
   activeRunProviderName: string | null
   pushingQueued: boolean
   runStartedAt: string | null
+  occupiedRun: OccupiedRuns[string] | null
   queuedPrompts: QueuedPrompt[]
   error: string | null
   providerMenuOpen: boolean
@@ -3442,24 +4246,33 @@ function ConversationPane({
   autoContextSkill: boolean
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
+  workspaceBranchTitles: Record<string, string>
+  owningConversation: ReferencedOwningConversation | null
   executionPanelOpen: boolean
+  onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
   onDraftChange: (value: string) => void
-  onAttachmentsAdd: (attachments: FileAttachment[]) => void
   onAttachmentRemove: (path: string) => void
   onSend: () => void
   onStop: () => void
   onResumeQueue: () => void
+  onViewOccupiedRun: () => void
   onPushQueuedNow: () => void
+  onStopAndSendNow: () => void
   onProviderMenu: () => void
   onModelMenu: () => void
   onProviderAuto: () => void
   onProviderChange: (providerId: ProviderId) => void
   onSizeTierChange: (sizeTier: ModelSizeTier | null) => void
   onConnect: () => void
+  filePickerAvailable: boolean
+  filePickerUnavailableMessage: string
+  onFilesChoose: () => void
   onContext: () => void
   onAutoContextSkillChange: () => void
   onExecutionPanelOpenChange: (open: boolean) => void
+  onOpenOwningConversation: (target: ReferencedOwningConversation) => Promise<boolean>
   onSettings: () => void
+  onOpenFile: (path: string) => void
 }) {
   const { getSectionProps, isVisible, setVisible } = useUIVisibility()
   const providerButtonRef = useRef<HTMLButtonElement>(null)
@@ -3467,14 +4280,12 @@ function ConversationPane({
   const modelButtonRef = useRef<HTMLButtonElement>(null)
   const modelMenuRef = useRef<HTMLDivElement>(null)
   const composerRef = useRef<HTMLTextAreaElement>(null)
-  const fileDragDepthRef = useRef(0)
-  const [fileDragActive, setFileDragActive] = useState(false)
-  const [attachmentError, setAttachmentError] = useState<string | null>(null)
   const providerMenuId = `provider-menu-${chat.id}`
   const modelMenuId = `model-menu-${chat.id}`
   const providerMenuStyle = useFloatingMenuPosition(providerMenuOpen, providerButtonRef)
   const modelMenuStyle = useFloatingMenuPosition(modelMenuOpen, modelButtonRef)
   const elapsedWorkingLabel = useWorkingElapsedLabel(sending, runStartedAt)
+  const occupiedElapsedLabel = useWorkingElapsedLabel(Boolean(occupiedRun), occupiedRun?.startedAt ?? null)
   const canRunSelectedProvider = provider.connected && supportsChat(provider)
   const canRunFallback = autoFallback
     && chat.providerMode === 'fixed'
@@ -3484,7 +4295,21 @@ function ConversationPane({
   const queueStatus = promptQueueStatusPresentation(queueGate, queuedPrompts.length, {
     liveDeliverySupported,
     activeProviderName: activeRunProviderName,
+    stopAndSendAvailable: canStopAndSendNow,
   })
+  // Live delivery is Codex-only; every other provider gets the honest
+  // stop-then-run path rather than a silently missing control. Stopping a turn
+  // discards its in-progress work, so the destructive action is deliberately
+  // two-step and disarms itself rather than waiting silently.
+  const [stopAndSendArmed, setStopAndSendArmed] = useState(false)
+  useEffect(() => {
+    if (!canStopAndSendNow && stopAndSendArmed) setStopAndSendArmed(false)
+  }, [canStopAndSendNow, stopAndSendArmed])
+  useEffect(() => {
+    if (!stopAndSendArmed) return
+    const timer = window.setTimeout(() => setStopAndSendArmed(false), 6000)
+    return () => window.clearTimeout(timer)
+  }, [stopAndSendArmed])
   const composerQueueState = promptQueueComposerState({
     sending,
     liveSteering,
@@ -3494,6 +4319,28 @@ function ConversationPane({
   const providerNotes = executionEvents
     .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
     .slice(-6)
+  // Derived from the same replayed event buffer the panel reads, so a window
+  // that reconnects mid-turn still sees the question the provider is blocked on.
+  const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
+  const workspaceOverlap = useMemo(() => workspaceOverlapSummary(
+    activeWorkspaceOverlaps(executionEvents),
+    workspaceBranchTitles,
+  ), [executionEvents, workspaceBranchTitles])
+  const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null)
+  const [questionError, setQuestionError] = useState<string | null>(null)
+  const submitQuestionAnswer = useCallback(async (
+    answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true },
+  ) => {
+    setAnsweringQuestionId(answer.questionId)
+    setQuestionError(null)
+    try {
+      await onAnswerQuestion(answer)
+    } catch (error) {
+      setQuestionError(error instanceof Error ? error.message : 'Ensync Host could not deliver that answer.')
+    } finally {
+      setAnsweringQuestionId(null)
+    }
+  }, [onAnswerQuestion])
   const scrollContentRevision = useMemo(() => chatAutoScrollContentRevision({
     messages: chat.messages,
     executionEvents,
@@ -3558,59 +4405,18 @@ function ConversationPane({
     }
   }, [modelMenuOpen, onModelMenu, onProviderMenu, providerMenuOpen])
 
-  const beginFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current += 1
-    setFileDragActive(true)
-  }
-
-  const continueFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    event.dataTransfer.dropEffect = fileAttachmentsEnabled && window.ensyncDesktop?.getPathForFile
-      ? 'copy'
-      : 'none'
-  }
-
-  const leaveFileDrag = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = Math.max(0, fileDragDepthRef.current - 1)
-    if (fileDragDepthRef.current === 0) setFileDragActive(false)
-  }
-
-  const attachDroppedFiles = async (event: React.DragEvent<HTMLDivElement>) => {
-    if (!fileDragContainsFiles(event.dataTransfer.types)) return
-    event.preventDefault()
-    event.stopPropagation()
-    fileDragDepthRef.current = 0
-    setFileDragActive(false)
-    if (!fileAttachmentsEnabled) {
-      setAttachmentError('These files are on this computer. Switch the chat to the local Ensync Host before attaching them.')
-      return
-    }
-    // Snapshot synchronously: the DataTransfer list is gone once the drop
-    // handler yields, and OS-protected drops are only copyable right now.
-    const files = Array.from(event.dataTransfer.files)
-    const dropped = await resolveDroppedAttachments(files, window.ensyncDesktop?.getPathForFile, {
-      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
-      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
-    })
-    if (dropped.attachments.length > 0) {
-      onAttachmentsAdd(dropped.attachments)
-      setAttachmentError(null)
-      requestAnimationFrame(() => composerRef.current?.focus())
-    }
-    if (dropped.unavailable.length > 0) {
-      setAttachmentError(window.ensyncDesktop?.getPathForFile
-        ? `Ensync could not attach ${dropped.unavailable.length === 1 ? dropped.unavailable[0] : `${dropped.unavailable.length} dropped files`}.`
-        : 'File drag-in is available in the native Ensync app; browsers do not expose safe local file paths.')
-    }
-  }
+  const automaticMode = chat.providerMode !== 'fixed'
+  const providerPickerMode = automaticMode ? 'Provider · Auto' : 'Provider · Fixed'
+  // The face of this control is a fact, so say which fact it is. Idle Auto names
+  // the provider the next turn would actually run on; the names only differ when
+  // automatic routing has no candidate and the last verified turn is all we know.
+  const providerPickerTitle = runningProviderPinned
+    ? `${provider.name} is running this turn.`
+    : automaticMode
+      ? provider.id === autoProvider.id
+        ? `Auto would run the next turn on ${provider.name}.`
+        : `${provider.name} ran this conversation's last turn. No connected provider reports verified remaining subscription usage right now.`
+      : `This conversation is fixed to ${provider.name}.`
   const selectedSize = MODEL_SIZE_OPTIONS.find((option) => option.tier === chat.sizeTier) ?? null
   const modelPickerDisabled = !supportsChat(provider)
   const modelPickerLabel = selectedSize?.label ?? 'Provider default'
@@ -3619,19 +4425,7 @@ function ConversationPane({
       ? `${provider.name} cannot run chats here, so model size is unavailable.`
       : `Choose a model size for ${provider.name}'s default model.`
   return (
-    <div
-      className={`conversation ${fileDragActive ? 'conversation--file-drag' : ''}`}
-      onDragEnter={beginFileDrag}
-      onDragOver={continueFileDrag}
-      onDragLeave={leaveFileDrag}
-      onDrop={attachDroppedFiles}
-    >
-      {fileDragActive && (
-        <div className="file-drop-overlay" aria-hidden="true">
-          <Paperclip size={24} />
-          <strong>{fileAttachmentsEnabled ? 'Drop any files to attach' : 'Local files need the local Ensync Host'}</strong>
-        </div>
-      )}
+    <div className="conversation">
       <div className="conversation-header" {...getSectionProps('conversationHeader')}>
         <div>
           <h1 dir="auto">{chat.title}</h1>
@@ -3639,9 +4433,9 @@ function ConversationPane({
         </div>
         <div className="conversation-header__actions">
           <div className="provider-picker-wrap">
-            <button ref={providerButtonRef} className="provider-picker" onClick={onProviderMenu} aria-haspopup="dialog" aria-expanded={providerMenuOpen} aria-controls={providerMenuId}>
+            <button ref={providerButtonRef} className="provider-picker" onClick={onProviderMenu} aria-haspopup="dialog" aria-expanded={providerMenuOpen} aria-controls={providerMenuId} title={providerPickerTitle}>
               <ProviderMark provider={provider} small />
-              <span><small>{chat.providerMode === 'fixed' ? 'Provider · Fixed' : 'Provider · Auto'}</small><strong>{provider.name}</strong></span>
+              <span><small>{providerPickerMode}</small><strong>{provider.name}</strong></span>
               <ChevronDown size={14} />
             </button>
             {providerMenuOpen && createPortal(
@@ -3650,17 +4444,23 @@ function ConversationPane({
                 <button onClick={onProviderAuto}>
                   <Bot size={16} />
                   <span><strong>Auto provider</strong><small>Chooses by your Automatic fallback priority</small></span>
-                  <em className={`model-usage-badge ${provider.usage === null ? 'model-usage-badge--unknown' : ''}`} title={provider.usageReason}>
-                    {provider.usage === null ? provider.name : `${provider.name} · ${provider.usage}%`}
+                  <em className={`model-usage-badge ${autoProvider.usage === null ? 'model-usage-badge--unknown' : ''}`} title={autoProvider.usageReason}>
+                    {autoProvider.usage === null ? autoProvider.name : `${autoProvider.name} · ${autoProvider.usage}%`}
                   </em>
-                  {chat.providerMode !== 'fixed' && <Check size={15} />}
+                  {automaticMode && <Check size={15} />}
                 </button>
                 <div className="menu-separator" />
-                {providers.map((item) => (
+                {[...providers]
+                  .sort((a, b) => {
+                    const aAvailable = a.connected && supportsChat(a) ? 0 : 1
+                    const bAvailable = b.connected && supportsChat(b) ? 0 : 1
+                    return aAvailable - bAvailable
+                  })
+                  .map((item) => (
                   <button key={item.id} disabled={!item.connected || !supportsChat(item)} onClick={() => onProviderChange(item.id)} title={supportsChat(item) ? item.status : `${item.name} chat execution is not supported yet.`}>
                     <ProviderMark provider={item} />
                     <span><strong>{item.name}</strong><small>{item.connected && supportsChat(item) ? `${item.usage === null ? 'Usage not reported' : `${item.usage}% used`} · Provider default model` : supportsChat(item) ? item.status : 'Chat execution not supported'}</small></span>
-                    {chat.providerMode === 'fixed' && provider.id === item.id && <Check size={15} />}
+                    {!automaticMode && chat.provider === item.id && <Check size={15} />}
                   </button>
                 ))}
                 <div className="menu-separator" />
@@ -3724,17 +4524,17 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : ''}</span></div><MessageContent content={message.content} />{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : message.deliveryStatus === 'transferred' ? ' · transferred to active run' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}</div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}<MessageContent content={message.content} /><div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
           )}
-          {providerNotes.length > 0 && (
+          {sending && providerNotes.length > 0 && (
             <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
               {providerNotes.map((note, index) => {
                 const noteProvider = providers.find((item) => item.id === note.provider) ?? provider
@@ -3743,7 +4543,9 @@ function ConversationPane({
                     <ProviderMark provider={noteProvider} small />
                     <div>
                       <strong>{noteProvider.name} note</strong>
-                      <MessageContent content={note.text} />
+                      {typeof window.ensyncDesktop?.openPath === 'function'
+                        ? <MessageContent content={note.text} projectPath={projectPath} />
+                        : <MessageContent content={note.text} onOpenFile={onOpenFile} />}
                       {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
                     </div>
                   </div>
@@ -3757,11 +4559,32 @@ function ConversationPane({
             <span className="copy-announcement">{provider.name} is working in this chat.</span>
           </div>}
           {queuedPrompts.length > 0 && (
-            <div className={`prompt-queue-status ${queueGate.state === 'paused' ? 'prompt-queue-status--paused' : ''}`} role="status">
+            <div className={`prompt-queue-status ${occupiedRun ? 'prompt-queue-status--occupied' : ''} ${queueGate.state === 'paused' ? 'prompt-queue-status--paused' : ''}`} role="status">
               <History size={13} />
-              <span className="prompt-queue-status__copy"><strong>{queueStatus.headline}</strong><span>{queueStatus.detail}</span></span>
+              <span className="prompt-queue-status__copy">
+                <strong>{occupiedRun ? `${activeRunProviderName ?? occupiedRun.provider} is active in another window` : queueStatus.headline}</strong>
+                <span>{occupiedRun
+                  ? `${occupiedElapsedLabel ? `${occupiedElapsedLabel}. ` : ''}${occupiedRunReason ?? 'This message remains queued until the active run can accept it.'}`
+                  : queueStatus.detail}</span>
+              </span>
+              {canViewOccupiedRun && <button type="button" className="prompt-queue-status__view" onClick={onViewOccupiedRun}>View active run</button>}
               {canPushQueuedNow && <button type="button" className="prompt-queue-status__push" onClick={onPushQueuedNow} disabled={pushingQueued} title="Deliver the first queued message to the active Codex turn now">{pushingQueued ? 'Pushing…' : 'Push now'}</button>}
-              {queueGate.state === 'paused' && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
+              {canStopAndSendNow && (
+                <button
+                  type="button"
+                  className={`prompt-queue-status__stop-send${stopAndSendArmed ? ' prompt-queue-status__stop-send--armed' : ''}`}
+                  onClick={() => {
+                    if (!stopAndSendArmed) {
+                      setStopAndSendArmed(true)
+                      return
+                    }
+                    setStopAndSendArmed(false)
+                    onStopAndSendNow()
+                  }}
+                  title={`${activeRunProviderName ?? provider.name} cannot take a new instruction mid-turn. This stops the current turn, discarding its in-progress work, and runs the queued message immediately. The stopped turn is not retried.`}
+                >{stopAndSendArmed ? 'Confirm stop & send' : 'Stop & send now'}</button>
+              )}
+              {queueGate.state === 'paused' && !occupiedRun && <button type="button" onClick={onResumeQueue} title="Run only the next queued message; do not retry the previous turn">{queueStatus.actionLabel}</button>}
             </div>
           )}
           {!sending && chat.messages.at(-1)?.deliveryStatus === 'cancelled' && (
@@ -3805,6 +4628,25 @@ function ConversationPane({
         />
       )}
 
+      {pendingQuestion && (
+        <ProviderQuestionCard
+          pending={pendingQuestion}
+          disabled={answeringQuestionId === pendingQuestion.questionId}
+          error={questionError}
+          onAnswer={(payload) => void submitQuestionAnswer(payload)}
+          onSkip={(questionId) => void submitQuestionAnswer({ questionId, cancelled: true })}
+        />
+      )}
+
+      {owningConversation && (
+        <OwningConversationBanner
+          target={owningConversation}
+          onOpen={onOpenOwningConversation}
+        />
+      )}
+
+      {workspaceOverlap && <WorkspaceOverlapBanner summary={workspaceOverlap} />}
+
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
         <div className="composer">
           {attachments.length > 0 && (
@@ -3833,14 +4675,14 @@ function ConversationPane({
           {attachmentError && <div className="composer__attachment-error" role="status"><CircleHelp size={13} />{attachmentError}</div>}
           <div className="composer__toolbar">
             <div className="composer__context-actions">
-              <button className="composer__context-button" type="button" onClick={onContext} title="Open project context" aria-label="Open project context"><Plus size={17} /></button>
+              <button className="composer__context-button" type="button" onClick={onFilesChoose} disabled={!filePickerAvailable} title={filePickerAvailable ? 'Add files' : filePickerUnavailableMessage} aria-label={filePickerAvailable ? 'Add files' : `Add files unavailable: ${filePickerUnavailableMessage}`}><Plus size={17} /></button>
               <button className="context-chip" onClick={onContext} title={projectContextAvailable ? 'Ensync Host found .relay context files' : 'No .relay context files verified by Ensync Host'}><FileText size={13} /><span className="context-chip__label">Project context</span>{projectContextAvailable ? <Check size={12} /> : <CircleHelp size={12} />}</button>
               <button className={`context-chip auto-context-chip ${autoContextSkill ? 'auto-context-chip--active' : ''}`} onClick={onAutoContextSkillChange} role="switch" aria-checked={autoContextSkill} title="Preserve complete project and conversation context when continuing or handing off between providers"><Bot size={13} /><span className="context-chip__label">Auto Context</span>{autoContextSkill ? <Check size={12} /> : null}</button>
             </div>
             <div className="composer__submit-actions">
               <span className="shortcut">{composerQueueState.hint}</span>
               {composerQueueState.stopVisible && <button className="stop-button" type="button" onClick={onStop} aria-label={`Stop ${provider.name} in this chat`} title="Stop current run; queued prompts pause"><Square size={13} /></button>}
-              <button className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''}`} onClick={onSend} disabled={!composerQueueState.sendEnabled} aria-label={composerQueueState.sendLabel} title={sending ? liveSteering ? 'Steer the active Codex turn now' : 'Queue after the current turn' : 'Send'}><ArrowUp size={17} /></button>
+              <button className={`send-button ${composerQueueState.sendEnabled ? 'send-button--ready' : ''}`} onClick={onSend} disabled={!composerQueueState.sendEnabled} aria-label={composerQueueState.sendLabel} title={sending ? 'Queue after the current turn' : 'Send'}><ArrowUp size={17} /></button>
             </div>
           </div>
         </div>
@@ -3860,6 +4702,64 @@ function ConversationPane({
           </button>
         </div>
       )}
+    </div>
+  )
+}
+
+function WorkspaceOverlapBanner({
+  summary,
+}: {
+  summary: NonNullable<ReturnType<typeof workspaceOverlapSummary>>
+}) {
+  return (
+    <div className="workspace-overlap-banner" role="status" aria-live="polite">
+      <AlertTriangle size={16} aria-hidden="true" />
+      <span>{summary.message}</span>
+    </div>
+  )
+}
+
+function OwningConversationBanner({
+  target,
+  onOpen,
+}: {
+  target: ReferencedOwningConversation
+  onOpen: (target: ReferencedOwningConversation) => Promise<boolean>
+}) {
+  const [opening, setOpening] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    setOpening(false)
+    setError(null)
+  }, [target.chatId, target.workspaceId])
+
+  const open = async () => {
+    if (opening) return
+    setOpening(true)
+    setError(null)
+    try {
+      const focused = await onOpen(target)
+      if (focused) return
+      setError('Ensync could not open that retained conversation. Quit Ensync completely and reopen it, then try again.')
+    } catch {
+      setError('Ensync could not open that retained conversation. Quit Ensync completely and reopen it, then try again.')
+    } finally {
+      setOpening(false)
+    }
+  }
+
+  return (
+    <div className="owning-conversation-banner" role={error ? 'alert' : 'status'} aria-live="polite">
+      <GitBranch size={16} aria-hidden="true" />
+      <span>
+        <strong>This task belongs to “{target.chatTitle}”</strong>
+        <small>{target.projectName} · protected conversation {target.branch}</small>
+        {error && <em>{error}</em>}
+      </span>
+      <button type="button" onClick={() => void open()} disabled={opening}>
+        {opening ? 'Opening…' : 'Open owning conversation'}
+      </button>
     </div>
   )
 }
@@ -3909,7 +4809,9 @@ function ExecutionPanel({
           <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
           {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
-            {latestProviderNote?.type === 'note'
+            {waitingForWorkspace
+              ? 'This older run cannot identify its owner window. Quit Ensync completely and reopen it before relying on active-run controls.'
+              : latestProviderNote?.type === 'note'
               ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>
@@ -3931,6 +4833,22 @@ function ExecutionPanel({
             }
             if (event.type === 'output') {
               return <span className={`execution-panel__${event.stream}`} key={`${event.at}-${index}`}>{event.text}{event.redacted ? '\n[Ensync Host] Possible secret redacted from this output.\n' : ''}</span>
+            }
+            if (event.type === 'question') {
+              return (
+                <span className="execution-panel__host" key={`${event.at}-${index}`}>
+                  {'\n'}[{event.provider} question] {event.questions.map((question) => question.question).join(' ')}{'\n'}
+                </span>
+              )
+            }
+            if (event.type === 'question_resolved') {
+              return (
+                <span className="execution-panel__host" key={`${event.at}-${index}`}>
+                  [Ensync Host] {event.cancelled
+                    ? 'The question was not answered; the provider was told so.'
+                    : `Answer sent: ${event.answers.map((answer) => answer.answer).join(' · ')}`}{'\n'}
+                </span>
+              )
             }
             return (
               <span className={`execution-panel__host execution-panel__host--${event.outcome}`} key={`${event.at}-${index}`}>
@@ -4419,7 +5337,7 @@ function RemoteRuntimeModal({ hostOnline, providers, project, chat, executionTar
               {runtime === 'local' && (
                 <div className="local-runtime">
                   <div className={`runtime-status-card ${hostOnline ? '' : 'runtime-status-card--offline'}`}><span className="large-status"><i /></span><div><strong>{hostOnline ? 'Ensync Host responded' : 'Ensync Host is offline'}</strong><p>{hostOnline ? 'Verified through the loopback health and provider endpoints.' : 'Run npm run dev to start the local host and web app together.'}</p></div><span className="status-badge">{hostOnline ? 'ONLINE' : 'OFFLINE'}</span></div>
-                  <div className="runtime-detail-grid"><div><small>Host endpoint</small><strong>127.0.0.1:43121</strong></div><div><small>CLIs found</small><strong>{installedCount}</strong></div><div><small>Authenticated</small><strong>{connectedCount}</strong></div><div><small>Telemetry</small><strong>{hostOnline ? 'CLI status only' : 'Unavailable'}</strong></div></div>
+                  <div className="runtime-detail-grid"><div><small>Host endpoint</small><strong>{hostOnline ? 'This computer · loopback only' : 'Not connected'}</strong></div><div><small>CLIs found</small><strong>{installedCount}</strong></div><div><small>Authenticated</small><strong>{connectedCount}</strong></div><div><small>Telemetry</small><strong>{hostOnline ? 'CLI status only' : 'Unavailable'}</strong></div></div>
                   <div className="runtime-callout"><ShieldCheck size={16} /><span><strong>Subscription-only probes</strong><small>The host removes model API-key variables from status and login processes.</small></span></div>
                   {executionTarget.kind === 'ssh' && <button className="button button--primary runtime-activate" onClick={() => onExecutionTargetChange({ kind: 'local' })} disabled={!hostOnline}>Use this computer for chats</button>}
                 </div>
@@ -4493,6 +5411,15 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
     return 'No verified non-consuming quota probe.'
   }
 
+  // A retained percentage stays on the card so a lost probe race cannot blank it,
+  // but it is never presented as this refresh's reading.
+  const staleUsageNote = (provider: Provider) => {
+    const measuredAt = provider.usageCheckedAt ? new Date(provider.usageCheckedAt) : null
+    return measuredAt && !Number.isNaN(measuredAt.getTime())
+      ? `Last verified ${measuredAt.toLocaleTimeString()}; this check returned no quota data.`
+      : 'Last verified earlier; this check returned no quota data.'
+  }
+
   const refresh = async () => {
     setRefreshing(true)
     try {
@@ -4522,13 +5449,15 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
                 <div className={`plan-meter ${provider.usage === null ? 'plan-meter--unknown' : ''}`}>{provider.usage !== null && <i style={{ width: `${provider.usage}%`, background: provider.color }} />}</div>
                 {provider.usageDetails.length > 0 && <dl className="usage-details">{provider.usageDetails.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
                 <div className="plan-card__foot"><span>{providerResetText(provider) ? <strong>{providerResetText(provider)}</strong> : 'Reset not reported'}</span><span>{provider.routeKind === 'local' ? (provider.installed ? 'Local runtime' : 'Not installed') : provider.connected ? 'Authenticated' : provider.installed ? provider.authenticationState === 'not_authenticated' ? 'Not authenticated' : 'Login not checked' : 'Not installed'}</span></div>
-                {provider.usage === null && <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>}
+                {provider.usage === null
+                  ? <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>
+                  : provider.usageStale && <p className="usage-unavailable-reason" title={provider.usageReason}>{staleUsageNote(provider)}</p>}
               </div>
             ))}
           </div>
           <section className="model-telemetry">
             <div className="model-telemetry__heading"><h3>Exact run usage by model</h3><span>Reported by CLI processes only</span></div>
-            {modelTelemetry.length === 0 ? <p className="model-telemetry__empty">No CLI-reported token totals yet. A completed Codex or Claude run will appear here only when its CLI reports usage.</p> : modelTelemetry.map((item) => {
+            {modelTelemetry.length === 0 ? <p className="model-telemetry__empty">No CLI-reported token totals yet. A completed Codex, Claude, or Factory Droid run will appear here only when its CLI reports usage.</p> : modelTelemetry.map((item) => {
               const provider = providers.find((entry) => entry.id === item.provider) ?? providers[0]
               return <div className="model-telemetry__row" key={`${item.provider}-${item.model}`}><ProviderMark provider={provider} small /><span><strong>{item.model}</strong><small>{provider.name} · {item.runs} verified {item.runs === 1 ? 'run' : 'runs'}</small></span><dl><div><dt>Input</dt><dd>{item.inputTokens?.toLocaleString() ?? 'Not reported'}</dd></div><div><dt>Output</dt><dd>{item.outputTokens?.toLocaleString() ?? 'Not reported'}</dd></div><div><dt>Cached</dt><dd>{item.cachedInputTokens?.toLocaleString() ?? 'Not reported'}</dd></div></dl></div>
             })}

@@ -24,33 +24,23 @@ export function appendFileAttachments(current, incoming) {
   ])
 }
 
-export function fileDragContainsFiles(types) {
+export function fileDragContainsFiles(value) {
   try {
-    return Array.from(types ?? []).includes('Files')
+    const dataTransfer = value && typeof value === 'object' && !Array.isArray(value)
+      && ('types' in value || 'items' in value || 'files' in value)
+      ? value
+      : null
+    const types = dataTransfer?.types ?? value
+    if (Array.from(types ?? []).some((type) => String(type).toLowerCase() === 'files')) {
+      return true
+    }
+    if (Array.from(dataTransfer?.items ?? []).some((item) => item?.kind === 'file')) {
+      return true
+    }
+    return Number(dataTransfer?.files?.length ?? 0) > 0
   } catch {
     return false
   }
-}
-
-export function droppedFileAttachments(files, pathForFile) {
-  const attachments = []
-  const unavailable = []
-  if (typeof pathForFile !== 'function') {
-    return { attachments, unavailable: Array.from(files ?? [], (file) => file?.name ?? 'file') }
-  }
-
-  for (const file of Array.from(files ?? [])) {
-    const name = nonEmptyString(file?.name) ?? 'file'
-    let path = null
-    try {
-      path = nonEmptyString(pathForFile(file))
-    } catch {
-      path = null
-    }
-    if (path) attachments.push({ name, path })
-    else unavailable.push(name)
-  }
-  return { attachments: normalizeFileAttachments(attachments), unavailable }
 }
 
 // Drop time is the only moment the renderer can read files the OS hides from

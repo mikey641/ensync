@@ -21,3 +21,4 @@ Ensync is the universal AI agent workspace, not another coding editor. Its prima
 - Support reports are local and review-first. Never invent a staffed queue, response SLA, external ticket, completed fix, download artifact, or code-signing state.
 - Risky remote actions require explicit approval, including through Telegram.
 - macOS and Windows are equal first-class desktop targets.
+- iOS and Android are equal first-class mobile clients. They initiate and control remote agent runs through Ensync Sync while the selected paired Ensync Host or worker remains responsible for subscription-backed execution and project isolation.

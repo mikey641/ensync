@@ -196,7 +196,9 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
   function runCaptured(executable, args, options) {
     return new Promise((resolve) => {
       const inactivityTimeoutMs = options.inactivityTimeoutMs ?? options.timeoutMs
-      const hardTimeoutMs = options.hardTimeoutMs ?? options.timeoutMs
+      const hardTimeoutMs = Object.hasOwn(options, 'hardTimeoutMs')
+        ? options.hardTimeoutMs
+        : options.timeoutMs
       let child
       let stdoutBytes = 0
       let stderrBytes = 0
@@ -302,7 +304,9 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       child.stdin.end(typeof options.input === 'string' ? options.input : '', 'utf8')
 
       refreshInactivityWatchdog()
-      hardTimer = setTimeout(() => timeout('hard_limit'), hardTimeoutMs)
+      if (Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0) {
+        hardTimer = setTimeout(() => timeout('hard_limit'), hardTimeoutMs)
+      }
 
       child.on('error', (error) => finish({ exitCode: null, signal: null, error: error.message }))
       child.on('close', (exitCode, signal) => {

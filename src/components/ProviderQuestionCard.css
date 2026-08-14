@@ -1,0 +1,193 @@
+.provider-question {
+  width: min(720px, 100%);
+  margin: 0 auto 10px;
+  padding: 12px 14px;
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent-ui) 42%, var(--border-default));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--accent-ui-soft) 42%, var(--surface-elevated));
+  box-shadow: var(--shadow-soft);
+}
+
+.provider-question__header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: var(--accent-header-text);
+}
+
+.provider-question__header strong {
+  font-size: var(--font-ui);
+  font-weight: 600;
+}
+
+.provider-question__header small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-muted);
+  font-size: var(--font-label);
+}
+
+.provider-question__item {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.provider-question__prompt {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-primary);
+  font-size: var(--font-ui);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* The exact call being approved, laid out but never reworded. */
+.provider-question__detail {
+  margin: 0;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-main);
+  color: var(--text-secondary);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: var(--font-label);
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.provider-question__chip {
+  display: inline-block;
+  margin-inline-end: 7px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: var(--surface-control);
+  color: var(--text-secondary);
+  font-size: var(--font-label);
+  font-weight: 600;
+  vertical-align: middle;
+}
+
+.provider-question__options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.provider-question__option {
+  flex: 1 1 190px;
+  min-width: 0;
+  padding: 7px 10px;
+  display: grid;
+  gap: 2px;
+  text-align: start;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-control);
+  color: var(--text-primary);
+  font-size: var(--font-ui);
+  cursor: pointer;
+}
+
+.provider-question__option:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+
+.provider-question__option small {
+  color: var(--text-muted);
+  font-size: var(--font-label);
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.provider-question__option--chosen {
+  border-color: var(--accent-ui);
+  background: var(--accent-ui);
+  color: var(--accent-ui-text);
+}
+
+.provider-question__option--chosen small {
+  color: color-mix(in srgb, var(--accent-ui-text) 78%, transparent);
+}
+
+.provider-question__option:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.provider-question__text {
+  width: 100%;
+  min-width: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--border-default);
+  border-radius: var(--radius-control);
+  background: var(--surface-main);
+  color: var(--text-primary);
+  font-size: var(--font-ui);
+  font-family: inherit;
+}
+
+.provider-question__hint,
+.provider-question__preview {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: var(--font-label);
+  overflow-wrap: anywhere;
+}
+
+.provider-question__error {
+  margin: 0;
+  color: var(--danger-ui, #f08a8a);
+  font-size: var(--font-label);
+}
+
+.provider-question__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.provider-question__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 12px;
+  border-radius: var(--radius-control);
+  font-size: var(--font-ui);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.provider-question__skip {
+  border: 1px solid var(--border-default);
+  background: transparent;
+  color: var(--text-muted);
+}
+
+.provider-question__skip:hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text-primary);
+}
+
+.provider-question__send {
+  border: 1px solid var(--accent-ui);
+  background: var(--accent-ui);
+  color: var(--accent-ui-text);
+}
+
+.provider-question__send:hover:not(:disabled) {
+  background: var(--accent-ui-strong);
+}
+
+.provider-question__actions button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

@@ -19,8 +19,8 @@ The public product site is [ensync.vercel.app](https://ensync.vercel.app). The m
 - Typed, non-fabricated usage telemetry: subscription quota for Codex and Claude when reported; session-only data for Copilot and Junie; local model inventory/load state for Ollama; explicit unavailable state for Cursor and Kiro account quota.
 - Verified SSH workers, guarded Oracle VirtualBox provisioning, and approval-gated Telegram operation through Ensync Host.
 - Local-first help desk with reviewable redacted diagnostics and an opt-in one-run bug repair through the connected Codex or Claude subscription. Results always require user review and never claim the bug is fixed automatically.
-- Electron packaging for universal macOS DMG/ZIP and a guarded Windows x64 AppX upload package. macOS uses native signing/notarization attestations and fail-closed public release generation; Windows is signed, certified, installed, and updated by Microsoft Store.
-- Manual native updates in Settings for direct desktop releases: the signed macOS app checks the production manifest only on request, verifies SHA-256 plus its Developer ID, and opens the verified DMG only after a separate click. A Microsoft Store Windows install instead reports Store-managed updates and disables Ensync's installer controls. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable.
+- Electron packaging for universal macOS DMG/ZIP and Windows x64 NSIS/ZIP, with embedded build/source identity, native CI, signature/notarization attestations, checksums, separate beta/stable feeds, retained rollback metadata, and fail-closed public release generation.
+- Manual native updates in Settings: the signed desktop app shows its exact build identity and selected stable/beta channel, checks only that channel on request, downloads with real byte progress, verifies SHA-256 plus the installed publisher identity, and opens the verified DMG/installer only after a separate click. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable; Ensync never silently installs, quits, or restarts.
 
 Only Codex and Claude currently have tested structured chat runners and may enter automatic fallback. Every other account-backed provider remains discovery-only until its execution adapter has equivalent parsing, subscription-authentication proof, paid-overage guards, session handling, and safe-retry proof. Ollama remains a separate local fallback and never enters the subscription pool.
 
@@ -48,6 +48,19 @@ npm --prefix desktop start
 
 In the native app, open the project switcher and choose **Choose folder** to use Finder on macOS or the system folder chooser on Windows. The selected absolute path is still inspected and canonicalized by Ensync Host before it becomes the focused project. Cancelling changes nothing. The browser build keeps manual absolute-path entry because websites cannot receive this narrow desktop bridge.
 
+## iPhone and Android
+
+The mobile client lives in `mobile/` and includes generated Capacitor iOS and Android projects. In desktop Settings, sign in to the same Ensync account, enable **Remote execution**, and create a one-time pairing code. On mobile, sign in, enter that code, choose Codex or Claude Code, enter the absolute project path on the paired Host, and start the encrypted run.
+
+```bash
+npm --prefix mobile install
+npm --prefix mobile run sync
+npm --prefix mobile run open:ios      # Xcode on macOS
+npm --prefix mobile run open:android  # Android Studio + Android SDK
+```
+
+The development app supports pairing, submission, encrypted event polling, cancellation, and steering. Host project discovery, attachments, secure OS credential persistence, background push wake-up, store signing, and App Store/Play Store publishing remain release work.
+
 ## Usage and fallback
 
 Every new conversation defaults to provider mode `Auto`. Settings keeps a persistent top-to-bottom Automatic fallback priority, separate from provider popularity order. Auto chooses the first connected, tested runner in that priority with verified usage below 100%; priority wins over the size of remaining capacity. Providers with unreported quota remain explicitly unknown and are considered only when no provider has verified remaining usage.
@@ -70,7 +83,7 @@ npm --prefix desktop run package:win-store # on Windows with Partner Center iden
 cd site && npm test
 ```
 
-The tag-triggered release workflow refuses to create a public GitHub release unless macOS app/DMG signing and notarization are verified. Its Windows AppX remains a private Actions artifact for Partner Center upload and can never enter the public binary release. Microsoft Store owns Windows certification and updates. The workflow deploys the exact macOS manifest to Vercel; a failed deployment leaves the older fail-closed feed in place. See `desktop/README.md` for Store identity, Apple notarization, and Vercel inputs and `site/README.md` for the public link contract.
+The tag-triggered workflow is prepared for a private source repository and a separate public binary repository. It refuses release generation unless clean build provenance, Windows signing, and macOS app/DMG signing plus notarization are verified; it changes only the tag-selected beta or stable feed and preserves the other production feed. Nothing is activated until credentials and a tag are intentionally supplied. Local unsigned artifacts stay private test builds. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
 
 ## Project memory
 
@@ -83,6 +96,7 @@ The tag-triggered release workflow refuses to create a public GitHub release unl
 
 ```bash
 npm run build
+npm run build:mobile
 npm run test:host
 npm --prefix desktop test
 npm --prefix desktop run smoke

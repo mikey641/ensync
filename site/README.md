@@ -18,7 +18,7 @@ Open `http://127.0.0.1:4174`. Set `ENSYNC_SITE_PORT` to use a different local po
 
 ## Truthful downloads
 
-The macOS button reads `public/releases.json`. It stays disabled unless all of these are true:
+The macOS and Windows website buttons read the stable `public/releases.json`. Opt-in desktop beta checks use the separate `public/releases-beta.json`; the website never silently switches to beta. A platform download stays disabled unless all of these are true:
 
 - `latest.version` is set;
 - the platform status is `available`;
@@ -28,9 +28,7 @@ The macOS button reads `public/releases.json`. It stays disabled unless all of t
 - `url` is a real HTTPS artifact URL;
 - `sha256` is the artifact's real 64-character SHA-256 checksum.
 
-The Windows button is independent of GitHub release artifacts. It reads `downloads.windowsStoreUrl` from `public/site-config.json` and accepts only an exact `https://apps.microsoft.com/detail/...` product listing. Keep it `null` until Partner Center certification succeeds and the real public listing opens. Store signing, installation, and updates remain Microsoft's responsibility; an uncertified AppX or private package-flight URL must never be linked from the public site.
-
-The repository intentionally starts with both platforms unavailable. `releases.json` is the stable macOS download/update feed and `releases-beta.json` is the opt-in macOS beta feed; publishing either channel must preserve the other file. Do not add placeholder artifacts or mark a build signed before verification. After editing a manifest or Store URL, run `npm test`; validation fails closed for incomplete releases, incorrect channels, or non-Microsoft Store listing URLs.
+The repository intentionally starts with both platforms unavailable in both channels. Do not add placeholder files or mark a build signed before verification. After editing either manifest, run `npm test`; validation fails closed when an available entry is incomplete or a feed declares the wrong channel/version type.
 
 Example shape for a real platform entry:
 
@@ -47,7 +45,7 @@ Example shape for a real platform entry:
 }
 ```
 
-Keep macOS `unavailable` if its signed artifact is not ready. The macOS desktop app uses this exact production URL as its manual update feed. Microsoft Store Windows installations instead detect Store context and disable the direct installer updater.
+Keep a platform `unavailable` if its signed artifact is not ready; macOS and Windows are resolved independently. Stable and beta deployments preserve one another. Each populated feed retains prior verified platform records so a reviewed rollback can repoint the channel without rebuilding artifacts or changing local user data.
 
 ## Support configuration
 

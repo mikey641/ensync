@@ -14,9 +14,16 @@ import {
   verifyInstalledNativeBuild,
 } from '../src/native-updates.mjs'
 
-function releaseManifest({ version = '1.2.3', notarized = true, signed = true, sha256 = 'a'.repeat(64) } = {}) {
+function releaseManifest({
+  version = '1.2.3',
+  channel = 'stable',
+  notarized = true,
+  signed = true,
+  sha256 = 'a'.repeat(64),
+} = {}) {
   return {
     schemaVersion: 1,
+    channel,
     latest: {
       version,
       publishedAt: '2026-08-06T00:00:00.000Z',
@@ -65,6 +72,13 @@ test('candidate resolution requires matching signed artifacts and macOS notariza
   assert.equal(current.available, false)
   assert.equal(current.current, true)
   assert.match(current.reason, /latest verified release/)
+})
+
+test('candidate resolution isolates stable and beta channels', () => {
+  const beta = releaseManifest({ version: '1.2.3-beta.2', channel: 'beta' })
+  assert.equal(resolveUpdateCandidate(beta, 'darwin', '1.2.3-beta.1', 'beta').available, true)
+  assert.match(resolveUpdateCandidate(beta, 'darwin', '1.2.2', 'stable').reason, /selected update channel/)
+  assert.match(resolveUpdateCandidate(releaseManifest({ version: '1.2.4-beta.1' }), 'darwin', '1.2.3').reason, /stable feed/)
 })
 
 test('development and unsigned packaged builds fail closed without checking the network', async () => {

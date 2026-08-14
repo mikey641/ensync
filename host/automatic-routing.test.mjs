@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
+  conversationProviderId,
   normalizeFallbackProviderOrder,
   orderedAutomaticProviders,
   selectAutomaticProvider,
@@ -75,94 +76,100 @@ test('safe fallback uses the same priority and never repeats an attempted provid
   assert.equal(selectAutomaticProvider(providers, ['codex', 'claude'], ['codex', 'claude']), null)
 })
 
-test('Auto refreshes a stale empty provider snapshot before giving up', async () => {
-  const routing = await import('../src/lib/automaticRouting.mjs')
-  assert.equal(typeof routing.selectAutomaticProviderAfterRefresh, 'function')
-  let refreshes = 0
-  const selected = await routing.selectAutomaticProviderAfterRefresh(
-    [
-      provider('codex', { connected: false, usage: null }),
-      provider('claude', { connected: false, usage: null }),
-    ],
-    ['codex', 'claude'],
-    async () => {
-      refreshes += 1
-      return [
-        provider('codex', { connected: true, usage: 88 }),
-        provider('claude', { connected: true, usage: 19 }),
-      ]
-    },
-  )
-
-  assert.equal(refreshes, 1)
-  assert.equal(selected?.id, 'codex')
+test('an executing run owns the displayed provider while usage moves under it', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: { provider: 'codex' },
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
 })
 
-test('Auto does not refresh when the current provider snapshot is runnable', async () => {
-  const routing = await import('../src/lib/automaticRouting.mjs')
-  assert.equal(typeof routing.selectAutomaticProviderAfterRefresh, 'function')
-  let refreshes = 0
-  const selected = await routing.selectAutomaticProviderAfterRefresh(
-    [provider('codex', { connected: true, usage: 88 })],
-    ['codex', 'claude'],
-    async () => {
-      refreshes += 1
-      return []
-    },
-  )
-
-  assert.equal(refreshes, 0)
-  assert.equal(selected?.id, 'codex')
+test('an idle automatic conversation shows where the next turn would actually run', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
 })
 
-test('safe runtime fallback refreshes stale destination status before giving up', async () => {
-  const routing = await import('../src/lib/automaticRouting.mjs')
-  assert.equal(typeof routing.selectAutomaticFallbackProviderAfterRefresh, 'function')
-  let refreshes = 0
-  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
-    [
-      provider('claude', { connected: true, usage: 99 }),
-      provider('codex', { connected: false, usage: null }),
-    ],
-    ['claude', 'codex'],
-    ['claude'],
-    async () => {
-      refreshes += 1
-      return [
-        provider('claude', { connected: true, usage: 100 }),
-        provider('codex', { connected: true, usage: 94 }),
-      ]
-    },
-  )
-
-  assert.equal(refreshes, 1)
-  assert.equal(selected?.id, 'codex')
+test('a one-turn quota fallback does not pin the idle automatic display to the fallback provider', () => {
+  const providers = [
+    provider('codex', { usage: 100 }),
+    provider('claude', { usage: 70 }),
+    provider('droid', { usage: null }),
+  ]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'droid' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude', 'droid'],
+  }), 'claude')
 })
 
-test('safe runtime fallback never retries an attempted provider after refresh', async () => {
-  const routing = await import('../src/lib/automaticRouting.mjs')
-  assert.equal(typeof routing.selectAutomaticFallbackProviderAfterRefresh, 'function')
-  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
-    [provider('claude', { connected: true, usage: 99 })],
-    ['claude', 'codex'],
-    ['claude'],
-    async () => [provider('claude', { connected: true, usage: 10 })],
-  )
-
-  assert.equal(selected, null)
+test('the last verified turn is shown only when automatic routing has no candidate', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 100 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'claude' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'droid' } },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), null)
 })
 
-test('safe runtime fallback retains the verified snapshot when refresh rejects', async () => {
-  const routing = await import('../src/lib/automaticRouting.mjs')
-  const selected = await routing.selectAutomaticFallbackProviderAfterRefresh(
-    [
-      provider('claude', { connected: true, usage: 100 }),
-      provider('codex', { connected: true, usage: 94 }),
-    ],
-    ['claude', 'codex'],
-    ['claude'],
-    async () => { throw new Error('Host refresh failed') },
-  )
+test('an automatic conversation that has never run shows the current automatic selection', () => {
+  const providers = [provider('codex', { usage: 100 }), provider('claude', { usage: 12 })]
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto' },
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto' },
+    activeRun: undefined,
+    providers: [provider('codex', { usage: 100 }), provider('claude', { usage: 100 })],
+    priorityOrder: ['codex', 'claude'],
+  }), null)
+})
 
-  assert.equal(selected?.id, 'codex')
+test('a fixed conversation shows its preference, and the real provider during a safe one-turn fallback', () => {
+  const providers = [provider('codex'), provider('claude')]
+  const chat = { provider: 'codex', providerMode: 'fixed', continuation: { provider: 'claude' } }
+  assert.equal(conversationProviderId({
+    chat,
+    activeRun: undefined,
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
+  assert.equal(conversationProviderId({
+    chat,
+    activeRun: { provider: 'claude' },
+    providers,
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+})
+
+test('provider ids the current execution target does not expose never pin the display', () => {
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'codex' } },
+    activeRun: { provider: 'codex' },
+    providers: [provider('claude', { usage: 5 })],
+    priorityOrder: ['codex', 'claude'],
+  }), 'claude')
+  assert.equal(conversationProviderId({
+    chat: { provider: 'codex', providerMode: 'auto', continuation: { provider: 'copilot' } },
+    activeRun: { provider: 'copilot' },
+    providers: [provider('codex', { usage: 5 }), provider('claude', { usage: 5 })],
+    priorityOrder: ['codex', 'claude'],
+  }), 'codex')
 })

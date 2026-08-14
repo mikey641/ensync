@@ -113,7 +113,7 @@ export function createRecentProjectStore({ filePath, now = () => new Date().toIS
     mkdirSync(dirname(filePath), { recursive: true })
     writeFileSync(filePath, candidates[0].encoded, { encoding: 'utf8', mode: 0o600 })
     if (candidates[0].path === stagingPath) {
-      try { rmSync(stagingPath) } catch {}
+      try { rmSync(stagingPath) } catch { /* best effort: a retained staging file is recovered on reopen */ }
     }
   }
 
@@ -126,7 +126,7 @@ export function createRecentProjectStore({ filePath, now = () => new Date().toIS
     if (current) writeFileSync(backupPath, current.encoded, { encoding: 'utf8', mode: 0o600 })
     // If this write is interrupted, the complete staging file wins on reopen.
     writeFileSync(filePath, encoded, { encoding: 'utf8', mode: 0o600 })
-    try { rmSync(stagingPath) } catch {}
+    try { rmSync(stagingPath) } catch { /* best effort: a retained staging file is recovered on reopen */ }
     projects = nextProjects
     revision = nextRevision
     return { projects: projects.map((project) => ({ ...project })), revision, changed: true }

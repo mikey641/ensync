@@ -11,7 +11,7 @@
  */
 import { execFile as execFileCallback } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFile, readdir, lstat, rm, mkdir, copyFile, access } from 'node:fs/promises'
+import { readFile, readdir, rm, mkdir, copyFile, access } from 'node:fs/promises'
 import { join, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -87,7 +87,7 @@ async function updateUiFiles() {
 
   // Wipe old assets to avoid stale hashed filenames accumulating.
   const destAssets = join(UI_DEST, 'assets')
-  try { await rm(destAssets, { recursive: true }) } catch {}
+  try { await rm(destAssets, { recursive: true }) } catch { /* nothing to wipe on a first install */ }
   await mkdir(destAssets, { recursive: true })
 
   let updated = 0

@@ -3,6 +3,7 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron')
 
 const PROJECT_FOLDER_PICKER_CHANNEL = 'ensync:project-folder:choose'
+const CHAT_FILE_PICKER_CHANNEL = 'ensync:chat-files:choose'
 const UPDATE_STATE_CHANNEL = 'ensync:updates:state'
 const UPDATE_GET_STATE_CHANNEL = 'ensync:updates:get-state'
 const UPDATE_CHECK_CHANNEL = 'ensync:updates:check'
@@ -13,21 +14,51 @@ const UPDATE_SET_CHANNEL_CHANNEL = 'ensync:updates:set-channel'
 const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
 const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
 const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
+const WORKSPACE_OPEN_PATH_CHANNEL = 'ensync:workspace:open-path'
 const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
+const ACTIVE_RUNS_PUBLISH_CHANNEL = 'ensync:workspace:publish-active-runs'
+const ACTIVE_RUN_MATCH_CHANNEL = 'ensync:workspace:match-active-run'
+const QUEUED_MESSAGE_HANDOFF_CHANNEL = 'ensync:workspace:handoff-queued-message'
+const QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL = 'ensync:workspace:queued-message-handoff-ack'
+const QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL = 'ensync:workspace:queued-message-handoff'
 const WORKSPACE_RECOVERY_CHANNEL = 'ensync:workspace:get-recovery-candidate'
 const CODEX_CONVERSATION_IMPORT_CHANNEL = 'ensync:workspace:get-codex-conversation-import'
 const RECENT_PROJECTS_GET_CHANNEL = 'ensync:recent-projects:get'
 const RECENT_PROJECTS_MIGRATE_CHANNEL = 'ensync:recent-projects:migrate'
 const RECENT_PROJECTS_REMEMBER_CHANNEL = 'ensync:recent-projects:remember'
 const RECENT_PROJECTS_CHANGED_CHANNEL = 'ensync:recent-projects:changed'
+const LOCAL_FILE_OPEN_CHANNEL = 'ensync:shell:open-local-file'
 const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
 
 contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
   getWorkspaceIdentity: () => ipcRenderer.invoke(WORKSPACE_IDENTITY_CHANNEL),
+  publishActiveRuns: (entries) => ipcRenderer.invoke(ACTIVE_RUNS_PUBLISH_CHANNEL, entries),
+  matchesActiveRun: (request) => ipcRenderer.invoke(ACTIVE_RUN_MATCH_CHANNEL, request),
   focusWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_FOCUS_CHANNEL, request),
+  handoffQueuedMessage: (request) => ipcRenderer.invoke(QUEUED_MESSAGE_HANDOFF_CHANNEL, request),
+  onQueuedMessageHandoff: (callback) => {
+    if (typeof callback !== 'function') return () => {}
+    const listener = (_event, payload) => {
+      Promise.resolve()
+        .then(() => callback(payload))
+        .then((result) => ipcRenderer.send(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, {
+          handoffId: payload?.handoffId,
+          status: result?.status === 'accepted' || result?.status === 'duplicate' ? 'accepted' : 'rejected',
+          messageId: payload?.entry?.messageId,
+        }))
+        .catch(() => ipcRenderer.send(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, {
+          handoffId: payload?.handoffId,
+          status: 'rejected',
+          messageId: payload?.entry?.messageId,
+        }))
+    }
+    ipcRenderer.on(QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, listener)
+    return () => ipcRenderer.removeListener(QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL, listener)
+  },
   openProjectWorkspace: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PROJECT_CHANNEL, request),
+  openPath: (request) => ipcRenderer.invoke(WORKSPACE_OPEN_PATH_CHANNEL, request),
   onWorkspaceProjectFocus: (callback) => {
     if (typeof callback !== 'function') return () => {}
     const listener = (_event, request) => callback(request)
@@ -39,6 +70,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getRecentProjects: () => ipcRenderer.invoke(RECENT_PROJECTS_GET_CHANNEL),
   migrateRecentProjects: (projects) => ipcRenderer.invoke(RECENT_PROJECTS_MIGRATE_CHANNEL, projects),
   rememberRecentProject: (project) => ipcRenderer.invoke(RECENT_PROJECTS_REMEMBER_CHANNEL, project),
+  openLocalFile: (path) => ipcRenderer.invoke(LOCAL_FILE_OPEN_CHANNEL, path),
   getDevicePreferences: () => ipcRenderer.invoke(DEVICE_PREFERENCES_GET_CHANNEL),
   setCompletionNotificationPreferences: (settings) => ipcRenderer.invoke(
     COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
@@ -51,6 +83,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
     return () => ipcRenderer.removeListener(RECENT_PROJECTS_CHANGED_CHANNEL, listener)
   },
   chooseProjectFolder: () => ipcRenderer.invoke(PROJECT_FOLDER_PICKER_CHANNEL),
+  chooseChatFiles: () => ipcRenderer.invoke(CHAT_FILE_PICKER_CHANNEL),
   getUpdateState: () => ipcRenderer.invoke(UPDATE_GET_STATE_CHANNEL),
   checkForUpdates: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),

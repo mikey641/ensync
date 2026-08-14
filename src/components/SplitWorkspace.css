@@ -147,6 +147,12 @@
   opacity: 0.58;
 }
 
+.relay-tabs-mode-tab--file-drag {
+  border-color: color-mix(in srgb, var(--relay-split-accent) 70%, var(--relay-split-border));
+  color: var(--relay-split-text);
+  background: color-mix(in srgb, var(--relay-split-accent) 12%, var(--relay-split-bg));
+}
+
 .relay-tabs-mode-tab--drop-before::before,
 .relay-tabs-mode-tab--drop-after::after {
   content: '';
@@ -222,6 +228,21 @@
   overflow-y: hidden;
   scrollbar-width: thin;
   container-type: inline-size;
+  /*
+   * The row is allowed to overflow horizontally, so without snapping it can
+   * rest between two panes and clip both of them. Every resting scroll offset
+   * must land on a pane edge instead.
+   */
+  scroll-snap-type: x mandatory;
+}
+
+/*
+ * Dragging a divider or a header changes pane geometry continuously; re-snapping
+ * mid-gesture would fight the pointer.
+ */
+.relay-split-workspace--resizing .relay-split-viewport,
+.relay-split-workspace--reordering .relay-split-viewport {
+  scroll-snap-type: none;
 }
 
 .relay-split-panes {
@@ -245,6 +266,31 @@
   flex-direction: column;
   overflow: hidden;
   background: var(--relay-split-bg);
+  /*
+   * A pane's own left edge is its snap position, so a scrolled row always shows
+   * whole panes: header, conversation, and composer stay aligned with it.
+   */
+  scroll-snap-align: start;
+}
+
+.relay-split-file-drop-overlay {
+  position: absolute;
+  z-index: 85;
+  inset: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  pointer-events: none;
+  border: 2px dashed color-mix(in srgb, var(--relay-split-accent) 70%, var(--relay-split-border));
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--relay-split-bg) 88%, var(--relay-split-accent));
+  color: var(--relay-split-text);
+  box-shadow: 0 18px 48px color-mix(in srgb, black 30%, transparent);
+}
+
+.relay-split-file-drop-overlay svg {
+  color: var(--relay-split-accent);
 }
 
 .relay-split-pane--largest {

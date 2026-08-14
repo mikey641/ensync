@@ -6,12 +6,44 @@ import tseslint from 'typescript-eslint'
 import { defineConfig, globalIgnores } from 'eslint/config'
 
 export default defineConfig([
-  globalIgnores(['dist/**', 'desktop/**', 'site/**', 'node_modules/**', '.claude/worktrees/**']),
+  globalIgnores([
+    'dist/**',
+    'desktop/node_modules/**',
+    'desktop/release/**',
+    'site/**',
+    'node_modules/**',
+    '.claude/worktrees/**',
+  ]),
   {
     files: ['host/**/*.mjs', '*.config.{js,mjs,ts}'],
     extends: [js.configs.recommended],
     languageOptions: {
       ecmaVersion: 'latest',
+      globals: globals.node,
+    },
+    rules: {
+      'no-control-regex': 'off',
+      'no-useless-escape': 'off',
+    },
+  },
+  {
+    files: ['desktop/**/*.mjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      globals: globals.node,
+    },
+    rules: {
+      'no-control-regex': 'off',
+      'no-useless-escape': 'off',
+    },
+  },
+  {
+    files: ['desktop/**/*.cjs'],
+    extends: [js.configs.recommended],
+    languageOptions: {
+      ecmaVersion: 'latest',
+      sourceType: 'commonjs',
       globals: globals.node,
     },
     rules: {

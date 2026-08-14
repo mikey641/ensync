@@ -151,7 +151,20 @@ export class SyncBrokerHostWorker {
     try {
       // start() is also the request-hash assertion for a retained job. When the
       // ID is new, the broker claim above was durably recorded first.
-      localJob = this.chatJobs.start({ jobId: claimed.id, kind: claimed.kind, request: claimed.request })
+      const admission = await this.chatJobs.start({
+        jobId: claimed.id,
+        kind: claimed.kind,
+        request: claimed.request,
+      })
+      if (admission.disposition === 'occupied') {
+        return this.#rejectClaimedJob(claimed, new ChatJobError(
+          'chat_job_occupied',
+          'That project is already running another chat job.',
+          409,
+          false,
+        ))
+      }
+      localJob = admission.job
     } catch (error) {
       return this.#rejectClaimedJob(claimed, error)
     }

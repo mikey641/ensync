@@ -1260,6 +1260,11 @@ kbd {
   font-weight: 600;
 }
 
+.native-update-build-source code {
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
 .native-update-status {
   min-height: 27px;
   padding: 4px 8px;
@@ -1744,6 +1749,9 @@ kbd {
 .prompt-queue-status__copy strong { color: var(--text); }
 .prompt-queue-status__copy span { margin-top: 2px; line-height: 1.4; }
 .prompt-queue-status--paused { border-color: #d7a66a; }
+.prompt-queue-status--occupied {
+  border-color: color-mix(in srgb, var(--accent) 34%, var(--border-default));
+}
 .prompt-queue-status button {
   flex: 0 0 auto;
   padding: 5px 8px;
@@ -1758,8 +1766,32 @@ kbd {
   font-weight: 650;
 }
 
+.prompt-queue-status .prompt-queue-status__view {
+  background: var(--surface-raised);
+  color: var(--text);
+  font-weight: 600;
+}
+
 .prompt-queue-status .prompt-queue-status__push:hover:not(:disabled) {
   background: color-mix(in srgb, var(--accent) 20%, var(--surface-subtle));
+}
+
+/* Stop & send discards the running turn's work, so it never borrows the
+ * accent treatment that marks Push now as the safe mid-turn delivery. */
+.prompt-queue-status .prompt-queue-status__stop-send {
+  border-color: color-mix(in srgb, #d7a66a 52%, var(--border-default));
+  background: var(--surface-subtle);
+  color: var(--text);
+}
+
+.prompt-queue-status .prompt-queue-status__stop-send:hover:not(:disabled) {
+  background: color-mix(in srgb, #d7a66a 14%, var(--surface-subtle));
+}
+
+.prompt-queue-status .prompt-queue-status__stop-send--armed {
+  border-color: #d7a66a;
+  background: color-mix(in srgb, #d7a66a 22%, var(--surface-subtle));
+  font-weight: 650;
 }
 
 /* Product-site visual alignment. Keep behavior in the feature components and
@@ -2045,16 +2077,47 @@ kbd {
   line-height: 1.65;
 }
 
-.message-content ul,
-.message-content ol,
-.message-table td {
-  color: var(--text-secondary);
-  line-height: 1.65;
+.message-content a {
+  color: var(--accent-ui);
 }
 
-.message--user li,
-.message--user td {
-  color: var(--text-primary);
+.message-content ul,
+.message-content ol,
+.message-content table {
+  color: var(--text-secondary);
+}
+
+.message-content blockquote {
+  border-inline-start-color: var(--border-strong);
+  color: var(--text-muted);
+}
+
+.message-content hr {
+  border-top-color: var(--border-default);
+}
+
+.message-content__table,
+.message-content th,
+.message-content td {
+  border-color: var(--border-default);
+}
+
+.message-content th {
+  background: var(--surface-subtle);
+}
+
+.message-inline-code,
+.message-file-chip code {
+  border-color: var(--border-default);
+  background: var(--surface-subtle);
+}
+
+.message-file-chip code {
+  color: var(--accent-ui);
+}
+
+.message-file-chip:hover code {
+  border-color: var(--accent-ui);
 }
 
 .message-actions button {
@@ -2143,6 +2206,17 @@ kbd {
   color: var(--surface-main);
 }
 
+.composer__toolbar .send-button.send-button--labeled {
+  width: auto;
+  min-width: 96px;
+  padding-inline: 13px;
+  gap: 6px;
+  border-radius: 999px;
+  font-size: var(--font-label);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
 .composer__toolbar .send-button--ready,
 .composer__toolbar .send-button--ready:hover {
   background: var(--text-primary);
@@ -2158,26 +2232,6 @@ kbd {
 
 .conversation {
   position: relative;
-}
-
-.file-drop-overlay {
-  position: absolute;
-  z-index: 85;
-  inset: 12px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 10px;
-  pointer-events: none;
-  border: 2px dashed color-mix(in srgb, var(--accent-ui) 70%, var(--border-default));
-  border-radius: var(--radius-card);
-  background: color-mix(in srgb, var(--surface-main) 88%, var(--accent-ui));
-  color: var(--text-primary);
-  box-shadow: var(--shadow-elevated);
-}
-
-.file-drop-overlay svg {
-  color: var(--accent-ui);
 }
 
 .composer__attachments {

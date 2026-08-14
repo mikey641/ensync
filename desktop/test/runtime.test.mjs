@@ -427,6 +427,105 @@ test('app protocol does not proxy renderer work when its shell lease cannot be r
   }
 })
 
+test('a Host that never received the request is refused as retryable JSON, not an unreadable body', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-host-down-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:43121'), {
+          code: 'ECONNREFUSED',
+        }),
+      })
+    },
+  })
+
+  try {
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+    assert.equal(response.status, 502)
+    assert.match(response.headers.get('content-type'), /application\/json/)
+    const payload = await response.json()
+    assert.equal(payload.code, 'host_unavailable')
+    assert.equal(payload.safeToRetry, true, 'a refused connection never reached the Host')
+    assert.match(payload.error, /unavailable/i)
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('a mutation that died in flight stays ambiguous instead of being advertised as retryable', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-host-inflight-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async () => {
+      throw Object.assign(new TypeError('fetch failed'), {
+        cause: Object.assign(new Error('other side closed'), { code: 'UND_ERR_SOCKET' }),
+      })
+    },
+  })
+
+  try {
+    const mutation = await handle(new Request(`${APP_ORIGIN}/api/chat/run`, {
+      method: 'POST',
+      body: JSON.stringify({ prompt: 'ship it' }),
+    }))
+    assert.equal(mutation.status, 502)
+    const payload = await mutation.json()
+    assert.equal(payload.code, 'host_unavailable')
+    assert.equal(payload.safeToRetry, false, 'the run may already have started')
+
+    // The same broken socket on an idempotent read is still safe to repeat.
+    const read = await handle(new Request(`${APP_ORIGIN}/api/chat/jobs/job_1/stream?after=0`))
+    assert.equal((await read.json()).safeToRetry, true)
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('workspace pushes reach the Host, and a truly unsupported method is refused as JSON', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-methods-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const forwarded = []
+  const handle = await createAppProtocolHandler({
+    uiRoot,
+    hostPort: 43_121,
+    fetchImpl: async (url, init) => {
+      forwarded.push({ url, method: init.method, body: init.body?.toString() })
+      return Response.json({ revision: 4 })
+    },
+  })
+
+  try {
+    const push = await handle(new Request(`${APP_ORIGIN}/api/account-sync/workspace`, {
+      method: 'PUT',
+      body: JSON.stringify({ state: {}, baseRevision: 3 }),
+    }))
+    assert.equal(push.status, 200)
+    assert.deepEqual(await push.json(), { revision: 4 })
+    assert.deepEqual(forwarded, [{
+      url: 'http://127.0.0.1:43121/api/account-sync/workspace',
+      method: 'PUT',
+      body: JSON.stringify({ state: {}, baseRevision: 3 }),
+    }])
+
+    const unsupported = await handle(new Request(`${APP_ORIGIN}/api/providers`, { method: 'DELETE' }))
+    assert.equal(unsupported.status, 405)
+    assert.match(unsupported.headers.get('content-type'), /application\/json/)
+    assert.deepEqual(await unsupported.json(), {
+      error: 'Ensync Host does not support this request method.',
+      code: 'host_method_not_supported',
+      safeToRetry: false,
+    })
+    assert.equal(forwarded.length, 1, 'an unsupported method never reaches the Host')
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
 test('app protocol resolves a replacement Host endpoint without changing the renderer origin', async () => {
   const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-live-host-recovery-'))
   await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
@@ -491,6 +590,73 @@ test('app protocol forwards NDJSON response bodies without buffering the executi
     assert.equal((await reader.read()).done, true)
   } finally {
     releaseSecondChunk()
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('a Host that forgot this shell lease is re-claimed and the request replayed', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-lease-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  const attempts = []
+  let leaseClaims = 0
+  // The Host keeps leases in memory only, so a restart or a slept machine
+  // leaves the shell holding one the Host no longer knows about while its own
+  // expiry clock still looks valid. Every call then 403s and the renderer
+  // reports the Host offline even though it is healthy and running jobs.
+  const fetchImpl = async (url, init) => {
+    attempts.push(init?.headers?.['x-ensync-owner'] ?? null)
+    if (attempts.length === 1) {
+      return Response.json(
+        { error: 'The native shell lease is missing or expired.', code: 'daemon_owner_expired' },
+        { status: 403 },
+      )
+    }
+    return Response.json({ ok: true, replayed: true })
+  }
+
+  try {
+    const handle = await createAppProtocolHandler({
+      uiRoot,
+      hostPort: 41_009,
+      hostToken: 'test-token',
+      ownerId: 'shell_test_owner_0123456789',
+      fetchImpl,
+      ensureHostLease: async ({ force } = {}) => { if (force) leaseClaims += 1 },
+    })
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { ok: true, replayed: true })
+    assert.equal(leaseClaims, 1, 'the expired lease is re-claimed exactly once')
+    assert.equal(attempts.length, 2, 'the original request is replayed, not dropped')
+  } finally {
+    await rm(uiRoot, { recursive: true, force: true })
+  }
+})
+
+test('a 403 that is not an expired lease is returned untouched', async () => {
+  const uiRoot = await mkdtemp(join(tmpdir(), 'ensync-ui-lease2-'))
+  await writeFile(join(uiRoot, 'index.html'), '<!doctype html><div id="root"></div>')
+  let leaseClaims = 0
+  let calls = 0
+  const fetchImpl = async () => {
+    calls += 1
+    return Response.json({ error: 'Forbidden project path.', code: 'project_not_allowed' }, { status: 403 })
+  }
+
+  try {
+    const handle = await createAppProtocolHandler({
+      uiRoot,
+      hostPort: 41_010,
+      fetchImpl,
+      ensureHostLease: async ({ force } = {}) => { if (force) leaseClaims += 1 },
+    })
+    const response = await handle(new Request(`${APP_ORIGIN}/api/providers`))
+
+    assert.equal(response.status, 403)
+    assert.equal(leaseClaims, 0, 'an unrelated refusal must not re-claim a lease')
+    assert.equal(calls, 1, 'and must not be replayed')
+  } finally {
     await rm(uiRoot, { recursive: true, force: true })
   }
 })

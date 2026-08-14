@@ -12,15 +12,15 @@ const outputRoot = resolve(option('--output', 'release-assets'))
 const tag = option('--tag')
 const repository = option('--repository')
 const channel = option('--channel')
+const sourceCommit = option('--source-commit')
 if (!tag || !/^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
   throw new Error('--tag must be a semantic release tag such as v1.2.3.')
 }
 if (!repository || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
   throw new Error('--repository must be a GitHub owner/repository name.')
 }
-if (!['stable', 'beta'].includes(channel)) {
-  throw new Error('--channel must be stable or beta.')
-}
+if (!['stable', 'beta'].includes(channel)) throw new Error('--channel must be stable or beta.')
+if (!/^[a-f0-9]{40,64}$/i.test(sourceCommit ?? '')) throw new Error('--source-commit must be the exact source revision.')
 const version = tag.replace(/^v/, '')
 const prerelease = version.split('+')[0].includes('-')
 if (channel === 'stable' && prerelease) {
@@ -49,13 +49,21 @@ const artifactExtensions = new Set(['.dmg', '.zip'])
 const artifacts = inputFiles.filter((file) => artifactExtensions.has(extname(file).toLowerCase()))
 const attestations = new Map()
 
-for (const file of inputFiles.filter((item) => basename(item) === 'attestation-macos.json')) {
+for (const file of inputFiles.filter((item) => /^attestation-(macos|windows)\.json$/.test(basename(item)))) {
   const attestation = JSON.parse(await readFile(file, 'utf8'))
-  if (attestation.schemaVersion !== 1 || attestation.platform !== 'macos') {
+  if (attestation.schemaVersion !== 1 || !['macos', 'windows'].includes(attestation.platform)) {
     throw new Error(`Invalid build attestation: ${relative(inputRoot, file)}`)
   }
   if (attestation.version !== version) {
     throw new Error(`${attestation.platform} attestation is for ${attestation.version}, expected ${version}.`)
+  }
+  if (!/^[a-f0-9]{16}$/.test(attestation.buildId ?? '')
+    || attestation.channel !== channel
+    || attestation.sourceCommit !== sourceCommit
+    || attestation.sourceDirty !== false
+    || typeof attestation.builtAt !== 'string'
+    || Number.isNaN(Date.parse(attestation.builtAt))) {
+    throw new Error(`${attestation.platform} attestation does not match the clean ${channel} source build.`)
   }
   if (attestations.has(attestation.platform)) throw new Error(`Duplicate ${attestation.platform} attestation.`)
   attestations.set(attestation.platform, attestation)
@@ -109,7 +117,8 @@ function macosRelease() {
     url: `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(primary.name)}`,
     sha256: primary.sha256,
     signed: true,
-    notarized: true,
+    notarized: platform === 'macos' ? true : null,
+    buildId: attestation.buildId,
     architectures: attestation.architectures ?? [],
   }
 }
@@ -124,6 +133,8 @@ await writeFile(join(outputRoot, 'SHA256SUMS.txt'), checksums, { flag: 'wx' })
 const manifest = {
   schemaVersion: 1,
   channel,
+  sourceRevision: sourceCommit.toLowerCase(),
+  feedUpdatedAt: new Date().toISOString(),
   latest: {
     version,
     publishedAt: new Date().toISOString(),
@@ -142,7 +153,8 @@ const manifest = {
       architectures: [],
     },
   },
+  history: [],
 }
-const manifestName = channel === 'beta' ? 'releases-beta.json' : 'releases.json'
+const manifestName = channel === 'stable' ? 'releases.json' : 'releases-beta.json'
 await writeFile(join(outputRoot, manifestName), `${JSON.stringify(manifest, null, 2)}\n`, { flag: 'wx' })
-console.log(`Prepared ${records.length} verified public macOS artifacts, checksums, and ${manifestName} for ${tag}.`)
+console.log(`Prepared ${records.length} verified artifacts, checksums, and ${manifestName} for ${tag}.`)

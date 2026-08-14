@@ -57,39 +57,64 @@ export function selectAutomaticProvider(providers, priorityOrder, attemptedProvi
 }
 
 /**
- * Provider telemetry can become stale while a renderer is suspended. Re-probe
- * once before declaring Auto unavailable, then select from the returned
- * snapshot so the caller does not have to wait for a React render cycle.
+ * The provider a conversation displays must be a fact. An executing run owns the
+ * current turn, so it always wins: re-resolving automatic routing on each render
+ * is what let a mid-run usage refresh rename a streaming Codex turn to Claude
+ * Code in the header. Callers that can observe a run must pass it.
+ *
+ * Once no run is executing, an automatic conversation shows where the next turn
+ * would actually go, because automatic routing is re-resolved from live usage at
+ * send time and never resumes the previous turn's provider by itself. Pinning an
+ * idle Auto conversation to the provider that ran last is what showed Factory
+ * Droid after a one-turn quota fallback while the next turn would have run on
+ * Claude Code. The last Host-verified turn is kept only as the last resort, when
+ * automatic routing currently has no candidate at all.
+ *
+ * Returns null when nothing is resolvable so callers keep their own last resort.
  */
-export async function selectAutomaticProviderAfterRefresh(providers, priorityOrder, refreshProviders) {
-  const selected = selectAutomaticProvider(providers, priorityOrder)
-  if (selected || typeof refreshProviders !== 'function') return selected
-  const refreshed = await refreshProviders()
-  return Array.isArray(refreshed)
-    ? selectAutomaticProvider(refreshed, priorityOrder)
-    : null
+export function conversationProviderId({ chat, activeRun, providers, priorityOrder }) {
+  const available = new Set((providers ?? []).map((provider) => provider.id))
+  const running = activeRun?.provider
+  if (typeof running === 'string' && available.has(running)) return running
+  if (chat?.providerMode === 'fixed') return typeof chat.provider === 'string' ? chat.provider : null
+  const nextAutomatic = selectAutomaticProvider(providers ?? [], priorityOrder)?.id
+  if (typeof nextAutomatic === 'string') return nextAutomatic
+  const lastVerified = chat?.continuation?.provider
+  if (typeof lastVerified === 'string' && available.has(lastVerified)) return lastVerified
+  return null
 }
 
 /**
- * A provider run can invalidate the renderer snapshot that existed when the
- * turn started. Refresh local provider facts before choosing a safe runtime
- * fallback, while retaining the last verified snapshot if that refresh fails.
+ * Refresh providers (if a refresh callback is provided), then select the next
+ * automatic fallback provider that has not been attempted yet.
  */
 export async function selectAutomaticFallbackProviderAfterRefresh(
   providers,
   priorityOrder,
-  attemptedProviderIds,
+  attemptedProviderIds = [],
   refreshProviders,
 ) {
-  const current = selectAutomaticProvider(providers, priorityOrder, attemptedProviderIds)
-  if (typeof refreshProviders !== 'function') return current
-  let refreshed
-  try {
-    refreshed = await refreshProviders()
-  } catch {
-    return current
+  let current = providers
+  if (typeof refreshProviders === 'function') {
+    const refreshed = await refreshProviders()
+    if (refreshed) current = refreshed
   }
-  return Array.isArray(refreshed)
-    ? selectAutomaticProvider(refreshed, priorityOrder, attemptedProviderIds)
-    : current
+  return selectAutomaticProvider(current, priorityOrder, attemptedProviderIds)
+}
+
+/**
+ * Refresh providers (if a refresh callback is provided), then select the
+ * automatic provider for a new conversation.
+ */
+export async function selectAutomaticProviderAfterRefresh(
+  providers,
+  priorityOrder,
+  refreshProviders,
+) {
+  let current = providers
+  if (typeof refreshProviders === 'function') {
+    const refreshed = await refreshProviders()
+    if (refreshed) current = refreshed
+  }
+  return selectAutomaticProvider(current, priorityOrder)
 }

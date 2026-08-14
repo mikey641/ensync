@@ -1,6 +1,7 @@
 name: Desktop CI
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
       - 'desktop/**'
@@ -47,3 +48,25 @@ jobs:
         run: npm run test:host
       - name: Test and smoke-check desktop runtime
         run: npm --prefix desktop run verify
+      - name: Package unsigned Windows verification artifacts
+        if: runner.os == 'Windows'
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: node desktop/scripts/package-native.mjs --platform windows
+      - name: Attest Windows verification artifacts
+        if: runner.os == 'Windows'
+        run: node desktop/scripts/attest-build.mjs --platform windows
+      - name: Launch packaged Windows app and verify UI and Host health
+        if: runner.os == 'Windows'
+        run: npm --prefix desktop run smoke:win-packaged
+      - name: Upload unsigned Windows verification artifacts
+        if: runner.os == 'Windows' && !cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ensync-windows-verification-${{ github.sha }}
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.zip
+            desktop/release/attestation-windows.json

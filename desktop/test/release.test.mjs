@@ -2,15 +2,22 @@ import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
 import { mkdtemp, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { basename, join, resolve } from 'node:path'
+import { join, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 import { createHash } from 'node:crypto'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const generator = resolve(desktopRoot, 'scripts/generate-release.mjs')
+const sourceCommit = '35642bfda02d82e007a1639dbd2c642b67c01b7d'
 
-async function fixture({ macSigned = true, macNotarized = true, includePrivateStorePackage = false, version = '1.2.3' } = {}) {
+async function fixture({
+  macSigned = true,
+  macNotarized = true,
+  windowsSigned = true,
+  includePrivateStorePackage = false,
+  version = '1.2.3',
+} = {}) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-release-'))
   const input = join(root, 'input')
   const output = join(root, 'output')
@@ -32,15 +39,37 @@ async function fixture({ macSigned = true, macNotarized = true, includePrivateSt
     })
   }
 
-  const attestations = [{
-    schemaVersion: 1,
-    platform: 'macos',
-    version,
-    signed: macSigned,
-    notarized: macNotarized,
-    architectures: ['universal'],
-    artifacts: records.filter((record) => record.name.includes('-mac-')),
-  }]
+  const channel = version.includes('-') ? 'beta' : 'stable'
+  const attestations = [
+    {
+      schemaVersion: 1,
+      platform: 'macos',
+      version,
+      buildId: 'a'.repeat(16),
+      channel,
+      sourceCommit,
+      sourceDirty: false,
+      builtAt: '2026-08-07T10:00:00.000Z',
+      signed: macSigned,
+      notarized: macNotarized,
+      architectures: ['universal'],
+      artifacts: records.filter((record) => record.name.includes('-mac-')),
+    },
+    {
+      schemaVersion: 1,
+      platform: 'windows',
+      version,
+      buildId: 'b'.repeat(16),
+      channel,
+      sourceCommit,
+      sourceDirty: false,
+      builtAt: '2026-08-07T10:01:00.000Z',
+      signed: windowsSigned,
+      notarized: null,
+      architectures: ['x64'],
+      artifacts: records.filter((record) => record.name.includes('-windows-')),
+    },
+  ]
   for (const attestation of attestations) {
     await writeFile(
       join(input, `attestation-${attestation.platform}.json`),
@@ -56,8 +85,9 @@ function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
     '--input', input,
     '--output', output,
     '--tag', tag,
-    '--repository', 'ensync/ensync',
+    '--repository', 'ensync/ensync-downloads',
     '--channel', channel,
+    '--source-commit', sourceCommit,
   ], { encoding: 'utf8' })
 }
 
@@ -71,7 +101,10 @@ test('release generation publishes signed macOS artifacts and leaves Windows to 
   assert.equal(manifest.platforms.macos.status, 'available')
   assert.equal(manifest.platforms.windows.status, 'unavailable')
   assert.match(manifest.platforms.windows.reason, /Microsoft Store/)
-  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\//)
+  assert.equal(manifest.channel, 'stable')
+  assert.equal(manifest.sourceRevision, sourceCommit)
+  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\/ensync\/ensync-downloads\//)
+  assert.equal(manifest.platforms.macos.buildId, 'a'.repeat(16))
   assert.equal(manifest.platforms.macos.signed, true)
   assert.equal(manifest.platforms.macos.notarized, true)
   assert.equal(manifest.platforms.windows.url, null)
@@ -118,4 +151,27 @@ test('release generation refuses a signed but unnotarized macOS build', async ()
   const result = generate(input, output)
   assert.notEqual(result.status, 0)
   assert.match(result.stderr, /macOS artifacts are not notarized/)
+})
+
+test('release generation refuses dirty or channel-mismatched attestations', async () => {
+  const dirty = await fixture()
+  const path = join(dirty.input, 'attestation-windows.json')
+  const attestation = JSON.parse(await readFile(path, 'utf8'))
+  await writeFile(path, JSON.stringify({ ...attestation, sourceDirty: true }))
+  const dirtyResult = generate(dirty.input, dirty.output)
+  assert.notEqual(dirtyResult.status, 0)
+  assert.match(dirtyResult.stderr, /clean stable source build/)
+
+  const beta = await fixture()
+  const betaResult = spawnSync(process.execPath, [
+    generator,
+    '--input', beta.input,
+    '--output', beta.output,
+    '--tag', 'v1.2.3',
+    '--repository', 'ensync/ensync-downloads',
+    '--channel', 'beta',
+    '--source-commit', sourceCommit,
+  ], { encoding: 'utf8' })
+  assert.notEqual(betaResult.status, 0)
+  assert.match(betaResult.stderr, /prerelease tag/)
 })

@@ -1,6 +1,11 @@
-import type { Chat, Provider } from './types'
+import type { AgentCoordinationPolicy, Chat, Provider } from './types'
 
-const defaultProviderCatalog: Provider[] = [
+const defaultAgentCoordination: AgentCoordinationPolicy = {
+  policy: 'ensync_agent_coordination_v1',
+  delivery: 'ensync_prompt',
+}
+
+const defaultProviderCatalog: Array<Omit<Provider, 'agentCoordination'>> = [
   {
     id: 'claude',
     name: 'Claude Code',
@@ -431,6 +436,7 @@ const defaultProviderCatalog: Provider[] = [
 // Keep the offline/loading fallback in the same navigation order returned by
 // Ensync Host. This is a recognition heuristic, not a market-share ranking.
 const providerNavigationOrder: Provider['id'][] = [
+  'droid',
   'codex',
   'claude',
   'copilot',
@@ -442,7 +448,6 @@ const providerNavigationOrder: Provider['id'][] = [
   'junie',
   'gitlab_duo',
   'oz',
-  'droid',
   'amp',
   'auggie',
   'qoder',
@@ -453,7 +458,7 @@ const providerNavigationOrder: Provider['id'][] = [
 export const defaultProviders: Provider[] = providerNavigationOrder.map((providerId) => {
   const provider = defaultProviderCatalog.find((candidate) => candidate.id === providerId)
   if (!provider) throw new Error(`Missing default provider definition for ${providerId}.`)
-  return provider
+  return { ...provider, agentCoordination: defaultAgentCoordination }
 })
 
 export const initialChats: Chat[] = [

@@ -34,6 +34,48 @@ export function normalizePromptQueues(value) {
   return normalized
 }
 
+function normalizedQueuedPrompt(value) {
+  return normalizePromptQueues({ handoff: [value] }).handoff?.[0] ?? null
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+/** Stable delivery identity; timestamps are audit metadata, not prompt content. */
+function queuedPromptIdentity(entry) {
+  return canonicalJson({
+    id: entry.id,
+    turnId: entry.turnId,
+    messageId: entry.messageId,
+    predecessorTurnId: entry.predecessorTurnId ?? null,
+    prompt: entry.prompt,
+    attachments: entry.attachments,
+    preferences: entry.preferences,
+  })
+}
+
+const TRANSFERRED_HANDOFF_IDENTITY_LIMIT = 512_000
+
+function handoffTombstone(entry) {
+  const queuedPromptIdentityValue = queuedPromptIdentity(entry)
+  if (queuedPromptIdentityValue.length > TRANSFERRED_HANDOFF_IDENTITY_LIMIT) return null
+  return Object.freeze({
+    handoffId: entry.id,
+    queuedPromptIdentity: queuedPromptIdentityValue,
+  })
+}
+
+function messageMatchesHandoffTombstone(message, messageId, tombstone) {
+  return message?.id === messageId
+    && message.handoffTombstone?.handoffId === tombstone.handoffId
+    && message.handoffTombstone?.queuedPromptIdentity === tombstone.queuedPromptIdentity
+}
+
 export function appendPromptToQueue(queues, chatId, entry) {
   return { ...queues, [chatId]: [...(queues[chatId] ?? []), entry] }
 }
@@ -45,6 +87,84 @@ export function removePromptFromQueue(queues, chatId, entryId) {
   if (retained.length > 0) next[chatId] = retained
   else delete next[chatId]
   return next
+}
+
+/**
+ * The source retains this audit record after a target has durably accepted its
+ * queue entry. It is intentionally not an executable queue state.
+ */
+export function markQueuedMessageTransferred(messages, messageId) {
+  return messages.map((message) => message.id === messageId
+    && message.role === 'user'
+    && message.deliveryStatus === 'queued'
+    ? { ...message, deliveryStatus: 'transferred' }
+    : message)
+}
+
+/**
+ * Persist a target-first handoff once. Every stable ID collision is checked
+ * against the full queue snapshot so a retry cannot silently change a prompt.
+ */
+export function acceptTransferredPrompt(queues, chats, chatId, entry) {
+  const normalized = normalizedQueuedPrompt(entry)
+  const targetIndex = Array.isArray(chats)
+    ? chats.findIndex((chat) => chat?.id === chatId)
+    : -1
+  const tombstone = normalized ? handoffTombstone(normalized) : null
+  if (!normalized || !tombstone || targetIndex < 0) return { status: 'conflict', queues, chats }
+
+  const target = chats[targetIndex]
+  const existingEntries = Array.isArray(queues?.[chatId]) ? queues[chatId] : []
+  const collisions = existingEntries.filter((existing) =>
+    existing?.id === normalized.id
+    || existing?.turnId === normalized.turnId
+    || existing?.messageId === normalized.messageId)
+  const sameIdentity = collisions.length === 1
+    && queuedPromptIdentity(collisions[0]) === queuedPromptIdentity(normalized)
+  if (collisions.length > 0) {
+    const existingMessage = target.messages?.find((message) => message?.id === normalized.messageId)
+    return sameIdentity && existingMessage?.role === 'user'
+      && existingMessage.turnId === normalized.turnId
+      && existingMessage.content === normalized.prompt
+      && existingMessage.deliveryStatus === 'queued'
+      && canonicalJson(normalizedAttachments(existingMessage.attachments))
+        === canonicalJson(normalized.attachments)
+      && messageMatchesHandoffTombstone(existingMessage, normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: false, queues, chats }
+      : { status: 'conflict', queues, chats }
+  }
+
+  const acceptedMessages = (target.messages ?? []).filter((message) =>
+    message?.id === normalized.messageId
+    || message?.handoffTombstone?.handoffId === normalized.id)
+  if (acceptedMessages.length > 0) {
+    return acceptedMessages.length === 1
+      && messageMatchesHandoffTombstone(acceptedMessages[0], normalized.messageId, tombstone)
+      ? { status: 'duplicate', alreadyConsumed: true, queues, chats }
+      : { status: 'conflict', queues, chats }
+  }
+
+  if ((target.messages ?? []).some((message) => message?.turnId === normalized.turnId)) {
+    return { status: 'conflict', queues, chats }
+  }
+
+  const message = {
+    id: normalized.messageId,
+    role: 'user',
+    turnId: normalized.turnId,
+    content: normalized.prompt,
+    time: normalized.enqueuedAt,
+    deliveryStatus: 'queued',
+    handoffTombstone: tombstone,
+    ...(normalized.attachments.length > 0 ? { attachments: normalized.attachments } : {}),
+  }
+  return {
+    status: 'accepted',
+    queues: { ...queues, [chatId]: [...existingEntries, normalized] },
+    chats: chats.map((chat, index) => index === targetIndex
+      ? { ...chat, messages: [...(chat.messages ?? []), message] }
+      : chat),
+  }
 }
 
 /**
@@ -85,6 +205,95 @@ export function predecessorTurnIdForPrompt(queue, messages, inFlightRun) {
   if (nonEmptyString(inFlightRun?.turnId)) return inFlightRun.turnId
   return [...messages].reverse().find((message) =>
     message?.role === 'user' && message.deliveryStatus === 'pending')?.turnId ?? null
+}
+
+/** A Host job can exist while provider preflight or workspace setup is still running. */
+export function activeCodexTurnCanAcceptSteering(activeRun) {
+  return activeRun?.provider === 'codex'
+    && activeRun.executionTarget === 'local'
+    && activeRun.providerProcessStarted === true
+    && Boolean(nonEmptyString(activeRun.jobId))
+}
+
+/** Match Push now to the exact started turn and its captured project/target. */
+export function queuedPromptCanSteerActiveTurn(entry, activeRun) {
+  return activeCodexTurnCanAcceptSteering(activeRun)
+    && entry?.predecessorTurnId === activeRun.turnId
+    && entry?.preferences?.executionTargetKey === activeRun.executionTarget
+    && entry?.preferences?.projectId === activeRun.projectId
+    && entry?.preferences?.projectPath === activeRun.projectPath
+}
+
+/**
+ * Stop-and-send is the only mid-turn delivery available on providers that
+ * cannot be steered. It is destructive — the running turn is cancelled, not
+ * corrected — so it is offered only where live steering is genuinely
+ * unavailable, and only for a head that still binds to the running turn's
+ * exact snapshot. It is never a synonym for Push now.
+ */
+export function queuedPromptCanStopAndSendNow(entry, activeRun, { liveSteerAvailable = false } = {}) {
+  if (liveSteerAvailable) return false
+  if (!nonEmptyString(activeRun?.turnId)) return false
+  return entry?.predecessorTurnId === activeRun.turnId
+    && entry?.preferences?.executionTargetKey === activeRun.executionTarget
+    && entry?.preferences?.projectId === activeRun.projectId
+    && entry?.preferences?.projectPath === activeRun.projectPath
+}
+
+function exactOwnerJobId(owner) {
+  const ownerJobId = nonEmptyString(owner?.ownerJobId)
+  const hostJobId = nonEmptyString(owner?.jobId)
+  if (ownerJobId && hostJobId && ownerJobId !== hostJobId) return null
+  return ownerJobId ?? hostJobId
+}
+
+function sameNonEmptyString(left, right) {
+  const normalizedLeft = nonEmptyString(left)
+  const normalizedRight = nonEmptyString(right)
+  return Boolean(normalizedLeft) && normalizedLeft === normalizedRight
+}
+
+/** Exact live native roster bindings are required before focusing another window. */
+export function occupiedRunCanNavigate(owner, currentBinding) {
+  const jobId = exactOwnerJobId(owner)
+  return owner?.targetKind === 'local'
+    && currentBinding?.targetKind === 'local'
+    && Boolean(jobId)
+    && jobId === currentBinding?.jobId
+    && sameNonEmptyString(owner?.nativeWorkspaceId, currentBinding?.workspaceId)
+    && sameNonEmptyString(owner?.projectId, currentBinding?.projectId)
+    && sameNonEmptyString(owner?.projectPath, currentBinding?.projectPath)
+    && sameNonEmptyString(owner?.chatId, currentBinding?.chatId)
+    && sameNonEmptyString(owner?.provider, currentBinding?.provider)
+}
+
+/** Push handoff adds exact local-Codex turn and queue-snapshot checks to navigation. */
+export function occupiedRunCanHandoff(owner, entry, currentBinding) {
+  const normalized = normalizedQueuedPrompt(entry)
+  return occupiedRunCanNavigate(owner, currentBinding)
+    && owner?.provider === 'codex'
+    && owner?.providerProcessStarted === true
+    && owner?.steerable === true
+    && Boolean(normalized)
+    && sameNonEmptyString(normalized.predecessorTurnId, currentBinding?.turnId)
+    && normalized.preferences.provider === 'codex'
+    && normalized.preferences.executionTargetKey === currentBinding?.targetKind
+    && normalized.preferences.projectId === currentBinding?.projectId
+    && normalized.preferences.projectPath === currentBinding?.projectPath
+}
+
+/**
+ * Automatic advancement stays success-only. The one exception is a stop-and-send
+ * the user explicitly confirmed, which already recorded its own approval for the
+ * head prompt; a plain Stop must still pause the tail.
+ */
+export function queueMayAdvanceAfterRun({ completedSuccessfully = false, stopAndSendArmed = false } = {}) {
+  return completedSuccessfully === true || stopAndSendArmed === true
+}
+
+/** This rejection proves the live instruction was not delivered and may remain FIFO. */
+export function liveSteerWasSafelyRejected(error) {
+  return error?.code === 'live_steer_unavailable' && error?.safeToRetry === true
 }
 
 /**
@@ -141,9 +350,14 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
       const subject = typeof delivery.activeProviderName === 'string' && delivery.activeProviderName.trim()
         ? delivery.activeProviderName.trim()
         : 'This provider'
+      // Name the destructive escape only when it is actually on screen, and
+      // state what it costs so it can never read as a second Push now.
+      const stopAndSend = delivery.stopAndSendAvailable === true
+        ? ' Stop & send now ends the current turn instead, discarding its in-progress work.'
+        : ''
       return {
         headline,
-        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.`,
+        detail: `${subject} cannot take a new instruction while a turn is running, so it will run automatically after the current turn finishes successfully.${stopAndSend}`,
         actionLabel: null,
       }
     }
@@ -167,7 +381,7 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
 export function transcriptMessagesBeforeTurn(messages, turnId) {
   const index = messages.findIndex((message) => message.role === 'user' && message.turnId === turnId)
   if (index < 0) return []
-  return messages.slice(0, index)
+  return messages.slice(0, index).filter((message) => message.deliveryStatus !== 'transferred')
 }
 
 /** Keep logical transcript order even when later user prompts were pre-enqueued. */
@@ -207,20 +421,34 @@ export function promoteQueuedMessageToActiveTurn(messages, messageId, activeTurn
   ]
 }
 
+/** Apply only Host-authored live-turn readiness transitions. */
+export function liveSteerReadyAfterEvent(current, event) {
+  if (event?.type === 'notice' && event.code === 'live_steer_ready') return true
+  if (event?.type === 'notice' && event.code === 'live_steer_closed') return false
+  if (event?.type === 'finished') return false
+  return current === true
+}
+
+/** Active-run submissions enter FIFO; live delivery is only an explicit Push now action. */
+export function promptSubmissionMode({ hasActiveRun }) {
+  return hasActiveRun ? 'queue' : 'run'
+}
+
 export function promptQueueComposerState({ sending, draft, canRun, liveSteering = false }) {
   const hasDraft = typeof draft === 'string' && Boolean(draft.trim())
-  return {
+  const state = {
     sendEnabled: hasDraft && Boolean(canRun),
-    sendLabel: sending
-      ? liveSteering
-        ? 'Steer the active Codex turn'
-        : 'Queue message in this chat'
-      : 'Send message',
+    sendLabel: sending ? 'Queue message in this chat' : 'Send message',
     stopVisible: Boolean(sending),
-    hint: sending
-      ? liveSteering
-        ? '↵ steer now · stop ends turn'
-        : '↵ queue · stop ends current only'
-      : '↵ send · ⇧↵ new line',
+    hint: sending ? '↵ queue · stop ends current only' : '↵ send · ⇧↵ new line',
   }
+  // Without a live-steerable turn the composer carries an explicit "no live
+  // send text" marker; while live steering is available the Push now control
+  // owns that surface, so the composer state omits the field entirely.
+  if (!liveSteering) state.sendText = null
+  return state
 }
+
+// host/prompt-queue.test.mjs — the executable Host/renderer contract — reads
+// these two guards as ambient globals, so publish them alongside the module
+// exports. They are pure functions; publishing them carries no state.

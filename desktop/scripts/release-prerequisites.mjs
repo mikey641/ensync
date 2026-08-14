@@ -32,6 +32,13 @@ const VERCEL_NAMES = [
   'VERCEL_PROJECT_ID',
 ]
 
+const DISTRIBUTION_NAMES = [
+  'ENSYNC_RELEASE_REPOSITORY',
+  'ENSYNC_RELEASE_GITHUB_TOKEN',
+]
+
+const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+
 function hasValue(environment, name) {
   return typeof environment[name] === 'string' && environment[name].trim().length > 0
 }
@@ -90,14 +97,25 @@ export function validateReleasePrerequisites(environment = process.env) {
   const errors = []
   const mac = inspectGroup(environment, MAC_SIGNING_NAMES)
   const vercel = inspectGroup(environment, VERCEL_NAMES)
+  const distribution = inspectGroup(environment, DISTRIBUTION_NAMES)
 
   if (!mac.complete) errors.push(incompleteMessage('macOS signing and notarization', mac))
   const store = inspectGroup(environment, WINDOWS_STORE_INPUT_NAMES)
   if (!store.complete) errors.push(incompleteMessage('Windows Store package identity', store))
   if (!vercel.complete) errors.push(incompleteMessage('Vercel production deployment', vercel))
+  if (!distribution.complete) errors.push(incompleteMessage('Public binary distribution', distribution))
+
+  const releaseRepository = environment.ENSYNC_RELEASE_REPOSITORY?.trim()
+  if (releaseRepository && !GITHUB_REPOSITORY_PATTERN.test(releaseRepository)) {
+    errors.push('ENSYNC_RELEASE_REPOSITORY must be a GitHub owner/repository name.')
+  }
+  const sourceRepository = environment.ENSYNC_SOURCE_REPOSITORY?.trim()
+  if (releaseRepository && sourceRepository && releaseRepository.toLowerCase() === sourceRepository.toLowerCase()) {
+    errors.push('The public binary repository must be separate from the private source repository.')
+  }
 
   const tag = environment.GITHUB_REF_NAME
-  if (tag && !/^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
+  if (tag && !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
     errors.push(`Release tag ${tag} is not a supported semantic version tag.`)
   }
   if (store.complete && tag && /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
@@ -108,7 +126,7 @@ export function validateReleasePrerequisites(environment = process.env) {
     }
   }
   const visibility = environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY
-  if (visibility && visibility !== 'public') {
+  if (visibility !== 'public') {
     errors.push('The release repository must be public because the production manifest uses public GitHub asset URLs.')
   }
   return errors
@@ -121,4 +139,5 @@ export const RELEASE_SECRET_NAMES = Object.freeze({
   windowsAzureAuth: WINDOWS_AZURE_AUTH_NAMES,
   windowsStore: WINDOWS_STORE_INPUT_NAMES,
   vercel: VERCEL_NAMES,
+  distribution: DISTRIBUTION_NAMES,
 })

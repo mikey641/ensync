@@ -3,6 +3,7 @@ import {
   readNdjsonStream,
   TruncatedNdjsonStreamError,
 } from './ndjsonStream.mjs'
+import { canReattachChatJob } from './chatJobReconnect.mjs'
 import {
   InvalidJsonResponseError,
   readJsonResponse,
@@ -62,17 +63,24 @@ export type ProviderUsage = {
   resetAt: string | null
   /** Exact provider-rendered reset schedule when no absolute timestamp is exposed. */
   resetLabel?: string | null
-  /** Provider-reported quota window associated with resetLabel. */
+  /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
   checkedAt: string
   details: Array<{ label: string; value: string }>
   reason: string
+  /** True when this refresh's probe failed and the Host kept the previous verified reading. */
+  stale?: boolean
 }
 
 export type CliModel = {
   id: string
   displayName: string
   isDefault: boolean
+}
+
+export type AgentCoordinationPolicy = {
+  policy: 'ensync_agent_coordination_v1'
+  delivery: 'ensync_prompt'
 }
 
 export type CliProviderStatus = {
@@ -96,6 +104,7 @@ export type CliProviderStatus = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
+  agentCoordination: AgentCoordinationPolicy
   checkedAt: string
 }
 
@@ -152,6 +161,23 @@ export type ProjectInspection = {
   }
   inspectedAt: string
 }
+
+export type LocalFileDisplay =
+  | {
+    status: 'ok'
+    path: string
+    name: string
+    text: string
+    bytes: number
+    truncated: boolean
+    language: string | null
+  }
+  | {
+    status: 'invalid' | 'missing' | 'directory' | 'binary' | 'unreadable'
+    path: string
+    name: string
+    message: string
+  }
 
 export type GitRemote = {
   name: string
@@ -250,11 +276,19 @@ export type ChatOutputRecovery = {
   discardedLineCount: number
 }
 
+export type ChatWorkspaceBaselineConflict = {
+  baselineSha: string
+  files: string[]
+  reason: string
+}
+
 export type ChatRunWorkspace = {
   path: string
   repositoryPath: string
   branch: string
   reused: boolean
+  /** A cleanly aborted baseline merge that Ensync will retry during landing. */
+  baselineConflict?: ChatWorkspaceBaselineConflict | null
   gitBefore: {
     branch: string
     head: string
@@ -286,7 +320,52 @@ export type ChatRunResponse = {
   completedAt: string
 }
 
+/** One choice the provider offered; `description` exists only where the provider supplied one. */
+export type ProviderQuestionOption = {
+  label: string
+  description: string | null
+  /** The provider's own outcome for a permission choice; null for a questionnaire. */
+  value: string | null
+}
+
+export type ProviderQuestion = {
+  /** Provider-assigned position; an answer names this and never re-sends question text. */
+  index: number
+  /** `permission` is an approval of a tool call: one of the offered outcomes, never typed words. */
+  kind: 'question' | 'permission'
+  header: string
+  question: string
+  multiSelect: boolean
+  options: ProviderQuestionOption[]
+}
+
+export type PendingProviderQuestion = {
+  questionId: string
+  provider: ChatProviderId
+  questions: ProviderQuestion[]
+  askedAt: string
+}
+
 export type ChatExecutionEvent =
+  | {
+      /** The provider paused its turn to ask the person something. */
+      type: 'question'
+      provider: ChatProviderId
+      questionId: string
+      questions: ProviderQuestion[]
+      at: string
+      sequence?: number
+    }
+  | {
+      /** The question left the queue: answered here, or cancelled when the run ended. */
+      type: 'question_resolved'
+      provider: ChatProviderId
+      questionId: string
+      cancelled: boolean
+      answers: { index: number; question: string; answer: string; value?: string }[]
+      at: string
+      sequence?: number
+    }
   | {
       type: 'notice'
       message: string
@@ -294,6 +373,14 @@ export type ChatExecutionEvent =
       workspace?: {
         path: string
         branch: string
+        baselineConflict?: ChatWorkspaceBaselineConflict | null
+      }
+      overlap?: {
+        peerBranch: string
+        state: 'detected' | 'cleared'
+        source: 'active' | 'unlanded'
+        paths: string[]
+        totalCount: number
       }
       at: string
       /** Monotonic Host job sequence used to resume a detached stream without duplication. */
@@ -372,11 +459,57 @@ export type ChatJobSnapshot = {
   firstSequence: number
   lastSequence: number
   providerProcessStarted: boolean
+  /** Host-observed active Codex turn readiness; never inferred from job state. */
+  steerable: boolean
+  /** Questions the live run is blocked on, so a reconnecting window recovers them. */
+  pendingQuestions: PendingProviderQuestion[]
+}
+
+export type OccupiedChatJobOwner = {
+  jobId: string | null
+  provider: string | null
+  targetKind: ChatJobKind | null
+  startedAt: string | null
+  providerProcessStarted: boolean
+  steerable: boolean
+  nativeWorkspaceId: string | null
+  /** Present only when this Host still retains the exact live job in memory. */
+  turnId: string | null
+}
+
+export type ChatJobNavigation = {
+  nativeWorkspaceId: string | null
+  projectId: string
+  chatId: string
+  turnId: string
+}
+
+export type ChatJobAdmission =
+  | { disposition: 'started' | 'reconnected'; job: ChatJobSnapshot }
+  | { disposition: 'occupied'; owner: OccupiedChatJobOwner }
+
+export class ChatJobOccupiedError extends Error {
+  owner: OccupiedChatJobOwner
+
+  constructor(owner: OccupiedChatJobOwner) {
+    super('Another run is already active in this conversation.')
+    this.name = 'ChatJobOccupiedError'
+    this.owner = owner
+  }
 }
 
 export type ChatSteerResponse = {
   job: ChatJobSnapshot
   delivery: { turnId: string }
+}
+
+export type ChatQuestionAnswerResponse = {
+  job: ChatJobSnapshot
+  answer: {
+    id: string
+    cancelled: boolean
+    answers: { index: number; question: string; answer: string; value?: string }[]
+  }
 }
 
 type ErrorPayload = { error?: string; code?: string; safeToRetry?: boolean }
@@ -485,6 +618,13 @@ export class EnsyncHostClient {
     })
   }
 
+  readLocalFile(path: string) {
+    return this.request<{ file: LocalFileDisplay }>('/local-file', {
+      method: 'POST',
+      body: JSON.stringify({ path }),
+    })
+  }
+
   cloneRepository(repositoryUrl: string, destinationPath: string) {
     return this.request<{ project: ProjectInspection; git: GitStatus }>('/git/clone', {
       method: 'POST',
@@ -542,10 +682,15 @@ export class EnsyncHostClient {
     })
   }
 
-  startChatJob(jobId: string, kind: ChatJobKind, request: object) {
-    return this.request<{ job: ChatJobSnapshot }>('/chat/jobs', {
+  startChatJob(
+    jobId: string,
+    kind: ChatJobKind,
+    request: object,
+    navigation?: ChatJobNavigation,
+  ) {
+    return this.request<ChatJobAdmission>('/chat/jobs', {
       method: 'POST',
-      body: JSON.stringify({ jobId, kind, request }),
+      body: JSON.stringify({ jobId, kind, request, navigation }),
     })
   }
 
@@ -559,10 +704,22 @@ export class EnsyncHostClient {
     })
   }
 
-  steerChatJob(jobId: string, prompt: string, attachments: string[] = []) {
+  steerChatJob(jobId: string, prompt: string, idempotencyKey: string, attachments: string[] = []) {
     return this.request<ChatSteerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/steer`, {
       method: 'POST',
-      body: JSON.stringify({ prompt, attachments }),
+      body: JSON.stringify({ prompt, attachments, idempotencyKey }),
+    })
+  }
+
+  /**
+   * Delivers the person's answer to the live provider run that is waiting on it.
+   * A permission answer carries `value`, the provider's own outcome, because a
+   * label alone is not something the provider would accept.
+   */
+  answerChatQuestion(jobId: string, answer: { questionId: string; answers?: { index: number; answer: string; value?: string }[]; cancelled?: boolean }) {
+    return this.request<ChatQuestionAnswerResponse>(`/chat/jobs/${encodeURIComponent(jobId)}/answer`, {
+      method: 'POST',
+      body: JSON.stringify(answer),
     })
   }
 
@@ -643,7 +800,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid retained job event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note' || event.type === 'question' || event.type === 'question_resolved') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result
@@ -717,8 +874,10 @@ export class EnsyncHostClient {
     request: object,
     onEvent: (event: ChatExecutionEvent) => void,
     signal?: AbortSignal,
+    navigation?: ChatJobNavigation,
   ): Promise<ChatRunResponse> {
-    await this.startChatJob(jobId, kind, request)
+    const admission = await this.startChatJob(jobId, kind, request, navigation)
+    if (admission.disposition === 'occupied') throw new ChatJobOccupiedError(admission.owner)
     let cursor = 0
     for (;;) {
       try {
@@ -729,8 +888,7 @@ export class EnsyncHostClient {
       } catch (error) {
         if (signal?.aborted) throw error
         const reconnectable = !(error instanceof EnsyncHostError)
-          || error.code === 'chat_job_stream_disconnected'
-          || (error.code === null && error.status >= 500)
+          || canReattachChatJob(error)
         if (!reconnectable) throw error
         await new Promise<void>((resolve) => setTimeout(resolve, 750))
       }
@@ -786,7 +944,7 @@ export class EnsyncHostClient {
         if (!event || typeof event !== 'object' || typeof event.type !== 'string') {
           throw new EnsyncHostError('Ensync Host returned an invalid execution event.', 502, event)
         }
-        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note') {
+        if (event.type === 'started' || event.type === 'output' || event.type === 'notice' || event.type === 'note' || event.type === 'question' || event.type === 'question_resolved') {
           onEvent(event)
         } else if (event.type === 'completed') {
           result = event.result

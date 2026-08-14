@@ -5,11 +5,13 @@ export type FileAttachment = {
 
 export function normalizeFileAttachments(value: unknown): FileAttachment[]
 export function appendFileAttachments(current: unknown, incoming: unknown): FileAttachment[]
-export function fileDragContainsFiles(types: ArrayLike<string> | Iterable<string> | null | undefined): boolean
-export function droppedFileAttachments(
-  files: ArrayLike<File> | Iterable<File> | null | undefined,
-  pathForFile?: ((file: File) => string) | null,
-): { attachments: FileAttachment[]; unavailable: string[] }
+export function fileDragContainsFiles(value:
+  | ArrayLike<string>
+  | Iterable<string>
+  | Pick<DataTransfer, 'types' | 'items' | 'files'>
+  | null
+  | undefined
+): boolean
 export type ChatAttachmentHostOps = {
   probeAttachmentPaths(paths: string[]): Promise<{ results: { path: string; readable: boolean }[] }>
   storeChatAttachment(name: string, bytes: ArrayBuffer): Promise<{ attachment: { path: string; name: string } }>

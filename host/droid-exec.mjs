@@ -2,6 +2,16 @@ import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { extname } from 'node:path'
 import { commandInvocation } from './command.mjs'
+import {
+  DROID_DECLINE_OUTCOME,
+  ProviderQuestionRegistry,
+  droidAskUserResult,
+  droidPermissionResult,
+  normalizeDroidPermission,
+  normalizeDroidQuestions,
+  providerQuestionEvent,
+  providerQuestionResolvedEvent,
+} from './provider-questions.mjs'
 
 // Pinned per Step 0 verification against the installed Factory Droid CLI
 // (droid 0.190.0, reporting factoryProtocolVersion 1.154.0) driven over
@@ -98,6 +108,23 @@ export function droidRequestEnvelope(id, method, params) {
     method,
     ...(params === undefined ? {} : { params }),
   }
+}
+
+/**
+ * Names the tools a `droid.request_permission` asked Ensync to approve, from
+ * the CLI's own request payload: `params.toolUses[].toolUse.name`. Only the
+ * names are read; tool input can carry command text and secrets, so it never
+ * reaches an Ensync notice or error message.
+ */
+export function droidPermissionToolNames(params) {
+  if (!Array.isArray(params?.toolUses)) return []
+  const names = []
+  for (const entry of params.toolUses) {
+    const name = typeof entry?.toolUse?.name === 'string' ? entry.toolUse.name.trim() : ''
+    if (!name || names.includes(name)) continue
+    names.push(name)
+  }
+  return names
 }
 
 export function droidImagePaths(attachmentPaths = []) {
@@ -208,9 +235,14 @@ class DroidExecSession {
   #usage = null
   #settings = null
   #stderr = ''
+  #declinedPermissionTools = []
+  #declinedPermissions = 0
   #hardTimer = null
   #inactivityTimer = null
   #forceKillTimer = null
+  #inactivityHolds = 0
+  #questionHoldTimer = null
+  #questions
   #resolveDone
   #rejectDone
   #done
@@ -219,8 +251,14 @@ class DroidExecSession {
     this.input = input
     this.onEvent = options.onEvent
     this.signal = options.signal
+    // Questions need a retained job to route the answer back to, so a run
+    // without one keeps the original decline-safely behaviour.
+    this.#questions = options.questionsEnabled === true
+      ? new ProviderQuestionRegistry({ idPrefix: 'droid' })
+      : null
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
+    this.questionHoldTimeoutMs = options.questionHoldTimeoutMs ?? null
     this.hardTimeoutMs = options.hardTimeoutMs ?? DEFAULT_HARD_TIMEOUT_MS
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
@@ -309,14 +347,7 @@ class DroidExecSession {
         throw turnFailure(terminal, droidTurnProvesNoActivity(this.#notifications))
       }
       const response = this.#finalResponse()
-      if (!response) {
-        throw new DroidExecError(
-          'empty_cli_response',
-          'Factory Droid finished without a verifiable final agent response.',
-          502,
-          false,
-        )
-      }
+      if (!response) throw this.#emptyResponseFailure()
       return {
         provider: 'droid',
         projectPath: this.input.projectPath,
@@ -414,6 +445,36 @@ class DroidExecSession {
     return typeof pending === 'string' && pending.trim() ? pending.trim() : null
   }
 
+  /**
+   * Explains a completed turn that carries no answer. Verified against the
+   * droid CLI: a cancelled tool batch breaks the agent loop immediately, and
+   * the exec-mode "insufficient permission" message that would explain it is
+   * only appended in non-interactive CLI mode — never in the stream-jsonrpc
+   * mode this runner drives. Droid then reports `agent_turn_completed` with
+   * reason `completed` and no closing message, so a declined permission
+   * request is the cause of the silence and is reported as such rather than as
+   * an unexplained empty response.
+   */
+  #emptyResponseFailure() {
+    if (this.#declinedPermissions === 0) {
+      return new DroidExecError(
+        'empty_cli_response',
+        'Factory Droid finished without a verifiable final agent response.',
+        502,
+        false,
+      )
+    }
+    const refused = this.#declinedPermissionTools.length > 0
+      ? `run ${this.#declinedPermissionTools.join(', ')}`
+      : 'run a tool'
+    return new DroidExecError(
+      'provider_permission_declined',
+      `Factory Droid asked for approval to ${refused}, which its pinned "${DROID_AUTONOMY_LEVEL}" autonomy level cannot approve on its own, and ended the turn without a closing message once Ensync declined. Ensync could not put that request to a person on this run and never approves one on its own; the Host commits this conversation's branch itself and performs every push and land, so work Droid finished before the request is saved on the branch. Review the branch before retrying.`,
+      409,
+      false,
+    )
+  }
+
   #abort = () => {
     if (this.#settled) return
     if (this.#sessionId) {
@@ -503,6 +564,14 @@ class DroidExecSession {
     }
 
     if (message.type === 'request') {
+      if (message.method === 'droid.ask_user' && this.#questions) {
+        this.#askUser(message)
+        return
+      }
+      if (message.method === 'droid.request_permission' && this.#questions) {
+        this.#requestPermission(message)
+        return
+      }
       this.#declineServerRequest(message)
       return
     }
@@ -512,12 +581,87 @@ class DroidExecSession {
     }
   }
 
-  // Droid asks the client to resolve tool permissions and questionnaires.
-  // Ensync cannot review them safely yet, so it declines with the provider's
-  // own documented outcome values rather than leaving the turn hanging.
-  #declineServerRequest(message) {
+  /**
+   * Puts a `droid.ask_user` questionnaire to the person and answers Droid with
+   * their words. A questionnaire Ensync cannot read is declined with the
+   * documented `{ cancelled: true, answers: [] }` outcome.
+   */
+  #askUser(message) {
+    const normalized = normalizeDroidQuestions(message.params)
+    if (!normalized) {
+      this.#declineServerRequest(message)
+      return
+    }
+    this.#putToPerson(message, normalized.questions, normalized.toolCallId, droidAskUserResult)
+  }
+
+  /**
+   * Puts a `droid.request_permission` to the person as one decision and answers
+   * Droid with the outcome they chose. Droid returns a single `selectedOption`
+   * for the whole request, so the person approves or declines the request as a
+   * whole rather than one tool use at a time.
+   *
+   * A request Ensync cannot describe, or one offering no outcome Ensync is
+   * willing to present, falls back to the decline that was the only behaviour
+   * before this surface existed. Nothing is ever approved without a person.
+   */
+  #requestPermission(message) {
+    const normalized = normalizeDroidPermission(message.params)
+    if (!normalized) {
+      this.#declineServerRequest(message, 'Ensync had no approval it could safely offer for it')
+      return
+    }
+    this.#putToPerson(message, [normalized.question], normalized.toolCallId, droidPermissionResult)
+  }
+
+  /**
+   * The shared block-on-a-person path. The turn is genuinely blocked meanwhile,
+   * so the inactivity watchdog is held: waiting on a human is not a hung CLI. If
+   * the run ends first, the registry resolves the question as cancelled and
+   * Droid still gets the documented declined outcome.
+   */
+  #putToPerson(message, asked, toolCallId, toResult) {
+    const askedAt = new Date().toISOString()
+    const { id, questions, answered } = this.#questions.ask({
+      provider: 'droid',
+      questions: asked,
+      toolCallId,
+      askedAt,
+    })
+    this.onEvent?.(providerQuestionEvent('droid', id, questions, askedAt))
+    this.#holdInactivity()
+    void answered.then((resolution) => {
+      this.#releaseInactivity()
+      this.onEvent?.(providerQuestionResolvedEvent('droid', id, resolution, new Date().toISOString()))
+      this.#respond(message.id, toResult(resolution))
+    })
+  }
+
+  answerQuestion(questionId, input) {
+    if (!this.#questions) return null
+    return this.#questions.answer(questionId, input)
+  }
+
+  pendingQuestions() {
+    return this.#questions ? this.#questions.list() : []
+  }
+
+  // Droid asks the client to resolve tool permissions and questionnaires. Both
+  // reach the person on a run bound to a retained job (see #requestPermission
+  // and #askUser). Everything else — a run with nobody to ask, an unreadable
+  // request, or a method Ensync does not implement — is declined with the
+  // provider's own documented outcome values rather than left hanging.
+  #declineServerRequest(message, because = 'Ensync declined it safely') {
+    let refusedTools = []
     if (message.method === 'droid.request_permission') {
-      this.#respond(message.id, { selectedOption: 'cancel' })
+      this.#respond(message.id, { selectedOption: DROID_DECLINE_OUTCOME })
+      // Recorded because Droid stops the turn silently after a decline, and
+      // that silence is otherwise indistinguishable from a provider fault.
+      refusedTools = droidPermissionToolNames(message.params)
+      this.#declinedPermissions += 1
+      for (const name of refusedTools) {
+        if (!this.#declinedPermissionTools.includes(name)) this.#declinedPermissionTools.push(name)
+      }
     } else if (message.method === 'droid.ask_user') {
       this.#respond(message.id, { cancelled: true, answers: [] })
     } else {
@@ -529,10 +673,16 @@ class DroidExecSession {
         error: { code: -32601, message: 'Unsupported Ensync client request.' },
       })}\n`)
     }
+    const named = refusedTools.length > 0 ? `: ${refusedTools.join(', ')}` : ''
+    // Only a permission decline ends the turn silently, so only it carries the
+    // warning that Droid may stop here without a closing message.
+    const silence = message.method === 'droid.request_permission'
+      ? ' Droid ends the turn after a declined permission, so it may stop here without a closing message.'
+      : ''
     this.onEvent?.({
       type: 'notice',
       code: 'provider_request_declined',
-      message: `Factory Droid requested interactive input (${message.method}); Ensync declined it safely.`,
+      message: `Factory Droid requested interactive input (${message.method}${named}); ${because}.${silence}`,
       at: new Date().toISOString(),
     })
   }
@@ -598,8 +748,40 @@ class DroidExecSession {
     this.#pendingAssistantText = []
   }
 
+  // Counted, not a flag: two things can be waiting on the person at once, and
+  // the first one answered must not restart the watchdog while the second is
+  // still open. The hold is bounded all the same — an unanswered card also
+  // pins this conversation's workspace lease, so every later message in the
+  // same chat waits behind it. Each new card starts the bound over.
+  #holdInactivity() {
+    this.#inactivityHolds += 1
+    if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
+    this.#inactivityTimer = null
+    if (this.#questionHoldTimer) clearTimeout(this.#questionHoldTimer)
+    this.#questionHoldTimer = null
+    if (this.#settled || !Number.isFinite(this.questionHoldTimeoutMs)) return
+    // Deliberately not unref'd: a run waiting on a person is the one state
+    // where the Host must stay awake to end it. run() clears this in its
+    // finally, so it can never outlive the session.
+    this.#questionHoldTimer = setTimeout(() => this.#fail(new DroidExecError(
+      'run_timed_out',
+      'Factory Droid waited for an answer to its question longer than Ensync Host allows one run to hold this conversation’s workspace, and was stopped. Nothing was answered on your behalf. Partial work may exist; send the answer as a message to continue.',
+      504,
+      false,
+    )), this.questionHoldTimeoutMs)
+  }
+
+  #releaseInactivity() {
+    this.#inactivityHolds = Math.max(0, this.#inactivityHolds - 1)
+    if (this.#inactivityHolds === 0 && this.#questionHoldTimer) {
+      clearTimeout(this.#questionHoldTimer)
+      this.#questionHoldTimer = null
+    }
+    this.#touch()
+  }
+
   #touch() {
-    if (this.#settled || !Number.isFinite(this.inactivityTimeoutMs)) return
+    if (this.#settled || this.#inactivityHolds > 0 || !Number.isFinite(this.inactivityTimeoutMs)) return
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
     this.#inactivityTimer = setTimeout(() => this.#fail(new DroidExecError(
       'run_timed_out',
@@ -613,6 +795,7 @@ class DroidExecSession {
   #fail(error) {
     if (this.#settled) return
     this.#settled = true
+    this.#questions?.closeAll()
     this.#rejectDone(error)
     for (const pending of this.#requests.values()) pending.reject(error)
     this.#requests.clear()
@@ -620,8 +803,10 @@ class DroidExecSession {
   }
 
   #finishProcess() {
+    this.#questions?.closeAll()
     clearTimeout(this.#hardTimer)
     if (this.#inactivityTimer) clearTimeout(this.#inactivityTimer)
+    if (this.#questionHoldTimer) clearTimeout(this.#questionHoldTimer)
     this.signal?.removeEventListener('abort', this.#abort)
     if (!this.#child) return
     if (!this.#child.stdin.destroyed) this.#child.stdin.end()
@@ -654,23 +839,65 @@ class DroidExecSession {
 }
 
 export class DroidExecRunner {
+  #sessions = new Map()
   #spawnProcess
   #inactivityTimeoutMs
+  #questionHoldTimeoutMs
   #hardTimeoutMs
 
   constructor(options = {}) {
     this.#spawnProcess = options.spawnProcess ?? spawn
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs
+    this.#questionHoldTimeoutMs = options.questionHoldTimeoutMs
     this.#hardTimeoutMs = options.hardTimeoutMs
   }
 
   async run(input, options = {}) {
     const session = new DroidExecSession(input, {
       ...options,
+      // Only a run bound to a retained job can be answered later, so only that
+      // run is allowed to ask.
+      questionsEnabled: typeof input?.id === 'string' && Boolean(input.id),
       spawnProcess: this.#spawnProcess,
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
+      questionHoldTimeoutMs: this.#questionHoldTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
     })
-    return session.run()
+    if (typeof input?.id !== 'string' || !input.id) return session.run()
+    if (this.#sessions.has(input.id)) {
+      throw new DroidExecError(
+        'chat_job_conflict',
+        'That retained job already owns a Factory Droid session.',
+        409,
+        true,
+      )
+    }
+    this.#sessions.set(input.id, session)
+    try {
+      return await session.run()
+    } finally {
+      this.#sessions.delete(input.id)
+    }
+  }
+
+  hasSession(id) {
+    return this.#sessions.has(id)
+  }
+
+  answerQuestion(id, questionId, input) {
+    const session = this.#sessions.get(id)
+    if (!session) {
+      throw new DroidExecError(
+        'question_not_found',
+        'That retained job has no active Factory Droid session, so the answer was not delivered.',
+        409,
+        false,
+      )
+    }
+    return session.answerQuestion(questionId, input)
+  }
+
+  pendingQuestions(id) {
+    return this.#sessions.get(id)?.pendingQuestions() ?? []
   }
 }

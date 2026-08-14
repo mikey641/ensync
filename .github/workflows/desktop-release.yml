@@ -16,6 +16,9 @@ concurrency:
 jobs:
   preflight:
     runs-on: ubuntu-24.04
+    outputs:
+      channel: ${{ steps.channel.outputs.value }}
+      source_commit: ${{ steps.source.outputs.value }}
     env:
       MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
       MACOS_CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
@@ -30,18 +33,35 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
-      ENSYNC_RELEASE_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
-      GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
+      ENSYNC_RELEASE_GITHUB_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+      ENSYNC_SOURCE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - name: Verify macOS signing, Store identity, and deployment inputs
+      - name: Resolve the exact source commit
+        id: source
+        shell: bash
+        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Resolve release channel from the source tag
+        id: channel
         shell: bash
         run: |
-          visibility=""
-          if test -n "$ENSYNC_RELEASE_REPOSITORY" && test -n "$GH_TOKEN"; then
-            visibility="$(gh api "repos/$ENSYNC_RELEASE_REPOSITORY" --jq '.visibility' 2>/dev/null || true)"
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+            echo "value=beta" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=stable" >> "$GITHUB_OUTPUT"
           fi
-          ENSYNC_RELEASE_REPOSITORY_VISIBILITY="$visibility" node desktop/scripts/release-preflight.mjs
+      - name: Verify the separate binary repository is public
+        env:
+          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          test -n "$ENSYNC_RELEASE_REPOSITORY"
+          test -n "$GH_TOKEN"
+          visibility="$(gh api "repos/$ENSYNC_RELEASE_REPOSITORY" --jq '.visibility')"
+          test "$visibility" = "public"
+          echo "ENSYNC_RELEASE_REPOSITORY_VISIBILITY=$visibility" >> "$GITHUB_ENV"
+      - name: Verify production signing and deployment inputs
+        run: node desktop/scripts/release-preflight.mjs
 
   macos:
     needs: preflight
@@ -52,6 +72,9 @@ jobs:
       ENSYNC_APPLE_ID: ${{ secrets.ENSYNC_APPLE_ID }}
       ENSYNC_APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.ENSYNC_APPLE_APP_SPECIFIC_PASSWORD }}
       ENSYNC_APPLE_TEAM_ID: ${{ secrets.ENSYNC_APPLE_TEAM_ID }}
+      ENSYNC_BUILD_CHANNEL: ${{ needs.preflight.outputs.channel }}
+      ENSYNC_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      ENSYNC_SOURCE_DIRTY: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -67,6 +90,7 @@ jobs:
         shell: bash
         run: npm --prefix desktop version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
       - run: npm run test:host
+      - run: npm run test:release-compatibility
       - name: Build, test, sign when configured, and attest macOS artifacts
         run: npm --prefix desktop run package:mac
       - uses: actions/upload-artifact@v4
@@ -87,6 +111,9 @@ jobs:
       ENSYNC_WINDOWS_STORE_PUBLISHER: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER }}
       ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_PUBLISHER_DISPLAY_NAME }}
       GITHUB_RUN_NUMBER: ${{ github.run_number }}
+      ENSYNC_BUILD_CHANNEL: ${{ needs.preflight.outputs.channel }}
+      ENSYNC_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      ENSYNC_SOURCE_DIRTY: 'false'
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -104,6 +131,7 @@ jobs:
           $version = $env:GITHUB_REF_NAME.TrimStart('v')
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
+      - run: npm run test:release-compatibility
       - name: Build and attest the private Partner Center upload package
         run: npm --prefix desktop run package:win-store
       - uses: actions/upload-artifact@v4
@@ -116,11 +144,12 @@ jobs:
             desktop/release/attestation-windows-store.json
 
   publish:
-    needs: [macos, windows-store]
+    needs: [preflight, macos, windows-store]
     runs-on: ubuntu-24.04
     env:
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
-      ENSYNC_RELEASE_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
+      ENSYNC_RELEASE_CHANNEL: ${{ needs.preflight.outputs.channel }}
+      ENSYNC_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -148,21 +177,47 @@ jobs:
           --tag "${GITHUB_REF_NAME}"
           --repository "${ENSYNC_RELEASE_REPOSITORY}"
           --channel "${ENSYNC_RELEASE_CHANNEL}"
+          --source-commit "${ENSYNC_SOURCE_COMMIT}"
+      - name: Preserve the other channel and retain rollback metadata
+        shell: bash
+        run: |
+          mkdir -p current-feeds
+          for feed in releases.json releases-beta.json; do
+            status="$(curl --silent --show-error --location --output "current-feeds/$feed" --write-out '%{http_code}' "https://ensync.vercel.app/$feed")"
+            if [[ "$status" == "404" ]]; then
+              cp "site/public/$feed" "current-feeds/$feed"
+            elif [[ "$status" != "200" ]]; then
+              echo "Could not preserve production $feed (HTTP $status)." >&2
+              exit 1
+            fi
+          done
+          if [[ "$ENSYNC_RELEASE_CHANNEL" == "beta" ]]; then
+            selected_feed="releases-beta.json"
+            preserved_feed="releases.json"
+          else
+            selected_feed="releases.json"
+            preserved_feed="releases-beta.json"
+          fi
+          node desktop/scripts/stage-release-feed.mjs \
+            --current "current-feeds/$selected_feed" \
+            --candidate "release-assets/$selected_feed" \
+            --output "release-assets/$selected_feed" \
+            --channel "$ENSYNC_RELEASE_CHANNEL"
+          cp "current-feeds/$preserved_feed" "site/public/$preserved_feed"
+          cp "release-assets/$selected_feed" "site/public/$selected_feed"
+          npm --prefix site test
       - name: Create or repair the verified GitHub release
         env:
-          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
+          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+        shell: bash
         run: |
+          release_title="Ensync ${GITHUB_REF_NAME} (${ENSYNC_RELEASE_CHANNEL})"
+          release_notes="Verified ${ENSYNC_RELEASE_CHANNEL} desktop binaries for private source revision ${ENSYNC_SOURCE_COMMIT}."
           if gh release view "${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber --repo "$ENSYNC_RELEASE_REPOSITORY"
-            gh release edit "${GITHUB_REF_NAME}" --title "Ensync ${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY"
+            gh release edit "${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
           else
-            prerelease=()
-            if test "$ENSYNC_RELEASE_CHANNEL" = "beta"; then prerelease=(--prerelease); fi
-            gh release create "${GITHUB_REF_NAME}" release-assets/* \
-              --repo "$ENSYNC_RELEASE_REPOSITORY" \
-              --title "Ensync ${GITHUB_REF_NAME}" \
-              --notes "Verified Ensync macOS artifacts built from private source revision ${GITHUB_SHA}. The Windows Store package remains a private Actions artifact pending Partner Center certification." \
-              "${prerelease[@]}"
+            gh release create "${GITHUB_REF_NAME}" release-assets/* --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
           fi
       - name: Publish the verified manifest to the production download and update feed
         env:
@@ -173,18 +228,5 @@ jobs:
           test -n "$VERCEL_TOKEN"
           test -n "$VERCEL_ORG_ID"
           test -n "$VERCEL_PROJECT_ID"
-          if test "$ENSYNC_RELEASE_MANIFEST" = "releases-beta.json"; then
-            other_manifest="releases.json"
-          else
-            other_manifest="releases-beta.json"
-          fi
-          staging="site/public/$other_manifest.remote"
-          if curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-time 15 --max-filesize 1048576 \
-            "https://ensync.vercel.app/$other_manifest" --output "$staging"; then
-            mv "$staging" "site/public/$other_manifest"
-          else
-            rm -f "$staging"
-          fi
-          cp "release-assets/$ENSYNC_RELEASE_MANIFEST" "site/public/$ENSYNC_RELEASE_MANIFEST"
           npm --prefix site test
           npx --yes vercel@58.7.1 --cwd site --prod --yes --token "$VERCEL_TOKEN"

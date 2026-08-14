@@ -71,7 +71,8 @@ export function chatAutoScrollContentRevision({
   queuedPrompts = [],
   error = null,
 }) {
-  const messageRevision = messages.map((message) => [
+  const visibleActivity = messages.filter((message) => message?.deliveryStatus !== 'transferred')
+  const messageRevision = visibleActivity.map((message) => [
     message?.id ?? '',
     message?.role ?? '',
     message?.deliveryStatus ?? '',
@@ -81,7 +82,7 @@ export function chatAutoScrollContentRevision({
   const latestExecutionEvent = executionEvents.at(-1)
 
   return [
-    `messages=${messages.length}:${messageRevision}`,
+    `messages=${visibleActivity.length}:${messageRevision}`,
     `execution=${executionEvents.length}:${executionEventSignature(latestExecutionEvent)}`,
     `sending=${sending ? 1 : 0}`,
     `queue=${queuedPrompts.length}:${queueRevision}`,
