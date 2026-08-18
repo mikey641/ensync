@@ -519,12 +519,19 @@ export class EnsyncHostError extends Error {
   payload: unknown
   code: string | null
   safeToRetry: boolean
+  /**
+   * True when a retained job delivered this outcome itself, so the job is over.
+   * Such a failure is reported to the person; it is never reattached, however
+   * safe the Host proved the task is to re-send.
+   */
+  terminal: boolean
 
-  constructor(message: string, status: number, payload: unknown) {
+  constructor(message: string, status: number, payload: unknown, terminal = false) {
     super(message)
     this.name = 'EnsyncHostError'
     this.status = status
     this.payload = payload
+    this.terminal = terminal
     this.code =
       typeof payload === 'object'
       && payload !== null
@@ -823,10 +830,10 @@ export class EnsyncHostClient {
             at: event.at,
             sequence: event.sequence,
           })
-          terminalError = new EnsyncHostError(event.error, event.status, event)
+          terminalError = new EnsyncHostError(event.error, event.status, event, true)
         } else if (event.type === 'cancelled') {
           reportCancellation()
-          terminalError = new EnsyncHostError(event.message, event.status, event)
+          terminalError = new EnsyncHostError(event.message, event.status, event, true)
         } else {
           throw new EnsyncHostError('Ensync Host returned an unknown retained job event.', 502, event)
         }
