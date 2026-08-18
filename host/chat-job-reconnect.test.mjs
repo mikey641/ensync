@@ -34,3 +34,18 @@ test('an ambiguous Host response is not reattached, so nothing is replayed blind
     false,
   )
 })
+
+test('a terminal turn outcome is reported instead of reattached, even when the turn is safe to re-send', () => {
+  // The Host proves a provider quota failure touched nothing and marks it
+  // safeToRetry so the *task* may be re-sent. That is not a transport fault:
+  // the job already ended, so reattaching only replays the same ending forever
+  // and pins the conversation to "Working".
+  assert.equal(
+    canReattachChatJob({ code: 'provider_quota', status: 429, safeToRetry: true, terminal: true }),
+    false,
+  )
+  assert.equal(
+    canReattachChatJob({ code: 'run_cancelled', status: 499, safeToRetry: false, terminal: true }),
+    false,
+  )
+})

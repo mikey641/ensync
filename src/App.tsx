@@ -108,6 +108,7 @@ import {
   withProviderRunnerInstructions,
 } from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
+import { retryableFailedTurn } from './lib/failedTurnRetry.mjs'
 import {
   chatRunPreferences,
   effortForModelSize,
@@ -566,6 +567,22 @@ function continuationGit(status: GitStatus | null) {
   } : null
 }
 
+function withChatId(chatId: string) {
+  return (current: ReadonlySet<string>) => {
+    if (current.has(chatId)) return current
+    return new Set(current).add(chatId)
+  }
+}
+
+function withoutChatId(chatId: string) {
+  return (current: ReadonlySet<string>) => {
+    if (!current.has(chatId)) return current
+    const next = new Set(current)
+    next.delete(chatId)
+    return next
+  }
+}
+
 function runNeedsReconciliation(error: unknown) {
   const code = error instanceof EnsyncHostError || error instanceof RemoteSshClientError
     ? error.code
@@ -851,6 +868,10 @@ function App() {
   const drainPromptQueueRef = useRef<(chatId: string) => void>(() => {})
   const [sendingChatIds, setSendingChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [pushingQueuedChatIds, setPushingQueuedChatIds] = useState<ReadonlySet<string>>(() => new Set())
+  // Chats whose last turn failed with a Host proof that it performed no work.
+  // Deliberately not persisted: after a restart Ensync no longer holds that
+  // proof in hand, and it will not invite a re-run it cannot vouch for.
+  const [verifiedRetryableChatIds, setVerifiedRetryableChatIds] = useState<ReadonlySet<string>>(() => new Set())
   const [readCompletionByChat, setReadCompletionByChat] = useState<Record<string, string>>(
     hydrated?.readCompletionByChat ?? {},
   )
@@ -2764,6 +2785,7 @@ function App() {
     const runStartedAt = new Date().toISOString()
     if (completionNotificationSettings.mode === 'ringtone') void primeCompletionNotifications()
     setSendingChatIds(chatRunRegistryRef.current.snapshot())
+    setVerifiedRetryableChatIds(withoutChatId(chatId))
     updateInFlightRun(chatId, () => ({
         turnId,
         provider: provider.id as ChatProviderId,
@@ -3159,6 +3181,9 @@ function App() {
       chatsRef.current = failedChats
       setChats(failedChats)
       updateChatError(chatId, failureMessage)
+      // The same Host proof that authorizes an automatic provider handoff is
+      // what makes a one-click re-run honest: zero observed activity.
+      if (safeFallbackProof(runError)) setVerifiedRetryableChatIds(withChatId(chatId))
     } finally {
       chatRunCancellationRef.current.finish(chatId, runController)
       chatRunRegistryRef.current.finish(chatId)
@@ -3778,6 +3803,25 @@ function App() {
     return () => { disposed = true }
   }, [commitWorkspace, hostJobRecoveryRetry, hostOnline, recoverDetachedRun])
 
+  /**
+   * Re-sends the exact instruction of a turn that failed without running
+   * anything. It becomes a new turn: the failed attempt stays in the
+   * transcript, where the run prompt already marks it context-only, so no
+   * retained Host job ID is reused and nothing is replayed silently.
+   */
+  const handleRetryFailedTurn = (chatId: string) => {
+    const chat = chatsRef.current.find((item) => item.id === chatId)
+    const retry = retryableFailedTurn(chat?.messages ?? [])
+    if (!retry) return
+    setVerifiedRetryableChatIds(withoutChatId(chatId))
+    draftsRef.current = { ...draftsRef.current, [chatId]: retry.prompt }
+    setDrafts(draftsRef.current)
+    draftAttachmentsRef.current = { ...draftAttachmentsRef.current, [chatId]: retry.attachments }
+    setDraftAttachments(draftAttachmentsRef.current)
+    updateChatError(chatId, null)
+    void handleSend(chatId)
+  }
+
   const handleResumeQueue = (chatId: string) => {
     updatePromptQueues(approveNextQueuedPrompt(promptQueuesRef.current, chatId, new Date().toISOString()))
     setChatErrors((current) => ({ ...current, [chatId]: null }))
@@ -4030,6 +4074,7 @@ function App() {
                 occupiedRun={occupied ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
                 error={chatErrors[chat.id] ?? null}
+                retryVerified={verifiedRetryableChatIds.has(chat.id)}
                 providerMenuOpen={providerMenuChatId === chat.id}
                 modelMenuOpen={modelMenuChatId === chat.id}
                 autoFallback={autoFallback}
@@ -4048,6 +4093,7 @@ function App() {
                 onSend={() => handleSend(chat.id)}
                 onStop={() => handleStop(chat.id)}
                 onResumeQueue={() => handleResumeQueue(chat.id)}
+                onRetryFailedTurn={() => handleRetryFailedTurn(chat.id)}
                 onViewOccupiedRun={() => void handleViewOccupiedRun(chat.id)}
                 onPushQueuedNow={() => occupied
                   ? void handleTransferToOccupiedRun(chat.id, false)
@@ -4179,6 +4225,7 @@ function ConversationPane({
   occupiedRun,
   queuedPrompts,
   error,
+  retryVerified,
   providerMenuOpen,
   modelMenuOpen,
   autoFallback,
@@ -4194,6 +4241,7 @@ function ConversationPane({
   onSend,
   onStop,
   onResumeQueue,
+  onRetryFailedTurn,
   onViewOccupiedRun,
   onPushQueuedNow,
   onStopAndSendNow,
@@ -4240,6 +4288,7 @@ function ConversationPane({
   occupiedRun: OccupiedRuns[string] | null
   queuedPrompts: QueuedPrompt[]
   error: string | null
+  retryVerified: boolean
   providerMenuOpen: boolean
   modelMenuOpen: boolean
   autoFallback: boolean
@@ -4255,6 +4304,7 @@ function ConversationPane({
   onSend: () => void
   onStop: () => void
   onResumeQueue: () => void
+  onRetryFailedTurn: () => void
   onViewOccupiedRun: () => void
   onPushQueuedNow: () => void
   onStopAndSendNow: () => void
@@ -4286,6 +4336,13 @@ function ConversationPane({
   const modelMenuStyle = useFloatingMenuPosition(modelMenuOpen, modelButtonRef)
   const elapsedWorkingLabel = useWorkingElapsedLabel(sending, runStartedAt)
   const occupiedElapsedLabel = useWorkingElapsedLabel(Boolean(occupiedRun), occupiedRun?.startedAt ?? null)
+  // Offered only while Ensync still holds the Host's proof that this attempt
+  // ran nothing, so a re-run can never duplicate half-applied project work.
+  // Retrying restores the failed instruction into the composer, so it stays out
+  // of the way of anything already written there.
+  const retryableTurn = !sending && retryVerified && !draft.trim() && attachments.length === 0
+    ? retryableFailedTurn(chat.messages)
+    : null
   const canRunSelectedProvider = provider.connected && supportsChat(provider)
   const canRunFallback = autoFallback
     && chat.providerMode === 'fixed'
@@ -4593,7 +4650,18 @@ function ConversationPane({
               <span>Stopped. Partial project changes may exist; review them before retrying.</span>
             </div>
           )}
-          {error && <div className="chat-run-error" role="alert"><CircleHelp size={15} /><span>{error}</span></div>}
+          {error && <div className="chat-run-error" role="alert">
+            <CircleHelp size={15} />
+            <span>{error}</span>
+            {retryableTurn && (
+              <button
+                type="button"
+                className="chat-run-error__retry"
+                onClick={onRetryFailedTurn}
+                title={`Ensync verified this attempt changed nothing. Send the same instruction to ${provider.name} again as a new turn.`}
+              ><RotateCw size={12} /> Retry</button>
+            )}
+          </div>}
           </div>
         </div>
         {pendingLatest && (

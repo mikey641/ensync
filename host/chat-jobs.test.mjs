@@ -231,7 +231,7 @@ test('turn navigation stays live-only and is returned only for an occupied job r
   await waitFor(() => service.get(JOB_A).state === 'completed')
 })
 
-test('runChatJob serializes its optional navigation beside the provider request', async () => {
+async function loadRelayHostModule() {
   const typescript = await import('typescript')
   const relayHostPath = new URL('../src/lib/relayHost.ts', import.meta.url)
   const source = await readFile(relayHostPath, 'utf8')
@@ -247,7 +247,11 @@ test('runChatJob serializes its optional navigation beside the provider request'
       new URL(dependency, new URL('../src/lib/', import.meta.url)).href,
     )
   }
-  const relayHost = await import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`)
+  return import(`data:text/javascript;base64,${Buffer.from(javascript).toString('base64')}`)
+}
+
+test('runChatJob serializes its optional navigation beside the provider request', async () => {
+  const relayHost = await loadRelayHostModule()
   const originalFetch = globalThis.fetch
   let submitted
   globalThis.fetch = async (_url, init) => {
@@ -284,6 +288,62 @@ test('runChatJob serializes its optional navigation beside the provider request'
       request: { prompt: 'provider-only' },
       navigation,
     })
+  } finally {
+    globalThis.fetch = originalFetch
+  }
+})
+
+test('a verified quota failure ends the turn instead of reattaching the finished job forever', async () => {
+  const relayHost = await loadRelayHostModule()
+  const originalFetch = globalThis.fetch
+  const failure = {
+    type: 'error',
+    error: 'Claude Code reported a quota, rate-limit, or capacity failure before any tool activity.',
+    code: 'provider_quota',
+    status: 429,
+    safeToRetry: true,
+    at: '2026-08-07T10:03:12.000Z',
+    sequence: 2,
+  }
+  let streamAttempts = 0
+  globalThis.fetch = async (url) => {
+    const target = String(url)
+    if (target.endsWith('/chat/jobs')) {
+      return new Response(JSON.stringify({ disposition: 'started', job: { id: JOB_A, state: 'running' } }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      })
+    }
+    if (!target.includes('/stream')) throw new Error(`Unexpected Host request: ${target}`)
+    streamAttempts += 1
+    if (streamAttempts === 1) {
+      return new Response(`${JSON.stringify(failure)}\n`, {
+        status: 200,
+        headers: { 'Content-Type': 'application/x-ndjson' },
+      })
+    }
+    // Only a wedged client asks again. Refuse in a way it cannot loop on, so
+    // the reattach bug fails this test instead of hanging it.
+    return new Response(
+      JSON.stringify({ error: 'That chat job is no longer available.', code: 'chat_job_not_found' }),
+      { status: 404, headers: { 'Content-Type': 'application/json' } },
+    )
+  }
+  try {
+    const client = new relayHost.EnsyncHostClient('http://host.test/api')
+    const events = []
+    await assert.rejects(
+      client.runChatJob(JOB_A, 'local', { provider: 'claude', prompt: 'continue' }, (event) => events.push(event)),
+      (error) => error instanceof relayHost.EnsyncHostError
+        && error.code === 'provider_quota'
+        && error.safeToRetry === true
+        && error.terminal === true,
+    )
+    assert.equal(streamAttempts, 1)
+    assert.deepEqual(
+      events.map((event) => [event.type, event.outcome, event.code]),
+      [['finished', 'failed', 'provider_quota']],
+    )
   } finally {
     globalThis.fetch = originalFetch
   }
