@@ -893,7 +893,7 @@ function claudeEventsProveNoActivity(events) {
   })
 }
 
-function claudeStartupFailureIsSafe(stdout, stderr, outputTruncated) {
+export function claudeStartupFailureIsSafe(stdout, stderr, outputTruncated) {
   if (outputTruncated === true || (typeof stderr === 'string' && stderr.trim())) return false
   const events = structuredEvents(stdout)
   if (!events) return false

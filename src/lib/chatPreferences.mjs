@@ -1,17 +1,8 @@
-export const MODEL_SIZE_EFFORT = Object.freeze({
-  small: 'low',
-  medium: 'medium',
-  large: 'high',
-  xl: 'max',
-})
+import { effortForModelSize } from '../../host/model-size-effort.mjs'
 
-export function effortForModelSize(sizeTier) {
-  return MODEL_SIZE_EFFORT[sizeTier] ?? null
-}
-
-export function sizeForModelEffort(effort) {
-  return Object.entries(MODEL_SIZE_EFFORT).find(([, candidate]) => candidate === effort)?.[0] ?? null
-}
+// The size-tier table itself lives in host/model-size-effort.mjs so the daemon's
+// connector API can request the same effort an Ensync conversation would.
+export { MODEL_SIZE_EFFORT, effortForModelSize, sizeForModelEffort } from '../../host/model-size-effort.mjs'
 
 export function chatRunPreferences(chat, automaticFallback) {
   return {

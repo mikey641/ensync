@@ -102,6 +102,7 @@ import {
 } from './lib/automaticRouting.mjs'
 import {
   resolveFallbackProviderOrder,
+  writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
 import {
@@ -810,6 +811,12 @@ function App() {
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
     resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
+  // The ranking is one device-wide choice, so it is written the moment it
+  // changes rather than at the next workspace snapshot: another window, and the
+  // Host's connector API, must not keep routing by the previous order.
+  const updateFallbackProviderOrder = useCallback((next: ProviderId[]) => {
+    setFallbackProviderOrder(writeStoredFallbackProviderOrder(window.localStorage, next))
+  }, [])
   const [search, setSearch] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>(hydrated?.drafts ?? {})
   const [draftAttachments, setDraftAttachments] = useState<Record<string, FileAttachment[]>>(() =>
@@ -1965,6 +1972,18 @@ function App() {
     occupiedShellReachabilityRef.current = {}
     setOccupiedShellReachability({})
   }, [hostOnline])
+
+  // Mirror the Automatic ranking to the Host whenever it changes or the Host
+  // reappears. Agents that run outside this window read the ranking from there,
+  // so a ranking that only ever lived in this renderer would route them by the
+  // shipped default instead of the choice the person actually made.
+  useEffect(() => {
+    if (!hostOnline) return
+    void ensyncHost.saveConnectorRouting(fallbackProviderOrder).catch(() => {
+      // Routing outside the app is a convenience: a Host that refuses the mirror
+      // must never interrupt the conversation the person is having in it.
+    })
+  }, [fallbackProviderOrder, hostOnline])
 
   useEffect(() => {
     if (!hostOnline) return
@@ -4175,7 +4194,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={setFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}

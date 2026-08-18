@@ -87,6 +87,13 @@
         "to": "desktop-host-bootstrap.mjs"
       },
       {
+        "from": "../bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "build/generated/build-info.json",
         "to": "build-info.json"
       }
