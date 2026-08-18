@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
+import { AgentConnectorError, AgentConnectorService } from './agent-connector.mjs'
 import {
   ChatAttachmentStore,
   MAX_STORED_ATTACHMENT_BYTES,
@@ -251,6 +252,10 @@ export function createEnsyncHost(options = {}) {
     baseUrl: options.accountSyncServiceUrl ?? process.env.ENSYNC_SYNC_SERVICE_URL ?? null,
   })
   const statuses = options.statusService ?? new ProviderStatusService()
+  const agentConnector = options.agentConnectorService ?? new AgentConnectorService({
+    statusService: statuses,
+    preferencesPath: options.connectorPreferencesPath,
+  })
   const terminalLauncher = options.terminalLauncher ?? launchTerminalCommand
   const automaticUpdateLaunches = new Map()
   const providerUpdateLaunches = new Map()
@@ -364,6 +369,30 @@ export function createEnsyncHost(options = {}) {
         }, origin)
       }
 
+      // Connector reads sit above the native-shell lease gate on purpose: an
+      // outside agent (a watchdog, a chat bot, a cron repair) has no window and
+      // can hold no lease, and asking "where would Auto send this turn?" changes
+      // nothing on this machine. Writing the ranking still requires the lease
+      // below, so only the app can reorder routing.
+      if (request.method === 'GET' && url.pathname === '/api/agent-connector/preferences') {
+        return sendJson(response, 200, await agentConnector.preferences(), origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/agent-connector/plan') {
+        const attempted = (url.searchParams.get('attempted') ?? '')
+          .split(',')
+          .map((value) => value.trim())
+          .filter(Boolean)
+        const plan = await agentConnector.plan({
+          refresh: refreshRequested(url),
+          attempted,
+          toolLevel: url.searchParams.get('tools') ?? 'workspace-write',
+          sizeTier: url.searchParams.get('size'),
+          cwd: url.searchParams.get('cwd'),
+        })
+        return sendJson(response, 200, plan, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/daemon/claim' && daemonLeases) {
         const body = await readJsonBody(request)
         return sendJson(response, 200, { lease: daemonLeases.claim(body.ownerId) }, origin)
@@ -413,6 +442,15 @@ export function createEnsyncHost(options = {}) {
       if (request.method === 'PUT' && url.pathname === '/api/account-sync/workspace') {
         const body = await readJsonBody(request, MAX_SYNC_BODY_BYTES)
         return sendJson(response, 200, await accountSync.push(body.state, body.baseRevision), origin)
+      }
+
+      // The ranking a person chose in Settings lives in the renderer's
+      // device-wide store, which a headless daemon cannot read. The app mirrors
+      // it here on every change so a bot routed by this Host follows the same
+      // order even while no window is open.
+      if (request.method === 'PUT' && url.pathname === '/api/agent-connector/preferences') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await agentConnector.savePreferences(body.order), origin)
       }
 
       if (request.method === 'GET' && url.pathname === '/api/providers') {
@@ -952,6 +990,12 @@ export function createEnsyncHost(options = {}) {
         }, origin)
       }
       if (error instanceof DaemonLeaseError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
+      if (error instanceof AgentConnectorError) {
         return sendJson(response, error.status, {
           error: error.message,
           code: error.code,

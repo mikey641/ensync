@@ -113,6 +113,16 @@ export type ProviderStatusesResponse = {
   checkedAt: string
 }
 
+/** What the Host reports back after mirroring the Automatic ranking. */
+export type ConnectorRoutingPreferences = {
+  apiVersion: number
+  order: string[]
+  source: 'device' | 'default'
+  updatedAt: string | null
+  toolLevels: string[]
+  sizeTiers: string[]
+}
+
 export type UsageStatus = Pick<
   CliProviderStatus,
   'id' | 'name' | 'installed' | 'connectionState'
@@ -588,6 +598,20 @@ export class EnsyncHostClient {
 
   providers(refresh = false) {
     return this.request<ProviderStatusesResponse>(`/providers${refresh ? '?refresh=1' : ''}`)
+  }
+
+  /**
+   * Mirrors the device-wide Automatic ranking to the Host so agents that run
+   * outside this window — a watchdog, a bot, a cron repair — route through the
+   * same priority. The daemon cannot read the renderer's local store.
+   */
+  // Takes the whole ranking as the renderer holds it; the Host normalizes it to
+  // the automatic allowlist, so a list carrying a non-routable ID is not an error.
+  saveConnectorRouting(order: readonly CliProviderId[]) {
+    return this.request<ConnectorRoutingPreferences>('/agent-connector/preferences', {
+      method: 'PUT',
+      body: JSON.stringify({ order }),
+    })
   }
 
   provider(id: CliProviderId, refresh = false) {

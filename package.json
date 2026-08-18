@@ -36,5 +36,8 @@
     "eslint-plugin-react-refresh": "latest",
     "globals": "latest",
     "typescript-eslint": "latest"
+  },
+  "bin": {
+    "ensync-agent": "bin/ensync-agent.mjs"
   }
 }
