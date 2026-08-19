@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { lstat, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { inspectProject } from './projects.mjs'
 import { validateProjectPath } from './chat.mjs'
@@ -93,7 +94,7 @@ function gitReason(stderr) {
  * message already states what Git reported pass `includeGitReason: false` so
  * the plumbing wording is not repeated back to the user.
  */
-function gitFailureMessage(stderr, curated, includeGitReason = true) {
+export function gitFailureMessage(stderr, curated, includeGitReason = true) {
   const reason = gitReason(stderr)
   if (!curated) return reason || 'Git could not complete the operation.'
   if (!includeGitReason || !reason) return curated
@@ -379,6 +380,124 @@ async function gitRepositoryRoot(projectPath, options = {}) {
       status: 403,
     })
   }
+}
+
+// Only used when Git has no identity of its own to commit with, so a project
+// folder without a configured user still gets its first commit.
+const ENSYNC_BASELINE_IDENTITY = {
+  GIT_AUTHOR_NAME: 'Ensync',
+  GIT_AUTHOR_EMAIL: 'baseline@ensync.local',
+  GIT_COMMITTER_NAME: 'Ensync',
+  GIT_COMMITTER_EMAIL: 'baseline@ensync.local',
+}
+
+// The two checked Git runners in this Host take a curated failure message under
+// different names, so a step usable by both supplies each of them.
+function baselineFailure(code, message) {
+  return { code, message, failureMessage: message, includeGitReason: false }
+}
+
+async function baselineCommitIdentity(cwd, run) {
+  const [name, email] = await Promise.all([
+    run(['config', '--get', 'user.name'], { cwd, allowFailure: true }),
+    run(['config', '--get', 'user.email'], { cwd, allowFailure: true }),
+  ])
+  const configured = name.exitCode === 0 && name.stdout.trim() && email.exitCode === 0 && email.stdout.trim()
+  return configured ? undefined : ENSYNC_BASELINE_IDENTITY
+}
+
+/**
+ * A home directory holds everything a person owns, so it is never the folder
+ * Ensync turns into one project repository. An existing repository there is
+ * still used as it is; only creating one is refused.
+ */
+export async function isHomeDirectory(directory, homePath) {
+  const home = await realpath(homePath ?? homedir()).catch(() => null)
+  return Boolean(home) && resolve(directory) === resolve(home)
+}
+
+/**
+ * Give a project folder the repository and first commit that isolated agent
+ * work needs, and do nothing when it already has them. `run` is the caller's
+ * checked Git runner, so this is equally usable from the Host Git service and
+ * from project isolation with its injected runner.
+ *
+ * A folder already inside a repository is left alone: Ensync never nests a new
+ * repository inside an existing working tree. When the surrounding repository
+ * has no commit yet, the baseline commit is made at its root rather than at the
+ * project subdirectory, so a partial tree is never committed into it.
+ */
+export async function ensureGitRepositoryBaseline(directory, run, options = {}) {
+  const existing = await run(['rev-parse', '--show-toplevel'], { cwd: directory, allowFailure: true })
+  const initialized = existing.exitCode !== 0
+  if (initialized) {
+    if (await isHomeDirectory(directory, options.homePath)) {
+      return { initialized: false, baselineCommitted: false, repositoryPath: null, refused: 'home_directory' }
+    }
+    await run(
+      ['init', '--initial-branch=main'],
+      {
+        cwd: directory,
+        ...baselineFailure('git_init_failed', 'Git could not create a repository in this project folder.'),
+      },
+    )
+  }
+
+  const located = initialized
+    ? await run(['rev-parse', '--show-toplevel'], {
+        cwd: directory,
+        ...baselineFailure('git_init_failed', 'Git created a repository that it could not then read back.'),
+      })
+    : existing
+  // Git answers with the working-tree root; the project folder is inside it either way.
+  const repositoryPath = located.stdout.trim() || directory
+
+  const head = await run(['rev-parse', '--verify', 'HEAD'], { cwd: repositoryPath, allowFailure: true })
+  const baselineCommitted = head.exitCode !== 0
+  if (baselineCommitted) {
+    const env = await baselineCommitIdentity(repositoryPath, run)
+    await run(['add', '-A', '--', '.'], {
+      cwd: repositoryPath,
+      env,
+      ...baselineFailure('git_baseline_commit_failed', 'Git could not stage this project for its first commit.'),
+    })
+    await run(
+      ['-c', 'commit.gpgsign=false', 'commit', '--no-verify', '--allow-empty', '-m', 'Initial commit'],
+      {
+        cwd: repositoryPath,
+        env,
+        ...baselineFailure('git_baseline_commit_failed', 'Git could not create the first commit for this project.'),
+      },
+    )
+  }
+
+  return { initialized, baselineCommitted, repositoryPath, refused: null }
+}
+
+/**
+ * Creates the repository for a focused project that is not inside one yet, then
+ * reports the real status of the result. Idempotent: a project that already has
+ * a repository and a commit is only inspected.
+ */
+export async function initializeGitRepository(projectPath, options = {}) {
+  const cwd = await validateProjectPath(projectPath, { allowedRoots: options.allowedRoots })
+  const outcome = await ensureGitRepositoryBaseline(
+    cwd,
+    (args, runOptions) => checkedGit(args, {
+      ...runOptions,
+      gitExecutable: options.gitExecutable,
+      timeoutMs: options.initTimeoutMs ?? 120_000,
+    }),
+    { homePath: options.homePath },
+  )
+  if (outcome.refused === 'home_directory') {
+    throw new GitWorkflowError(
+      'A home directory is too broad to become one Ensync project repository. Open the specific project folder instead.',
+      { code: 'unsafe_git_init_location', status: 400 },
+    )
+  }
+  const git = await getGitStatus(cwd, options)
+  return { initialized: outcome.initialized, baselineCommitted: outcome.baselineCommitted, git }
 }
 
 async function remoteDefaultBranch(repositoryPath, remote, options = {}) {
@@ -813,6 +932,10 @@ export class GitWorkflowService {
 
   status(projectPath) {
     return getGitStatus(projectPath, this.options())
+  }
+
+  initialize(projectPath) {
+    return initializeGitRepository(projectPath, this.options())
   }
 
   clone(input) {

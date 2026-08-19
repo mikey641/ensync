@@ -261,6 +261,8 @@ export function createEnsyncHost(options = {}) {
   const providerUpdateLaunches = new Map()
   const projectIsolation = options.projectIsolationService ?? new ProjectIsolationService({
     rootPath: options.projectIsolationRoot,
+    autoInitializeGit: options.autoInitializeGitRepositories
+      ?? process.env.ENSYNC_AUTO_INIT_GIT !== '0',
   })
   const workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? new WorkspaceOverlapMonitor()
   const chatImages = options.chatImageService ?? new ChatImageService({
@@ -499,6 +501,12 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const status = await git.status(body.projectPath)
         return sendJson(response, 200, { git: status }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/git/init') {
+        const body = await readJsonBody(request)
+        const result = await git.initialize(body.projectPath)
+        return sendJson(response, 200, result, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/git/verify-remote') {

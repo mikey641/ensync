@@ -25,6 +25,12 @@ Before a provider starts and immediately before a land, Ensync also checks compl
 
 All local explicit and automatic land operations serialize through one renewable repository-scoped lease in Git's common directory. After entering that queue, the land operation freshly rechecks the checkout, branch, overlaps, merge conflicts, and repository land gate. File overlap stays advisory; dirty shared state, Git conflicts, and semantic verification failures continue to fail closed. Automatic landing is on by default and can be disabled host-wide with `ENSYNC_AUTO_LAND=0` (or the `autoLandAgentWork` host option). It is also a user preference: the renderer's Automatic landing settings toggle (on by default, persisted with the workspace snapshot) travels with each local run request as its optional boolean `autoLand` field, and `autoLand: false` keeps that run's branch unlanded for explicit review. Because the shared Host daemon outlives any one window, the preference is carried per request rather than stored host-side; a request can opt out of landing but never re-enable it when the host-wide switch has it off.
 
+## Repository creation
+
+Ensync isolates every local agent run in a Git worktree, so a focused project that is not inside a repository cannot host one. Rather than refusing that project, Ensync Host creates what the run needs: `git init --initial-branch=main` in the project folder, then one `Initial commit` holding the files already in it. A folder that is already inside a repository is never re-initialized; a repository that exists with no commit gets only the missing first commit, made at that repository's own root so a partial tree is never committed into it. The commit uses the computer's configured Git identity and falls back to an Ensync identity only when Git has none. Nothing is pushed.
+
+Creation runs automatically before local isolation, and the Git panel also offers it explicitly whenever status reports the focused project outside a repository. A host can keep the previous fail-closed behavior with `ENSYNC_AUTO_INIT_GIT=0` (or the `autoInitializeGitRepositories` host option); a non-Git project then refuses local agent execution with an explanation instead. A home directory is always refused as too broad to become one project repository, and remote SSH execution still requires a repository that already exists on the remote.
+
 ## Repository import
 
 - Import requires an allowlisted HTTP, HTTPS, SSH, or Git-protocol URL, a strict `user@host:path` SSH location, or an absolute local repository path.

@@ -239,6 +239,7 @@
   white-space: nowrap;
 }
 
+.git-initialize-panel,
 .git-unlanded-panel,
 .git-connection-panel,
 .git-push-panel {
@@ -494,4 +495,12 @@
   .git-footer-note {
     width: 100%;
   }
+}
+
+.git-initialize-panel .git-section-heading {
+  margin: 0;
+}
+
+.git-initialize-panel > .button {
+  align-self: flex-start;
 }

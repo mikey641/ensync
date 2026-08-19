@@ -670,6 +670,14 @@ export class EnsyncHostClient {
     })
   }
 
+  /** Creates the repository (and its first commit) a project needs before an agent can run. */
+  initializeGitRepository(projectPath: string) {
+    return this.request<{ initialized: boolean; baselineCommitted: boolean; git: GitStatus }>('/git/init', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath }),
+    })
+  }
+
   verifyGitRemote(projectPath: string, remote: string) {
     return this.request<{ connection: GitConnection }>('/git/verify-remote', {
       method: 'POST',

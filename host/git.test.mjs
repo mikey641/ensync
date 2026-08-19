@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -9,6 +9,7 @@ import {
   cloneGitRepository,
   getGitStatus,
   GitWorkflowError,
+  initializeGitRepository,
   landAgentBranch,
   listUnlandedAgentWork,
   pushGit,
@@ -532,4 +533,70 @@ test('a failed push leads with the explanation and keeps the reason Git reported
     `expected the explanation to lead, got: ${error.message}`,
   )
   assert.match(error.message, /reject|fast-forward|fetch first/i)
+})
+
+test('initializing a plain project folder creates a repository whose baseline commit holds the existing files', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+  const plain = join(fixture.root, 'plain-project')
+  await mkdir(plain)
+  await writeFile(join(plain, 'notes.md'), '# Notes\n')
+
+  const created = await initializeGitRepository(plain, { allowedRoots: [fixture.root] })
+
+  assert.equal(created.initialized, true)
+  assert.equal(created.baselineCommitted, true)
+  assert.equal(created.git.repositoryPath, await realpath(plain))
+  assert.equal(created.git.branch, 'main')
+  assert.equal(created.git.dirty, false)
+  assert.equal((await git(['ls-files'], { cwd: plain })).stdout.trim(), 'notes.md')
+
+  // Initializing an already-initialized project changes nothing.
+  const again = await initializeGitRepository(plain, { allowedRoots: [fixture.root] })
+  assert.equal(again.initialized, false)
+  assert.equal(again.baselineCommitted, false)
+  assert.equal((await git(['rev-list', '--count', 'HEAD'], { cwd: plain })).stdout.trim(), '1')
+})
+
+test('a repository that has no commit yet gets the baseline commit isolated work needs', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+  const unborn = join(fixture.root, 'unborn')
+  await mkdir(unborn)
+  await git(['init', '--initial-branch=main'], { cwd: unborn })
+  await writeFile(join(unborn, 'app.txt'), 'hello\n')
+
+  const result = await initializeGitRepository(unborn, { allowedRoots: [fixture.root] })
+
+  assert.equal(result.initialized, false)
+  assert.equal(result.baselineCommitted, true)
+  assert.equal((await git(['show', 'HEAD:app.txt'], { cwd: unborn })).stdout.trim(), 'hello')
+})
+
+test('a folder inside an existing repository is never turned into a nested repository', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+  const nested = join(fixture.seed, 'packages', 'app')
+  await mkdir(nested, { recursive: true })
+
+  const result = await initializeGitRepository(nested, { allowedRoots: [fixture.root] })
+
+  assert.equal(result.initialized, false)
+  assert.equal(result.baselineCommitted, false)
+  assert.equal(result.git.repositoryPath, await realpath(fixture.seed))
+  await assert.rejects(stat(join(nested, '.git')), { code: 'ENOENT' })
+})
+
+test('the home directory is refused as a project to initialize', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+
+  const error = await initializeGitRepository(fixture.root, {
+    allowedRoots: [fixture.root],
+    homePath: fixture.root,
+  }).then(() => null, (thrown) => thrown)
+
+  assert.ok(error instanceof GitWorkflowError)
+  assert.equal(error.code, 'unsafe_git_init_location')
+  await assert.rejects(stat(join(fixture.root, '.git')), { code: 'ENOENT' })
 })
