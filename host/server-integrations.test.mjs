@@ -464,6 +464,33 @@ test('git unlanded and land routes delegate to the git workflow service', async 
   assert.deepEqual(calls.map(([name]) => name), ['unlanded', 'land'])
 })
 
+test('the git init route delegates to the git workflow service', async (context) => {
+  const calls = []
+  const fakeGit = {
+    initialize: async (projectPath) => {
+      calls.push(projectPath)
+      return {
+        initialized: true,
+        baselineCommitted: true,
+        git: { repositoryPath: projectPath, branch: 'main', dirty: false },
+      }
+    },
+  }
+  const baseUrl = await withHost(context, { gitService: fakeGit })
+
+  const response = await fetch(`${baseUrl}/api/git/init`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: '/tmp/project' }),
+  })
+
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.initialized, true)
+  assert.equal(body.git.branch, 'main')
+  assert.deepEqual(calls, ['/tmp/project'])
+})
+
 test('VirtualBox routes expose real service results and partial recovery errors', async (context) => {
   const virtualBoxService = {
     status: async () => ({ installed: false, executable: null, version: null }),

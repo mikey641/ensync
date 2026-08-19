@@ -522,15 +522,51 @@ test('a lease released while its heartbeat is writing leaves no lock behind', as
   }
 })
 
-test('non-Git projects fail closed before provider execution', async (context) => {
+test('a project folder outside Git is given a repository so isolated work can start', async (context) => {
   const root = await mkdtemp(join(tmpdir(), 'ensync-non-git-'))
   context.after(() => rm(root, { recursive: true, force: true }))
+  const project = join(root, 'project')
+  await mkdir(project)
+  await writeFile(join(project, 'notes.md'), 'baseline\n')
   const isolation = new ProjectIsolationService({ rootPath: join(root, 'workspaces') })
 
-  await assert.rejects(
-    isolation.acquire(root, 'window-a:chat-a'),
-    (error) => error instanceof ProjectIsolationError && error.code === 'project_isolation_required',
-  )
+  const lease = await isolation.acquire(project, 'window-a:chat-a')
+  context.after(() => lease.release())
+
+  assert.equal(await git(project, ['rev-parse', '--abbrev-ref', 'HEAD']), 'main')
+  assert.equal(await git(project, ['show', 'HEAD:notes.md']), 'baseline')
+  // The protected worktree carries the project the person opened.
+  assert.equal(await readFile(join(lease.workspace.projectPath, 'notes.md'), 'utf8'), 'baseline\n')
+})
+
+test('a host with automatic repository creation off still fails closed without Git plumbing text', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-non-git-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const isolation = new ProjectIsolationService({
+    rootPath: join(root, 'workspaces'),
+    autoInitializeGit: false,
+  })
+
+  const error = await isolation.acquire(root, 'window-a:chat-a').then(() => null, (thrown) => thrown)
+
+  assert.ok(error instanceof ProjectIsolationError)
+  assert.equal(error.code, 'project_isolation_required')
+  assert.doesNotMatch(error.message, /fatal:/i)
+  assert.doesNotMatch(error.message, /any of the parent directories/i)
+  await assert.rejects(stat(join(root, '.git')), { code: 'ENOENT' })
+})
+
+test('a home directory is never turned into one Ensync project repository', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-home-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const isolation = new ProjectIsolationService({ rootPath: join(root, 'workspaces'), homePath: root })
+
+  const error = await isolation.acquire(root, 'window-a:chat-a').then(() => null, (thrown) => thrown)
+
+  assert.ok(error instanceof ProjectIsolationError)
+  assert.equal(error.code, 'project_isolation_required')
+  assert.match(error.message, /home directory/i)
+  await assert.rejects(stat(join(root, '.git')), { code: 'ENOENT' })
 })
 
 test('a stale renderer without a conversation key gets an actionable restart error', async (context) => {

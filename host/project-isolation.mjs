@@ -3,13 +3,21 @@ import { chmod, mkdir, mkdtemp, readdir, readFile, realpath, rename, rm, stat, w
 import { homedir } from 'node:os'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
 
-import { runGit, validateRepositoryLocation } from './git.mjs'
+import {
+  ensureGitRepositoryBaseline,
+  gitFailureMessage,
+  runGit,
+  validateRepositoryLocation,
+} from './git.mjs'
 
 const DEFAULT_LOCK_POLL_MS = 250
 const DEFAULT_LOCK_STALE_MS = 30_000
 const DEFAULT_HEARTBEAT_MS = 5_000
 const DEFAULT_BASE_FETCH_TTL_MS = 60_000
 const DEFAULT_FETCH_TIMEOUT_MS = 120_000
+// A first commit walks the whole project, which can outlast an ordinary
+// plumbing call on a large folder.
+const BASELINE_TIMEOUT_MS = 120_000
 const PREFERRED_CANONICAL_REMOTE = 'origin'
 const CANONICAL_BRANCH_FALLBACKS = ['main', 'master']
 const MAX_WORKSPACE_KEY_CHARACTERS = 512
@@ -219,6 +227,8 @@ export class ProjectIsolationService {
   #rootPath
   #gitExecutable
   #gitRunner
+  #autoInitializeGit
+  #homePath
   #lockPollMs
   #lockStaleMs
   #heartbeatMs
@@ -236,6 +246,8 @@ export class ProjectIsolationService {
     this.#rootPath = resolve(rootPath)
     this.#gitExecutable = options.gitExecutable ?? 'git'
     this.#gitRunner = options.gitRunner ?? runGit
+    this.#autoInitializeGit = options.autoInitializeGit !== false
+    this.#homePath = options.homePath
     this.#lockPollMs = options.lockPollMs ?? DEFAULT_LOCK_POLL_MS
     this.#lockStaleMs = options.lockStaleMs ?? DEFAULT_LOCK_STALE_MS
     this.#heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS
@@ -450,18 +462,45 @@ export class ProjectIsolationService {
     if (result.exitCode !== 0 && !options.allowFailure) {
       throw new ProjectIsolationError(
         options.code ?? 'project_isolation_failed',
-        firstLine(result.stderr) || options.message || 'Git could not prepare an isolated Ensync workspace.',
+        gitFailureMessage(
+          result.stderr,
+          options.message ?? 'Git could not prepare an isolated Ensync workspace.',
+          options.includeGitReason !== false,
+        ),
         options.status ?? 409,
       )
     }
     return result
   }
 
+  /**
+   * Isolation needs a repository with a commit to branch from. Rather than
+   * refusing a project folder that has neither, Ensync creates them, which is
+   * also the change that keeps the person's files under version control while
+   * an agent works. A folder already inside a repository is never re-created.
+   */
+  async #ensureRepositoryBaseline(projectPath) {
+    if (!this.#autoInitializeGit) return
+    const outcome = await ensureGitRepositoryBaseline(
+      projectPath,
+      (args, options) => this.#git(args, { ...options, timeoutMs: options.timeoutMs ?? BASELINE_TIMEOUT_MS }),
+      { homePath: this.#homePath },
+    )
+    if (outcome.refused === 'home_directory') {
+      throw new ProjectIsolationError(
+        'project_isolation_required',
+        'A home directory is too broad to become one Ensync project repository. Open the specific project folder the agent should work in.',
+      )
+    }
+  }
+
   async #repository(projectPath) {
+    await this.#ensureRepositoryBaseline(projectPath)
     const topLevel = await this.#git(['rev-parse', '--show-toplevel'], {
       cwd: projectPath,
       code: 'project_isolation_required',
-      message: 'Local agent execution requires a Git repository so Ensync can isolate changes from the shared checkout.',
+      message: 'Local agent execution requires a Git repository so Ensync can isolate changes from the shared checkout. Open a project folder that Ensync is allowed to initialize, or create the repository yourself.',
+      includeGitReason: false,
     })
     const repositoryPath = await canonicalDirectory(
       firstLine(topLevel.stdout),

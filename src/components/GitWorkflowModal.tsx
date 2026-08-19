@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import {
   ensyncHost,
+  EnsyncHostError,
   type GitConnection,
   type GitPushMode,
   type GitStatus,
@@ -73,10 +74,22 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const [pushMode, setPushMode] = useState<GitPushMode>('current_branch')
   const [productionBranch, setProductionBranch] = useState(() => project?.path ? readProductionBranch(project.path) : '')
   const [confirmation, setConfirmation] = useState('')
-  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'land' | null>(null)
+  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'land' | 'init' | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [errorCode, setErrorCode] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [noticeHeading, setNoticeHeading] = useState<string>('Completed')
+
+  const reportFailure = (thrown: unknown, fallback: string) => {
+    setError(thrown instanceof Error ? thrown.message : fallback)
+    setErrorCode(thrown instanceof EnsyncHostError ? thrown.code : null)
+  }
+
+  const clearFeedback = () => {
+    setError(null)
+    setErrorCode(null)
+    setNotice(null)
+  }
 
   const exactConfirmation = productionBranch ? `PUSH TO ${productionBranch}` : ''
   const selectedRemote = status?.remotes.find((item) => item.name === remote)
@@ -90,6 +103,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
     if (!project?.path) return
     setBusy('status')
     setError(null)
+    setErrorCode(null)
     try {
       const response = await ensyncHost.gitStatus(project.path)
       setStatus(response.git)
@@ -103,11 +117,11 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         setUnlanded(unlandedResponse.unlanded.branches)
       } catch (unlandedError) {
         setUnlanded([])
-        setError(unlandedError instanceof Error ? unlandedError.message : 'Ensync Host could not inspect unlanded work.')
+        reportFailure(unlandedError, 'Ensync Host could not inspect unlanded work.')
       }
     } catch (statusError) {
       setStatus(null)
-      setError(statusError instanceof Error ? statusError.message : 'Ensync Host could not inspect Git status.')
+      reportFailure(statusError, 'Ensync Host could not inspect Git status.')
     } finally {
       setBusy(null)
     }
@@ -122,23 +136,44 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const clone = async () => {
     if (!repositoryUrl.trim() || !destinationPath.trim()) return
     setBusy('clone')
-    setError(null)
-    setNotice(null)
+    clearFeedback()
     try {
       const response = await ensyncHost.cloneRepository(repositoryUrl.trim(), destinationPath.trim())
       onImported(response.project)
     } catch (cloneError) {
-      setError(cloneError instanceof Error ? cloneError.message : 'Ensync Host could not clone that repository.')
+      reportFailure(cloneError, 'Ensync Host could not clone that repository.')
     } finally {
       setBusy(null)
     }
   }
 
+  /**
+   * A project outside Git cannot host an isolated agent run, so the panel that
+   * reports that offers the repair directly instead of describing it.
+   */
+  const initializeRepository = async () => {
+    if (!project?.path) return
+    setBusy('init')
+    clearFeedback()
+    try {
+      const result = await ensyncHost.initializeGitRepository(project.path)
+      setNoticeHeading(result.initialized ? 'Repository created' : 'Repository ready')
+      setNotice(result.initialized
+        ? `Ensync created a Git repository in this project${result.baselineCommitted ? ' and committed its current files as the first commit' : ''}.`
+        : 'This project is already inside a Git repository.')
+    } catch (initError) {
+      reportFailure(initError, 'Ensync Host could not create a repository for this project.')
+      setBusy(null)
+      return
+    }
+    setBusy(null)
+    await refreshStatus()
+  }
+
   const verifyRemote = async () => {
     if (!project?.path || !remote) return
     setBusy('connect')
-    setError(null)
-    setNotice(null)
+    clearFeedback()
     setConnection(null)
     try {
       const response = await ensyncHost.verifyGitRemote(project.path, remote)
@@ -147,7 +182,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         setProductionBranch(response.connection.defaultBranch)
       }
     } catch (connectionError) {
-      setError(connectionError instanceof Error ? connectionError.message : 'Git could not verify that remote.')
+      reportFailure(connectionError, 'Git could not verify that remote.')
     } finally {
       setBusy(null)
     }
@@ -156,8 +191,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const push = async () => {
     if (!project?.path || !remote) return
     setBusy('push')
-    setError(null)
-    setNotice(null)
+    clearFeedback()
     try {
       const result = await ensyncHost.pushGit({
         projectPath: project.path,
@@ -175,7 +209,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
       setNoticeHeading('Push completed')
       setNotice(`Pushed ${result.push.sourceBranch} to ${result.push.remote}/${result.push.targetBranch}.`)
     } catch (pushError) {
-      setError(pushError instanceof Error ? pushError.message : 'Git could not push this branch.')
+      reportFailure(pushError, 'Git could not push this branch.')
     } finally {
       setBusy(null)
     }
@@ -184,8 +218,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const landBranch = async (branch: string) => {
     if (!project) return
     setBusy('land')
-    setError(null)
-    setNotice(null)
+    clearFeedback()
     try {
       const result = await ensyncHost.landGitBranch({ projectPath: project.path, branch })
       setStatus(result.git)
@@ -198,7 +231,7 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         // The land succeeded; a stale unlanded list self-corrects on the next refresh.
       }
     } catch (landError) {
-      setError(landError instanceof Error ? landError.message : 'Landing failed.')
+      reportFailure(landError, 'Landing failed.')
     } finally {
       setBusy(null)
     }
@@ -224,8 +257,8 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
         </div>
 
         <div className="modal-tabs git-workflow-tabs">
-          <button className={mode === 'clone' ? 'active' : ''} onClick={() => { setMode('clone'); setError(null); setNotice(null) }}><GitFork size={15} /> Import repository</button>
-          <button className={mode === 'manage' ? 'active' : ''} onClick={() => { setMode('manage'); setError(null); setNotice(null) }} disabled={!project?.path}><GitBranch size={15} /> Focused project</button>
+          <button className={mode === 'clone' ? 'active' : ''} onClick={() => { setMode('clone'); clearFeedback() }}><GitFork size={15} /> Import repository</button>
+          <button className={mode === 'manage' ? 'active' : ''} onClick={() => { setMode('manage'); clearFeedback() }} disabled={!project?.path}><GitBranch size={15} /> Focused project</button>
         </div>
 
         <div className="git-workflow-body">
@@ -318,6 +351,20 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
               )}
 
               {busy === 'status' && !status && <div className="git-loading"><LoaderCircle className="spin" size={18} /> Reading real repository state…</div>}
+              {errorCode === 'not_a_git_repository' && (
+                <div className="git-initialize-panel">
+                  <div className="git-section-heading">
+                    <GitBranch size={20} />
+                    <div>
+                      <strong>This project is not inside a Git repository</strong>
+                      <p>Ensync runs every agent in its own Git worktree, so this folder needs a repository first. Ensync creates it here and records the files already in the folder as the first commit. Nothing is pushed anywhere.</p>
+                    </div>
+                  </div>
+                  <button className="button button--primary" onClick={() => void initializeRepository()} disabled={busy !== null || !project?.path}>
+                    {busy === 'init' ? <><LoaderCircle className="spin" size={15} /> Creating repository…</> : <><GitBranch size={15} /> Create Git repository</>}
+                  </button>
+                </div>
+              )}
               {notice && <div className="git-success"><Check size={16} /><span><strong>{noticeHeading}</strong><small>{notice}</small></span></div>}
               {error && <GitError message={error} />}
             </section>
