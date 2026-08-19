@@ -479,3 +479,57 @@ test('pushLandedBaseline reports a diverged remote without force-pushing', async
   const remoteHeadAfter = (await git(['rev-parse', 'refs/heads/main'], { cwd: fixture.remote })).stdout.trim()
   assert.equal(remoteHeadAfter, remoteHeadBefore)
 })
+
+test('a project outside a repository reports the explanation instead of raw Git plumbing output', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+  const plain = join(fixture.root, 'plain-folder')
+  await mkdir(plain)
+
+  const error = await getGitStatus(plain, { allowedRoots: [fixture.root] }).then(
+    () => null,
+    (thrown) => thrown,
+  )
+
+  assert.ok(error instanceof GitWorkflowError)
+  assert.equal(error.code, 'not_a_git_repository')
+  assert.match(error.message, /not inside a Git repository/)
+  assert.doesNotMatch(error.message, /fatal:/i)
+  assert.doesNotMatch(error.message, /any of the parent directories/i)
+})
+
+test('a failed push leads with the explanation and keeps the reason Git reported', async (context) => {
+  const fixture = await gitFixture(context)
+  if (!fixture) return
+  await git(['checkout', '-b', 'feature'], { cwd: fixture.seed })
+  await writeFile(join(fixture.seed, 'feature.txt'), 'first\n')
+  await git(['add', 'feature.txt'], { cwd: fixture.seed })
+  await git(['commit', '-m', 'Feature commit'], { cwd: fixture.seed })
+  await git(['push', '--set-upstream', 'origin', 'feature'], { cwd: fixture.seed })
+
+  await git(['clone', fixture.remote, fixture.clone])
+  await git(['config', 'user.name', 'Relay Other'], { cwd: fixture.clone })
+  await git(['config', 'user.email', 'relay-other@example.invalid'], { cwd: fixture.clone })
+  await git(['checkout', 'feature'], { cwd: fixture.clone })
+  await writeFile(join(fixture.clone, 'other.txt'), 'concurrent\n')
+  await git(['add', 'other.txt'], { cwd: fixture.clone })
+  await git(['commit', '-m', 'Concurrent commit'], { cwd: fixture.clone })
+  await git(['push', 'origin', 'feature'], { cwd: fixture.clone })
+
+  await writeFile(join(fixture.seed, 'feature.txt'), 'second\n')
+  await git(['add', 'feature.txt'], { cwd: fixture.seed })
+  await git(['commit', '-m', 'Diverged commit'], { cwd: fixture.seed })
+
+  const error = await pushGit(
+    { projectPath: fixture.seed, remote: 'origin', mode: 'current_branch' },
+    { allowedRoots: [fixture.root] },
+  ).then(() => null, (thrown) => thrown)
+
+  assert.ok(error instanceof GitWorkflowError)
+  assert.equal(error.code, 'git_push_failed')
+  assert.ok(
+    error.message.startsWith('Git could not push to origin/feature.'),
+    `expected the explanation to lead, got: ${error.message}`,
+  )
+  assert.match(error.message, /reject|fast-forward|fetch first/i)
+})
