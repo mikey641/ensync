@@ -53,12 +53,51 @@ function redactGitText(value) {
     })
 }
 
-function gitFailureMessage(stderr, fallback) {
-  const line = redactGitText(stderr)
-    .split(/\r?\n/)
-    .map((item) => item.trim())
-    .find(Boolean)
-  return line || fallback
+const MAX_GIT_REASON_LENGTH = 240
+
+// Lines Git prints as framing rather than explanation. The push header in
+// particular precedes the real reason and carries the remote location, so
+// taking Git's first stderr line yields the least useful sentence available.
+const UNINFORMATIVE_GIT_OUTPUT = [
+  /^failed to push some refs\b/i,
+  /^See the '[^']*' in 'git [^']*' for details\.?$/i,
+  /^Everything up-to-date$/i,
+]
+
+/**
+ * Reduce Git's stderr to one short redacted sentence a user can act on. Git
+ * hard-wraps its explanations across several prefixed lines, so the prefixes
+ * are stripped and the remaining text is rejoined before the first sentence is
+ * taken.
+ */
+function gitReason(stderr) {
+  const meaningful = []
+  for (const rawLine of redactGitText(stderr).split(/\r?\n/)) {
+    const text = rawLine.trim().replace(/^(?:fatal|error|warning|hint):\s*/i, '').trim()
+    if (!text) continue
+    if (UNINFORMATIVE_GIT_OUTPUT.some((pattern) => pattern.test(text))) continue
+    meaningful.push(text)
+  }
+  if (meaningful.length === 0) return ''
+  const joined = meaningful.join(' ')
+  const sentence = joined.match(/^.*?[.!?](?=\s|$)/)
+  const reason = (sentence ? sentence[0] : joined).trim()
+  return reason.length > MAX_GIT_REASON_LENGTH
+    ? `${reason.slice(0, MAX_GIT_REASON_LENGTH - 1).trimEnd()}\u2026`
+    : reason
+}
+
+/**
+ * A caller-supplied message explains the operation the user asked for, so it
+ * leads and Git's own reason follows as supporting detail. Callers whose
+ * message already states what Git reported pass `includeGitReason: false` so
+ * the plumbing wording is not repeated back to the user.
+ */
+function gitFailureMessage(stderr, curated, includeGitReason = true) {
+  const reason = gitReason(stderr)
+  if (!curated) return reason || 'Git could not complete the operation.'
+  if (!includeGitReason || !reason) return curated
+  return /[.!?]$/.test(curated) ? `${curated} ${reason}` : `${curated}. ${reason}`
 }
 
 export function runGit(args, options = {}) {
@@ -135,7 +174,7 @@ async function checkedGit(args, options = {}) {
   const result = await runGit(args, options)
   if (result.exitCode !== 0 && !options.allowFailure) {
     throw new GitWorkflowError(
-      gitFailureMessage(result.stderr, options.failureMessage ?? 'Git could not complete the operation.'),
+      gitFailureMessage(result.stderr, options.failureMessage, options.includeGitReason !== false),
       { code: options.code ?? 'git_failed', status: options.status ?? 409 },
     )
   }
@@ -326,8 +365,10 @@ async function gitRepositoryRoot(projectPath, options = {}) {
   const result = await checkedGit(['rev-parse', '--show-toplevel'], {
     cwd,
     gitExecutable: options.gitExecutable,
-    failureMessage: 'The focused project is not inside a Git repository.',
+    failureMessage:
+      'The focused project is not inside a Git repository. Open a project inside a repository, or run git init in that folder first.',
     code: 'not_a_git_repository',
+    includeGitReason: false,
   })
   const root = result.stdout.trim()
   try {
