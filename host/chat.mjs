@@ -246,6 +246,14 @@ const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 // conversation's workspace lease, so every other message in the same chat waits
 // behind it. One hour is far past a real answer and far short of a lost evening.
 const DEFAULT_QUESTION_HOLD_TIMEOUT_MS = 60 * 60 * 1_000
+// Automatic landing runs after the provider has already finished, inside the
+// same await that marks the job complete. Its own waits are unbounded by
+// design — the repository land lease polls until it is free, and a conflict
+// resolution agent runs as long as it needs — so a land that never returns
+// pins a finished run as "Working" forever and queues every later message in
+// that chat behind a turn that ended. This ceiling only ends the *landing*:
+// the run's outcome and its committed branch are already safe either way.
+const DEFAULT_AUTO_LAND_TIMEOUT_MS = 30 * 60 * 1_000
 // There is no absolute run ceiling by default; this conservative ceiling is
 // applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
 const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
@@ -1194,6 +1202,8 @@ export class ChatRunService {
   #workspaceOverlapMonitor
   #autoLand
   #autoPushLanded
+  #autoLandWorkspace
+  #autoLandTimeoutMs
   #gitExecutable
   #landCheck
   #activeRuns = 0
@@ -1212,6 +1222,8 @@ export class ChatRunService {
     this.#workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? null
     this.#autoLand = options.autoLand !== false
     this.#autoPushLanded = options.autoPushLanded !== false
+    this.#autoLandWorkspace = options.autoLandWorkspace ?? autoLandWorkspace
+    this.#autoLandTimeoutMs = options.autoLandTimeoutMs ?? DEFAULT_AUTO_LAND_TIMEOUT_MS
     this.#gitExecutable = options.gitExecutable
     this.#landCheck = options.landCheck ?? runLandCheck
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
@@ -1780,9 +1792,23 @@ export class ChatRunService {
    * notice and never changes the finished run's outcome.
    */
   async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, overlapSession, options) {
-    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal)
+    const landTimeout = new AbortController()
+    let landTimedOut = false
+    const landTimer = this.#autoLandTimeoutMs > 0
+      ? setTimeout(() => {
+        landTimedOut = true
+        options.onEvent?.({
+          type: 'notice',
+          code: 'auto_land_timed_out',
+          message: `Automatic landing of ${workspace.branch} did not finish within ${Math.round(this.#autoLandTimeoutMs / 60_000)} minutes and was stopped. The work stays on ${workspace.branch} for explicit review and landing.`,
+          at: new Date().toISOString(),
+        })
+        landTimeout.abort(new Error('Automatic landing exceeded its time limit.'))
+      }, this.#autoLandTimeoutMs)
+      : null
+    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal, landTimeout.signal)
     try {
-      await autoLandWorkspace(workspace, {
+      await this.#autoLandWorkspace(workspace, {
         allowedRoots: this.#allowedRoots,
         gitExecutable: this.#gitExecutable,
         signal: landSignal.signal,
@@ -1819,13 +1845,18 @@ export class ChatRunService {
         autoPush: this.#autoPushLanded,
       })
     } catch (error) {
-      options.onEvent?.({
-        type: 'notice',
-        code: 'auto_land_failed',
-        message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
-        at: new Date().toISOString(),
-      })
+      // A timed-out land already reported itself; the abort it raises here is
+      // that same stop, not a second, different failure.
+      if (!landTimedOut) {
+        options.onEvent?.({
+          type: 'notice',
+          code: 'auto_land_failed',
+          message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
+          at: new Date().toISOString(),
+        })
+      }
     } finally {
+      if (landTimer) clearTimeout(landTimer)
       landSignal.dispose()
     }
   }

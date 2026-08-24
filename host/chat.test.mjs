@@ -1705,3 +1705,54 @@ test('arguments carry no containment flags without a protected workspace', () =>
     assert.equal(args.includes('--settings'), false)
   }
 })
+
+test('ChatRunService bounds a hung automatic land so the finished run still completes', { timeout: 10_000 }, async (context) => {
+  const projectPath = await projectFixture(context)
+  const lease = {
+    workspace: {
+      projectPath, repositoryPath: projectPath, branch: 'ensync/chat-hung-land', base: null, integration: null,
+      gitBefore: { dirty: false, changedFiles: 0 },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {},
+  }
+  const notices = []
+  let landAborted = false
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() { return { committed: true, changedFiles: 1 } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    autoLandTimeoutMs: 25,
+    // A land that never settles on its own: exactly the stall that pinned a
+    // finished run as "Working" until the window was reopened.
+    autoLandWorkspace: (_workspace, options) => new Promise((_resolve, reject) => {
+      options.signal.addEventListener('abort', () => {
+        landAborted = true
+        reject(new Error('landing aborted'))
+      }, { once: true })
+    }),
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+
+  const result = await service.run(
+    { provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-hung-land' },
+    { preAcquiredWorkspaceLease: lease, onEvent: (event) => { if (event.type === 'notice') notices.push(event) } },
+  )
+
+  assert.equal(result.response, 'done')
+  assert.equal(landAborted, true)
+  const timedOut = notices.find((notice) => notice.code === 'auto_land_timed_out')
+  assert.ok(timedOut, `expected an auto_land_timed_out notice, saw: ${notices.map((n) => n.code).join(', ')}`)
+  assert.match(timedOut.message, /ensync\/chat-hung-land/)
+})

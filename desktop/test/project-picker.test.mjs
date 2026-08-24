@@ -245,6 +245,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'openLocalFile',
     'getDevicePreferences',
     'setCompletionNotificationPreferences',
+    'setTitleBarAppearance',
     'onRecentProjectsChanged',
     'chooseProjectFolder',
     'chooseChatFiles',

@@ -30,6 +30,7 @@ const RECENT_PROJECTS_CHANGED_CHANNEL = 'ensync:recent-projects:changed'
 const LOCAL_FILE_OPEN_CHANNEL = 'ensync:shell:open-local-file'
 const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
+const TITLEBAR_APPEARANCE_CHANNEL = 'ensync:window:set-titlebar-appearance'
 
 contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
@@ -76,6 +77,7 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
     COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
     settings,
   ),
+  setTitleBarAppearance: (theme) => ipcRenderer.invoke(TITLEBAR_APPEARANCE_CHANNEL, theme),
   onRecentProjectsChanged: (callback) => {
     if (typeof callback !== 'function') return () => {}
     const listener = (_event, state) => callback(state)
