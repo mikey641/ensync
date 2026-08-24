@@ -23,8 +23,11 @@ import {
 import { createRendererCrashRecovery } from './crash-recovery.mjs'
 import {
   createNativeIpcAuthorizer,
+  createNativeTitleBarAppearanceHandler,
   createNativeWindowMenuTemplate,
   createNativeWindowRegistry,
+  nativeWindowFrameOptions,
+  TITLEBAR_APPEARANCE_CHANNEL,
 } from './native-windows.mjs'
 import {
   ACTIVE_RUN_MATCH_CHANNEL,
@@ -315,6 +318,11 @@ function registerNativeBridge() {
     },
     onError: (error) => console.error('[ensync-file-picker]', error),
   }))
+  ipcMain.handle(TITLEBAR_APPEARANCE_CHANNEL, createNativeTitleBarAppearanceHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    platform: process.platform,
+    windowForWebContents: (webContents) => BrowserWindow.fromWebContents(webContents),
+  }))
   ipcMain.handle(PROJECT_FOLDER_PICKER_CHANNEL, createProjectFolderPickerHandler({
     isAuthorized: isAuthorizedNativeEvent,
     openDialog: async (event, options) => {
@@ -387,6 +395,7 @@ function unregisterNativeBridge() {
   if (!nativeBridgeRegistered) return true
   ipcMain.removeHandler(CHAT_FILE_PICKER_CHANNEL)
   ipcMain.removeHandler(PROJECT_FOLDER_PICKER_CHANNEL)
+  ipcMain.removeHandler(TITLEBAR_APPEARANCE_CHANNEL)
   ipcMain.removeHandler(ACTIVE_RUNS_PUBLISH_CHANNEL)
   ipcMain.removeHandler(ACTIVE_RUN_MATCH_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
@@ -514,6 +523,7 @@ async function createWindow(workspaceIdentity) {
   })
   const window = new BrowserWindow({
     ...placement.bounds,
+    ...nativeWindowFrameOptions(process.platform),
     minWidth: MINIMUM_WINDOW_BOUNDS.width,
     minHeight: MINIMUM_WINDOW_BOUNDS.height,
     fullscreen: placement.fullScreen,

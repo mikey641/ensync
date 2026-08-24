@@ -6,9 +6,12 @@ import test from 'node:test'
 import {
   CLOSE_WINDOW_ACCELERATOR,
   createNativeIpcAuthorizer,
+  createNativeTitleBarAppearanceHandler,
   createNativeWindowMenuTemplate,
   createNativeWindowRegistry,
   FORCE_RELOAD_ACCELERATOR,
+  nativeTitleBarOverlayOptions,
+  nativeWindowFrameOptions,
   NEW_WINDOW_ACCELERATOR,
   RELOAD_ACCELERATOR,
 } from '../src/native-windows.mjs'
@@ -131,4 +134,45 @@ test('desktop packages the native multi-window contract', async () => {
   assert.ok(manifest.build.files.includes('src/recent-projects.mjs'))
   assert.ok(manifest.build.files.includes('src/workspace-recovery.mjs'))
   assert.ok(manifest.build.files.includes('src/native-updates.mjs'))
+})
+
+// The native title-bar appearance bridge shipped only inside the installed
+// app.asar and was never in desktop/src, so any rebuild of the bundle silently
+// dropped it. These tests keep it in the repository.
+test('nativeWindowFrameOptions hides the frame per platform', () => {
+  assert.deepEqual(nativeWindowFrameOptions('darwin'), { titleBarStyle: 'hiddenInset' })
+  const windows = nativeWindowFrameOptions('win32')
+  assert.equal(windows.titleBarStyle, 'hidden')
+  assert.equal(windows.titleBarOverlay.color, '#191919')
+})
+
+test('nativeTitleBarOverlayOptions resolves light and dark, and rejects anything else', () => {
+  assert.deepEqual(nativeTitleBarOverlayOptions('light'), { color: '#ffffff', symbolColor: '#202123', height: 46 })
+  assert.deepEqual(nativeTitleBarOverlayOptions('dark'), { color: '#191919', symbolColor: '#ececec', height: 46 })
+  assert.throws(() => nativeTitleBarOverlayOptions('system'), TypeError)
+})
+
+test('createNativeTitleBarAppearanceHandler repaints only authorized, resolved themes', () => {
+  const overlays = []
+  const window = { isDestroyed: () => false, setTitleBarOverlay: (options) => overlays.push(options) }
+  const handler = createNativeTitleBarAppearanceHandler({
+    isAuthorized: (event) => event?.trusted === true,
+    platform: 'win32',
+    windowForWebContents: () => window,
+  })
+
+  assert.equal(handler({ trusted: false }, 'dark'), false)
+  assert.equal(handler({ trusted: true }, 'system'), false)
+  assert.deepEqual(overlays, [])
+  assert.equal(handler({ trusted: true }, 'light'), true)
+  assert.deepEqual(overlays, [{ color: '#ffffff', symbolColor: '#202123', height: 46 }])
+})
+
+test('createNativeTitleBarAppearanceHandler leaves macOS windows to the system chrome', () => {
+  const handler = createNativeTitleBarAppearanceHandler({
+    isAuthorized: () => true,
+    platform: 'darwin',
+    windowForWebContents: () => { throw new Error('macOS must not look up a window') },
+  })
+  assert.equal(handler({}, 'dark'), true)
 })
