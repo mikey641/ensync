@@ -14,16 +14,28 @@ function checksum(value) {
   return createHash('sha256').update(value).digest('hex')
 }
 
+// The renderer owns these defaults (src/lib/completionNotificationPreferences.mjs);
+// they are repeated here because this store also has to read a file written by
+// a build that predates question alerts.
+const DEFAULT_ANSWER_SPEECH_TEXT = 'Your Ensync task needs an answer.'
+
 function normalizeCompletionNotifications(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   if (value.mode !== 'off' && value.mode !== 'ringtone' && value.mode !== 'speech') return null
   if (typeof value.speechText !== 'string' || value.speechText.length > 240) return null
   if (value.voiceId !== null && (typeof value.voiceId !== 'string'
     || value.voiceId.length === 0 || value.voiceId.length > 1024)) return null
+  // A stored preference carrying neither answer field predates question alerts
+  // rather than being malformed, so it defaults instead of failing to load.
+  if (value.answerAlerts !== undefined && typeof value.answerAlerts !== 'boolean') return null
+  if (value.answerSpeechText !== undefined
+    && (typeof value.answerSpeechText !== 'string' || value.answerSpeechText.length > 240)) return null
   return Object.freeze({
     mode: value.mode,
     speechText: value.speechText,
     voiceId: value.voiceId,
+    answerAlerts: value.answerAlerts ?? true,
+    answerSpeechText: value.answerSpeechText ?? DEFAULT_ANSWER_SPEECH_TEXT,
   })
 }
 

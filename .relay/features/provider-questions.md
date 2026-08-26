@@ -199,5 +199,17 @@ permission, is `cancel`.
   explicit cancellation. A permission renders in the same card with the text box
   removed and the actions relabelled "Send decision" / "Don't allow".
 
+- A question arriving alerts the device, because a run blocked on a person is
+  the one state in Ensync that never resolves itself. Every window derives the
+  open questions of **every** conversation from the same replayed event buffers
+  the cards read, so a question asked in a pane nobody is looking at still
+  rings. The alert marks an arrival, not a state: one ring per question id
+  however often the panel re-renders it (about once a second while a run is in
+  flight), and silence for a question that was already open when the window
+  loaded. It reuses the device alert from Display preferences with its own
+  words and its own unresolved two-note chime, and can be switched off without
+  silencing the finished-task alert. `host/answer-needed-alert.test.mjs` is the
+  contract.
+
 `host/provider-questions.test.mjs` is the executable Host/renderer contract for
 all of the above, including both wire formats driven against fake CLIs.

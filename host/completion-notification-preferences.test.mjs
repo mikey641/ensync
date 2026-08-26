@@ -21,6 +21,34 @@ const spoken = Object.freeze({
   mode: 'speech',
   speechText: 'Your Ensync task is finished.',
   voiceId: '["Samantha","en-US"]',
+  answerAlerts: true,
+  answerSpeechText: 'Your Ensync task needs an answer.',
+})
+
+test('preferences saved before question alerts existed gain them, switched on', () => {
+  const localStorage = storage([
+    [COMPLETION_NOTIFICATIONS_STORAGE_KEY, JSON.stringify({
+      mode: 'ringtone',
+      speechText: 'All done.',
+      voiceId: null,
+    })],
+  ])
+
+  assert.deepEqual(readCompletionNotificationSettings(localStorage), {
+    mode: 'ringtone',
+    speechText: 'All done.',
+    voiceId: null,
+    answerAlerts: true,
+    answerSpeechText: 'Your Ensync task needs an answer.',
+  })
+})
+
+test('turning question alerts off round-trips through browser storage', () => {
+  const localStorage = storage()
+  const saved = saveCompletionNotificationPreferences({ ...spoken, answerAlerts: false }, { localStorage })
+
+  assert.equal(saved.answerAlerts, false)
+  assert.equal(readCompletionNotificationSettings(localStorage).answerAlerts, false)
 })
 
 test('spoken completion preferences round-trip through browser storage', () => {

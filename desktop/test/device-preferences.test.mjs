@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +14,49 @@ const spoken = Object.freeze({
   mode: 'speech',
   speechText: 'Your Ensync task is finished.',
   voiceId: '["Samantha","en-US"]',
+  answerAlerts: true,
+  answerSpeechText: 'Your Ensync task needs an answer.',
+})
+
+test('a device preference file written before question alerts still loads, with them on', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-device-preferences-legacy-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'device-preferences-v1.json')
+  const payload = JSON.stringify({
+    completionNotifications: {
+      mode: 'speech',
+      speechText: 'Your Ensync task is finished.',
+      voiceId: '["Samantha","en-US"]',
+    },
+    updateChannel: 'stable',
+  })
+  await writeFile(filePath, JSON.stringify({
+    format: 'ensync-device-preferences',
+    version: 1,
+    revision: 4,
+    committedAt: '2026-08-07T12:00:00.000Z',
+    payload,
+    checksum: createHash('sha256').update(payload).digest('hex'),
+  }), 'utf8')
+
+  assert.deepEqual(createDevicePreferencesStore({ filePath }).get(), {
+    completionNotifications: spoken,
+    updateChannel: 'stable',
+  })
+})
+
+test('a device keeps question alerts switched off across store restarts', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-device-preferences-answer-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'device-preferences-v1.json')
+  const silentQuestions = { ...spoken, answerAlerts: false }
+
+  createDevicePreferencesStore({ filePath }).setCompletionNotifications(silentQuestions)
+
+  assert.deepEqual(createDevicePreferencesStore({ filePath }).get(), {
+    completionNotifications: silentQuestions,
+    updateChannel: 'stable',
+  })
 })
 
 test('device preferences persist spoken completion alerts across store restarts', async (t) => {
