@@ -1063,3 +1063,39 @@ test('a chosen option survives the panel re-rendering the same question', async 
   assert.match(card, /setSelection\(initialQuestionSelection\(pending\)\)\n(?:\s*\/\/[^\n]*\n)*\s*\}, \[pending\.questionId\]\)/)
   assert.doesNotMatch(card, /\}, \[pending\]\)/)
 })
+
+// A question with several long options is taller than the room the chat panel
+// has left for it, and nothing above the card scrolls: `#root`, `.conversation`
+// and the split pane are all `overflow: hidden`, and the transcript's own
+// scroller is a sibling. A card laid out at its full content height therefore
+// runs off the bottom edge — its later options, its text box, "Don't answer"
+// and "Send answer" become unreachable, and the composer is pushed out with
+// them. The card carries the scrolling itself: the questions sit in a bounded
+// body that scrolls, while the header and the actions stay pinned to the card.
+test('a question taller than the chat panel scrolls inside the card', async () => {
+  const [card, css] = await Promise.all([
+    readFile(new URL('../src/components/ProviderQuestionCard.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/components/ProviderQuestionCard.css', import.meta.url), 'utf8'),
+  ])
+
+  const bodyStart = card.indexOf('provider-question__body')
+  const actionsStart = card.indexOf('provider-question__actions')
+  assert.ok(bodyStart > 0, 'the questions need a body element of their own to scroll')
+  assert.ok(actionsStart > bodyStart, 'Send and Don’t answer stay pinned below the scrolling body')
+  const body = card.slice(bodyStart, actionsStart)
+  assert.match(body, /pending\.questions\.map\(/)
+  assert.match(body, /<\/div>/)
+
+  const rule = (selector) => {
+    const match = css.match(new RegExp(`\\${selector}\\s*\\{([^}]*)\\}`))
+    assert.ok(match, `${selector} is missing from the card stylesheet`)
+    return match[1]
+  }
+  const shell = rule('.provider-question ')
+  assert.match(shell, /max-height:/)
+  assert.match(shell, /min-height:\s*0/)
+  assert.match(shell, /overflow:\s*hidden/)
+  const scroller = rule('.provider-question__body')
+  assert.match(scroller, /overflow-y:\s*auto/)
+  assert.match(scroller, /min-height:\s*0/)
+})

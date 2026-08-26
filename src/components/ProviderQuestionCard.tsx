@@ -94,75 +94,80 @@ export function ProviderQuestionCard({
         </small>
       </header>
 
-      {pending.questions.map((question, questionIndex) => {
-        const prompt = splitPrompt(question)
-        const approval = isPermissionQuestion(question)
-        const answer = questionAnswerText(selection, question)
-        return (
-          <div className="provider-question__item" key={`${pending.questionId}-${question.index}`}>
-            <p className="provider-question__prompt" dir="auto">
-              {question.header && <span className="provider-question__chip">{question.header}</span>}
-              {prompt.ask}
-            </p>
-            {prompt.detail && (
-              <pre className="provider-question__detail" dir="auto">{prompt.detail}</pre>
-            )}
-            {question.options.length > 0 && (
-              <div
-                className="provider-question__options"
-                role="group"
-                aria-label={question.multiSelect ? 'Choose one or more' : 'Choose one'}
-              >
-                {question.options.map((option, optionIndex) => {
-                  const chosen = (selection[question.index]?.options ?? []).includes(option.label)
-                  return (
-                    <button
-                      ref={questionIndex === 0 && optionIndex === 0 ? firstOptionRef : undefined}
-                      key={option.label}
-                      type="button"
-                      className={`provider-question__option ${chosen ? 'provider-question__option--chosen' : ''}`}
-                      aria-pressed={chosen}
-                      disabled={disabled}
-                      onClick={() => setSelection((current) => toggleQuestionOption(current, question, option.label))}
-                      title={option.description ?? undefined}
-                    >
-                      <span>{option.label}</span>
-                      {option.description && <small dir="auto">{option.description}</small>}
-                    </button>
-                  )
-                })}
-              </div>
-            )}
-            {/* An approval is one of the provider's own outcomes, so there is
-                nothing here to type: typed words could not be sent as one. */}
-            {!approval && (
-              <input
-                className="provider-question__text"
-                type="text"
-                dir="auto"
-                disabled={disabled}
-                value={selection[question.index]?.text ?? ''}
-                placeholder={question.options.length > 0 ? 'Or answer in your own words' : 'Type your answer'}
-                aria-label={`Your answer to: ${question.question}`}
-                onChange={(event) => setSelection((current) => setQuestionText(current, question, event.target.value))}
-                onKeyDown={(event) => {
-                  if (event.key !== 'Enter') return
-                  event.preventDefault()
-                  send()
-                }}
-              />
-            )}
-            {question.multiSelect && question.options.length > 0 && (
-              <small className="provider-question__hint">You can choose more than one.</small>
-            )}
-            <p className="provider-question__preview" aria-live="polite">
-              {answer
-                ? `Sending: ${answer}`
-                : approval ? 'No decision yet' : 'No answer yet'}
-            </p>
-          </div>
-        )
-      })}
+      {/* The questions scroll here rather than off the bottom of the panel:
+          nothing above this card scrolls, so a card taller than the room left
+          for it would put its own text box and buttons out of reach. */}
+      <div className="provider-question__body">
+        {pending.questions.map((question, questionIndex) => {
+          const prompt = splitPrompt(question)
+          const approval = isPermissionQuestion(question)
+          const answer = questionAnswerText(selection, question)
+          return (
+            <div className="provider-question__item" key={`${pending.questionId}-${question.index}`}>
+              <p className="provider-question__prompt" dir="auto">
+                {question.header && <span className="provider-question__chip">{question.header}</span>}
+                {prompt.ask}
+              </p>
+              {prompt.detail && (
+                <pre className="provider-question__detail" dir="auto">{prompt.detail}</pre>
+              )}
+              {question.options.length > 0 && (
+                <div
+                  className="provider-question__options"
+                  role="group"
+                  aria-label={question.multiSelect ? 'Choose one or more' : 'Choose one'}
+                >
+                  {question.options.map((option, optionIndex) => {
+                    const chosen = (selection[question.index]?.options ?? []).includes(option.label)
+                    return (
+                      <button
+                        ref={questionIndex === 0 && optionIndex === 0 ? firstOptionRef : undefined}
+                        key={option.label}
+                        type="button"
+                        className={`provider-question__option ${chosen ? 'provider-question__option--chosen' : ''}`}
+                        aria-pressed={chosen}
+                        disabled={disabled}
+                        onClick={() => setSelection((current) => toggleQuestionOption(current, question, option.label))}
+                        title={option.description ?? undefined}
+                      >
+                        <span>{option.label}</span>
+                        {option.description && <small dir="auto">{option.description}</small>}
+                      </button>
+                    )
+                  })}
+                </div>
+              )}
+              {/* An approval is one of the provider's own outcomes, so there is
+                  nothing here to type: typed words could not be sent as one. */}
+              {!approval && (
+                <input
+                  className="provider-question__text"
+                  type="text"
+                  dir="auto"
+                  disabled={disabled}
+                  value={selection[question.index]?.text ?? ''}
+                  placeholder={question.options.length > 0 ? 'Or answer in your own words' : 'Type your answer'}
+                  aria-label={`Your answer to: ${question.question}`}
+                  onChange={(event) => setSelection((current) => setQuestionText(current, question, event.target.value))}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Enter') return
+                    event.preventDefault()
+                    send()
+                  }}
+                />
+              )}
+              {question.multiSelect && question.options.length > 0 && (
+                <small className="provider-question__hint">You can choose more than one.</small>
+              )}
+              <p className="provider-question__preview" aria-live="polite">
+                {answer
+                  ? `Sending: ${answer}`
+                  : approval ? 'No decision yet' : 'No answer yet'}
+              </p>
+            </div>
+          )
+        })}
+      </div>
 
       {error && <p className="provider-question__error" role="alert">{error}</p>}
 
