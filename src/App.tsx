@@ -4420,6 +4420,7 @@ function ConversationPane({
   // Derived from the same replayed event buffer the panel reads, so a window
   // that reconnects mid-turn still sees the question the provider is blocked on.
   const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
+  const questionMessageProvider = providers.find((item) => item.id === pendingQuestion?.provider) ?? provider
   const workspaceOverlap = useMemo(() => workspaceOverlapSummary(
     activeWorkspaceOverlaps(executionEvents),
     workspaceBranchTitles,
@@ -4649,6 +4650,22 @@ function ConversationPane({
                   </div>
                 )
               })}
+            </div>
+          )}
+          {/* What the agent wrote to the person before asking is an ordinary
+              message, not progress commentary, so it is rendered as one: it is
+              the answer the question card hangs off, and the run's final reply
+              never repeats it. */}
+          {pendingQuestion?.message && (
+            <div className="message message--agent" key={`question-message-${pendingQuestion.questionId}`}>
+              <ProviderMark provider={questionMessageProvider} />
+              <div className="message__body">
+                <div className="message__meta"><strong>{questionMessageProvider.name}</strong><span>{new Date(pendingQuestion.askedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span></div>
+                {typeof window.ensyncDesktop?.openPath === 'function'
+                  ? <MessageContent content={pendingQuestion.message} projectPath={projectPath} />
+                  : <MessageContent content={pendingQuestion.message} onOpenFile={onOpenFile} />}
+                <div className="message-actions"><CopyTextButton text={pendingQuestion.message} label="Copy message" /></div>
+              </div>
             </div>
           )}
           {sending && <div className="working-line">

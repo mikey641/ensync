@@ -71,8 +71,16 @@ export function createClaudeQuestionChannel(options = {}) {
   // Claude cancels a control request by id when the turn moves on without it.
   const inFlight = new Map()
   let closed = false
+  // The assistant text Claude wrote immediately before the AskUserQuestion call
+  // it is about to make. It rides on the question so the renderer can show it as
+  // the ordinary agent message it is; see CLAUDE_ASK_PERSON_TOOL in chat.mjs.
+  let questionMessage = ''
 
   const respondToQuestion = async (requestId, input) => {
+    // Consumed by the first question that follows it, so a later ask can never
+    // inherit words written for an earlier one.
+    const message = questionMessage
+    questionMessage = ''
     const normalized = normalizeClaudeQuestions(input)
     if (!normalized) {
       write(controlSuccess(requestId, {
@@ -88,7 +96,7 @@ export function createClaudeQuestionChannel(options = {}) {
       askedAt,
     })
     inFlight.set(requestId, id)
-    onEvent?.(providerQuestionEvent('claude', id, questions, askedAt))
+    onEvent?.(providerQuestionEvent('claude', id, questions, askedAt, message))
     hold()
     let resolution
     try {
@@ -108,6 +116,14 @@ export function createClaudeQuestionChannel(options = {}) {
 
   return {
     registry,
+    /**
+     * Records the agent's own words in front of the question it is about to
+     * ask. The stream carries them one frame ahead of the control request, so
+     * they are held here until that request turns into a question event.
+     */
+    noteQuestionMessage(text) {
+      questionMessage = typeof text === 'string' ? text.trim() : ''
+    },
     /** Feeds one stdout line; returns true when the line was a protocol frame this channel owns. */
     handleLine(line) {
       // A trailing frame flushed after the process ended has nothing left to

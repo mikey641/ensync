@@ -105,6 +105,9 @@ export function pendingQuestionsAfterEvent(current, event) {
       questionId: event.questionId,
       provider: event.provider,
       questions: event.questions,
+      // Carried through so the card can show the agent's message as the normal
+      // text it is; an older Host that never sent one leaves it null.
+      message: typeof event.message === 'string' && event.message.trim() ? event.message : null,
       askedAt: event.at,
     }
     return pending.some((item) => samePending(item, asked)) ? pending : [...pending, asked]
