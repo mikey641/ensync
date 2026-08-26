@@ -1,16 +1,41 @@
+/*
+ * The chat panel clips: the card's ancestors are all `overflow: hidden` and the
+ * transcript's scroller is a sibling, so height the card takes is height the
+ * composer loses and nothing scrolls it back. It is capped instead, shrinks
+ * before the panel runs out of room, and scrolls its questions internally —
+ * the header and the Send/Don't-answer row stay on screen at any length.
+ */
 .provider-question {
   width: min(720px, 100%);
   margin: 0 auto 10px;
   padding: 12px 14px;
-  display: grid;
+  min-height: 0;
+  max-height: min(55vh, 560px);
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
+  overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--accent-ui) 42%, var(--border-default));
   border-radius: var(--radius-card);
   background: color-mix(in srgb, var(--accent-ui-soft) 42%, var(--surface-elevated));
   box-shadow: var(--shadow-soft);
 }
 
+.provider-question__body {
+  min-height: 0;
+  flex: 0 1 auto;
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scroll-thumb) transparent;
+}
+
 .provider-question__header {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 7px;
@@ -150,6 +175,7 @@
 }
 
 .provider-question__actions {
+  flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;
   gap: 8px;

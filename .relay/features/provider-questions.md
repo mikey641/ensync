@@ -198,6 +198,14 @@ permission, is `cancel`.
   Send stays disabled until every question has an answer; "Don't answer" sends an
   explicit cancellation. A permission renders in the same card with the text box
   removed and the actions relabelled "Send decision" / "Don't allow".
+- The card carries its own scrolling. It sits between the transcript's scroller
+  and the composer inside a chat panel whose every ancestor is `overflow:
+  hidden`, so height the card takes is height the composer loses and no ancestor
+  can scroll it back. `.provider-question` is therefore capped, shrinkable, and
+  clips; `.provider-question__body` scrolls the questions while the header and
+  the Send / Don't-answer row stay pinned. A question with several long options
+  — or two questions at once — is otherwise unanswerable: its lower options, its
+  text box and both buttons fall off the bottom edge with nothing to scroll.
 
 `host/provider-questions.test.mjs` is the executable Host/renderer contract for
 all of the above, including both wire formats driven against fake CLIs.
