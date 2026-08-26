@@ -6,14 +6,18 @@ import {
   useState,
 } from 'react'
 import {
+  ANSWER_NEEDED_ALERT,
   COMPLETION_NOTIFICATIONS_STORAGE_KEY,
   DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  TASK_FINISHED_ALERT,
+  completionAlertPlan,
   normalizeCompletionNotificationSettings,
   readCompletionNotificationSettings,
   saveCompletionNotificationPreferences,
   writeCompletionNotificationSettings,
 } from './lib/completionNotificationPreferences.mjs'
 import type {
+  CompletionAlertTrigger,
   CompletionNotificationMode,
   CompletionNotificationSettings,
 } from './lib/completionNotificationPreferences.mjs'
@@ -22,13 +26,16 @@ import './completion-notifications.css'
 const COMPLETION_NOTIFICATIONS_CHANGE_EVENT = 'ensync:completion-notifications-change'
 
 export {
+  ANSWER_NEEDED_ALERT,
   COMPLETION_NOTIFICATIONS_STORAGE_KEY,
   DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  TASK_FINISHED_ALERT,
+  completionAlertPlan,
   normalizeCompletionNotificationSettings,
   readCompletionNotificationSettings,
   writeCompletionNotificationSettings,
 }
-export type { CompletionNotificationMode, CompletionNotificationSettings }
+export type { CompletionAlertTrigger, CompletionNotificationMode, CompletionNotificationSettings }
 
 export type CompletionVoice = {
   id: string
@@ -130,8 +137,31 @@ export function primeCompletionNotifications(): Promise<boolean> {
   }
 }
 
-export async function playCompletionRingtone(): Promise<CompletionNotificationResult> {
+/**
+ * The two chimes are deliberately different figures, not the same notes at a
+ * different pitch: a finished run resolves upwards and stops, a waiting
+ * question asks the same rising pair twice and never resolves. Hearing one
+ * from another room has to be enough to know whether anything is blocked.
+ */
+const CHIMES: Record<CompletionAlertTrigger, { notes: { frequency: number, at: number }[], end: number }> = {
+  [TASK_FINISHED_ALERT]: {
+    notes: [659.25, 783.99, 1046.5].map((frequency, index) => ({ frequency, at: index * 0.1 })),
+    end: 0.52,
+  },
+  [ANSWER_NEEDED_ALERT]: {
+    notes: [
+      { frequency: 587.33, at: 0 },
+      { frequency: 880, at: 0.1 },
+      { frequency: 587.33, at: 0.28 },
+      { frequency: 880, at: 0.38 },
+    ],
+    end: 0.7,
+  },
+}
+
+async function playChime(trigger: CompletionAlertTrigger): Promise<CompletionNotificationResult> {
   const mode = 'ringtone' as const
+  const chime = CHIMES[trigger]
   if (typeof window === 'undefined') {
     return { mode, status: 'unsupported', message: 'Ringtone playback is not available here.' }
   }
@@ -157,16 +187,15 @@ export async function playCompletionRingtone(): Promise<CompletionNotificationRe
     const master = context.createGain()
     master.gain.setValueAtTime(0.0001, start)
     master.gain.exponentialRampToValueAtTime(0.16, start + 0.018)
-    master.gain.setValueAtTime(0.16, start + 0.25)
-    master.gain.exponentialRampToValueAtTime(0.0001, start + 0.52)
+    master.gain.setValueAtTime(0.16, start + chime.end - 0.27)
+    master.gain.exponentialRampToValueAtTime(0.0001, start + chime.end)
     master.connect(context.destination)
 
-    const notes = [659.25, 783.99, 1046.5]
-    notes.forEach((frequency, index) => {
+    chime.notes.forEach(({ frequency, at }) => {
       const oscillator = context?.createOscillator()
       const gain = context?.createGain()
       if (!context || !oscillator || !gain) return
-      const noteStart = start + index * 0.1
+      const noteStart = start + at
       oscillator.type = 'sine'
       oscillator.frequency.setValueAtTime(frequency, noteStart)
       gain.gain.setValueAtTime(0.0001, noteStart)
@@ -178,7 +207,7 @@ export async function playCompletionRingtone(): Promise<CompletionNotificationRe
       oscillator.stop(noteStart + 0.23)
     })
 
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 560))
+    await new Promise<void>((resolve) => window.setTimeout(resolve, Math.round(chime.end * 1000) + 40))
     return { mode, status: 'played', message: 'Ringtone played.' }
   } catch {
     return {
@@ -187,6 +216,14 @@ export async function playCompletionRingtone(): Promise<CompletionNotificationRe
       message: 'Ringtone playback was blocked. Interact with Ensync once, then try Preview again.',
     }
   }
+}
+
+export function playCompletionRingtone(): Promise<CompletionNotificationResult> {
+  return playChime(TASK_FINISHED_ALERT)
+}
+
+export function playAnswerNeededRingtone(): Promise<CompletionNotificationResult> {
+  return playChime(ANSWER_NEEDED_ALERT)
 }
 
 export function speakCompletionText(
@@ -286,17 +323,31 @@ export function useCompletionNotifications() {
     window.dispatchEvent(new CustomEvent(COMPLETION_NOTIFICATIONS_CHANGE_EVENT, { detail: next }))
   }, [])
 
-  const notifyCompletion = useCallback(async (speechTextOverride?: string) => {
-    if (settings.mode === 'ringtone') return playCompletionRingtone()
-    if (settings.mode === 'speech') {
-      return speakCompletionText(speechTextOverride ?? settings.speechText, settings.voiceId)
+  const notify = useCallback(async (
+    trigger: CompletionAlertTrigger,
+    speechTextOverride?: string,
+  ) => {
+    const plan = completionAlertPlan(settings, trigger)
+    if (plan.mode === 'ringtone') {
+      return plan.chime === ANSWER_NEEDED_ALERT ? playAnswerNeededRingtone() : playCompletionRingtone()
     }
+    if (plan.mode === 'speech') return speakCompletionText(speechTextOverride ?? plan.speechText, plan.voiceId)
     return {
       mode: 'off',
       status: 'disabled',
-      message: 'Completion notifications are off.',
+      message: trigger === ANSWER_NEEDED_ALERT
+        ? 'Question alerts are off.'
+        : 'Completion notifications are off.',
     } satisfies CompletionNotificationResult
   }, [settings])
+
+  const notifyCompletion = useCallback(
+    (speechTextOverride?: string) => notify(TASK_FINISHED_ALERT, speechTextOverride),
+    [notify],
+  )
+
+  /** A run that stopped to ask something cannot go on until the person answers. */
+  const notifyAnswerNeeded = useCallback(() => notify(ANSWER_NEEDED_ALERT), [notify])
 
   return {
     settings,
@@ -308,6 +359,7 @@ export function useCompletionNotifications() {
     setVoiceId: (selectedVoiceId: string | null) => updateSettings({ voiceId: selectedVoiceId }),
     prime: primeCompletionNotifications,
     notifyCompletion,
+    notifyAnswerNeeded,
   }
 }
 
@@ -376,6 +428,7 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
     capabilities,
     updateSettings,
     notifyCompletion,
+    notifyAnswerNeeded,
   } = useCompletionNotifications()
   const [previewStatus, setPreviewStatus] = useState('')
 
@@ -396,9 +449,9 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
     setPreviewStatus('')
   }
 
-  const preview = async () => {
+  const preview = async (trigger: CompletionAlertTrigger) => {
     setPreviewStatus('Playing preview…')
-    const result = await notifyCompletion()
+    const result = trigger === ANSWER_NEEDED_ALERT ? await notifyAnswerNeeded() : await notifyCompletion()
     setPreviewStatus(result.message)
   }
 
@@ -406,13 +459,13 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
     <section className={`completion-notification-preferences ${className}`.trim()} aria-labelledby="completion-notification-title">
       <div className="completion-notification-preferences__heading">
         <div>
-          <h3 id="completion-notification-title">Task finished alert</h3>
-          <p>Play a local alert when an agent finishes. Saved on this device.</p>
+          <h3 id="completion-notification-title">Agent alerts</h3>
+          <p>Play a local alert when an agent finishes, or needs an answer. Saved on this device.</p>
         </div>
         <span>{settings.mode === 'off' ? 'Off' : 'On'}</span>
       </div>
 
-      <div className="completion-notification-preferences__modes" role="radiogroup" aria-label="Task finished alert type">
+      <div className="completion-notification-preferences__modes" role="radiogroup" aria-label="Agent alert type">
         <ModeButton mode="off" label="Off" currentMode={settings.mode} onSelect={selectMode} />
         <ModeButton
           mode="ringtone"
@@ -432,8 +485,26 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
 
       {settings.mode === 'ringtone' && (
         <p className="completion-notification-preferences__note">
-          Ensync will play a short three-note chime on this device.
+          Ensync will play a short three-note chime on this device, and a different, unresolved
+          two-note chime when an agent is waiting on you.
         </p>
+      )}
+
+      {settings.mode !== 'off' && (
+        <label className="completion-notification-preferences__toggle">
+          <input
+            type="checkbox"
+            checked={settings.answerAlerts}
+            onChange={(event) => updateSettings({ answerAlerts: event.target.checked })}
+          />
+          <span>
+            Alert when an agent needs an answer
+            <small>
+              A question or a permission request stops the run in that conversation until you
+              answer it, including one you are not looking at.
+            </small>
+          </span>
+        </label>
       )}
 
       {settings.mode === 'speech' && (
@@ -448,6 +519,19 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
               placeholder="Your Ensync task is finished."
             />
           </label>
+
+          {settings.answerAlerts && (
+            <label>
+              Words to speak when an agent needs an answer
+              <textarea
+                value={settings.answerSpeechText}
+                maxLength={240}
+                rows={2}
+                onChange={(event) => updateSettings({ answerSpeechText: event.target.value })}
+                placeholder="Your Ensync task needs an answer."
+              />
+            </label>
+          )}
 
           <label>
             System voice and accent
@@ -475,13 +559,24 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
       <div className="completion-notification-preferences__footer">
         <button
           type="button"
-          onClick={() => void preview()}
+          onClick={() => void preview(TASK_FINISHED_ALERT)}
           disabled={
             settings.mode === 'off'
             || (settings.mode === 'speech' && (!settings.speechText.trim() || !selectedVoiceExists))
           }
         >
-          Preview
+          Preview finished
+        </button>
+        <button
+          type="button"
+          onClick={() => void preview(ANSWER_NEEDED_ALERT)}
+          disabled={
+            settings.mode === 'off'
+            || !settings.answerAlerts
+            || (settings.mode === 'speech' && (!settings.answerSpeechText.trim() || !selectedVoiceExists))
+          }
+        >
+          Preview needs answer
         </button>
         <span role="status" aria-live="polite">{previewStatus}</span>
       </div>

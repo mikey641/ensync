@@ -123,6 +123,35 @@ export function pendingQuestionsFromEvents(events) {
   return (Array.isArray(events) ? events : []).reduce(pendingQuestionsAfterEvent, [])
 }
 
+/**
+ * Every question every conversation is blocked on right now, from the same
+ * replayed event buffers the cards read. A question waiting in a conversation
+ * nobody is looking at is exactly the one worth alerting about, so this reads
+ * all of them rather than only the visible chat.
+ */
+export function pendingQuestionsByChat(eventsByChat) {
+  const chats = eventsByChat && typeof eventsByChat === 'object' && !Array.isArray(eventsByChat)
+    ? eventsByChat
+    : {}
+  return Object.entries(chats).flatMap(([chatId, events]) =>
+    pendingQuestionsFromEvents(events).map((pending) => ({ chatId, ...pending })))
+}
+
+/**
+ * Which open questions have not been alerted about yet, plus the set to
+ * remember. An alert marks a question arriving, so a question that is still
+ * open on the next render never rings again, and one that has been answered is
+ * forgotten rather than accumulating.
+ */
+export function questionsNeedingAlert(pending, announced) {
+  const open = Array.isArray(pending) ? pending : []
+  const known = announced instanceof Set ? announced : new Set(announced ?? [])
+  return {
+    alerts: open.filter((question) => !known.has(question.questionId)),
+    announced: new Set(open.map((question) => question.questionId)),
+  }
+}
+
 /** One-line transcript of an answered question, for the chat's own record. */
 export function questionAnswerSummary(pending, answers) {
   const questions = pending?.questions ?? []

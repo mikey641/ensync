@@ -192,7 +192,9 @@ import {
   type OccupiedRuns,
 } from './lib/occupiedRunState.mjs'
 import {
+  pendingQuestionsByChat,
   pendingQuestionsFromEvents,
+  questionsNeedingAlert,
   type ProviderQuestionAnswerPayload,
 } from './lib/providerQuestions.mjs'
 import { ProviderQuestionCard } from './components/ProviderQuestionCard'
@@ -785,7 +787,11 @@ function App() {
   const sidebarStorageKey = workspaceStorageKey('ensync-conversations-sidebar-v1', nativeWorkspaceIdentity)
   const { getSectionProps, setVisible, visibility } = useUIVisibility()
   const { completionIndicator } = useDisplayPreferences()
-  const { settings: completionNotificationSettings, notifyCompletion } = useCompletionNotifications()
+  const {
+    settings: completionNotificationSettings,
+    notifyCompletion,
+    notifyAnswerNeeded,
+  } = useCompletionNotifications()
   const [hydrated] = useState<StoredState | null>(readInitialStoredState)
   const workspaceRecoveryIds = hydrated?.workspaceRecoveryIds ?? []
   const recentProjectRecoveryIds = hydrated?.recentProjectRecoveryIds ?? []
@@ -940,6 +946,22 @@ function App() {
   occupiedRunsRef.current = occupiedRuns
   occupiedShellReachabilityRef.current = occupiedShellReachability
   executionTargetRef.current = executionTarget
+
+  // A provider that stops to ask something holds its run until the person
+  // answers, and it can ask in a conversation nobody is looking at — so the
+  // alert watches every conversation, not the visible one. It marks a question
+  // arriving: one ring per question however often the panel re-renders it, and
+  // silence for a question that was already open when this window loaded.
+  const announcedQuestionsRef = useRef<{ hydrated: boolean, ids: Set<string> }>({ hydrated: false, ids: new Set() })
+  useEffect(() => {
+    const { alerts, announced } = questionsNeedingAlert(
+      pendingQuestionsByChat(chatExecutionEvents),
+      announcedQuestionsRef.current.ids,
+    )
+    const alreadyLoaded = announcedQuestionsRef.current.hydrated
+    announcedQuestionsRef.current = { hydrated: true, ids: announced }
+    if (alreadyLoaded && alerts.length > 0) void notifyAnswerNeeded()
+  }, [chatExecutionEvents, notifyAnswerNeeded])
 
   const workspaceSnapshot: StoredState = {
     chats,

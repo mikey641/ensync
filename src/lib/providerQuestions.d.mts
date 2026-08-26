@@ -18,6 +18,15 @@ export function questionAnswersReady(pending: PendingProviderQuestion | null | u
 export function questionAnswerPayload(pending: PendingProviderQuestion | null | undefined, selection: QuestionSelection): ProviderQuestionAnswerPayload | null
 export function pendingQuestionsAfterEvent(current: PendingProviderQuestion[], event: ChatExecutionEvent | { type: string }): PendingProviderQuestion[]
 export function pendingQuestionsFromEvents(events: ChatExecutionEvent[]): PendingProviderQuestion[]
+export type PendingChatQuestion = PendingProviderQuestion & { chatId: string }
+
+export function pendingQuestionsByChat(
+  eventsByChat: Record<string, ChatExecutionEvent[]> | null | undefined,
+): PendingChatQuestion[]
+export function questionsNeedingAlert(
+  pending: PendingChatQuestion[],
+  announced: Set<string> | Iterable<string> | null | undefined,
+): { alerts: PendingChatQuestion[]; announced: Set<string> }
 export function questionAnswerSummary(
   pending: PendingProviderQuestion | null | undefined,
   answers: { index: number; answer: string }[],

@@ -142,3 +142,29 @@
     grid-template-columns: 1fr;
   }
 }
+
+.completion-notification-preferences__toggle {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.completion-notification-preferences__toggle input {
+  margin-top: 3px;
+  accent-color: var(--accent-ui, #9ee6a6);
+}
+
+.completion-notification-preferences__toggle span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: var(--text-secondary, #c2c9c0);
+  font-size: var(--font-label, 13px);
+}
+
+.completion-notification-preferences__toggle small {
+  color: var(--text-muted, #929b91);
+  font-size: var(--font-label, 13px);
+  line-height: 1.4;
+}

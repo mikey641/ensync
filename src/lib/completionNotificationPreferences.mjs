@@ -1,15 +1,26 @@
 export const COMPLETION_NOTIFICATIONS_STORAGE_KEY = 'ensync-completion-notifications-v1'
 
+/** A run that has stopped and is waiting on the person before it can go on. */
+export const ANSWER_NEEDED_ALERT = 'answer-needed'
+/** A run that has finished and left something to read. */
+export const TASK_FINISHED_ALERT = 'task-finished'
+
 export const DEFAULT_COMPLETION_NOTIFICATION_SETTINGS = Object.freeze({
   mode: 'off',
   speechText: 'Your Ensync task is finished.',
   voiceId: null,
+  answerAlerts: true,
+  answerSpeechText: 'Your Ensync task needs an answer.',
 })
 
 function isMode(value) {
   return value === 'off' || value === 'ringtone' || value === 'speech'
 }
 
+/**
+ * Settings stored before question alerts existed carry neither field, so both
+ * default rather than reject: an alert the person never turned off is on.
+ */
 export function normalizeCompletionNotificationSettings(value) {
   const stored = value && typeof value === 'object' && !Array.isArray(value) ? value : {}
   return {
@@ -20,6 +31,40 @@ export function normalizeCompletionNotificationSettings(value) {
     voiceId: typeof stored.voiceId === 'string' && stored.voiceId.length > 0
       ? stored.voiceId.slice(0, 1024)
       : null,
+    answerAlerts: typeof stored.answerAlerts === 'boolean'
+      ? stored.answerAlerts
+      : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.answerAlerts,
+    answerSpeechText: typeof stored.answerSpeechText === 'string'
+      ? stored.answerSpeechText.slice(0, 240)
+      : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.answerSpeechText,
+  }
+}
+
+/**
+ * What this device should play for one trigger. A question alert keeps its own
+ * words and its own chime, because "come and decide" is not the same news as
+ * "come and read"; the two share the mode and the voice so there is one alert
+ * to configure, not two.
+ */
+export function completionAlertPlan(settings, trigger = TASK_FINISHED_ALERT) {
+  const normalized = normalizeCompletionNotificationSettings(settings)
+  const answerNeeded = trigger === ANSWER_NEEDED_ALERT
+  const silent = { mode: 'off', chime: null, speechText: '', voiceId: normalized.voiceId }
+  if (normalized.mode === 'off') return silent
+  if (answerNeeded && !normalized.answerAlerts) return silent
+  if (normalized.mode === 'ringtone') {
+    return {
+      mode: 'ringtone',
+      chime: answerNeeded ? ANSWER_NEEDED_ALERT : TASK_FINISHED_ALERT,
+      speechText: '',
+      voiceId: normalized.voiceId,
+    }
+  }
+  return {
+    mode: 'speech',
+    chime: null,
+    speechText: answerNeeded ? normalized.answerSpeechText : normalized.speechText,
+    voiceId: normalized.voiceId,
   }
 }
 
