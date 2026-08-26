@@ -423,12 +423,18 @@ function normalizeAnswers(questions, input) {
  * The single shape every runner emits, so the renderer never has to know which
  * provider paused the turn.
  */
-export function providerQuestionEvent(provider, id, questions, askedAt) {
+export function providerQuestionEvent(provider, id, questions, askedAt, message = null) {
   return {
     type: 'question',
     provider,
     questionId: id,
     questions,
+    /**
+     * What the agent said to the person immediately before asking. Ordinary
+     * transcript text, never a progress note: it is the answer the question
+     * hangs off, and no other frame in the run repeats it.
+     */
+    message: typeof message === 'string' && message.trim() ? message.trim() : null,
     at: askedAt,
   }
 }

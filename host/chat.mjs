@@ -523,7 +523,17 @@ function assistantTextBlocks(content) {
     .join('\n\n')
 }
 
-function claudeNoteExtractor() {
+/**
+ * The one Claude tool that is not work: it is the agent turning to the person.
+ * The assistant text in front of it is therefore the message it wrote *to* them
+ * — the answer the question hangs off — so it is ordinary transcript text, not
+ * progress commentary. Demoting it to a note both mislabels it and loses it,
+ * because Claude's terminal `result` carries only the last assistant text of
+ * the turn and nothing else in the stream repeats it.
+ */
+const CLAUDE_ASK_PERSON_TOOL = 'AskUserQuestion'
+
+function claudeNoteExtractor({ onQuestionMessage } = {}) {
   const pending = new Map()
 
   const remember = (id, text) => {
@@ -540,11 +550,31 @@ function claudeNoteExtractor() {
     const content = event.message?.content ?? event.content
     if (!Array.isArray(content)) return null
     const text = assistantTextBlocks(content)
-    const startsToolWork = content.some((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    const toolUses = content.filter((block) => block && typeof block === 'object' && block.type === 'tool_use')
+    // With no question channel there is no card to carry the message, so a note
+    // stays the only place it can be shown and the old routing is kept.
+    const asksPerson = toolUses.length > 0
+      && toolUses.every((block) => block.name === CLAUDE_ASK_PERSON_TOOL)
+      && typeof onQuestionMessage === 'function'
+    const startsToolWork = toolUses.length > 0 && !asksPerson
     const id = typeof event.message?.id === 'string' && event.message.id ? event.message.id : null
-    if (!id) return startsToolWork ? text || null : null
+    if (!id) {
+      if (asksPerson) {
+        onQuestionMessage(text)
+        return null
+      }
+      return startsToolWork ? text || null : null
+    }
 
     const held = remember(id, text)
+    // Handed to the question rather than flushed, and cleared either way: work
+    // resumed after the answer must never inherit words written before the ask.
+    if (asksPerson) {
+      const message = held.text
+      held.text = ''
+      onQuestionMessage(message)
+      return null
+    }
     if (!startsToolWork && !held.toolStarted) return null
     held.toolStarted = true
     const note = held.text
@@ -553,8 +583,8 @@ function claudeNoteExtractor() {
   }
 }
 
-function providerNoteExtractor(provider) {
-  if (provider === 'claude') return claudeNoteExtractor()
+function providerNoteExtractor(provider, options = {}) {
+  if (provider === 'claude') return claudeNoteExtractor(options)
   return (event) => {
     if (
       provider === 'codex'
@@ -579,6 +609,10 @@ function redactedRunEvent(event) {
   if (event?.type === 'question') {
     return {
       ...event,
+      // The agent wrote this, so it is redacted exactly like a note would be.
+      message: typeof event.message === 'string' && event.message
+        ? redactTerminalText(event.message).text
+        : null,
       questions: event.questions.map((question) => ({
         ...question,
         header: redactTerminalText(question.header).text,
@@ -599,12 +633,12 @@ function redactedRunEvent(event) {
   return { ...event, text: safe.text, redacted: safe.redacted }
 }
 
-function outputForwarder(onEvent, provider, { onStdoutLine } = {}) {
+function outputForwarder(onEvent, provider, { onStdoutLine, onQuestionMessage } = {}) {
   if (typeof onEvent !== 'function' && typeof onStdoutLine !== 'function') {
     return { stdout() {}, stderr() {}, flush() {} }
   }
   const buffers = { stdout: '', stderr: '' }
-  const noteFromEvent = providerNoteExtractor(provider)
+  const noteFromEvent = providerNoteExtractor(provider, { onQuestionMessage })
   const emit = (stream, text) => {
     if (!text) return
     // The interactive channel sees every stdout line before it is redacted:
@@ -1590,6 +1624,7 @@ export class ChatRunService {
     const args = argumentsFor(executionRequest, attachmentPaths, containment, { questions: questionsEnabled })
     const forwarder = outputForwarder(options.onEvent, request.provider, {
       onStdoutLine: questionChannel ? (line) => questionChannel.handleLine(line) : undefined,
+      onQuestionMessage: questionChannel ? (message) => questionChannel.noteQuestionMessage(message) : undefined,
     })
     // Registered last, so nothing between here and the try/finally that
     // removes it can leave a channel stranded in the map.

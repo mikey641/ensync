@@ -281,7 +281,7 @@ test('a file link opens the in-app file display before any system opener', async
   assert.match(messageContent, /if \(onOpenFile\) \{[\s\S]*?onOpenFile\(segment\.path\)[\s\S]*?return/)
   assert.match(app, /<FileViewerModal path=\{viewedFilePath\} onClose=\{\(\) => setViewedFilePath\(null\)\} \/>/)
   assert.match(app, /onOpenFile=\{setViewedFilePath\}/)
-  assert.equal(app.match(/<MessageContent content=\{[^}]+\} onOpenFile=\{onOpenFile\} \/>/g)?.length, 3)
+  assert.equal(app.match(/<MessageContent content=\{[^}]+\} onOpenFile=\{onOpenFile\} \/>/g)?.length, 4)
 })
 
 test('message content becomes collapsible only after a meaningful length or line threshold', () => {

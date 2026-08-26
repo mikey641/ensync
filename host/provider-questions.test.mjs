@@ -1099,3 +1099,59 @@ test('a question taller than the chat panel scrolls inside the card', async () =
   assert.match(scroller, /overflow-y:\s*auto/)
   assert.match(scroller, /min-height:\s*0/)
 })
+
+// The Host/renderer contract for the agent's own words in front of an ask.
+test('the agent message on a question reaches the renderer as ordinary text', async () => {
+  const asked = {
+    type: 'question',
+    provider: 'claude',
+    questionId: 'claude-9',
+    questions: PENDING.questions,
+    message: 'Confirmed the root cause. Here is the full report.',
+    at: PENDING.askedAt,
+  }
+  const [pending] = pendingQuestionsFromEvents([asked])
+  assert.equal(pending.message, 'Confirmed the root cause. Here is the full report.')
+
+  // A Host that never sends one leaves the card with nothing to show rather
+  // than an empty block.
+  const [plain] = pendingQuestionsFromEvents([{ ...asked, message: undefined }])
+  assert.equal(plain.message, null)
+
+  // It is rendered as a message, not as a provider note.
+  const app = await readFile(new URL('../src/App.tsx', import.meta.url), 'utf8')
+  assert.match(app, /pendingQuestion\?\.message && \(\s*\n\s*<div className="message message--agent"/)
+})
+
+test('a claude question carries the text written immediately before it', async () => {
+  const { channel, events } = claudeChannel()
+  channel.noteQuestionMessage('  Confirmed the root cause.  ')
+  channel.handleLine(JSON.stringify({
+    type: 'control_request',
+    request_id: 'req-msg-1',
+    request: {
+      subtype: 'can_use_tool',
+      tool_name: 'AskUserQuestion',
+      input: CLAUDE_ASK_INPUT,
+      tool_use_id: 'toolu_9',
+      requires_user_interaction: true,
+    },
+  }))
+  const asked = await waitFor(() => events.find((event) => event.type === 'question'))
+  assert.equal(asked.message, 'Confirmed the root cause.')
+
+  // Consumed once: a later ask with nothing in front of it says nothing.
+  channel.handleLine(JSON.stringify({
+    type: 'control_request',
+    request_id: 'req-msg-2',
+    request: {
+      subtype: 'can_use_tool',
+      tool_name: 'AskUserQuestion',
+      input: CLAUDE_ASK_INPUT,
+      tool_use_id: 'toolu_10',
+      requires_user_interaction: true,
+    },
+  }))
+  const second = await waitFor(() => events.filter((event) => event.type === 'question')[1])
+  assert.equal(second.message, null)
+})

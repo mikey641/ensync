@@ -1756,3 +1756,111 @@ test('ChatRunService bounds a hung automatic land so the finished run still comp
   assert.ok(timedOut, `expected an auto_land_timed_out notice, saw: ${notices.map((n) => n.code).join(', ')}`)
   assert.match(timedOut.message, /ensync\/chat-hung-land/)
 })
+
+// `AskUserQuestion` is the one Claude tool that is not work: it is the agent
+// turning to the person. Text in front of it is the message it wrote *to* them,
+// so labelling it a progress note both mislabels the agent's own answer and
+// loses it — Claude's terminal `result` carries only the last assistant text of
+// the turn, so nothing else in the stream ever repeats it.
+// Shape replayed from a real recorded run (assistant text, then a lone
+// AskUserQuestion tool_use block, then the control request).
+test('Claude text before a question is the agent message on the question, not a note', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const report = 'Confirmed the root cause. Here is the full report.'
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'thinking', thinking: 'hidden reasoning' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'text', text: report }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'tool_use', id: 'tool-1', name: 'AskUserQuestion', input: {} }] } }),
+    JSON.stringify({
+      type: 'control_request',
+      request_id: 'req-1',
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: 'AskUserQuestion',
+        input: { questions: [{ question: 'Which fix do you want?', header: 'Fix', options: [{ label: 'Timeout', description: null }] }] },
+        tool_use_id: 'tool-1',
+        requires_user_interaction: true,
+      },
+    }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_b', content: [{ type: 'text', text: 'Real Claude response' }] } }),
+    JSON.stringify({ type: 'result', is_error: false, result: 'Real Claude response', session_id: sessionId }),
+  ].join('\n')
+
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      options.onStdout(stdout)
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Find the stuck jobs' },
+    { liveTurnId: 'job_2222222222222222', onEvent: (event) => events.push(event) },
+  )
+
+  assert.equal(result.response, 'Real Claude response')
+  // The report is the agent's message, so it is not a note anywhere.
+  assert.deepEqual(events.filter((event) => event.type === 'note').map((event) => event.text), [])
+  const asked = events.find((event) => event.type === 'question')
+  assert.equal(asked.message, report)
+})
+
+// The same text with no question channel to carry it has nowhere better to go,
+// so the long-standing note routing is left exactly as it was.
+test('Claude text before a question stays a note when no question channel exists', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'text', text: 'About to ask something.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'tool_use', id: 'tool-1', name: 'AskUserQuestion', input: {} }] } }),
+    JSON.stringify({ type: 'result', is_error: false, result: 'Real Claude response', session_id: sessionId }),
+  ].join('\n')
+
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      options.onStdout(stdout)
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  await service.run({ provider: 'claude', projectPath, prompt: 'Ask me' }, { onEvent: (event) => events.push(event) })
+  assert.deepEqual(events.filter((event) => event.type === 'note').map((event) => event.text), ['About to ask something.'])
+})
+
+// A question the agent asks after going back to work must not inherit the words
+// it wrote before an earlier one.
+test('a diverted Claude question message is never replayed onto later work', async (context) => {
+  const projectPath = await projectFixture(context)
+  const sessionId = '123e4567-e89b-12d3-a456-426614174000'
+  const events = []
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'init', session_id: sessionId, model: 'claude-opus-4-6' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'text', text: 'Here is what I found.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_a', content: [{ type: 'tool_use', id: 'tool-1', name: 'AskUserQuestion', input: {} }] } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', tool_use_id: 'tool-1', content: 'answered' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_b', content: [{ type: 'text', text: 'Applying the fix now.' }] } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'msg_b', content: [{ type: 'tool_use', id: 'tool-2', name: 'Edit', input: {} }] } }),
+    JSON.stringify({ type: 'result', is_error: false, result: 'Real Claude response', session_id: sessionId }),
+  ].join('\n')
+
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, _args, options) => {
+      options.onStdout(stdout)
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout }
+    },
+  })
+
+  await service.run(
+    { provider: 'claude', projectPath, prompt: 'Fix it' },
+    { liveTurnId: 'job_3333333333333333', onEvent: (event) => events.push(event) },
+  )
+  assert.deepEqual(events.filter((event) => event.type === 'note').map((event) => event.text), ['Applying the fix now.'])
+})

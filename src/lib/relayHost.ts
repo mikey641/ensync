@@ -353,6 +353,8 @@ export type PendingProviderQuestion = {
   questionId: string
   provider: ChatProviderId
   questions: ProviderQuestion[]
+  /** What the agent said to the person before asking: ordinary text, not a note. */
+  message: string | null
   askedAt: string
 }
 
@@ -363,6 +365,8 @@ export type ChatExecutionEvent =
       provider: ChatProviderId
       questionId: string
       questions: ProviderQuestion[]
+      /** The agent's own words in front of the ask; shown as normal agent text. */
+      message?: string | null
       at: string
       sequence?: number
     }
