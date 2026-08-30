@@ -9,6 +9,7 @@ import {
   runGit,
   validateRepositoryLocation,
 } from './git.mjs'
+import { processIsLiveSince } from './process-liveness.mjs'
 
 const DEFAULT_LOCK_POLL_MS = 250
 const DEFAULT_LOCK_STALE_MS = 30_000
@@ -115,16 +116,6 @@ function waitFor(milliseconds, signal) {
 // lease this Host is using from one it leaked: both stay "alive" until the
 // daemon dies. The token can, and it is the only thing that can.
 const heldLeaseTokens = new Set()
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
 
 function workspaceKey(value) {
   if (value === undefined || value === null) {
@@ -740,7 +731,10 @@ export class ProjectIsolationService {
     const leakedByThisHost = ownerPid === process.pid && !heldLeaseTokens.has(ownerToken)
     // A live Host may be temporarily suspended while its provider child is
     // still mutating. Never steal that lease merely because timers paused.
-    if (!leakedByThisHost && processIsAlive(ownerPid)) return false
+    // The PID is only that Host's name while it still holds it: a lock left by
+    // a Host that died in a reboot names a PID the system has since reissued,
+    // and trusting it alone strands the conversation behind it forever.
+    if (!leakedByThisHost && processIsLiveSince(ownerPid, freshest, { now: this.#now() })) return false
 
     const quarantinePath = `${lockPath}.stale-${this.#uuid()}`
     try {

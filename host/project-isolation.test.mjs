@@ -9,6 +9,13 @@ import { runGit } from './git.mjs'
 import { ChatRunService } from './chat.mjs'
 import { ProjectIsolationError, ProjectIsolationService } from './project-isolation.mjs'
 
+// Old enough to be stale against the tests' lockStaleMs, recent enough that the
+// owner process it names was already running when it was written.
+const STALE_BUT_POSSIBLE_HEARTBEAT = new Date(Date.now() - 1_000).toISOString()
+// Predates every process alive on this machine, so any PID paired with it must
+// have been reissued since.
+const HEARTBEAT_FROM_A_PREVIOUS_BOOT = '2020-01-01T00:00:00.000Z'
+
 async function git(cwd, args) {
   const result = await runGit(args, { cwd })
   assert.equal(result.exitCode, 0, result.stderr || `git ${args.join(' ')} failed`)
@@ -386,8 +393,11 @@ test('a stale heartbeat is never stolen while another Host process is still aliv
     // another Host that is alive but suspended.
     pid: 1,
     workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
-    acquiredAt: '2020-01-01T00:00:00.000Z',
-    heartbeatAt: '2020-01-01T00:00:00.000Z',
+    acquiredAt: STALE_BUT_POSSIBLE_HEARTBEAT,
+    // Stale against lockStaleMs, yet later than this owner started. A heartbeat
+    // predating its own writer would instead describe a reissued PID, which the
+    // reclamation test below covers.
+    heartbeatAt: STALE_BUT_POSSIBLE_HEARTBEAT,
   }))
   const old = new Date('2020-01-01T00:00:00.000Z')
   await utimes(ownerPath, old, old)
@@ -408,6 +418,37 @@ test('a stale heartbeat is never stolen while another Host process is still aliv
   assert.equal(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'suspended-live-host')
 })
 
+test('a lock whose PID was reissued after a reboot is reclaimed, not guarded forever', async (context) => {
+  const fixture = await repositoryFixture(context)
+  const commonDirectory = await git(fixture.repository, ['rev-parse', '--git-common-dir'])
+  const key = 'window-a:chat-a'
+  const lockPath = workspaceLockPath(fixture.repository, commonDirectory, key)
+  const ownerPath = join(lockPath, 'owner.json')
+  await mkdir(lockPath, { recursive: true })
+  await writeFile(ownerPath, JSON.stringify({
+    version: 2,
+    token: 'host-that-died-in-a-reboot',
+    // Alive, but it started long after this heartbeat was written, so it cannot
+    // be the Host that wrote it — the PID was reissued across the reboot.
+    pid: 1,
+    workspaceHash: createHash('sha256').update(key).digest('hex').slice(0, 24),
+    acquiredAt: HEARTBEAT_FROM_A_PREVIOUS_BOOT,
+    heartbeatAt: HEARTBEAT_FROM_A_PREVIOUS_BOOT,
+  }))
+  const old = new Date(HEARTBEAT_FROM_A_PREVIOUS_BOOT)
+  await utimes(ownerPath, old, old)
+  await utimes(lockPath, old, old)
+
+  const isolation = new ProjectIsolationService({
+    rootPath: fixture.workspaceRoot,
+    lockStaleMs: 10,
+    lockPollMs: 5,
+  })
+  const lease = await isolation.acquire(fixture.repository, key)
+  context.after(() => lease.release())
+  assert.notEqual(JSON.parse(await readFile(ownerPath, 'utf8')).token, 'host-that-died-in-a-reboot')
+})
+
 test('a lease this Host still holds is never stolen when its own heartbeat freezes', async (context) => {
   const fixture = await repositoryFixture(context)
   const key = 'window-a:chat-a'
@@ -422,7 +463,7 @@ test('a lease this Host still holds is never stolen when its own heartbeat freez
   const lockPath = workspaceLockPath(fixture.repository, '.git', key)
   const ownerPath = join(lockPath, 'owner.json')
   const owner = JSON.parse(await readFile(ownerPath, 'utf8'))
-  await writeFile(ownerPath, JSON.stringify({ ...owner, heartbeatAt: '2020-01-01T00:00:00.000Z' }))
+  await writeFile(ownerPath, JSON.stringify({ ...owner, heartbeatAt: STALE_BUT_POSSIBLE_HEARTBEAT }))
   const old = new Date('2020-01-01T00:00:00.000Z')
   await utimes(ownerPath, old, old)
   await utimes(lockPath, old, old)

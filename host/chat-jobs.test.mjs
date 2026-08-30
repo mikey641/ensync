@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -773,4 +775,117 @@ test('frequent live output checkpoints are batched while terminal events remain 
   release()
   await waitFor(() => service.get(JOB_A).state === 'completed')
   assert.equal(saves, 4)
+})
+
+// Fixtures the production writer cannot produce: a save() always stamps
+// savedAt with the current time, but these cases need a record whose stamp
+// predates this process. Each fixture carries a real job so a fixture the
+// module rejects as corrupt fails the test instead of silently returning [].
+const FENCE_FIXTURE_JOB = {
+  id: JOB_A,
+  kind: 'local',
+  state: 'completed',
+  sequence: 1,
+  events: [],
+}
+
+async function writeJournalFixture(filePath, { writer, savedAt, revision = 42 }) {
+  const payload = {
+    revision,
+    ...(savedAt === undefined ? {} : { savedAt }),
+    ...(writer ? { writer } : {}),
+    jobs: [FENCE_FIXTURE_JOB],
+  }
+  await writeFile(filePath, JSON.stringify({
+    version: 1,
+    checksum: createHash('sha256').update(JSON.stringify(payload)).digest('hex'),
+    payload,
+  }), 'utf8')
+}
+
+function thisProcessStartedAtMs() {
+  return Date.now() - Math.round(process.uptime() * 1000)
+}
+
+async function retiredPid() {
+  const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60_000)'], { stdio: 'ignore' })
+  await new Promise((resolve, reject) => {
+    child.once('spawn', resolve)
+    child.once('error', reject)
+  })
+  const { pid } = child
+  child.kill('SIGKILL')
+  await new Promise((resolve) => child.once('exit', resolve))
+  return pid
+}
+
+test('a writer PID recycled since the record was written does not fence the journal', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-chat-journal-recycled-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'jobs.json')
+  // The reboot case: the PID is alive, but whatever holds it now started long
+  // after the record was written, so it cannot be the Host that wrote it.
+  await writeJournalFixture(filePath, {
+    writer: { instanceId: 'host-before-reboot', pid: process.pid },
+    savedAt: new Date(thisProcessStartedAtMs() - 600_000).toISOString(),
+  })
+
+  const afterReboot = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-after-reboot', pid: process.pid },
+  })
+  assert.deepEqual(afterReboot.load(), [FENCE_FIXTURE_JOB])
+  assert.doesNotThrow(() => afterReboot.save([FENCE_FIXTURE_JOB]))
+})
+
+test('a journal whose writer process has exited is reclaimed with its jobs intact', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-chat-journal-reclaim-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'jobs.json')
+  await writeJournalFixture(filePath, {
+    writer: { instanceId: 'host-crashed', pid: await retiredPid() },
+    savedAt: new Date().toISOString(),
+  })
+
+  const successor = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-successor', pid: process.pid },
+  })
+  assert.deepEqual(successor.load(), [FENCE_FIXTURE_JOB])
+  assert.doesNotThrow(() => successor.save([FENCE_FIXTURE_JOB]))
+})
+
+test('a writer record with no timestamp keeps its live PID fenced', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-chat-journal-undated-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'jobs.json')
+  // Nothing here disproves the writer, and wrongly declaring a live Host dead
+  // is the failure that loses jobs. The fence stays on.
+  await writeJournalFixture(filePath, {
+    writer: { instanceId: 'host-undated', pid: process.pid },
+    savedAt: undefined,
+  })
+
+  const competing = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-competing', pid: process.pid },
+  })
+  assert.throws(() => competing.load(), ChatJobJournalInUseError)
+})
+
+test('a live writer that saved during this process lifetime still fences the journal', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-chat-journal-current-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'jobs.json')
+  await writeJournalFixture(filePath, {
+    writer: { instanceId: 'host-live', pid: process.pid },
+    savedAt: new Date().toISOString(),
+  })
+
+  const competing = new ChatJobJournal({
+    filePath,
+    writer: { instanceId: 'host-competing', pid: process.pid },
+  })
+  assert.throws(() => competing.load(), ChatJobJournalInUseError)
+  assert.throws(() => competing.save([]), ChatJobJournalInUseError)
 })

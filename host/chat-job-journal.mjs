@@ -10,6 +10,8 @@ import {
 } from 'node:fs'
 import { dirname } from 'node:path'
 
+import { processIsLiveSince } from './process-liveness.mjs'
+
 const JOURNAL_VERSION = 1
 
 function checksum(payload) {
@@ -32,16 +34,6 @@ function readCandidate(path) {
     return decode(readFileSync(path, 'utf8'))
   } catch {
     return null
-  }
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
   }
 }
 
@@ -73,10 +65,16 @@ export class ChatJobJournal {
       : null
   }
 
+  // The writer's PID is only evidence while it still names the process that
+  // saved the file. After a reboot the operating system reissues that PID to an
+  // unrelated daemon, and a liveness check alone would then fence every later
+  // Host out of its own journal. savedAt dates the claim, so a PID whose
+  // current owner started afterwards is a recycled one.
   #assertWriter(payload) {
     const writer = payload?.writer
     if (!this.writer || !writer || writer.instanceId === this.writer.instanceId) return
-    if (processIsAlive(writer.pid)) throw new ChatJobJournalInUseError()
+    const savedAtMs = Date.parse(payload?.savedAt)
+    if (processIsLiveSince(writer.pid, savedAtMs)) throw new ChatJobJournalInUseError()
   }
 
   load() {

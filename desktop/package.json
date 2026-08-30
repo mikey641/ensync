@@ -63,6 +63,7 @@
       "src/build-info.mjs",
       "src/native-updates.mjs",
       "src/runtime.mjs",
+      "src/process-liveness.mjs",
       "package.json"
     ],
     "extraResources": [

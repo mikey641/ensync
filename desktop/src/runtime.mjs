@@ -3,6 +3,8 @@ import { createHash, randomBytes, randomUUID } from 'node:crypto'
 import { access, mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { extname, isAbsolute, relative, resolve, sep } from 'node:path'
 
+import { processIsAlive, processIsLiveSince } from './process-liveness.mjs'
+
 export const HOST_READY_PREFIX = 'ENSYNC_HOST_READY:'
 export const APP_SCHEME = 'ensync'
 export const APP_HOST = 'app'
@@ -71,16 +73,6 @@ function appendChunk(onLine, state, chunk) {
 
 function processExited(child) {
   return child.exitCode !== null || child.signalCode !== null
-}
-
-function processIsAlive(pid) {
-  if (!Number.isInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
 }
 
 export class HostProcessController {
@@ -466,7 +458,14 @@ export class HostProcessController {
       this.#readDescriptor(stateFilePath),
       this.#readDescriptor(`${stateFilePath}.backup`),
     ])
-    const live = initial.filter((descriptor) => descriptor && processIsAlive(descriptor.pid))
+    // A descriptor left behind by a Host that died in a reboot names a PID the
+    // system has since reissued. Its own startedAt dates the claim, so a PID
+    // whose current owner is younger than that cannot be the Host it describes
+    // — without this the retry below reports a phantom Host and refuses to
+    // start. The loop keeps the cheap liveness check: it only has to notice a
+    // Host confirmed real here exiting while we wait.
+    const live = initial.filter((descriptor) => descriptor
+      && processIsLiveSince(descriptor.pid, Date.parse(descriptor.startedAt ?? '')))
     if (live.length === 0) return null
 
     const deadline = Date.now() + (this.options.descriptorRetryMs ?? DEFAULT_DESCRIPTOR_RETRY_MS)
@@ -505,7 +504,7 @@ export class HostProcessController {
       } catch {
         try { createdAt = (await stat(lockPath)).mtimeMs } catch { continue }
       }
-      if (!processIsAlive(ownerPid) && Number.isFinite(createdAt) && Date.now() - createdAt > LAUNCH_LOCK_STALE_MS) {
+      if (!processIsLiveSince(ownerPid, createdAt) && Number.isFinite(createdAt) && Date.now() - createdAt > LAUNCH_LOCK_STALE_MS) {
         const quarantine = `${lockPath}.stale-${randomUUID()}`
         try {
           await rename(lockPath, quarantine)
