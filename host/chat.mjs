@@ -1716,6 +1716,16 @@ export class ChatRunService {
           true,
         )
       }
+      if (request.provider === 'claude') {
+        try {
+          parseClaudeChatResult(processResult.stdout, { outputTruncated })
+        } catch (error) {
+          // A nonzero process exit still carries Claude's authoritative terminal
+          // result. Prefer that actionable, redacted diagnostic over the start of
+          // stdout, which normally contains a large SessionStart hook response.
+          if (error instanceof ChatRunError && error.code === 'cli_failed') throw error
+        }
+      }
       const output = processResult.stderr || processResult.stdout
       const reason = output ? ` ${redactTerminalText(output.slice(0, 500)).text}` : ''
       throw new ChatRunError(

@@ -939,6 +939,51 @@ test('Claude startup-only code 1 is safe for automatic fallback', async (context
   )
 })
 
+test('Claude nonzero exit surfaces its terminal structured error instead of startup hook output', async (context) => {
+  const projectPath = await projectFixture(context)
+  const stdout = [
+    JSON.stringify({ type: 'system', subtype: 'hook_started', hook_name: 'SessionStart:startup' }),
+    JSON.stringify({
+      type: 'system',
+      subtype: 'hook_response',
+      hook_name: 'SessionStart:startup',
+      output: '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"bootstrap"}}',
+    }),
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({
+      type: 'assistant',
+      message: { content: [{ type: 'tool_use', name: 'Read', input: { file_path: 'package.json' } }] },
+    }),
+    JSON.stringify({
+      type: 'result',
+      is_error: true,
+      terminal_reason: 'api_error',
+      result: 'Failed to authenticate: OAuth session expired and could not be refreshed',
+    }),
+  ].join('\n')
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async () => ({
+      exitCode: 1,
+      error: null,
+      timedOut: false,
+      outputTruncated: false,
+      stderr: '',
+      stdout,
+    }),
+  })
+
+  await assert.rejects(
+    service.run({ provider: 'claude', projectPath, prompt: 'Continue the task' }),
+    (error) =>
+      error instanceof ChatRunError
+      && error.code === 'cli_failed'
+      && error.safeToRetry === false
+      && error.message === 'Claude Code reported an error: Failed to authenticate: OAuth session expired and could not be refreshed'
+      && !error.message.includes('hook_started'),
+  )
+})
+
 test('Claude code 1 after an assistant event is not replayable', async (context) => {
   const projectPath = await projectFixture(context)
   const stdout = [
