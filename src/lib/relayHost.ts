@@ -198,6 +198,7 @@ export type GitStatus = {
   behind: number | null
   dirty: boolean
   changedFiles: number
+  files: { path: string; status: string }[]
   remotes: GitRemote[]
   preferredRemote: string | null
   productionBranch: string | null
@@ -708,6 +709,20 @@ export class EnsyncHostClient {
     return this.request<GitLandResult>('/git/land', {
       method: 'POST',
       body: JSON.stringify(input),
+    })
+  }
+
+  commitAllChanges(projectPath: string, message: string) {
+    return this.request<{ git: GitStatus }>('/git/commit', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath, message }),
+    })
+  }
+
+  stashAllChanges(projectPath: string) {
+    return this.request<{ git: GitStatus }>('/git/stash', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath }),
     })
   }
 

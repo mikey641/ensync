@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  Archive,
   Check,
   CircleHelp,
   CloudCog,
   GitBranch,
+  GitCommit,
   GitFork,
   LoaderCircle,
   RefreshCw,
@@ -72,11 +74,12 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
   const [pushMode, setPushMode] = useState<GitPushMode>('current_branch')
   const [productionBranch, setProductionBranch] = useState(() => project?.path ? readProductionBranch(project.path) : '')
   const [confirmation, setConfirmation] = useState('')
-  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'init' | null>(null)
+  const [busy, setBusy] = useState<'clone' | 'status' | 'connect' | 'push' | 'init' | 'commit' | 'stash' | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [errorCode, setErrorCode] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [noticeHeading, setNoticeHeading] = useState<string>('Completed')
+  const [commitMessage, setCommitMessage] = useState('')
 
   const reportFailure = (thrown: unknown, fallback: string) => {
     setError(thrown instanceof Error ? thrown.message : fallback)
@@ -206,6 +209,39 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
     }
   }
 
+  const commitAll = async () => {
+    if (!project?.path || !commitMessage.trim()) return
+    setBusy('commit')
+    clearFeedback()
+    try {
+      const response = await ensyncHost.commitAllChanges(project.path, commitMessage.trim())
+      setStatus(response.git)
+      setCommitMessage('')
+      setNoticeHeading('Changes committed')
+      setNotice(`Committed ${status?.changedFiles ?? 'all'} changes on ${response.git.branch ?? 'HEAD'}. You can start an Ensync chat now.`)
+    } catch (commitError) {
+      reportFailure(commitError, 'Git could not commit the changes.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  const stashAll = async () => {
+    if (!project?.path) return
+    setBusy('stash')
+    clearFeedback()
+    try {
+      const response = await ensyncHost.stashAllChanges(project.path)
+      setStatus(response.git)
+      setNoticeHeading('Changes stashed')
+      setNotice(`Stashed ${status?.changedFiles ?? 'all'} changes. Restore them later with \`git stash pop\` in a terminal. You can start an Ensync chat now.`)
+    } catch (stashError) {
+      reportFailure(stashError, 'Git could not stash the changes.')
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const statusFacts = useMemo(() => status ? [
     { label: 'Branch', value: status.branch ?? 'Detached HEAD' },
     { label: 'Working tree', value: status.dirty ? `${status.changedFiles} changed` : 'Clean' },
@@ -261,6 +297,34 @@ export function GitWorkflowModal({ mode: initialMode, project, onImported, onClo
                   <div className="git-status-grid">
                     {statusFacts.map((fact) => <div key={fact.label}><small>{fact.label}</small><strong>{fact.value}</strong></div>)}
                   </div>
+
+                  {status.dirty && status.files.length > 0 && (
+                    <div className="git-dirty-panel">
+                      <div className="git-section-heading"><AlertTriangle size={20} /><div><strong>{status.changedFiles} uncommitted changes</strong><p>Commit or stash these changes to start an Ensync chat. Ensync never auto-stashes or hides your work.</p></div></div>
+                      <div className="git-dirty-files">
+                        {status.files.map((file) => (
+                          <div key={file.path} className="git-dirty-file">
+                            <span className="git-dirty-status" data-status={file.status.trim() || '?'}>{file.status.trim() || '?'}</span>
+                            <span className="git-dirty-path">{file.path}</span>
+                          </div>
+                        ))}
+                      </div>
+                      <div className="git-dirty-actions">
+                        <label>
+                          <span>Commit message</span>
+                          <input value={commitMessage} onChange={(event) => setCommitMessage(event.target.value)} placeholder="feat: add new feature" onKeyDown={(event) => { if (event.key === 'Enter' && commitMessage.trim()) void commitAll() }} />
+                        </label>
+                        <div className="git-dirty-buttons">
+                          <button className="button button--primary" onClick={() => void commitAll()} disabled={busy !== null || !commitMessage.trim()}>
+                            {busy === 'commit' ? <><LoaderCircle className="spin" size={15} /> Committing…</> : <><GitCommit size={15} /> Commit all</>}
+                          </button>
+                          <button className="button button--ghost" onClick={() => void stashAll()} disabled={busy !== null}>
+                            {busy === 'stash' ? <><LoaderCircle className="spin" size={15} /> Stashing…</> : <><Archive size={15} /> Stash all</>}
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  )}
 
                   <div className="git-connection-panel">
                     <div className="git-section-heading"><CloudCog size={20} /><div><strong>Git remote connection</strong><p>Verification contacts the selected remote with non-interactive Git, using only credentials already configured on this computer.</p></div></div>

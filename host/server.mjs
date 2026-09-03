@@ -599,6 +599,18 @@ export function createEnsyncHost(options = {}) {
         return sendJson(response, 200, result, origin)
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/git/commit') {
+        const body = await readJsonBody(request)
+        const git = await git.commitAll(body.projectPath, body.message)
+        return sendJson(response, 200, { git }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/git/stash') {
+        const body = await readJsonBody(request)
+        const git = await git.stashAll(body.projectPath)
+        return sendJson(response, 200, { git }, origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/chat/attachments/probe') {
         const body = await readJsonBody(request)
         return sendJson(response, 200, await probeAttachmentPaths(body.paths), origin)

@@ -3408,6 +3408,9 @@ function App() {
         return
       }
       const failureMessage = runError instanceof Error ? runError.message : 'The Ensync Host run failed.'
+      if (runError instanceof EnsyncHostError && runError.code === 'shared_checkout_dirty') {
+        setGitWorkflowMode('manage')
+      }
       const failedChats: Chat[] = chatsRef.current.map((chat): Chat => chat.id === chatId ? {
         ...chat,
         subtitle: 'Run failed',

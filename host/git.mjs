@@ -346,6 +346,53 @@ function parseBranchStatus(output) {
   return status
 }
 
+/**
+ * Parse null-separated `git status --porcelain=v1 -z` output into a list of
+ * { path, status } entries so the UI can show exactly which files are dirty
+ * and offer to commit or stash them without leaving the app.
+ */
+function parseChangedFiles(output) {
+  const parts = String(output ?? '').split('\0')
+  const files = []
+  for (let index = 0; index < parts.length; index += 1) {
+    const entry = parts[index]
+    if (!entry) continue
+    const xy = entry.slice(0, 2)
+    const path = entry.slice(3)
+    if (!path) continue
+    if (xy[0] === 'R' || xy[0] === 'C') {
+      const renamedTo = parts[index + 1]
+      if (renamedTo) {
+        files.push({ path: renamedTo, status: xy })
+        index += 1
+      } else {
+        files.push({ path, status: xy })
+      }
+    } else {
+      files.push({ path, status: xy })
+    }
+  }
+  return files
+}
+
+const MAX_COMMIT_MESSAGE_LENGTH = 512
+const MAX_CHANGED_FILES_IN_STATUS = 200
+
+function validateCommitMessage(message) {
+  if (typeof message !== 'string' || !message.trim()) {
+    throw new GitWorkflowError('Enter a commit message.', { code: 'invalid_commit_message' })
+  }
+  const trimmed = message.trim()
+  if (trimmed.length > MAX_COMMIT_MESSAGE_LENGTH) {
+    throw new GitWorkflowError('The commit message is too long.', { code: 'invalid_commit_message' })
+  }
+  // Strip control characters that could break the -m argument or inject flags.
+  if (/[\0\r\n]/.test(trimmed)) {
+    throw new GitWorkflowError('The commit message may not contain line breaks.', { code: 'invalid_commit_message' })
+  }
+  return trimmed
+}
+
 function validateRemoteName(remote) {
   if (typeof remote !== 'string' || !REMOTE_NAME_PATTERN.test(remote)) {
     throw new GitWorkflowError('Select a valid configured Git remote.', { code: 'invalid_git_remote' })
@@ -594,9 +641,19 @@ export async function getGitStatus(projectPath, options = {}) {
     ? await remoteDefaultBranch(repositoryPath, preferredRemote, options)
     : null
 
+  let files = []
+  if (branchStatus.dirty) {
+    const filesResult = await checkedGit(
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+      { cwd: repositoryPath, gitExecutable: options.gitExecutable },
+    )
+    files = parseChangedFiles(filesResult.stdout).slice(0, MAX_CHANGED_FILES_IN_STATUS)
+  }
+
   return {
     repositoryPath,
     ...branchStatus,
+    files,
     remotes,
     preferredRemote,
     productionBranch,
@@ -883,6 +940,66 @@ export async function queueAgentBranchLanding(input, options = {}) {
   }
 }
 
+/**
+ * Stages every change (including untracked files) and commits with the
+ * user-provided message. This is a convenience to unblock a dirty shared
+ * checkout so the user can start an Ensync chat without leaving the app.
+ * It uses the user's own Git identity and does not bypass hooks or signing.
+ */
+export async function commitAllChanges(projectPath, message, options = {}) {
+  const validatedMessage = validateCommitMessage(message)
+  const repositoryPath = await gitRepositoryRoot(projectPath, options)
+  const statusResult = await checkedGit(
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { cwd: repositoryPath, gitExecutable: options.gitExecutable },
+  )
+  if (statusResult.stdout.split('\0').filter(Boolean).length === 0) {
+    throw new GitWorkflowError('The working tree is already clean; there is nothing to commit.', {
+      code: 'nothing_to_commit',
+      status: 409,
+    })
+  }
+  await checkedGit(['add', '-A', '--', '.'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    failureMessage: 'Git could not stage the changes.',
+    code: 'git_commit_failed',
+  })
+  await checkedGit(['commit', '-m', validatedMessage], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    failureMessage: 'Git could not create the commit.',
+    code: 'git_commit_failed',
+  })
+  return getGitStatus(projectPath, options)
+}
+
+/**
+ * Stashes all changes including untracked files so the shared checkout
+ * becomes clean and an Ensync chat can start immediately. The user can
+ * restore the stashed work later with `git stash pop`.
+ */
+export async function stashAllChanges(projectPath, options = {}) {
+  const repositoryPath = await gitRepositoryRoot(projectPath, options)
+  const statusResult = await checkedGit(
+    ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+    { cwd: repositoryPath, gitExecutable: options.gitExecutable },
+  )
+  if (statusResult.stdout.split('\0').filter(Boolean).length === 0) {
+    throw new GitWorkflowError('The working tree is already clean; there is nothing to stash.', {
+      code: 'nothing_to_stash',
+      status: 409,
+    })
+  }
+  await checkedGit(['stash', 'push', '--include-untracked', '-m', 'Ensync auto-stash before chat'], {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    failureMessage: 'Git could not stash the changes.',
+    code: 'git_stash_failed',
+  })
+  return getGitStatus(projectPath, options)
+}
+
 export class GitWorkflowService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
@@ -924,5 +1041,13 @@ export class GitWorkflowService {
 
   land(input) {
     return queueAgentBranchLanding(input, this.options())
+  }
+
+  commitAll(projectPath, message) {
+    return commitAllChanges(projectPath, message, this.options())
+  }
+
+  stashAll(projectPath) {
+    return stashAllChanges(projectPath, this.options())
   }
 }

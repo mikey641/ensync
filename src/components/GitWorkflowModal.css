@@ -452,3 +452,82 @@
 .git-initialize-panel > .button {
   align-self: flex-start;
 }
+
+.git-dirty-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, #d8a85d 42%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in srgb, #d8a85d 5%, var(--panel));
+}
+
+.git-dirty-files {
+  display: flex;
+  flex-direction: column;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+}
+
+.git-dirty-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--line);
+  font-size: 12px;
+}
+
+.git-dirty-file:last-child {
+  border-bottom: 0;
+}
+
+.git-dirty-status {
+  flex: 0 0 28px;
+  text-align: center;
+  font: 10px ui-monospace, monospace;
+  font-weight: 600;
+  padding: 2px 0;
+  border-radius: 4px;
+  background: color-mix(in srgb, #d8a85d 15%, transparent);
+  color: #d8a85d;
+}
+
+.git-dirty-path {
+  flex: 1;
+  font: 11px ui-monospace, monospace;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.git-dirty-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.git-dirty-actions label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.git-dirty-actions input {
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+}
+
+.git-dirty-buttons {
+  display: flex;
+  gap: 8px;
+}
