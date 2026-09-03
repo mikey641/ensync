@@ -58,6 +58,7 @@ await rm(toolsDirectory, { recursive: true, force: true })
 await stageAgentWorktree({
   repoRoot: resolve(desktopRoot, '..'),
   toolsDirectory,
+  universalMac: platform === 'macos',
 })
 await unlink(join(desktopRoot, 'release', `attestation-${platform}.json`)).catch((error) => {
   if (error?.code !== 'ENOENT') throw error

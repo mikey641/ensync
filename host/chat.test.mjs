@@ -245,7 +245,7 @@ test('ChatRunService tells the provider and renderer that baseline reconciliatio
   assert.deepEqual(result.workspace.baselineConflict, baselineConflict)
 })
 
-test('ChatRunService shows live overlap events, advises the provider, and stops monitoring', async (context) => {
+test('ChatRunService ignores the removed filesystem overlap monitor and prompt wrapper', async (context) => {
   const projectPath = await projectFixture(context)
   const overlap = {
     peerBranch: 'ensync/chat-bbbbbbbbbbbbbbbbbbbbbbbb',
@@ -255,7 +255,7 @@ test('ChatRunService shows live overlap events, advises the provider, and stops 
   }
   const events = []
   let seenPrompt = ''
-  let stopCalls = 0
+  let startCalls = 0
   const lease = {
     workspace: {
       projectPath,
@@ -279,6 +279,7 @@ test('ChatRunService shows live overlap events, advises the provider, and stops 
     },
     workspaceOverlapMonitor: {
       async start(_workspace, options) {
+        startCalls += 1
         options.onEvent({
           type: 'notice',
           code: 'workspace_file_overlap_detected',
@@ -289,7 +290,7 @@ test('ChatRunService shows live overlap events, advises the provider, and stops 
         return {
           current: () => [overlap],
           async refresh() { return [overlap] },
-          async stop() { stopCalls += 1 },
+          async stop() {},
         }
       },
     },
@@ -313,69 +314,13 @@ test('ChatRunService shows live overlap events, advises the provider, and stops 
     onEvent: (event) => events.push(event),
   })
 
-  assert.match(seenPrompt, /CROSS-CONVERSATION FILE AWARENESS/)
-  assert.match(seenPrompt, /src\/App\.tsx/)
-  assert.match(seenPrompt, /re-read/i)
+  assert.doesNotMatch(seenPrompt, /CROSS-CONVERSATION FILE AWARENESS/)
+  assert.doesNotMatch(seenPrompt, /src\/App\.tsx/)
   assert.doesNotMatch(seenPrompt, /another worktree at/)
-  assert.equal(events.some((event) => event.code === 'workspace_file_overlap_detected'), true)
-  assert.equal(stopCalls, 1)
+  assert.equal(events.some((event) => event.code === 'workspace_file_overlap_detected'), false)
+  assert.equal(startCalls, 0)
 })
 
-test('overlap refresh failures never replace a completed provider result', async (context) => {
-  const projectPath = await projectFixture(context)
-  let stopCalls = 0
-  const lease = {
-    workspace: {
-      projectPath,
-      repositoryPath: projectPath,
-      commonGitDirectory: join(projectPath, '.git'),
-      branch: 'ensync/chat-aaaaaaaaaaaaaaaaaaaaaaaa',
-      base: null,
-      integration: null,
-      gitBefore: { dirty: false, changedFiles: 0, head: 'base' },
-      shared: { repositoryPath: projectPath },
-    },
-    signal: new AbortController().signal,
-    assertHeld() {},
-    async release() {},
-  }
-  const service = new ChatRunService({
-    statusService: statusService(readyProvider('codex')),
-    projectIsolation: {
-      async commitAgentWork() { return { committed: false, changedFiles: 0 } },
-      async checkSharedCheckout() { return { available: false } },
-    },
-    workspaceOverlapMonitor: {
-      async start() {
-        return {
-          current: () => [],
-          async refresh() { throw new Error('overlap metadata unavailable') },
-          async stop() { stopCalls += 1 },
-        }
-      },
-    },
-    processRunner: async () => ({
-      exitCode: 0, error: null, timedOut: false, stderr: '',
-      stdout: [
-        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
-        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done despite advisory failure' } }),
-        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
-      ].join('\n'),
-    }),
-  })
-  const events = []
-
-  const result = await service.run({
-    provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'conversation:overlap-failure',
-  }, {
-    preAcquiredWorkspaceLease: lease,
-    onEvent: (event) => events.push(event),
-  })
-
-  assert.equal(result.response, 'done despite advisory failure')
-  assert.equal(stopCalls, 1)
-  assert.equal(events.some((event) => event.code === 'workspace_overlap_unavailable'), true)
-})
 
 test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON only', async (context) => {
   const projectPath = await projectFixture(context)

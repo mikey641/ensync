@@ -24,7 +24,6 @@ import { LandingJournal } from './landing-journal.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
-import { WorkspaceOverlapMonitor } from './workspace-overlap.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
   SupportRepairError,
@@ -269,7 +268,6 @@ export function createEnsyncHost(options = {}) {
     autoInitializeGit: options.autoInitializeGitRepositories
       ?? process.env.ENSYNC_AUTO_INIT_GIT !== '0',
   })
-  const workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? new WorkspaceOverlapMonitor()
   const chatImages = options.chatImageService ?? new ChatImageService({
     workspaceRoot: options.projectIsolationRoot,
   })
@@ -320,7 +318,6 @@ export function createEnsyncHost(options = {}) {
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
-    workspaceOverlapMonitor,
     landingCoordinator,
   })
   const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({

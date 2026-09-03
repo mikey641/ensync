@@ -41,6 +41,15 @@ export class LandingCoordinator {
 
   async enqueue(input) {
     const item = await this.journal.enqueue(input)
+    const retained = await this.journal.load()
+    for (const candidate of retained) {
+      if (
+        candidate.state === 'retry'
+        && this.#repositoryKey(candidate.repositoryPath) === this.#repositoryKey(item.repositoryPath)
+      ) {
+        this.#markReady(candidate)
+      }
+    }
     this.#markReady(item)
     return item
   }

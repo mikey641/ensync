@@ -13,7 +13,7 @@ Make concurrent Ensync chats safe and fast without allowing repository integrati
 - Chats that finish while a landing is active form the next ordered train.
 - Landing never asks for manual merge review.
 - A difficult item must not keep later items or the originating chat stuck.
-- Remove project-owned Superpowers artifacts and redundant coordination prompt injection. Do not modify user-global Codex or Claude installations.
+- Remove project-owned legacy coordination skill artifacts and redundant coordination prompt injection. Do not modify user-global Codex or Claude installations.
 
 ## Research and selected approach
 
@@ -98,7 +98,8 @@ The rewrite removes:
 - the old auto-land timeout and conflict/repair waits attached to chat jobs;
 - branch-side-picking or force-merge behavior;
 - the injected `[ENSYNC SAFE MULTI-AGENT v1]` prompt and provider coordination-policy metadata;
-- `.superpowers/` and historical `docs/superpowers/` artifacts;
+- the filesystem-polled active-edit overlap monitor, injected peer warning, and overlap banner;
+- project-owned legacy coordination skill artifacts;
 - redundant automatic-landing controls whose off state conflicts with the selected always-on behavior.
 
 The reusable Ensync Auto Context skill remains because it is a product feature and carries provider-neutral continuity; user-global skills are untouched.

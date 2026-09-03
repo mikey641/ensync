@@ -429,8 +429,8 @@ function validateRemoteChatRequest(request) {
 
 /**
  * Builds the same-Host admission coordinate before any SSH process starts.
- * The remote bridge still owns the cross-Host filesystem lease; this key only
- * prevents this Host from retaining a second waiter for one conversation.
+ * The selected Host uses this process-local key to reject a second concurrent
+ * run for the same remote conversation without creating a remote lock or waiter.
  */
 export async function remoteChatAdmissionCoordinate(request) {
   validateRemoteChatRequest(request)

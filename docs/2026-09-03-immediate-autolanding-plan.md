@@ -1,8 +1,8 @@
 # Immediate Automatic Landing Rewrite Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** Implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace Ensync's awaited homegrown landing pipeline with immediate completion-order background integration delegated to `agent-worktree`, while removing redundant coordination prompts and Superpowers artifacts.
+**Goal:** Replace Ensync's awaited homegrown landing pipeline with immediate completion-order background integration delegated to `agent-worktree`, while removing redundant coordination prompts and legacy project-owned skill artifacts.
 
 **Architecture:** Provider jobs preserve their branch, enqueue one immutable landing item, and complete without awaiting integration. A repository-scoped coordinator creates a tool-owned integration worktree, applies currently queued item SHAs in completion order, resolves genuine conflicts with a bounded subscription-backed agent, and publishes through agent-worktree while later chats remain independent.
 
@@ -18,7 +18,7 @@
 - A provider job must not await repository integration after its mutations have been durably saved.
 - Automatic landing has no user-off switch and begins immediately without polling.
 - A failed landing item remains recoverable and cannot block compatible later items.
-- Keep `skills/ensync-auto-context/`; remove only project-owned Superpowers and redundant coordination artifacts.
+- Keep `skills/ensync-auto-context/`; remove only project-owned legacy coordination skills and redundant prompt artifacts.
 
 ---
 
@@ -240,6 +240,11 @@
 - Delete: `host/multi-agent-prompt.mjs`
 - Delete: `host/multi-agent-prompt.d.mts`
 - Delete: `host/multi-agent-prompt.test.mjs`
+- Delete: `host/workspace-overlap.mjs`
+- Delete: `host/workspace-overlap.test.mjs`
+- Delete: `host/workspace-overlap-ui.test.mjs`
+- Delete: `src/lib/workspaceOverlap.mjs`
+- Delete: `src/lib/workspaceOverlap.d.mts`
 - Modify: `host/provider-runner-contract.mjs`
 - Modify: `host/provider-runner-contract.test.mjs`
 - Modify: `host/providers.mjs`
@@ -250,8 +255,7 @@
 - Modify: `src/lib/relayHost.ts`
 - Modify: `src/App.tsx`
 - Modify: relevant renderer tests
-- Delete: `.superpowers/`
-- Delete: `docs/superpowers/`
+- Delete: project-owned legacy coordination skill directories
 
 **Interfaces:**
 - Provider prompts contain only user text, verified project isolation context, and enabled Auto Context continuity.
@@ -268,13 +272,13 @@
 
 - [ ] **Step 3: Remove the redundant runtime and UI surfaces**
 
-  Delete the wrapper and policy metadata, pass the isolated/Auto Context prompt directly, remove the landing preference and request field, and remove only the project-owned Superpowers directories. Preserve `skills/ensync-auto-context/` and all user-global files.
+  Delete the wrapper and policy metadata, pass the isolated/Auto Context prompt directly, remove the landing preference and request field, and remove only the project-owned legacy coordination skill directories. Preserve `skills/ensync-auto-context/` and all user-global files.
 
 - [ ] **Step 4: Verify active code has no stale coupling**
 
   Run: `test -z "$(rg -n 'ENSYNC SAFE MULTI-AGENT|ENSYNC_AGENT_COORDINATION_POLICY|withEnsyncMultiAgentInstructions|autoLand' host src desktop package.json || true)"`
 
-  Run: `test -f skills/ensync-auto-context/SKILL.md && test ! -e .superpowers && test ! -e docs/superpowers`
+  Run: `test -f skills/ensync-auto-context/SKILL.md`
 
 - [ ] **Step 5: Commit**
 

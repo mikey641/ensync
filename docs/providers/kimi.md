@@ -26,8 +26,8 @@ live run; where a claim could only be settled by running a turn, it is marked un
   There is no `--prompt -` convention and no TTY-detection fallback.
 
   **This is a direct conflict with Ensync's rule that prompts never go in argv.** An
-  Ensync prompt is large (up to 100,000 characters) and wrapped with
-  `withEnsyncMultiAgentInstructions`; putting it in argv exposes it in process listings
+  Ensync prompt is large (up to 100,000 characters) and includes verified isolation
+  and optional Auto Context continuity; putting it in argv exposes it in process listings
   and risks `E2BIG`. This is the single blocking gap for Kimi, and it is a property of
   the CLI, not of Ensync's wiring.
 - Other relevant flags: `-c/--continue`, `-S/--session [id]`, `-m/--model <model>`,

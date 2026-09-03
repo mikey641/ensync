@@ -335,20 +335,6 @@ export function workspaceBaseSummary(workspace) {
   return `Base: ${base.sha}.`
 }
 
-export function workspaceOverlapPrompt(overlaps) {
-  if (!Array.isArray(overlaps) || overlaps.length === 0) return ''
-  const paths = [...new Set(overlaps.flatMap((overlap) => Array.isArray(overlap?.paths) ? overlap.paths : []))]
-    .filter((path) => typeof path === 'string' && path.length > 0)
-    .sort((left, right) => left.localeCompare(right))
-    .slice(0, 20)
-  if (paths.length === 0) return ''
-  return `[ENSYNC HOST CROSS-CONVERSATION FILE AWARENESS]
-Another Ensync conversation is actively editing or has unlanded changes in files this branch also changes:
-${paths.map((path) => `- ${path}`).join('\n')}
-Before changing these paths, re-read their current contents and preserve compatible work. Do not access another checkout or worktree, and do not push or land; Ensync Host rechecks and lands this branch.
-`
-}
-
 function boundedBaselineConflict(workspace) {
   const conflict = workspace?.baselineConflict
   if (!conflict || !/^[0-9a-f]{40,64}$/i.test(conflict.baselineSha ?? '')) return null
@@ -379,39 +365,7 @@ Ensync aborted the failed merge and verified that this exact conversation branch
 `
 }
 
-function overlapUnavailableNotice(error) {
-  return {
-    type: 'notice',
-    code: 'workspace_overlap_unavailable',
-    message: `Ensync could not refresh cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
-    at: new Date().toISOString(),
-  }
-}
-
-async function refreshOverlapSession(session, onEvent) {
-  if (!session) return []
-  try {
-    return await session.refresh()
-  } catch (error) {
-    onEvent?.(overlapUnavailableNotice(error))
-    try {
-      return session.current()
-    } catch {
-      return []
-    }
-  }
-}
-
-async function stopOverlapSession(session, onEvent) {
-  if (!session) return
-  try {
-    await session.stop()
-  } catch (error) {
-    onEvent?.(overlapUnavailableNotice(error))
-  }
-}
-
-function isolatedPrompt(prompt, workspace, overlaps = []) {
+function isolatedPrompt(prompt, workspace) {
   if (!workspace) return prompt
   const base = workspaceBaseSummary(workspace)
   const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
@@ -425,7 +379,7 @@ Treat the current working directory as the only writable project for this task. 
 Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-  ${base ? `${base}\n` : ''}${deferredBaselinePrompt(workspace)}${unintegrated}${workspaceOverlapPrompt(overlaps)}
+  ${base ? `${base}\n` : ''}${deferredBaselinePrompt(workspace)}${unintegrated}
   ${prompt}`
 }
 
@@ -1203,7 +1157,6 @@ export class ChatRunService {
   /** Live Claude interactive channels, keyed by the retained job that owns them. */
   #claudeQuestionChannels = new Map()
   #projectIsolation
-  #workspaceOverlapMonitor
   #landingCoordinator
   #activeRuns = 0
 
@@ -1218,7 +1171,6 @@ export class ChatRunService {
     this.#hardTimeoutMs = options.hardTimeoutMs
       ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
-    this.#workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? null
     this.#landingCoordinator = options.landingCoordinator ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
@@ -1280,8 +1232,6 @@ export class ChatRunService {
     let workspaceLease = options.preAcquiredWorkspaceLease ?? null
     const ownsWorkspaceLease = workspaceLease === null
     let workspace = null
-    let workspaceOverlapSession = null
-    let workspaceOverlaps = []
     let combinedSignal = { signal: options.signal, dispose() {} }
     if (workspaceLease || this.#projectIsolation) {
       try {
@@ -1321,28 +1271,9 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
-    if (workspace && this.#workspaceOverlapMonitor) {
-      try {
-        workspaceOverlapSession = await this.#workspaceOverlapMonitor.start(workspace, {
-          jobId: typeof options.liveTurnId === 'string' && options.liveTurnId
-            ? options.liveTurnId
-            : workspace.branch,
-          signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(event),
-        })
-        workspaceOverlaps = workspaceOverlapSession.current()
-      } catch (error) {
-        options.onEvent?.({
-          type: 'notice',
-          code: 'workspace_overlap_unavailable',
-          message: `Ensync could not start cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
-          at: new Date().toISOString(),
-        })
-      }
-    }
     const executionRequest = {
       ...request,
-      prompt: workspace ? isolatedPrompt(request.prompt, workspace, workspaceOverlaps) : request.prompt,
+      prompt: workspace ? isolatedPrompt(request.prompt, workspace) : request.prompt,
     }
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
@@ -1747,9 +1678,8 @@ export class ChatRunService {
             })
           }
         } catch {
-          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip ownership release.
         }
-        await refreshOverlapSession(workspaceOverlapSession, options.onEvent)
         if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved) {
           let landingError = null
           if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(savedHead ?? '')) {
@@ -1784,16 +1714,14 @@ export class ChatRunService {
           }
         }
       }
-      await stopOverlapSession(workspaceOverlapSession, options.onEvent)
       const leaseRelease = ownsWorkspaceLease ? await workspaceLease?.release() : null
-      // A lease that could not be deleted is the one failure nobody sees from
-      // the outside: this run ends normally while the next message in the same
-      // conversation waits on a lock with nothing behind it.
+      // This is only process-local ownership; no filesystem lock or waiter
+      // exists. A failed release is an invariant error and must be visible.
       if (leaseRelease && leaseRelease.removed === false) {
         options.onEvent?.({
           type: 'notice',
-          code: 'workspace_lease_release_failed',
-          message: `${leaseRelease.reason} Ensync Host reclaims it automatically once it goes stale, so the next message in this conversation may wait briefly before it starts.`,
+          code: 'workspace_ownership_release_failed',
+          message: `${leaseRelease.reason} No filesystem lock was created; a duplicate same-conversation start will be rejected until this Host exits.`,
           at: new Date().toISOString(),
         })
       }

@@ -400,7 +400,7 @@ export function runProcess(executable, args, options = {}) {
       },
       // Holding the watchdog is what keeps a person's thinking time from
       // reading as a hung CLI, but an unanswered question must never pin the
-      // run — and through it this conversation's workspace lease — forever.
+      // run — and through it this conversation's process-local ownership — forever.
       // Every hold therefore carries its own bound, and answering hands the
       // run straight back to the ordinary inactivity watchdog.
       holdInactivity: () => {

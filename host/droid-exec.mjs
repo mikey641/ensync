@@ -751,7 +751,7 @@ class DroidExecSession {
   // Counted, not a flag: two things can be waiting on the person at once, and
   // the first one answered must not restart the watchdog while the second is
   // still open. The hold is bounded all the same — an unanswered card also
-  // pins this conversation's workspace lease, so every later message in the
+  // pins this conversation's process-local workspace ownership, so every later message in the
   // same chat waits behind it. Each new card starts the bound over.
   #holdInactivity() {
     this.#inactivityHolds += 1

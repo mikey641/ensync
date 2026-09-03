@@ -178,7 +178,10 @@ test('native staging copies only the matching pinned platform executable', async
     'wt',
   )
   await mkdir(join(source, '..'), { recursive: true })
-  await writeFile(join(source, '..', '..', 'package.json'), JSON.stringify({ version: '0.13.6' }))
+  await writeFile(join(source, '..', '..', 'package.json'), JSON.stringify({
+    name: '@nekocode/agent-worktree-darwin-arm64',
+    version: '0.13.6',
+  }))
   await writeFile(source, 'native binary')
   await chmod(source, 0o755)
   const toolsDirectory = join(root, 'desktop', 'build', 'tools')
@@ -204,13 +207,46 @@ test('native staging copies only the matching pinned platform executable', async
   )
 })
 
+test('universal macOS staging combines both exact pinned architecture packages', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-wt-universal-stage-'))
+  for (const arch of ['arm64', 'x64']) {
+    const packageRoot = join(root, 'node_modules', '@nekocode', `agent-worktree-darwin-${arch}`)
+    await mkdir(join(packageRoot, 'bin'), { recursive: true })
+    await writeFile(join(packageRoot, 'package.json'), JSON.stringify({
+      name: `@nekocode/agent-worktree-darwin-${arch}`,
+      version: '0.13.6',
+    }))
+    await writeFile(join(packageRoot, 'bin', 'wt'), arch)
+  }
+  const calls = []
+
+  const staged = await stageAgentWorktree({
+    repoRoot: root,
+    toolsDirectory: join(root, 'desktop', 'build', 'tools'),
+    platform: 'darwin',
+    arch: 'arm64',
+    universalMac: true,
+    combineUniversal: async (input) => {
+      calls.push(input)
+      await writeFile(input.destination, 'universal')
+    },
+  })
+
+  assert.equal(await readFile(staged, 'utf8'), 'universal')
+  assert.equal(calls.length, 1)
+  assert.match(calls[0].arm64, /agent-worktree-darwin-arm64\/bin\/wt$/)
+  assert.match(calls[0].x64, /agent-worktree-darwin-x64\/bin\/wt$/)
+  assert.equal(calls[0].destination, `${staged}.${process.pid}.staging`)
+  assert.notEqual((await stat(staged)).mode & 0o111, 0)
+})
+
 test('desktop packaging and local install both ship the staged runtime tool', async () => {
   const repositoryRoot = join(import.meta.dirname, '..')
   const manifest = JSON.parse(await readFile(join(repositoryRoot, 'desktop', 'package.json'), 'utf8'))
   assert.ok(manifest.build.extraResources.some((entry) => entry.from === 'build/tools' && entry.to === 'tools'))
   assert.match(
     await readFile(join(repositoryRoot, 'desktop', 'scripts', 'package-native.mjs'), 'utf8'),
-    /stageAgentWorktree/,
+    /stageAgentWorktree[\s\S]*universalMac:\s*platform\s*===\s*['"]macos['"]/,
   )
   assert.match(
     await readFile(join(repositoryRoot, 'scripts', 'install-app.mjs'), 'utf8'),

@@ -187,6 +187,32 @@ test('integration rejection becomes retry state without an unhandled background 
   assert.ok(stored.error.length <= 4_096)
 })
 
+test('a new completion automatically retrains older retry items without blocking the newcomer', async () => {
+  const journal = new MemoryJournal()
+  const calls = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async (train) => {
+      calls.push(train.map((item) => item.branch))
+      if (calls.length === 1) {
+        return { landedIds: [], retryIds: [train[0].id] }
+      }
+      return { landedIds: train.map((item) => item.id), retryIds: [] }
+    },
+  })
+
+  await coordinator.enqueue(input('ensync/retry-first'))
+  await coordinator.whenIdle()
+  await coordinator.enqueue(input('ensync/new-completion', '/repo', SHA_B))
+  await coordinator.whenIdle()
+
+  assert.deepEqual(calls, [
+    ['ensync/retry-first'],
+    ['ensync/retry-first', 'ensync/new-completion'],
+  ])
+  assert.ok(journal.items.every((item) => item.state === 'landed'))
+})
+
 test('start resumes queued and retry entries once even when called repeatedly', async () => {
   const recovered = [
     {
