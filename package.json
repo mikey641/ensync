@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "latest",
+    "agent-worktree": "0.13.6",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",

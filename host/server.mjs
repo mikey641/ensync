@@ -1,9 +1,12 @@
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
 import { AgentConnectorError, AgentConnectorService } from './agent-connector.mjs'
+import { AgentWorktreeClient, resolveAgentWorktreeExecutable } from './agent-worktree-client.mjs'
 import {
   ChatAttachmentStore,
   MAX_STORED_ATTACHMENT_BYTES,
@@ -15,11 +18,12 @@ import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
-import { runLandCheck } from './land-check.mjs'
+import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
+import { LandingIntegrator } from './landing-integrator.mjs'
+import { LandingJournal } from './landing-journal.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
-import { WorkspaceOverlapMonitor } from './workspace-overlap.mjs'
 import { ProjectInspectionService } from './projects.mjs'
 import {
   SupportRepairError,
@@ -264,15 +268,59 @@ export function createEnsyncHost(options = {}) {
     autoInitializeGit: options.autoInitializeGitRepositories
       ?? process.env.ENSYNC_AUTO_INIT_GIT !== '0',
   })
-  const workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? new WorkspaceOverlapMonitor()
   const chatImages = options.chatImageService ?? new ChatImageService({
     workspaceRoot: options.projectIsolationRoot,
   })
-  const chats = options.chatService ?? new ChatRunService({
+  const landingStateRoot = options.landingStateRoot
+    ?? (options.chatJobJournalPath ? dirname(options.chatJobJournalPath) : join(homedir(), '.ensync', 'landing-v1'))
+  const landingJournal = options.landingJournal ?? new LandingJournal({
+    filePath: options.landingJournalPath ?? join(landingStateRoot, 'landing-journal.json'),
+  })
+  let chats
+  let landingIntegratorPromise = null
+  const resolveLandingIntegrator = () => {
+    if (options.landingIntegrator) return Promise.resolve(options.landingIntegrator)
+    landingIntegratorPromise ??= (async () => {
+      const client = options.agentWorktreeClient ?? new AgentWorktreeClient({
+        executable: await resolveAgentWorktreeExecutable(),
+        storagePath: options.agentWorktreeStoragePath ?? join(landingStateRoot, 'agent-worktree'),
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: 'Ensync Agent',
+          GIT_AUTHOR_EMAIL: 'agent@ensync.local',
+          GIT_COMMITTER_NAME: 'Ensync Agent',
+          GIT_COMMITTER_EMAIL: 'agent@ensync.local',
+          GIT_EDITOR: 'true',
+          GIT_MERGE_AUTOEDIT: 'no',
+        },
+      })
+      return new LandingIntegrator({ client })
+    })()
+    return landingIntegratorPromise
+  }
+  const landingCoordinator = options.landingCoordinator ?? (options.chatService ? null : new LandingCoordinator({
+    journal: landingJournal,
+    anchorSnapshot: (input) => anchorLandingSnapshot(input),
+    integrate: async (train, runtime = {}) => {
+      const integrator = await resolveLandingIntegrator()
+      return integrator.integrate(train, {
+        signal: runtime.signal,
+        resolveConflict: (details) => chats.resolveLandingConflict(details),
+      })
+    },
+    onEvent: (event) => {
+      if (event.type === 'landed') {
+        console.log(`Ensync automatically landed ${event.item.branch} (FIFO ${event.item.completionSequence}).`)
+      } else if (event.type === 'retry') {
+        console.error(`Ensync will retry automatic landing for ${event.item.branch}: ${event.error}`)
+      }
+    },
+  }))
+  chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
     projectIsolation,
-    workspaceOverlapMonitor,
+    landingCoordinator,
   })
   const chatAttachments = options.chatAttachmentStore ?? new ChatAttachmentStore({
     rootPath: options.chatAttachmentsRoot,
@@ -294,7 +342,7 @@ export function createEnsyncHost(options = {}) {
   })
   const git = options.gitService ?? new GitWorkflowService({
     allowedRoots: options.allowedProjectRoots,
-    verifyLand: (details) => runLandCheck(details.repositoryPath),
+    landingCoordinator,
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
   const admitSshChat = createSshChatAdmissions()
@@ -307,8 +355,11 @@ export function createEnsyncHost(options = {}) {
   const chatJobs = options.chatJobService ?? new ChatJobService({
     runLocal: (request, runOptions) => chats.run(request, runOptions),
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
-    admit: (input, owner) => input.kind === 'local'
-      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, { owner })
+    admit: (input, owner, runtime = {}) => input.kind === 'local'
+      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, {
+          owner,
+          signal: runtime.signal,
+        })
       : admitSshChat(input.request, owner),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
     canSteerLocal: (jobId) => chats.canSteer(jobId),
@@ -1058,7 +1109,14 @@ export function createEnsyncHost(options = {}) {
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
-  server.ensyncServices = { accountSync, chatImages, chatJobs, daemonLeases, projectIsolation }
+  server.ensyncServices = {
+    accountSync,
+    chatImages,
+    chatJobs,
+    daemonLeases,
+    landingCoordinator,
+    projectIsolation,
+  }
   return server
 }
 
@@ -1073,13 +1131,8 @@ export function startEnsyncHost(options = {}) {
     const address = server.address()
     const resolvedPort = typeof address === 'object' && address ? address.port : port
     console.log(`Ensync Host listening on http://${host}:${resolvedPort}`)
-    const isolation = server.ensyncServices?.projectIsolation
-    isolation?.recoverStrandedWorktrees?.().then((summary) => {
-      if (summary.recovered.length > 0) {
-        console.log(`Ensync recovered uncommitted agent work in ${summary.recovered.length} worktree(s).`)
-      }
-    }).catch((error) => {
-      console.error('Ensync stranded-work recovery failed:', error instanceof Error ? error.message : error)
+    server.ensyncServices?.landingCoordinator?.start?.().catch((error) => {
+      console.error('Ensync automatic-landing recovery failed:', error instanceof Error ? error.message : error)
     })
   })
   return server

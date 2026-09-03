@@ -1,4 +1,5 @@
 [
+  { "id": "droid", "name": "Factory Droid", "documentationUrl": "https://docs.factory.ai/cli/getting-started/quickstart" },
   { "id": "codex", "name": "Codex", "documentationUrl": "https://developers.openai.com/codex/cli/" },
   { "id": "claude", "name": "Claude Code", "documentationUrl": "https://code.claude.com/docs/en/installation" },
   { "id": "copilot", "name": "GitHub Copilot CLI", "documentationUrl": "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli" },
@@ -10,7 +11,6 @@
   { "id": "junie", "name": "Junie CLI", "documentationUrl": "https://junie.jetbrains.com/docs/junie-cli.html" },
   { "id": "gitlab_duo", "name": "GitLab Duo CLI", "documentationUrl": "https://docs.gitlab.com/user/gitlab_duo_cli/set_up/" },
   { "id": "oz", "name": "Warp Oz", "documentationUrl": "https://docs.warp.dev/reference/cli" },
-  { "id": "droid", "name": "Factory Droid", "documentationUrl": "https://docs.factory.ai/cli/getting-started/quickstart" },
   { "id": "amp", "name": "Amp", "documentationUrl": "https://ampcode.com/manual" },
   { "id": "auggie", "name": "Augment Auggie", "documentationUrl": "https://docs.augmentcode.com/cli/setup-auggie/install-auggie-cli" },
   { "id": "qoder", "name": "Qoder CLI", "documentationUrl": "https://docs.qoder.com/en/cli/quick-start" },

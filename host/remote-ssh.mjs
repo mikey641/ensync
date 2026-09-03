@@ -9,7 +9,6 @@ import {
 import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
   supportsProviderRunner,
-  withProviderRunnerInstructions,
 } from './provider-runner-contract.mjs'
 import {
   createRemoteBridgeInput,
@@ -430,8 +429,8 @@ function validateRemoteChatRequest(request) {
 
 /**
  * Builds the same-Host admission coordinate before any SSH process starts.
- * The remote bridge still owns the cross-Host filesystem lease; this key only
- * prevents this Host from retaining a second waiter for one conversation.
+ * The selected Host uses this process-local key to reject a second concurrent
+ * run for the same remote conversation without creating a remote lock or waiter.
  */
 export async function remoteChatAdmissionCoordinate(request) {
   validateRemoteChatRequest(request)
@@ -541,7 +540,7 @@ export class RemoteSshService {
         provider: request.provider,
         projectPath: connection.projectPath,
         workspaceKey: request.workspaceKey,
-        prompt: withProviderRunnerInstructions(request.provider, 'ssh', request.prompt),
+        prompt: request.prompt,
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
         effort: request.effort ?? null,

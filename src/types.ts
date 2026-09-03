@@ -17,11 +17,6 @@ export type ProviderId =
   | 'junie'
   | 'ollama'
 
-export type AgentCoordinationPolicy = {
-  policy: 'ensync_agent_coordination_v1'
-  delivery: 'ensync_prompt'
-}
-
 export type Provider = {
   id: ProviderId
   name: string
@@ -64,8 +59,6 @@ export type Provider = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
-  /** Universal Ensync agent-coordination behavior delivered in every provider prompt. */
-  agentCoordination: AgentCoordinationPolicy
   checkedAt: string | null
 }
 

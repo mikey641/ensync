@@ -4,9 +4,9 @@ import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { inspectProject } from './projects.mjs'
 import { validateProjectPath } from './chat.mjs'
-import { withRepositoryLandLease } from './repository-land-lease.mjs'
 
 const DEFAULT_TIMEOUT_MS = 30_000
+const DEFAULT_TERMINATION_GRACE_MS = 2_000
 const MAX_OUTPUT_BYTES = 512 * 1024
 const MAX_REPOSITORY_URL_LENGTH = 4_096
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -108,8 +108,16 @@ export function runGit(args, options = {}) {
 
   const executable = options.gitExecutable ?? 'git'
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS
+  const spawnProcess = options.spawn ?? spawn
+  if (options.signal?.aborted) {
+    return Promise.reject(new GitWorkflowError('Git was stopped before completing.', {
+      code: 'git_aborted',
+      status: 499,
+    }))
+  }
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, args, {
+    const child = spawnProcess(executable, args, {
       cwd: options.cwd,
       env: {
         ...process.env,
@@ -125,22 +133,43 @@ export function runGit(args, options = {}) {
     let stderr = ''
     let outputBytes = 0
     let settled = false
+    let stoppingError = null
+    let forceTimer = null
+    let captureOutput = true
+    let timer = null
+    const onAbort = () => stopAfterClose(new GitWorkflowError('Git was stopped before completing.', {
+      code: 'git_aborted',
+      status: 499,
+    }))
 
     const finish = (callback) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(forceTimer)
+      options.signal?.removeEventListener('abort', onAbort)
       callback()
     }
 
+    const stopAfterClose = (error) => {
+      if (stoppingError) return
+      stoppingError = error
+      captureOutput = false
+      clearTimeout(timer)
+      try { child.kill('SIGTERM') } catch { /* close/error remains authoritative */ }
+      forceTimer = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* close/error remains authoritative */ }
+      }, terminationGraceMs)
+    }
+
     const collect = (target, chunk) => {
+      if (!captureOutput) return target
       outputBytes += chunk.length
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        child.kill()
-        finish(() => rejectPromise(new GitWorkflowError('Git produced too much output.', {
+        stopAfterClose(new GitWorkflowError('Git produced too much output.', {
           code: 'git_output_limit',
           status: 502,
-        })))
+        }))
         return target
       }
       return target + chunk.toString('utf8')
@@ -148,25 +177,33 @@ export function runGit(args, options = {}) {
 
     child.stdout.on('data', (chunk) => { stdout = collect(stdout, chunk) })
     child.stderr.on('data', (chunk) => { stderr = collect(stderr, chunk) })
-    child.on('error', (error) => finish(() => rejectPromise(new GitWorkflowError(
-      error && typeof error === 'object' && error.code === 'ENOENT'
+    child.on('error', (error) => {
+      const workflowError = new GitWorkflowError(
+        error && typeof error === 'object' && error.code === 'ENOENT'
         ? 'Git is not installed or is not available on PATH.'
         : 'Ensync Host could not start Git.',
-      { code: 'git_unavailable', status: 503 },
-    ))))
-    child.on('close', (exitCode, signal) => finish(() => resolvePromise({
-      exitCode: exitCode ?? -1,
-      signal,
-      stdout,
-      stderr,
-    })))
+        { code: 'git_unavailable', status: 503 },
+      )
+      if (!child.pid) finish(() => rejectPromise(workflowError))
+      else stopAfterClose(workflowError)
+    })
+    child.on('close', (exitCode, signal) => finish(() => {
+      if (stoppingError) rejectPromise(stoppingError)
+      else resolvePromise({
+        exitCode: exitCode ?? -1,
+        signal,
+        stdout,
+        stderr,
+      })
+    }))
 
-    const timer = setTimeout(() => {
-      child.kill()
-      finish(() => rejectPromise(new GitWorkflowError('Git timed out without completing.', {
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted) onAbort()
+    timer = setTimeout(() => {
+      stopAfterClose(new GitWorkflowError('Git timed out without completing.', {
         code: 'git_timeout',
         status: 504,
-      })))
+      }))
     }, timeoutMs)
   })
 }
@@ -675,44 +712,7 @@ export async function pushGit(input, options = {}) {
   }
 }
 
-/**
- * Push used only by the automatic landing pipeline: publishes the already
- * landed baseline branch to its configured remote, never with force. It never
- * throws — automatic landing must not fail because publishing did — and it
- * deliberately bypasses pushGit's interactive production confirmation: a land
- * that passed verification is the pipeline's product, and publishing it is the
- * standing intent behind automatic landing. Every other push keeps the guarded
- * interactive flow.
- */
-export async function pushLandedBaseline(projectPath, options = {}) {
-  try {
-    const status = await getGitStatus(projectPath, options)
-    if (!status.branch || status.detached) return { pushed: false, code: 'git_detached_head' }
-    const remote = status.preferredRemote
-    if (!remote || !status.remotes.some((item) => item.name === remote)) {
-      return { pushed: false, code: 'git_remote_not_found' }
-    }
-    await validateConfiguredRemote(status.repositoryPath, remote, 'push', options)
-    const branch = await validateBranchName(status.branch, { gitExecutable: options.gitExecutable })
-    await checkedGit(['push', '--porcelain', remote, `HEAD:refs/heads/${branch}`], {
-      cwd: status.repositoryPath,
-      gitExecutable: options.gitExecutable,
-      timeoutMs: options.timeoutMs ?? 120_000,
-      failureMessage: `Git could not push ${branch} to ${remote}.`,
-      code: 'git_push_failed',
-    })
-    return { pushed: true, remote, branch }
-  } catch (error) {
-    return {
-      pushed: false,
-      code: typeof error?.code === 'string' ? error.code : 'git_push_failed',
-      reason: error instanceof Error ? error.message : 'Git could not push the landed baseline.',
-    }
-  }
-}
-
 const AGENT_BRANCH_PATTERN = /^ensync\/chat-[a-f0-9]{24}$/
-const LAND_MESSAGE_PREFIX = 'Ensync land: '
 
 async function baselineBranch(repositoryPath, options) {
   const symbolic = await checkedGit(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
@@ -766,167 +766,135 @@ export async function listUnlandedAgentWork(projectPath, options = {}) {
   }
 }
 
-async function landAgentBranchLocked(input, branch, repositoryPath, options, lease) {
-  await lease.assertHeld()
-  await checkedGit(['show-ref', '--verify', `refs/heads/${branch}`], {
+function worktreePathForBranch(value, branch) {
+  let path = null
+  for (const line of String(value ?? '').split(/\r?\n/)) {
+    if (line.startsWith('worktree ')) path = line.slice('worktree '.length)
+    if (line === `branch refs/heads/${branch}`) return path
+    if (!line) path = null
+  }
+  return null
+}
+
+function providerFromCommitMessage(value) {
+  const provider = String(value ?? '').match(/^Provider:\s*([a-z0-9._-]+)\s*$/im)?.[1]?.toLowerCase()
+  return provider || 'codex'
+}
+
+export async function captureLandingTarget(repositoryPath, options = {}) {
+  const invoke = options.checkedGit ?? checkedGit
+  const commandOptions = {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    code: 'landing_target_unavailable',
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = await invoke(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      ...commandOptions,
+      failureMessage: 'Check out the branch this saved conversation should land into.',
+    })
+    const targetBranch = before.stdout.trim()
+    const targetBase = await invoke([
+      'rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`,
+    ], commandOptions)
+    const after = await invoke(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      ...commandOptions,
+      failureMessage: 'Check out the branch this saved conversation should land into.',
+    })
+    if (after.stdout.trim() === targetBranch) {
+      return { targetBranch, targetBaseSha: targetBase.stdout.trim() }
+    }
+  }
+  throw new GitWorkflowError('The checked-out branch changed while Ensync captured the automatic landing target. Retry after the checkout is stable.', {
+    code: 'landing_target_changed',
+    status: 409,
+  })
+}
+
+/**
+ * Compatibility path for the old explicit Land button. It snapshots the exact
+ * branch SHA into the same event-driven landing queue used at chat completion;
+ * no merge, lock, verification wait, or checkout mutation happens here.
+ */
+export async function queueAgentBranchLanding(input, options = {}) {
+  const branch = typeof input?.branch === 'string' ? input.branch : ''
+  if (!AGENT_BRANCH_PATTERN.test(branch)) {
+    throw new GitWorkflowError('Only Ensync agent conversation branches (ensync/chat-…) can be queued.', {
+      code: 'invalid_agent_branch',
+      status: 400,
+    })
+  }
+  if (!options.landingCoordinator || typeof options.landingCoordinator.enqueue !== 'function') {
+    throw new GitWorkflowError('Automatic landing is unavailable.', {
+      code: 'automatic_landing_unavailable',
+      status: 503,
+    })
+  }
+  const projectPath = await validateProjectPath(input.projectPath, { allowedRoots: options.allowedRoots })
+  const repositoryPath = await gitRepositoryRoot(input.projectPath, options)
+  const saved = await checkedGit(['rev-parse', '--verify', `refs/heads/${branch}^{commit}`], {
     cwd: repositoryPath,
     gitExecutable: options.gitExecutable,
     code: 'invalid_agent_branch',
     status: 400,
     failureMessage: `The agent branch ${branch} does not exist in this repository.`,
   })
-  const mergedInto = await baselineBranch(repositoryPath, options)
-  if (!mergedInto) {
-    throw new GitWorkflowError('The shared checkout is on a detached HEAD; check out a branch before landing agent work.', {
-      code: 'git_detached_head',
-      status: 409,
-    })
-  }
-  const status = await checkedGit(['status', '--porcelain=v1', '-z', '--untracked-files=all'], {
-    cwd: repositoryPath,
-    gitExecutable: options.gitExecutable,
-  })
-  const dirtyCount = status.stdout.split('\0').filter(Boolean).length
-  if (dirtyCount > 0) {
-    throw new GitWorkflowError(
-      `The shared checkout has ${dirtyCount} uncommitted change${dirtyCount === 1 ? '' : 's'}. Commit or stash your work before landing agent changes.`,
-      { code: 'shared_checkout_dirty', status: 409 },
-    )
-  }
-  const ahead = await checkedGit(['rev-list', '--count', `HEAD..${branch}`], {
-    cwd: repositoryPath,
-    gitExecutable: options.gitExecutable,
-  })
-  if ((Number.parseInt(ahead.stdout.trim(), 10) || 0) === 0) {
-    throw new GitWorkflowError(`${branch} has no commits that are not already on ${mergedInto}.`, {
-      code: 'agent_branch_already_landed',
-      status: 409,
-    })
-  }
-  const check = await checkedGit(['merge-tree', '--write-tree', '--name-only', 'HEAD', branch], {
-    cwd: repositoryPath,
-    gitExecutable: options.gitExecutable,
-    allowFailure: true,
-  })
-  if (check.exitCode !== 0 && check.exitCode !== 1) {
-    throw new GitWorkflowError(
-      'This Git version does not support conflict pre-checks (git 2.38+ is required for landing).',
-      { code: 'git_merge_tree_unsupported', status: 409 },
-    )
-  }
-  if (check.exitCode === 1) {
-    // Conflicted output: <tree-oid>\n<conflicted files…>\n\n<informational messages>
-    const rawLines = check.stdout.split(/\r?\n/)
-    const blankIndex = rawLines.indexOf('', 1)
-    const files = rawLines.slice(1, blankIndex === -1 ? undefined : blankIndex).filter(Boolean)
-    const conflictError = new GitWorkflowError(
-      `Landing ${branch} would conflict in: ${files.join(', ') || 'unknown files'}. Continue that conversation so it syncs with ${mergedInto} and resolves the conflict in its own worktree, then land.`,
-      { code: 'agent_branch_conflicts', status: 409 },
-    )
-    conflictError.files = files
-    throw conflictError
-  }
-  await lease.assertHeld()
-  const preMergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
-    cwd: repositoryPath,
-    gitExecutable: options.gitExecutable,
-  })
-  const merge = await checkedGit(
-    ['-c', 'commit.gpgsign=false', 'merge', '--no-ff', '--no-edit', '-m', `${LAND_MESSAGE_PREFIX}${branch}`, branch],
-    { cwd: repositoryPath, gitExecutable: options.gitExecutable, allowFailure: true },
+  const savedSha = saved.stdout.trim()
+  const [worktrees, commit, commonGitResult] = await Promise.all([
+    checkedGit(['worktree', 'list', '--porcelain'], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    }),
+    checkedGit(['show', '-s', '--format=%B', savedSha], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+    }),
+    checkedGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+      code: 'landing_target_unavailable',
+      failureMessage: 'Ensync could not identify the repository shared Git directory.',
+    }),
+  ])
+  const target = await captureLandingTarget(repositoryPath, options)
+  const commonValue = commonGitResult.stdout.trim()
+  const commonGitDirectory = await realpath(
+    isAbsolute(commonValue) ? commonValue : resolve(repositoryPath, commonValue),
   )
-  if (merge.exitCode !== 0) {
-    await checkedGit(['merge', '--abort'], { cwd: repositoryPath, gitExecutable: options.gitExecutable, allowFailure: true })
-    throw new GitWorkflowError(gitFailureMessage(merge.stderr, `Git could not land ${branch}.`), {
-      code: 'agent_branch_land_failed',
-      status: 409,
-    })
-  }
-  try {
-    if (typeof options.verifyLand === 'function') {
-      // A textually clean merge can still drop code one side depends on, so the
-      // land is verified semantically after the merge commit exists. A failed
-      // verification rolls the checkout back to its pre-merge state exactly; the
-      // checkout was verified clean above, so the reset cannot destroy user work.
-      let verification
-      try {
-        verification = await options.verifyLand({ repositoryPath, branch, mergedInto })
-      } catch (error) {
-        verification = { ok: false, reason: error instanceof Error ? error.message : 'The land verification could not run.' }
-      }
-      if (verification && verification.ok === false) {
-        const verificationError = new GitWorkflowError(
-          `Landing ${branch} was rolled back because the land verification failed: ${verification.reason ?? 'no reason was reported'}`,
-          { code: 'agent_branch_verification_failed', status: 409 },
-        )
-        verificationError.verification = verification
-        throw verificationError
-      }
-    }
-    await lease.assertHeld()
-    const mergeHead = await checkedGit(['rev-parse', '--verify', 'HEAD'], {
-      cwd: repositoryPath,
-      gitExecutable: options.gitExecutable,
-    })
-    return {
-      land: {
-        branch,
-        mergedInto,
-        mergeHead: mergeHead.stdout.trim(),
-        completedAt: new Date().toISOString(),
-      },
-      git: await getGitStatus(input.projectPath, options),
-    }
-  } catch (error) {
-    await checkedGit(['reset', '--hard', preMergeHead.stdout.trim()], {
-      cwd: repositoryPath,
-      gitExecutable: options.gitExecutable,
-    })
-    throw error
-  }
-}
-
-export async function landAgentBranch(input, options = {}) {
-  const branch = typeof input?.branch === 'string' ? input.branch : ''
-  if (!AGENT_BRANCH_PATTERN.test(branch)) {
-    throw new GitWorkflowError('Only Ensync agent conversation branches (ensync/chat-…) can be landed.', {
-      code: 'invalid_agent_branch',
-      status: 400,
-    })
-  }
-  const repositoryPath = await gitRepositoryRoot(input.projectPath, options)
-  const common = await checkedGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
-    cwd: repositoryPath,
-    gitExecutable: options.gitExecutable,
-    code: 'git_baseline_unavailable',
-    failureMessage: 'Git could not resolve the shared repository directory for landing.',
-  })
-  const commonGitDirectory = await realpath(common.stdout.trim())
-  return withRepositoryLandLease(
+  const item = await options.landingCoordinator.enqueue({
+    repositoryPath,
     commonGitDirectory,
-    (lease) => landAgentBranchLocked(input, branch, repositoryPath, options, lease),
-    {
-      ...options.landLeaseOptions,
-      signal: options.signal,
-      onWait: options.onWait,
+    projectPath,
+    workspacePath: worktreePathForBranch(worktrees.stdout, branch) ?? repositoryPath,
+    branch,
+    savedSha,
+    targetBranch: target.targetBranch,
+    targetBaseSha: target.targetBaseSha,
+    provider: providerFromCommitMessage(commit.stdout),
+  })
+  return {
+    land: {
+      disposition: 'queued',
+      branch,
+      savedSha,
+      completionSequence: item.completionSequence ?? null,
+      queuedAt: item.createdAt ?? new Date().toISOString(),
     },
-  )
+  }
 }
 
 export class GitWorkflowService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
     this.gitExecutable = options.gitExecutable
-    this.verifyLand = options.verifyLand
-    this.landLeaseOptions = options.landLeaseOptions
+    this.landingCoordinator = options.landingCoordinator
   }
 
   options() {
     return {
       allowedRoots: this.allowedRoots,
       gitExecutable: this.gitExecutable,
-      verifyLand: this.verifyLand,
-      landLeaseOptions: this.landLeaseOptions,
+      landingCoordinator: this.landingCoordinator,
     }
   }
 
@@ -955,6 +923,6 @@ export class GitWorkflowService {
   }
 
   land(input) {
-    return landAgentBranch(input, this.options())
+    return queueAgentBranchLanding(input, this.options())
   }
 }

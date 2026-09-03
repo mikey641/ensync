@@ -200,6 +200,8 @@ class CursorAgentSession {
   #resolveDone
   #rejectDone
   #done
+  #resolveClosed
+  #closed
 
   constructor(input, options = {}) {
     this.input = input
@@ -211,6 +213,9 @@ class CursorAgentSession {
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
+    })
+    this.#closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve
     })
     void this.#done.catch(() => {})
   }
@@ -245,6 +250,7 @@ class CursorAgentSession {
       this.#stderr = `${this.#stderr}${chunk.toString('utf8')}`.slice(0, MAX_STDERR_CHARACTERS)
     })
     this.#child.on('error', (error) => {
+      if (!this.#child.pid) this.#resolveClosed()
       this.#fail(new CursorAgentError(
         'run_start_failed',
         `Cursor Agent could not be started: ${error.message}`,
@@ -305,6 +311,7 @@ class CursorAgentSession {
       )
     } finally {
       this.#finishProcess()
+      await this.#closed
     }
   }
 
@@ -318,6 +325,9 @@ class CursorAgentSession {
   }
 
   #handleClose(exitCode, signal) {
+    if (this.#forceKillTimer) clearTimeout(this.#forceKillTimer)
+    this.#forceKillTimer = null
+    this.#resolveClosed()
     if (this.#settled) return
     const recognised = cursorStartupFailure(this.#stderr)
     if (recognised) {
@@ -464,8 +474,12 @@ class CursorAgentSession {
     if (!this.#child.stdin.destroyed) this.#child.stdin.end()
     this.#reader?.close()
     if (this.#child.exitCode === null && this.#child.signalCode === null) {
-      this.#forceKillTimer = setTimeout(() => this.#terminate(), 1_000)
-      this.#forceKillTimer.unref?.()
+      this.#forceKillTimer = setTimeout(() => {
+        this.#forceKillTimer = null
+        if (this.#child.exitCode === null && this.#child.signalCode === null) {
+          try { this.#child.kill('SIGKILL') } catch { /* A concurrent exit needs no cleanup. */ }
+        }
+      }, 1_000)
     }
   }
 
@@ -489,7 +503,6 @@ class CursorAgentSession {
         }
       }
     }, 1_000)
-    this.#forceKillTimer.unref?.()
   }
 }
 

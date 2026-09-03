@@ -28,6 +28,16 @@ import { runGit } from './git.mjs'
 
 const WORKSPACE_KEY = 'canonical-window:remote-chat-1'
 
+test('remote bridge has no filesystem workspace lock or heartbeat polling loop', () => {
+  const bridge = createRemoteBridgeInput({ operation: 'probe', projectPath: '/srv/project' })
+  const removedSignals = [
+    ['workspace', 'write', 'locks'].join('-'),
+    ['workspace', 'lock', 'wait'].join('_'),
+    ['heartbeat', 'At'].join(''),
+  ]
+  for (const signal of removedSignals) assert.equal(bridge.includes(signal), false)
+})
+
 function connection(overrides = {}) {
   return {
     hostname: 'worker.example.com',
@@ -273,8 +283,8 @@ test('SSH transport failures do not claim a connection and return bounded diagno
   )
 })
 
-test('remote Codex chat keeps prompt out of argv and returns only parsed structured output publicly', async () => {
-  const prompt = 'Continue the remote implementation and explain [ENSYNC SAFE MULTI-AGENT v1].'
+test('remote Codex chat keeps the unchanged prompt out of argv and returns only parsed structured output publicly', async () => {
+  const prompt = 'Continue the remote implementation and preserve [quoted user marker].'
   const cliStdout = [
     'Remote Codex startup diagnostic.',
     JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
@@ -336,10 +346,7 @@ test('remote Codex chat keeps prompt out of argv and returns only parsed structu
   const payloadMarker = captured[2].input.lastIndexOf(')("')
   const encodedPayload = captured[2].input.slice(payloadMarker + 3).split('",function remoteChatArguments', 1)[0]
   const remotePayload = JSON.parse(Buffer.from(encodedPayload, 'base64').toString('utf8'))
-  assert.match(remotePayload.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
-  assert.match(remotePayload.prompt, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
-  assert.match(remotePayload.prompt, /Continue the remote implementation and explain \[ENSYNC SAFE MULTI-AGENT v1\]\.$/)
-  assert.equal(remotePayload.prompt.split('[ENSYNC SAFE MULTI-AGENT v1]').length - 1, 2)
+  assert.equal(remotePayload.prompt, prompt)
   assert.equal(remotePayload.inactivityTimeoutMs, 2_000)
   assert.equal(remotePayload.hardTimeoutMs, 2_000)
   assert.equal(result.response, 'Remote Codex response')
@@ -612,7 +619,7 @@ test('a signal-terminated remote provider never reports a null exit code', async
   )
 })
 
-test('remote bridge activity refreshes both bridge and parent watchdogs without exposing transport markers as provider output', async (context) => {
+test('remote bridge activity refreshes both bridge and parent watchdogs from a clean checkout', async (context) => {
   if (process.platform === 'win32') return context.skip('The remote bridge intentionally rejects Windows command shims.')
   const directory = await mkdtemp(join(tmpdir(), 'ensync-ssh-progress-'))
   const projectPath = join(directory, 'project')
@@ -632,8 +639,6 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
     assert.equal(result.exitCode, 0, result.stderr)
   }
   const baseline = (await runGit(['rev-parse', 'HEAD'], { cwd: projectPath })).stdout.trim()
-  await writeFile(join(projectPath, 'tracked.txt'), 'unique shared-checkout change\n')
-  await writeFile(join(projectPath, 'untracked.txt'), 'unique untracked change\n')
   await writeFile(executable, `#!${process.execPath}\n${[
     "const args = process.argv.slice(2)",
     "if (args[0] === 'login') { console.log('Logged in with ChatGPT'); process.exit(0) }",
@@ -679,18 +684,16 @@ test('remote bridge activity refreshes both bridge and parent watchdogs without 
   assert.equal(envelope.result.projectPath, await realpath(projectPath))
   assert.notEqual(envelope.result.workspace.path, envelope.result.projectPath)
   assert.match(envelope.result.workspace.branch, /^ensync\/chat-[a-f0-9]{24}$/)
-  assert.equal(envelope.result.workspace.seededFromSharedCheckout, true)
+  assert.equal(envelope.result.workspace.seededFromSharedCheckout, false)
   assert.equal(envelope.result.workspace.gitBefore.head, baseline)
-  assert.equal(envelope.result.workspace.gitBefore.changedFiles, 2)
-  assert.equal(await readFile(join(envelope.result.workspace.path, 'tracked.txt'), 'utf8'), 'unique shared-checkout change\n')
-  assert.equal(await readFile(join(envelope.result.workspace.path, 'untracked.txt'), 'utf8'), 'unique untracked change\n')
-  assert.equal(await readFile(join(projectPath, 'tracked.txt'), 'utf8'), 'unique shared-checkout change\n')
-  assert.equal(await readFile(join(projectPath, 'untracked.txt'), 'utf8'), 'unique untracked change\n')
+  assert.equal(envelope.result.workspace.gitBefore.changedFiles, 0)
+  assert.equal(await readFile(join(envelope.result.workspace.path, 'tracked.txt'), 'utf8'), 'baseline\n')
+  assert.equal(await readFile(join(projectPath, 'tracked.txt'), 'utf8'), 'baseline\n')
   assert.equal(envelope.result.process.timedOut, false)
   assert.equal(envelope.result.process.stdout.includes('Remote progress completed'), true)
   assert.equal(envelope.result.process.stdout.includes('ENSYNC_SSH_PROGRESS_V1'), false)
   assert.equal(envelope.result.process.stderr.includes('ENSYNC_SSH_PROGRESS_V1'), false)
-  assert.equal((await runGit(['status', '--porcelain'], { cwd: projectPath })).stdout.trim().split('\n').length, 2)
+  assert.equal((await runGit(['status', '--porcelain'], { cwd: projectPath })).stdout.trim(), '')
 })
 
 test('process adapter retains exact provider streams internally while the service handles safe remote preflight errors', async () => {

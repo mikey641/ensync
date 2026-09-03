@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
 import test from 'node:test'
-import { createEnsyncHost } from './server.mjs'
+import { createEnsyncHost, startEnsyncHost } from './server.mjs'
 import { SupportRepairError } from './support-repair.mjs'
 import { RemoteSshError } from './remote-ssh.mjs'
 import { TelegramBridgeError } from './telegram.mjs'
@@ -24,6 +24,30 @@ async function withHost(context, options) {
   assert.equal(typeof address, 'object')
   return `http://127.0.0.1:${address.port}`
 }
+
+test('Host startup resumes the automatic landing queue without polling', async (context) => {
+  let starts = 0
+  const server = startEnsyncHost({
+    host: '127.0.0.1',
+    port: 0,
+    landingCoordinator: {
+      async start() { starts += 1 },
+      hasActiveWork() { return false },
+    },
+    statusService: { list: async () => [], get: async () => null },
+    chatService: { run: async () => ({ response: 'unused' }) },
+    projectService: {},
+    supportRepairService: { run: async () => ({ status: 'unused' }) },
+    supportService: { status: () => ({}), preview: async () => ({}), prepareGitHubIssue: () => ({}) },
+    gitService: {},
+  })
+  context.after(() => new Promise((resolve) => server.close(resolve)))
+  await once(server, 'listening')
+  await Promise.resolve()
+
+  assert.equal(starts, 1)
+  assert.equal(server.ensyncServices.landingCoordinator.hasActiveWork(), false)
+})
 
 function assertNoForbiddenJobData(value) {
   const forbidden = new Set(['prompt', 'attachments', 'projectPath', 'repositoryPath', 'token', 'pid', 'request'])
@@ -439,7 +463,15 @@ test('git unlanded and land routes delegate to the git workflow service', async 
     },
     land: async (input) => {
       calls.push(['land', input])
-      return { land: { branch: input.branch, mergedInto: 'main', mergeHead: 'def', completedAt: 'now' }, git: {} }
+      return {
+        land: {
+          disposition: 'queued',
+          branch: input.branch,
+          savedSha: 'd'.repeat(40),
+          completionSequence: 3,
+          queuedAt: 'now',
+        },
+      }
     },
   }
   const baseUrl = await withHost(context, { gitService: fakeGit })
@@ -460,7 +492,8 @@ test('git unlanded and land routes delegate to the git workflow service', async 
   })
   assert.equal(landResponse.status, 200)
   const landBody = await landResponse.json()
-  assert.equal(landBody.land.mergedInto, 'main')
+  assert.equal(landBody.land.disposition, 'queued')
+  assert.equal(landBody.land.completionSequence, 3)
 
   assert.deepEqual(calls.map(([name]) => name), ['unlanded', 'land'])
 })

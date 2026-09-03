@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  AlertTriangle,
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -105,9 +104,6 @@ import {
   writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
-import {
-  withProviderRunnerInstructions,
-} from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
 import { retryableFailedTurn } from './lib/failedTurnRetry.mjs'
 import {
@@ -121,10 +117,6 @@ import {
 } from './lib/nativeProjectFolder.mjs'
 import { createChatRunRegistry } from './lib/chatRunRegistry.mjs'
 import { createChatRunCancellationRegistry } from './lib/chatRunCancellation.mjs'
-import {
-  activeWorkspaceOverlaps,
-  workspaceOverlapSummary,
-} from './lib/workspaceOverlap.mjs'
 import {
   adoptReconnectableHostJobState,
   beginRunAfterPredecessorFingerprint,
@@ -325,8 +317,6 @@ type StoredState = {
   conversationLayout?: ConversationLayoutMode
   autoFallback: boolean
   autoContextSkill?: boolean
-  /** Whether verified successful local runs land their work automatically. */
-  autoLandAgentWork?: boolean
   fallbackProviderOrder?: ProviderId[]
   /** Latest completed agent-message ID the user opened, keyed by stable chat ID. */
   readCompletionByChat?: Record<string, string>
@@ -503,7 +493,6 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     setupKind: status.setupKind,
     documentationUrl: status.documentationUrl,
     catalogReason: status.catalogReason,
-    agentCoordination: status.agentCoordination ?? current.agentCoordination,
     checkedAt: status.checkedAt,
   }
 }
@@ -819,7 +808,6 @@ function App() {
   const [conversationLayout, setConversationLayout] = useState<ConversationLayoutMode>(hydrated?.conversationLayout === 'tabs' ? 'tabs' : 'split')
   const [autoFallback, setAutoFallback] = useState(hydrated?.autoFallback ?? true)
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
-  const [autoLandAgentWork, setAutoLandAgentWork] = useState(hydrated?.autoLandAgentWork ?? true)
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
     resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
@@ -985,7 +973,6 @@ function App() {
     conversationLayout,
     autoFallback,
     autoContextSkill,
-    autoLandAgentWork,
     readCompletionByChat,
     executionPanelOpenByChat,
     drafts,
@@ -1211,9 +1198,6 @@ function App() {
     () => prepareAccountWorkspace({ chats, projects }),
     [chats, projects],
   )
-  const workspaceBranchTitles = useMemo(() => Object.fromEntries(
-    chats.flatMap((chat) => chat.workspace?.branch ? [[chat.workspace.branch, chat.title]] : []),
-  ), [chats])
   const owningConversationTargets = useMemo<Record<string, ReferencedOwningConversation>>(() => {
     if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return {}
     const retainedWorkspaces = getRetainedNativeWorkspaces()
@@ -1269,14 +1253,11 @@ function App() {
     const next = { ...chatExecutionEventsRef.current, [chatId]: retained }
     chatExecutionEventsRef.current = next
     setChatExecutionEvents(next)
-    if (event.type === 'notice' && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? '')) {
-      const subtitle = ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(event.code ?? '')
-        ? 'Waiting for this chat workspace'
-        : 'Working in protected branch'
+    if (event.type === 'notice' && event.code === 'project_workspace_ready') {
       const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
         ...chat,
-        subtitle,
-        workspace: event.code === 'project_workspace_ready' && event.workspace
+        subtitle: 'Working in protected branch',
+        workspace: event.workspace
           ? { path: event.workspace.path, branch: event.workspace.branch }
           : chat.workspace,
       } : chat)
@@ -3184,11 +3165,7 @@ function App() {
             providerMode: chatToSend.providerMode ?? 'auto',
           })
         : canResume || !transcript ? prompt : `${transcript}\n\nUser: ${prompt}`
-      const effectivePrompt = withProviderRunnerInstructions(
-        targetProviderId,
-        runTarget.kind === 'local' ? 'local' : 'ssh',
-        basePrompt,
-      )
+      const effectivePrompt = basePrompt
       const requestedModel = null
       const requestedEffort = runPreferences.requestedEffort
       const jobId = `job-${turnId}-${targetProviderId}-${attemptedProviders.length}`
@@ -3236,7 +3213,6 @@ function App() {
                 sessionId: canResume ? session.sessionId : null,
                 model: requestedModel,
                 effort: requestedEffort,
-                autoLand: autoLandAgentWork,
               }
             : {
                 provider: target.id,
@@ -3247,7 +3223,6 @@ function App() {
                 sessionId: canResume ? session.sessionId : null,
                 model: requestedModel,
                 effort: requestedEffort,
-                autoLand: autoLandAgentWork,
               }
           return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
             if (event.type === 'started') providerProcessStarted = true
@@ -4073,7 +4048,7 @@ function App() {
         void recoverDetachedRun(candidate.chatId, recoveredRun)
       }
 
-      // A Host 404 proves that the exact candidate is absent. Transport/lease
+      // A Host 404 proves that the exact candidate is absent. Transport/ownership
       // failures leave discovery eligible for the next healthy Host refresh.
       if (inspected.every((item) => item.hostReached)) {
         rediscoveredHostJobsRef.current = true
@@ -4365,7 +4340,6 @@ function App() {
                 autoContextSkill={autoContextSkill}
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
-                workspaceBranchTitles={workspaceBranchTitles}
                 owningConversation={owningConversation}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
                 onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
@@ -4459,7 +4433,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -4516,7 +4490,6 @@ function ConversationPane({
   autoContextSkill,
   fallbackProviders,
   executionEvents,
-  workspaceBranchTitles,
   owningConversation,
   executionPanelOpen,
   onAnswerQuestion,
@@ -4579,7 +4552,6 @@ function ConversationPane({
   autoContextSkill: boolean
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
-  workspaceBranchTitles: Record<string, string>
   owningConversation: ReferencedOwningConversation | null
   executionPanelOpen: boolean
   onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
@@ -4664,10 +4636,6 @@ function ConversationPane({
   // that reconnects mid-turn still sees the question the provider is blocked on.
   const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
   const questionMessageProvider = providers.find((item) => item.id === pendingQuestion?.provider) ?? provider
-  const workspaceOverlap = useMemo(() => workspaceOverlapSummary(
-    activeWorkspaceOverlaps(executionEvents),
-    workspaceBranchTitles,
-  ), [executionEvents, workspaceBranchTitles])
   const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null)
   const [questionError, setQuestionError] = useState<string | null>(null)
   const submitQuestionAnswer = useCallback(async (
@@ -5014,8 +4982,6 @@ function ConversationPane({
         />
       )}
 
-      {workspaceOverlap && <WorkspaceOverlapBanner summary={workspaceOverlap} />}
-
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
         <div className="composer">
           {attachments.length > 0 && (
@@ -5071,19 +5037,6 @@ function ConversationPane({
           </button>
         </div>
       )}
-    </div>
-  )
-}
-
-function WorkspaceOverlapBanner({
-  summary,
-}: {
-  summary: NonNullable<ReturnType<typeof workspaceOverlapSummary>>
-}) {
-  return (
-    <div className="workspace-overlap-banner" role="status" aria-live="polite">
-      <AlertTriangle size={16} aria-hidden="true" />
-      <span>{summary.message}</span>
     </div>
   )
 }
@@ -5150,12 +5103,6 @@ function ExecutionPanel({
 }) {
   const outputRef = useRef<HTMLPreElement>(null)
   const latestProviderNote = [...events].reverse().find((event) => event.type === 'note')
-  const latestWorkspaceState = [...events].reverse().find((event) =>
-    event.type === 'notice'
-    && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? ''))
-  const waitingForWorkspace = sending
-    && latestWorkspaceState?.type === 'notice'
-    && ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(latestWorkspaceState.code ?? '')
 
   useLayoutEffect(() => {
     if (!open || !outputRef.current) return
@@ -5175,12 +5122,10 @@ function ExecutionPanel({
         >
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <TerminalSquare size={14} />
-          <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
-          {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
+          <strong>{sending ? 'Live CLI execution' : 'CLI execution'}</strong>
+          {sending && <span className="execution-panel__live"><i /> running</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
-            {waitingForWorkspace
-              ? 'This older run cannot identify its owner window. Quit Ensync completely and reopen it before relying on active-run controls.'
-              : latestProviderNote?.type === 'note'
+            {latestProviderNote?.type === 'note'
               ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>
@@ -5446,7 +5391,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, autoLandAgentWork, setAutoLandAgentWork, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; autoLandAgentWork: boolean; setAutoLandAgentWork: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -5492,7 +5437,6 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <NativeUpdatePreferences />
           <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
           <section className="setting-section">
-            <div className="setting-title"><div><h3>Automatic landing</h3><p>Merge each verified successful run on this computer into the project history automatically. When the baseline moved during the run, an agent resolves the conflict inside the conversation's protected workspace before landing. Turn off to review and land agent work yourself from Git workflows.</p></div><Toggle enabled={autoLandAgentWork} onChange={() => setAutoLandAgentWork(!autoLandAgentWork)} label="Automatic landing" /></div>
           </section>
           <section className="setting-section">
             <div className="setting-title"><div><h3>Ensync Auto Context skill</h3><p>Keep one task synchronized with Auto or a provider you pin, on this computer or the selected SSH/VM worker.</p></div><Toggle enabled={autoContextSkill} onChange={() => setAutoContextSkill(!autoContextSkill)} label="Ensync Auto Context skill" /></div>

@@ -520,7 +520,9 @@ function fakeDroidExec({ askUser = true, permission = null } = {}) {
   child.exitCode = null
   child.signalCode = null
   child.kill = () => {
+    if (child.exitCode !== null || child.signalCode !== null) return true
     child.exitCode = 0
+    queueMicrotask(() => child.emit('close', child.exitCode, child.signalCode))
     return true
   }
 
@@ -848,8 +850,7 @@ test('the terminal claude frame reaches the channel while the process is still a
   assert.equal(result.response, 'Done')
   assert.equal(captured.keepStdinOpen, true)
   assert.deepEqual(captured.args.slice(-4), ['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio'])
-  // The prompt still travels as one text block, wrapped with the same Ensync
-  // multi-agent contract a plain-text run receives.
+  // The prompt still travels as one unchanged text block.
   const sent = JSON.parse(captured.input)
   assert.equal(sent.type, 'user')
   assert.equal(sent.message.content.length, 1)

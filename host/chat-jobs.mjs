@@ -233,8 +233,14 @@ export class ChatJobService {
     }
     // Queue admission only after publishing the reservation. Even a
     // synchronously re-entrant admission hook must observe this capacity use.
-    const starting = Promise.resolve().then(() => this.#startNew({ ...input, jobId: id, kind }, key, hash))
-    this.#pendingStarts.set(id, { requestHash: hash, promise: starting })
+    const controller = new AbortController()
+    const starting = Promise.resolve().then(() => this.#startNew(
+      { ...input, jobId: id, kind },
+      key,
+      hash,
+      controller.signal,
+    ))
+    this.#pendingStarts.set(id, { requestHash: hash, promise: starting, controller })
     try {
       return await starting
     } finally {
@@ -242,9 +248,13 @@ export class ChatJobService {
     }
   }
 
-  async #startNew(input, key, hash) {
+  async #startNew(input, key, hash, signal) {
     const startedAt = this.#now()
-    const admission = await this.#admit(input, publicOwnerFromStartInput(input, startedAt))
+    const admission = await this.#admit(
+      input,
+      publicOwnerFromStartInput(input, startedAt),
+      { signal },
+    )
     if (admission?.disposition === 'occupied') return this.#occupiedAdmission(admission)
     if (admission?.disposition !== 'acquired') {
       throw new ChatJobError('project_isolation_failed', 'Ensync Host could not admit this retained chat job.', 409)
@@ -344,7 +354,9 @@ export class ChatJobService {
   async shutdown() {
     this.#shuttingDown = true
     this.#flushPersist()
-    const pending = [...this.#pendingStarts.values()].map((item) => item.promise)
+    const starting = [...this.#pendingStarts.values()]
+    for (const item of starting) item.controller.abort()
+    const pending = starting.map((item) => item.promise)
     await Promise.allSettled(pending)
     const running = [...this.#jobs.values()].filter((job) => job.state === 'running')
     for (const job of running) job.controller.abort()
@@ -458,7 +470,7 @@ export class ChatJobService {
       : 0
     const firstSequence = job.events[0]?.sequence ?? job.sequence + 1
     if (afterSequence < firstSequence - 1) {
-      onEvent({
+      this.#notifySubscriber({ onEvent, onEnd }, 'onEvent', {
         type: 'notice',
         message: 'Earlier live CLI events were omitted from the bounded Ensync Host recovery buffer.',
         at: job.startedAt,
@@ -466,10 +478,10 @@ export class ChatJobService {
       })
     }
     for (const event of job.events) {
-      if (event.sequence > afterSequence) onEvent(event)
+      if (event.sequence > afterSequence) this.#notifySubscriber({ onEvent, onEnd }, 'onEvent', event)
     }
     if (job.state !== 'running') {
-      onEnd()
+      this.#notifySubscriber({ onEvent, onEnd }, 'onEnd')
       return () => false
     }
 
@@ -554,9 +566,11 @@ export class ChatJobService {
     )) {
       job.eventCharacters -= eventSize(job.events.shift())
     }
-    for (const subscriber of [...job.subscribers]) subscriber.onEvent(recorded)
+    for (const subscriber of [...job.subscribers]) {
+      if (!this.#notifySubscriber(subscriber, 'onEvent', recorded)) job.subscribers.delete(subscriber)
+    }
     if (['completed', 'error', 'cancelled'].includes(recorded.type)) {
-      for (const subscriber of [...job.subscribers]) subscriber.onEnd()
+      for (const subscriber of [...job.subscribers]) this.#notifySubscriber(subscriber, 'onEnd')
       job.subscribers.clear()
     }
     try {
@@ -571,6 +585,16 @@ export class ChatJobService {
       // a subsequent Host will reconcile the retained running record rather
       // than ever replaying the request.
       job.journalFailure = error instanceof Error ? error.message : 'Chat job journal write failed.'
+    }
+  }
+
+  #notifySubscriber(subscriber, method, value) {
+    try {
+      subscriber[method](value)
+      return true
+    } catch {
+      // A disconnected response stream never owns provider or retained-job truth.
+      return false
     }
   }
 
