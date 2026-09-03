@@ -95,6 +95,13 @@
         ]
       },
       {
+        "from": "build/tools",
+        "to": "tools",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
         "from": "build/generated/build-info.json",
         "to": "build-info.json"
       }

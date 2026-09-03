@@ -78,11 +78,6 @@ export type CliModel = {
   isDefault: boolean
 }
 
-export type AgentCoordinationPolicy = {
-  policy: 'ensync_agent_coordination_v1'
-  delivery: 'ensync_prompt'
-}
-
 export type CliProviderStatus = {
   id: CliProviderId
   name: string
@@ -104,7 +99,6 @@ export type CliProviderStatus = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
-  agentCoordination: AgentCoordinationPolicy
   checkedAt: string
 }
 
@@ -250,11 +244,16 @@ export interface GitUnlandedResult {
 }
 
 export interface GitLandResult {
-  land: { branch: string; mergedInto: string; mergeHead: string; completedAt: string }
-  git: GitStatus
+  land: {
+    disposition: 'queued'
+    branch: string
+    savedSha: string
+    completionSequence: number | null
+    queuedAt: string
+  }
 }
 
-export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid'>
+export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid' | 'cursor'>
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
 export type ChatRunRequest = {
@@ -269,8 +268,6 @@ export type ChatRunRequest = {
   model?: string | null
   effort?: ChatModelEffort | null
   timeoutMs?: number
-  /** False keeps this run's work unlanded for explicit review; the host-wide switch still wins. */
-  autoLand?: boolean
 }
 
 export type ChatRunUsage = {
@@ -383,18 +380,11 @@ export type ChatExecutionEvent =
   | {
       type: 'notice'
       message: string
-      code?: 'project_write_lock_waiting' | 'workspace_write_lock_waiting' | 'project_workspace_ready' | string
+      code?: 'project_workspace_ready' | string
       workspace?: {
         path: string
         branch: string
         baselineConflict?: ChatWorkspaceBaselineConflict | null
-      }
-      overlap?: {
-        peerBranch: string
-        state: 'detected' | 'cleared'
-        source: 'active' | 'unlanded'
-        paths: string[]
-        totalCount: number
       }
       at: string
       /** Monotonic Host job sequence used to resume a detached stream without duplication. */
@@ -489,6 +479,8 @@ export type OccupiedChatJobOwner = {
   nativeWorkspaceId: string | null
   /** Present only when this Host still retains the exact live job in memory. */
   turnId: string | null
+  /** Live-only transcript binding for that retained turn; never lease/journal data. */
+  predecessorTranscriptFingerprint: string | null
 }
 
 export type ChatJobNavigation = {
@@ -496,6 +488,8 @@ export type ChatJobNavigation = {
   projectId: string
   chatId: string
   turnId: string
+  /** Null keeps admission usable when browser hashing is unavailable. */
+  predecessorTranscriptFingerprint: string | null
 }
 
 export type ChatJobAdmission =

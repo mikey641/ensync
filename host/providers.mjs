@@ -8,7 +8,6 @@ import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
 import { rankProvidersByAvailability } from './provider-availability.mjs'
-import { ENSYNC_AGENT_COORDINATION_POLICY } from './multi-agent-prompt.mjs'
 
 // Tie-breaker only. Live provider lists are ordered by real availability (see
 // provider-availability.mjs); this order decides what happens when two
@@ -314,10 +313,10 @@ const providerCatalog = {
   },
   cursor: {
     routeKind: 'subscription',
-    chatExecution: 'supported',
+    chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.cursor.com/en/cli/installation',
-    catalogReason: 'Chat runs headless through `--print --output-format stream-json` with the prompt on stdin and the stored Cursor login, and a turn counts as finished only when the CLI emits its terminal success result. Containment is the pinned `--sandbox enabled` OS sandbox, which a headless run refuses to start without. Verified against cursor-agent 2026.08.04 from its own bundled sources; no live end-to-end run was observed, because this machine reports the CLI as signed out.',
+    catalogReason: 'The structured runner and OS sandbox are implemented, but Cursor login does not prove paid Additional Usage is disabled. Execution remains off until the CLI exposes a machine-verifiable per-run no-overage boundary.',
   },
   kiro: {
     routeKind: 'subscription',
@@ -342,10 +341,10 @@ const providerCatalog = {
   },
   droid: {
     routeKind: 'subscription',
-    chatExecution: 'supported',
+    chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Usage comes from the TUI /limits panel, driven in a disposable PTY and strictly parsed (verified against droid 0.191.1); an unverifiable capture degrades to honest-unknown capacity.',
+    catalogReason: 'The structured runner and Standard quota probe are implemented, but Factory browser login does not prove paid Extra Usage is disabled. Execution remains off until the CLI exposes a machine-verifiable per-run no-overage boundary.',
   },
   auggie: {
     routeKind: 'subscription',
@@ -392,16 +391,9 @@ const providerCatalog = {
 }
 
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
-const universalAgentCoordination = Object.freeze({
-  policy: ENSYNC_AGENT_COORDINATION_POLICY,
-  delivery: 'ensync_prompt',
-})
 
 function providerCatalogEntry(id) {
-  return {
-    ...providerCatalog[id],
-    agentCoordination: universalAgentCoordination,
-  }
+  return { ...providerCatalog[id] }
 }
 
 function now() {

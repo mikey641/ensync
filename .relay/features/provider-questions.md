@@ -43,9 +43,9 @@ runner can hang on a dead process. Question text is redacted on the way out
 person's own answer is not, exactly like a prompt.
 
 Questions are only offered for a run bound to a retained chat job — that job ID
-is what routes the answer back. A run without one (`/api/chat/run`, the
-auto-land conflict and land-check repair sub-agents) keeps the old
-decline-safely behaviour untouched.
+is what routes the answer back. A run without one (`/api/chat/run` or the
+background automatic-landing conflict resolver) keeps the decline-safely
+behaviour untouched.
 
 ## Factory Droid
 

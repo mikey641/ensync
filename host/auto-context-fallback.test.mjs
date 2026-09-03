@@ -59,7 +59,7 @@ test('fallback capsule preserves focused local project, transcript, relevant fil
   assert.match(prompt, /User: Keep the existing branch\./)
   assert.match(prompt, /Agent \(codex\): I inspected the router\./)
   assert.match(prompt, /Current user request:\nFinish the safe quota fallback\./)
-  assert.match(prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
+  assert.match(prompt, /^\[ENSYNC AUTO CONTEXT v1\]/)
 })
 
 test('fallback capsule pins an SSH handoff to the verified canonical remote project', () => {
@@ -90,7 +90,7 @@ test('fallback capsule pins an SSH handoff to the verified canonical remote proj
   assert.match(prompt, /Verified Git state: unavailable \(remote branch\/worktree status was not exposed/)
 })
 
-test('fallback capsule budgets the always-on multi-agent contract inside the Host prompt limit', () => {
+test('fallback capsule budgets only its provider-neutral context inside the Host prompt limit', () => {
   const oversizedChat = chat()
   oversizedChat.messages = [
     { role: 'user', content: 'old context '.repeat(20_000) },

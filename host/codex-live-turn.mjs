@@ -7,6 +7,7 @@ import { JsonEventRepairTracker } from './json-event-repair.mjs'
 
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 1_000
 const MAX_STDERR_CHARACTERS = 256 * 1024
 
 export class CodexLiveTurnError extends Error {
@@ -89,8 +90,10 @@ class CodexLiveSession {
   #rejectDone
   #resolveReady
   #rejectReady
+  #resolveClosed
   #done
   #ready
+  #closed
   #eventRepair = new JsonEventRepairTracker()
 
   constructor(input, options = {}) {
@@ -101,6 +104,7 @@ class CodexLiveSession {
     this.spawnProcess = options.spawnProcess ?? spawn
     this.inactivityTimeoutMs = options.inactivityTimeoutMs ?? DEFAULT_INACTIVITY_TIMEOUT_MS
     this.hardTimeoutMs = options.hardTimeoutMs ?? null
+    this.shutdownTimeoutMs = options.shutdownTimeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
@@ -108,6 +112,9 @@ class CodexLiveSession {
     this.#ready = new Promise((resolve, reject) => {
       this.#resolveReady = resolve
       this.#rejectReady = reject
+    })
+    this.#closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve
     })
     // Either promise can be rejected before its normal await point (for
     // example, when app-server fails during initialization).
@@ -140,6 +147,7 @@ class CodexLiveSession {
       this.#stderr = `${this.#stderr}${chunk.toString('utf8')}`.slice(0, MAX_STDERR_CHARACTERS)
     })
     this.#child.on('error', (error) => {
+      if (!this.#child.pid) this.#resolveClosed()
       this.#fail(new CodexLiveTurnError(
         'run_start_failed',
         `Codex app-server could not be started: ${error.message}`,
@@ -148,6 +156,9 @@ class CodexLiveSession {
       ))
     })
     this.#child.on('close', (exitCode, signal) => {
+      if (this.#forceKillTimer) clearTimeout(this.#forceKillTimer)
+      this.#forceKillTimer = null
+      this.#resolveClosed()
       if (this.#settled) return
       const detail = this.#stderr.trim()
         ? ` ${this.#stderr.trim().slice(0, 500)}`
@@ -276,6 +287,7 @@ class CodexLiveSession {
       )
     } finally {
       this.#finishProcess()
+      await this.#closed
     }
   }
 
@@ -553,8 +565,12 @@ class CodexLiveSession {
     if (!this.#child.stdin.destroyed) this.#child.stdin.end()
     this.#reader?.close()
     if (this.#child.exitCode === null && this.#child.signalCode === null) {
-      this.#forceKillTimer = setTimeout(() => this.#terminate(), 1_000)
-      this.#forceKillTimer.unref?.()
+      this.#forceKillTimer = setTimeout(() => {
+        this.#forceKillTimer = null
+        if (this.#child.exitCode === null && this.#child.signalCode === null) {
+          try { this.#child.kill('SIGKILL') } catch { /* A concurrent exit needs no cleanup. */ }
+        }
+      }, this.shutdownTimeoutMs)
     }
   }
 
@@ -574,8 +590,7 @@ class CodexLiveSession {
             // A concurrent process exit requires no further cleanup.
           }
         }
-      }, 1_000)
-      this.#forceKillTimer.unref?.()
+      }, this.shutdownTimeoutMs)
     }
   }
 }
@@ -585,11 +600,13 @@ export class CodexLiveTurnRunner {
   #spawnProcess
   #inactivityTimeoutMs
   #hardTimeoutMs
+  #shutdownTimeoutMs
 
   constructor(options = {}) {
     this.#spawnProcess = options.spawnProcess ?? spawn
     this.#inactivityTimeoutMs = options.inactivityTimeoutMs
     this.#hardTimeoutMs = options.hardTimeoutMs
+    this.#shutdownTimeoutMs = options.shutdownTimeoutMs
   }
 
   async run(input, options = {}) {
@@ -604,6 +621,7 @@ export class CodexLiveTurnRunner {
       spawnProcess: this.#spawnProcess,
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
+      shutdownTimeoutMs: this.#shutdownTimeoutMs,
     })
     this.#sessions.set(input.id, session)
     try {

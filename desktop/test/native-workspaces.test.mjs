@@ -301,6 +301,346 @@ test('active run match queries require an authorized exact live roster binding',
   assert.equal(match({ sender: {} }, binding), false)
 })
 
+test('provisional exact-run claims survive stale publication and finalize or release exactly', () => {
+  const original = { id: IDS[0], kind: 'canonical' }
+  const replacement = { id: IDS[1], kind: 'isolated' }
+  const competitor = { id: IDS[2], kind: 'isolated' }
+  const replacementSender = { id: 8 }
+  const competitorSender = { id: 9 }
+  const identityForSender = (sender) => sender === replacementSender
+    ? replacement
+    : sender === competitorSender ? competitor : null
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    createClaimToken: () => 'claim-b',
+  })
+  const originalTarget = {
+    workspaceId: original.id,
+    projectId: 'project-relay',
+    projectPath: 'C:\\Users\\example\\relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-claude-1',
+  }
+  const replacementTarget = { ...originalTarget, workspaceId: replacement.id }
+  const competitorTarget = { ...originalTarget, workspaceId: competitor.id }
+  const unrelatedTarget = {
+    ...replacementTarget,
+    chatId: 'chat-unrelated',
+    jobId: 'job-turn-87654321-claude-1',
+  }
+  const windows = new Map()
+  const claim = nativeWorkspaces.createActiveRunClaimHandler({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    activeRuns: roster,
+    windowForWorkspace: (workspaceId) => windows.get(workspaceId) ?? null,
+  })
+
+  const result = claim({ sender: replacementSender }, {
+    original: originalTarget,
+    replacement: replacementTarget,
+  })
+  assert.deepEqual(result, { status: 'claimed', token: 'claim-b' })
+  assert.equal(roster.matches(replacementTarget), false)
+
+  // A periodic callback captured before the claim must not erase its
+  // provisional ownership or let a third renderer take the same run.
+  assert.equal(roster.publish({ sender: replacementSender }, [unrelatedTarget]), true)
+  assert.equal(roster.publish({ sender: competitorSender }, [competitorTarget]), false)
+  assert.deepEqual(claim({ sender: competitorSender }, {
+    original: originalTarget,
+    replacement: competitorTarget,
+  }), { status: 'rejected' })
+  assert.equal(roster.matches(competitorTarget), false)
+
+  assert.equal(roster.finalize({ sender: replacementSender }, {
+    token: result.token,
+    target: replacementTarget,
+  }, () => null), true)
+  assert.equal(roster.matches(replacementTarget), true)
+  assert.equal(roster.publish({ sender: replacementSender }, [unrelatedTarget]), true)
+  assert.equal(roster.matches(replacementTarget), true)
+  assert.equal(roster.publish({ sender: replacementSender }, [unrelatedTarget, replacementTarget]), true)
+  assert.equal(roster.release({ sender: replacementSender }, {
+    token: result.token,
+    target: replacementTarget,
+  }), true)
+  assert.equal(roster.matches(replacementTarget), false)
+  assert.equal(roster.matches(unrelatedTarget), true)
+  assert.deepEqual(claim({ sender: competitorSender }, {
+    original: originalTarget,
+    replacement: competitorTarget,
+  }), { status: 'claimed', token: 'claim-b' })
+})
+
+test('exact-run claim refuses live owners even on retries, presenters, unauthorized senders, and malformed payloads', () => {
+  const original = { id: IDS[0], kind: 'canonical' }
+  const replacement = { id: IDS[1], kind: 'isolated' }
+  const originalSender = { id: 7 }
+  const replacementSender = { id: 8 }
+  const identityForSender = (sender) => sender === originalSender
+    ? original
+    : sender === replacementSender ? replacement : null
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    createClaimToken: () => 'claim-live-owner',
+  })
+  const originalTarget = {
+    workspaceId: original.id,
+    projectId: 'project-relay',
+    projectPath: '\\\\server\\share\\relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-codex-1',
+  }
+  const replacementTarget = { ...originalTarget, workspaceId: replacement.id }
+  let originalWindow = {}
+  const claim = nativeWorkspaces.createActiveRunClaimHandler({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    activeRuns: roster,
+    windowForWorkspace: (workspaceId) => workspaceId === original.id ? originalWindow : null,
+  })
+  const request = { original: originalTarget, replacement: replacementTarget }
+
+  assert.deepEqual(claim({ sender: replacementSender }, request), { status: 'rejected' })
+  originalWindow = null
+  assert.equal(roster.publish({ sender: originalSender }, [originalTarget]), true)
+  assert.deepEqual(claim({ sender: replacementSender }, request), { status: 'rejected' })
+  roster.removeWorkspace(original.id)
+  assert.deepEqual(claim({ sender: {} }, request), { status: 'rejected' })
+  assert.deepEqual(claim({ sender: replacementSender }, {
+    ...request,
+    replacement: { ...replacementTarget, workspaceId: original.id },
+  }), { status: 'rejected' })
+  for (const field of ['projectId', 'projectPath', 'chatId', 'jobId']) {
+    assert.deepEqual(claim({ sender: replacementSender }, {
+      ...request,
+      replacement: { ...replacementTarget, [field]: `${replacementTarget[field]}-other` },
+    }), { status: 'rejected' })
+  }
+
+  assert.deepEqual(claim({ sender: replacementSender }, { ...request, prompt: 'do not cross IPC' }), {
+    status: 'rejected',
+  })
+  assert.deepEqual(claim({ sender: replacementSender }, {
+    ...request,
+    replacement: { ...replacementTarget, attachments: [{ path: '/secret' }] },
+  }), { status: 'rejected' })
+
+  const first = claim({ sender: replacementSender }, request)
+  assert.deepEqual(first, { status: 'claimed', token: 'claim-live-owner' })
+  originalWindow = {}
+  assert.deepEqual(claim({ sender: replacementSender }, request), { status: 'rejected' })
+  assert.equal(roster.finalize({ sender: replacementSender }, {
+    token: first.token,
+    target: replacementTarget,
+  }, (workspaceId) => workspaceId === original.id ? originalWindow : null), false)
+  assert.equal(roster.publish({ sender: originalSender }, [originalTarget]), true)
+})
+
+test('same-workspace renderer reload can reclaim its exact run when the roster is empty', () => {
+  const workspace = { id: IDS[0], kind: 'canonical' }
+  const sender = { id: 7 }
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => workspace,
+    createClaimToken: () => 'claim-reload',
+  })
+  const target = {
+    workspaceId: workspace.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-codex-1',
+  }
+  const claim = nativeWorkspaces.createActiveRunClaimHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => workspace,
+    activeRuns: roster,
+    windowForWorkspace: () => ({ webContents: sender }),
+  })
+
+  const result = claim({ sender }, { original: target, replacement: target })
+  assert.deepEqual(result, { status: 'claimed', token: 'claim-reload' })
+  assert.equal(roster.matches(target), false)
+  assert.equal(roster.finalize({ sender }, { token: result.token, target }, () => ({ webContents: sender })), true)
+  assert.equal(roster.matches(target), true)
+})
+
+test('provisional exact-run claims expire and exact release preserves unrelated bindings', () => {
+  const original = { id: IDS[0], kind: 'canonical' }
+  const replacement = { id: IDS[1], kind: 'isolated' }
+  const competitor = { id: IDS[2], kind: 'isolated' }
+  const replacementSender = { id: 8 }
+  const competitorSender = { id: 9 }
+  const identityForSender = (sender) => sender === replacementSender
+    ? replacement
+    : sender === competitorSender ? competitor : null
+  let currentTime = 100
+  let claimIndex = 0
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    now: () => currentTime,
+    claimTtlMs: 1_000,
+    createClaimToken: () => `claim-${++claimIndex}`,
+  })
+  const originalTarget = {
+    workspaceId: original.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-codex-1',
+  }
+  const replacementTarget = { ...originalTarget, workspaceId: replacement.id }
+  const competitorTarget = { ...originalTarget, workspaceId: competitor.id }
+  const unrelatedTarget = {
+    ...replacementTarget,
+    chatId: 'chat-other',
+    jobId: 'job-turn-87654321-codex-1',
+  }
+
+  assert.equal(roster.publish({ sender: replacementSender }, [unrelatedTarget]), true)
+  const first = roster.claim({ sender: replacementSender }, {
+    original: originalTarget,
+    replacement: replacementTarget,
+  }, () => null)
+  assert.deepEqual(first, { status: 'claimed', token: 'claim-1' })
+  assert.equal(roster.release({ sender: replacementSender }, {
+    token: first.token,
+    target: replacementTarget,
+  }), true)
+  assert.equal(roster.release({ sender: replacementSender }, {
+    token: first.token,
+    target: replacementTarget,
+  }), true)
+  assert.equal(roster.matches(unrelatedTarget), true)
+
+  const second = roster.claim({ sender: replacementSender }, {
+    original: originalTarget,
+    replacement: replacementTarget,
+  }, () => null)
+  assert.deepEqual(second, { status: 'claimed', token: 'claim-2' })
+  currentTime += 1_001
+  assert.deepEqual(roster.claim({ sender: competitorSender }, {
+    original: originalTarget,
+    replacement: competitorTarget,
+  }, () => null), { status: 'claimed', token: 'claim-3' })
+})
+
+test('finalized claims survive TTL until exact release or authenticated workspace removal', () => {
+  const original = { id: IDS[0], kind: 'canonical' }
+  const replacement = { id: IDS[1], kind: 'isolated' }
+  const competitor = { id: IDS[2], kind: 'isolated' }
+  const replacementSender = { id: 8 }
+  const competitorSender = { id: 9 }
+  const identityForSender = (sender) => sender === replacementSender
+    ? replacement
+    : sender === competitorSender ? competitor : null
+  let currentTime = 100
+  let claimIndex = 0
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => Boolean(identityForSender(event.sender)),
+    identityForWebContents: identityForSender,
+    now: () => currentTime,
+    claimTtlMs: 1_000,
+    createClaimToken: () => `finalized-claim-${++claimIndex}`,
+  })
+  const originalTarget = {
+    workspaceId: original.id,
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-codex-1',
+  }
+  const replacementTarget = { ...originalTarget, workspaceId: replacement.id }
+  const competitorTarget = { ...originalTarget, workspaceId: competitor.id }
+  const unrelatedTarget = {
+    ...replacementTarget,
+    chatId: 'chat-other',
+    jobId: 'job-turn-87654321-codex-1',
+  }
+
+  const replacementClaim = roster.claim({ sender: replacementSender }, {
+    original: originalTarget,
+    replacement: replacementTarget,
+  }, () => null)
+  assert.deepEqual(replacementClaim, { status: 'claimed', token: 'finalized-claim-1' })
+  assert.equal(roster.finalize({ sender: replacementSender }, {
+    token: replacementClaim.token,
+    target: replacementTarget,
+  }, () => null), true)
+
+  currentTime += 1_001
+  assert.equal(roster.publish({ sender: replacementSender }, [unrelatedTarget]), true)
+  assert.equal(roster.matches(replacementTarget), true)
+  assert.deepEqual(roster.claim({ sender: competitorSender }, {
+    original: originalTarget,
+    replacement: competitorTarget,
+  }, () => null), { status: 'rejected' })
+
+  assert.equal(roster.release({ sender: replacementSender }, {
+    token: replacementClaim.token,
+    target: replacementTarget,
+  }), true)
+  const competitorClaim = roster.claim({ sender: competitorSender }, {
+    original: originalTarget,
+    replacement: competitorTarget,
+  }, () => null)
+  assert.deepEqual(competitorClaim, { status: 'claimed', token: 'finalized-claim-2' })
+  assert.equal(roster.finalize({ sender: competitorSender }, {
+    token: competitorClaim.token,
+    target: competitorTarget,
+  }, () => null), true)
+  assert.equal(roster.removeWorkspace(competitor.id), true)
+  assert.deepEqual(roster.claim({ sender: replacementSender }, {
+    original: originalTarget,
+    replacement: replacementTarget,
+  }, () => null), { status: 'claimed', token: 'finalized-claim-3' })
+})
+
+test('claim finalize and release handlers require strict authenticated token payloads', () => {
+  const workspace = { id: IDS[1], kind: 'isolated' }
+  const sender = { id: 8 }
+  const roster = nativeWorkspaces.createActiveRunRoster({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => workspace,
+    createClaimToken: () => 'claim-strict',
+  })
+  const original = {
+    workspaceId: IDS[0],
+    projectId: 'project-relay',
+    projectPath: '/Users/example/relay',
+    chatId: 'chat-relay',
+    jobId: 'job-turn-12345678-codex-1',
+  }
+  const target = { ...original, workspaceId: workspace.id }
+  const result = roster.claim({ sender }, { original, replacement: target }, () => null)
+  const finalize = nativeWorkspaces.createActiveRunClaimFinalizeHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => workspace,
+    activeRuns: roster,
+    windowForWorkspace: () => null,
+  })
+  const release = nativeWorkspaces.createActiveRunClaimReleaseHandler({
+    isAuthorized: (event) => event.sender === sender,
+    identityForWebContents: () => workspace,
+    activeRuns: roster,
+  })
+
+  assert.equal(finalize({ sender }, { token: result.token, target, prompt: 'forbidden' }), false)
+  assert.equal(finalize({ sender }, {
+    token: result.token,
+    target: { ...target, prompt: 'forbidden' },
+  }), false)
+  assert.equal(release({ sender }, { token: result.token, target, attachments: [] }), false)
+  assert.equal(release({ sender: {} }, { token: result.token, target }), false)
+  assert.equal(finalize({ sender }, { token: result.token, target }), true)
+  assert.equal(release({ sender }, { token: result.token, target }), true)
+})
+
 test('exact retained idle-chat focus needs no live job but keeps every chat coordinate intact', async () => {
   const source = { id: IDS[0], kind: 'isolated' }
   const target = { id: IDS[1], kind: 'canonical' }

@@ -1,8 +1,11 @@
 import { constants as fsConstants } from 'node:fs'
 import { access, stat } from 'node:fs/promises'
 import { delimiter, join } from 'node:path'
-import { spawn } from 'node:child_process'
+import { execFile as execFileCallback, spawn } from 'node:child_process'
 import { homedir } from 'node:os'
+import { promisify } from 'node:util'
+
+const execFile = promisify(execFileCallback)
 
 const API_KEY_NAMES = new Set([
   'ANTHROPIC_API_KEY',
@@ -55,6 +58,168 @@ function isPaidProviderOverride(key) {
 const ANSI_PATTERN = /\u001b\[[0-?]*[ -/]*[@-~]/g
 const MAX_CAPTURE_BYTES = 256 * 1024
 const CAPTURE_HEAD_RATIO = 0.25
+
+async function posixDescendants(rootPid) {
+  try {
+    const { stdout } = await execFile('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'lstart='], {
+      encoding: 'utf8',
+      maxBuffer: 512 * 1024,
+      timeout: 2_000,
+    })
+    const children = new Map()
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.+?)\s*$/)
+      if (!match) continue
+      const pid = Number(match[1])
+      const parent = Number(match[2])
+      const identity = match[3].replace(/\s+/g, ' ').trim()
+      const values = children.get(parent) ?? []
+      values.push({ pid, identity })
+      children.set(parent, values)
+    }
+    const result = []
+    const visit = (parent) => {
+      for (const child of children.get(parent) ?? []) {
+        visit(child.pid)
+        result.push(child)
+      }
+    }
+    visit(rootPid)
+    return result
+  } catch {
+    return []
+  }
+}
+
+async function posixProcessIdentity(pid) {
+  try {
+    const { stdout } = await execFile('ps', ['-p', String(pid), '-o', 'lstart='], {
+      encoding: 'utf8',
+      maxBuffer: 16 * 1024,
+      timeout: 2_000,
+    })
+    return stdout.replace(/\s+/g, ' ').trim() || null
+  } catch {
+    return null
+  }
+}
+
+function descendantProcesses(rootPid, processes) {
+  const children = new Map()
+  for (const process of processes) {
+    const values = children.get(process.parentPid) ?? []
+    values.push(process)
+    children.set(process.parentPid, values)
+  }
+  const result = []
+  const visit = (parentPid) => {
+    for (const process of children.get(parentPid) ?? []) {
+      visit(process.pid)
+      result.push(process)
+    }
+  }
+  visit(rootPid)
+  return result
+}
+
+async function windowsProcessSnapshot() {
+  const script = [
+    "$ErrorActionPreference='Stop'",
+    '@(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,CreationDate) | ConvertTo-Json -Compress',
+  ].join(';')
+  try {
+    const { stdout } = await execFile('powershell.exe', [
+      '-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script,
+    ], {
+      encoding: 'utf8',
+      maxBuffer: 4 * 1024 * 1024,
+      timeout: 5_000,
+      windowsHide: true,
+    })
+    const parsed = JSON.parse(stdout)
+    const records = Array.isArray(parsed) ? parsed : [parsed]
+    return records.flatMap((record) => {
+      const pid = Number(record?.ProcessId)
+      const parentPid = Number(record?.ParentProcessId)
+      const identity = typeof record?.CreationDate === 'string' ? record.CreationDate : ''
+      return Number.isInteger(pid) && pid > 0 && Number.isInteger(parentPid) && identity
+        ? [{ pid, parentPid, identity }]
+        : []
+    })
+  } catch {
+    return null
+  }
+}
+
+async function taskkill(pid, force, spawnProcess = spawn) {
+  return new Promise((resolveTermination) => {
+    const killer = spawnProcess('taskkill', [
+      '/PID', String(pid), '/T', ...(force ? ['/F'] : []),
+    ], { shell: false, stdio: 'ignore', windowsHide: true })
+    killer.once('error', () => resolveTermination(false))
+    killer.once('close', (code) => resolveTermination(code === 0))
+  })
+}
+
+async function terminateProcessTree(child, force, retainedPids, options = {}) {
+  if (!Number.isInteger(child.pid) || child.pid <= 0) return false
+  const platform = options.platform ?? process.platform
+  if (platform === 'win32') {
+    const snapshot = await (options.windowsSnapshot ?? windowsProcessSnapshot)(child.pid)
+    if (!snapshot) return false
+    for (const process of descendantProcesses(child.pid, snapshot)) {
+      retainedPids.set(process.pid, process.identity)
+    }
+    if (child.exitCode === null && child.signalCode === null) {
+      return (options.taskkill ?? taskkill)(child.pid, force, options.spawn ?? spawn)
+    }
+    let confirmed = true
+    const current = new Map(snapshot.map((process) => [process.pid, process.identity]))
+    for (const [pid, identity] of retainedPids) {
+      if (current.get(pid) !== identity) continue
+      if (!(await (options.taskkill ?? taskkill)(pid, force, options.spawn ?? spawn))) confirmed = false
+    }
+    return confirmed
+  }
+  for (const process of await posixDescendants(child.pid)) retainedPids.set(process.pid, process.identity)
+  const signal = force ? 'SIGKILL' : 'SIGTERM'
+  try { process.kill(-child.pid, signal) } catch { /* individually captured PIDs remain */ }
+  for (const [pid, identity] of retainedPids) {
+    if (await posixProcessIdentity(pid) !== identity) continue
+    try { process.kill(pid, signal) } catch { /* an exited descendant needs no cleanup */ }
+  }
+  try { child.kill(signal) } catch { /* close/error remains authoritative */ }
+  return true
+}
+
+async function processTreeIsQuiescent(child, retainedPids, terminationConfirmed, options = {}) {
+  const platform = options.platform ?? process.platform
+  if (platform === 'win32') {
+    if (!terminationConfirmed) return false
+    const snapshot = await (options.windowsSnapshot ?? windowsProcessSnapshot)(child.pid)
+    if (!snapshot) return false
+    const current = new Map(snapshot.map((process) => [process.pid, process.identity]))
+    if (descendantProcesses(child.pid, snapshot).length > 0) return false
+    return [...retainedPids].every(([pid, identity]) => current.get(pid) !== identity)
+  }
+  await new Promise((resolveCheck) => setTimeout(resolveCheck, 20))
+  try {
+    process.kill(-child.pid, 0)
+    return false
+  } catch {
+    // An absent process group is the expected successful state.
+  }
+  for (const [pid, identity] of retainedPids) {
+    if (await posixProcessIdentity(pid) !== identity) continue
+    try {
+      process.kill(pid, 0)
+      return false
+    } catch {
+      // An exited captured descendant is quiescent.
+    }
+  }
+  return true
+}
 
 /**
  * Bounded process-output capture that discards only whole lines from the middle
@@ -288,6 +453,13 @@ export function runProcess(executable, args, options = {}) {
   const maxCaptureBytes = options.maxCaptureBytes ?? MAX_CAPTURE_BYTES
   const hasInput = typeof options.input === 'string'
   const invocation = commandInvocation(executable, args, env)
+  const killProcessTree = options.killProcessTree === true
+  const processTreePlatform = options.processTreePlatform ?? process.platform
+  const processTreeOptions = {
+    platform: processTreePlatform,
+    taskkill: options.processTreeTaskkill,
+    windowsSnapshot: options.windowsProcessSnapshot,
+  }
 
   return new Promise((resolve) => {
     const stdoutCapture = new BoundedOutputCapture(maxCaptureBytes)
@@ -303,24 +475,72 @@ export function runProcess(executable, args, options = {}) {
     // A CLI that is blocked on a question Ensync put to the person is not hung.
     // The interactive session holds the watchdog for exactly that window.
     let inactivityHeld = false
+    let treeTerminationComplete = false
+    let treeTerminationStarted = false
+    let processTreeQuiescent = !killProcessTree
+    let pendingCloseResult = null
+    const retainedTreePids = new Map()
+    let treeSampleTimer = null
+    let treeSampleInFlight = null
 
     const child = spawn(invocation.executable, invocation.args, {
       cwd: options.cwd,
       env,
       shell: false,
       stdio: [hasInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+      detached: killProcessTree && processTreePlatform !== 'win32',
       windowsHide: true,
     })
 
+    const sampleProcessTree = () => {
+      if (!killProcessTree || processTreePlatform === 'win32' || treeSampleInFlight) return
+      treeSampleInFlight = posixDescendants(child.pid)
+        .then((processes) => {
+          for (const process of processes) retainedTreePids.set(process.pid, process.identity)
+        })
+        .catch(() => {})
+        .finally(() => { treeSampleInFlight = null })
+    }
+    const quiesceProcessTree = () => {
+      if (treeTerminationStarted) return
+      treeTerminationStarted = true
+      if (treeSampleTimer) clearInterval(treeSampleTimer)
+      treeSampleTimer = null
+      let terminationConfirmed = false
+      void Promise.resolve(treeSampleInFlight)
+        .then(() => terminateProcessTree(child, true, retainedTreePids, processTreeOptions))
+        .then((confirmed) => {
+          terminationConfirmed = confirmed
+          return processTreeIsQuiescent(child, retainedTreePids, terminationConfirmed, processTreeOptions)
+        })
+        .then((quiescent) => { processTreeQuiescent = quiescent })
+        .catch(() => { processTreeQuiescent = false })
+        .finally(() => {
+          treeTerminationComplete = true
+          if (pendingCloseResult) finish(pendingCloseResult)
+        })
+    }
+    if (killProcessTree && processTreePlatform !== 'win32') {
+      sampleProcessTree()
+      treeSampleTimer = setInterval(sampleProcessTree, 50)
+      treeSampleTimer.unref?.()
+    }
+
     const terminate = () => {
       if (child.exitCode !== null || child.signalCode !== null || forceKillTimer) return
-      try {
-        child.kill('SIGTERM')
-      } catch {
-        // The close/error event remains authoritative when the process already exited.
+      if (killProcessTree) {
+        void terminateProcessTree(child, false, retainedTreePids, processTreeOptions).catch(() => {})
+      } else {
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          // The close/error event remains authoritative when the process already exited.
+        }
       }
       forceKillTimer = setTimeout(() => {
-        if (child.exitCode === null && child.signalCode === null) {
+        if (killProcessTree) {
+          quiesceProcessTree()
+        } else if (child.exitCode === null && child.signalCode === null) {
           try {
             child.kill('SIGKILL')
           } catch {
@@ -328,7 +548,7 @@ export function runProcess(executable, args, options = {}) {
           }
         }
       }, terminationGraceMs)
-      forceKillTimer.unref?.()
+      if (!killProcessTree) forceKillTimer.unref?.()
     }
 
     const onAbort = () => {
@@ -400,7 +620,7 @@ export function runProcess(executable, args, options = {}) {
       },
       // Holding the watchdog is what keeps a person's thinking time from
       // reading as a hung CLI, but an unanswered question must never pin the
-      // run — and through it this conversation's workspace lease — forever.
+      // run — and through it this conversation's process-local ownership — forever.
       // Every hold therefore carries its own bound, and answering hands the
       // run straight back to the ordinary inactivity watchdog.
       holdInactivity: () => {
@@ -430,11 +650,17 @@ export function runProcess(executable, args, options = {}) {
 
     const finish = (result) => {
       if (settled) return
+      if (killProcessTree && !treeTerminationComplete) {
+        pendingCloseResult = result
+        if (!forceKillTimer) quiesceProcessTree()
+        return
+      }
       settled = true
       if (hardTimer) clearTimeout(hardTimer)
       if (inactivityTimer) clearTimeout(inactivityTimer)
       if (questionHoldTimer) clearTimeout(questionHoldTimer)
       if (forceKillTimer) clearTimeout(forceKillTimer)
+      if (treeSampleTimer) clearInterval(treeSampleTimer)
       options.signal?.removeEventListener('abort', onAbort)
       resolve({
         ...result,
@@ -447,6 +673,7 @@ export function runProcess(executable, args, options = {}) {
         timedOut,
         timeoutReason,
         aborted,
+        processTreeQuiescent,
         outputTruncated: Boolean(stdoutCapture.truncation || stderrCapture.truncation),
       })
     }

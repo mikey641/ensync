@@ -246,6 +246,8 @@ class DroidExecSession {
   #resolveDone
   #rejectDone
   #done
+  #resolveClosed
+  #closed
 
   constructor(input, options = {}) {
     this.input = input
@@ -263,6 +265,9 @@ class DroidExecSession {
     this.#done = new Promise((resolve, reject) => {
       this.#resolveDone = resolve
       this.#rejectDone = reject
+    })
+    this.#closed = new Promise((resolve) => {
+      this.#resolveClosed = resolve
     })
     void this.#done.catch(() => {})
   }
@@ -293,6 +298,7 @@ class DroidExecSession {
       this.#stderr = `${this.#stderr}${chunk.toString('utf8')}`.slice(0, MAX_STDERR_CHARACTERS)
     })
     this.#child.on('error', (error) => {
+      if (!this.#child.pid) this.#resolveClosed()
       this.#fail(new DroidExecError(
         'run_start_failed',
         `Factory Droid could not be started: ${error.message}`,
@@ -301,6 +307,9 @@ class DroidExecSession {
       ))
     })
     this.#child.on('close', (exitCode, signal) => {
+      if (this.#forceKillTimer) clearTimeout(this.#forceKillTimer)
+      this.#forceKillTimer = null
+      this.#resolveClosed()
       if (this.#settled) return
       const detail = this.#stderr.trim()
         ? ` ${this.#stderr.trim().slice(0, 500)}`
@@ -371,6 +380,7 @@ class DroidExecSession {
       )
     } finally {
       this.#finishProcess()
+      await this.#closed
     }
   }
 
@@ -751,7 +761,7 @@ class DroidExecSession {
   // Counted, not a flag: two things can be waiting on the person at once, and
   // the first one answered must not restart the watchdog while the second is
   // still open. The hold is bounded all the same — an unanswered card also
-  // pins this conversation's workspace lease, so every later message in the
+  // pins this conversation's process-local workspace ownership, so every later message in the
   // same chat waits behind it. Each new card starts the bound over.
   #holdInactivity() {
     this.#inactivityHolds += 1
@@ -812,8 +822,12 @@ class DroidExecSession {
     if (!this.#child.stdin.destroyed) this.#child.stdin.end()
     this.#reader?.close()
     if (this.#child.exitCode === null && this.#child.signalCode === null) {
-      this.#forceKillTimer = setTimeout(() => this.#terminate(), 1_000)
-      this.#forceKillTimer.unref?.()
+      this.#forceKillTimer = setTimeout(() => {
+        this.#forceKillTimer = null
+        if (this.#child.exitCode === null && this.#child.signalCode === null) {
+          try { this.#child.kill('SIGKILL') } catch { /* A concurrent exit needs no cleanup. */ }
+        }
+      }, 1_000)
     }
   }
 
@@ -834,7 +848,6 @@ class DroidExecSession {
         }
       }
     }, 1_000)
-    this.#forceKillTimer.unref?.()
   }
 }
 

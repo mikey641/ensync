@@ -23,6 +23,7 @@ import {
 } from '../src/lib/occupiedRunState.mjs'
 
 const workspaceId = '11111111-1111-4111-8111-111111111111'
+const predecessorTranscriptFingerprint = 'a'.repeat(64)
 const owner = {
   jobId: 'job-owner-1234567890',
   turnId: 'turn-owner',
@@ -32,6 +33,7 @@ const owner = {
   providerProcessStarted: true,
   steerable: true,
   nativeWorkspaceId: workspaceId,
+  predecessorTranscriptFingerprint,
 }
 const preferences = {
   providerMode: 'auto',
@@ -78,6 +80,7 @@ test('persisted occupied owners are bounded and reject extra sensitive fields', 
       providerProcessStarted: true,
       steerable: true,
       nativeWorkspaceId: workspaceId,
+      predecessorTranscriptFingerprint,
       projectId: 'relay',
       projectPath: '/Users/example/relay',
       chatId: 'chat-a',
@@ -95,6 +98,7 @@ test('persisted occupied owners are bounded and reject extra sensitive fields', 
       providerProcessStarted: true,
       steerable: true,
       nativeWorkspaceId: workspaceId,
+      predecessorTranscriptFingerprint,
       projectId: 'relay',
       projectPath: '/Users/example/relay',
       chatId: 'chat-a',
@@ -152,6 +156,7 @@ test('occupied admission converts the already-visible pending turn into one stab
     providerProcessStarted: true,
     steerable: true,
     nativeWorkspaceId: workspaceId,
+    predecessorTranscriptFingerprint,
     projectId: 'relay',
     projectPath: '/Users/example/relay',
     chatId: 'chat-a',
@@ -173,6 +178,36 @@ test('occupied admission converts the already-visible pending turn into one stab
   })
   assert.equal(retried.status, 'duplicate')
   assert.equal(retried.queues['chat-a'].length, 1)
+})
+
+test('legacy or malformed occupied owners cannot acquire a transcript adoption binding', () => {
+  const normalized = normalizeOccupiedRuns({
+    legacy: {
+      ownerJobId: owner.jobId,
+      turnId: owner.turnId,
+      provider: owner.provider,
+      targetKind: owner.targetKind,
+      startedAt: owner.startedAt,
+      nativeWorkspaceId: workspaceId,
+      projectId: 'relay',
+      projectPath: '/Users/example/relay',
+      chatId: 'legacy',
+    },
+    malformed: {
+      ownerJobId: owner.jobId,
+      turnId: owner.turnId,
+      provider: owner.provider,
+      targetKind: owner.targetKind,
+      startedAt: owner.startedAt,
+      nativeWorkspaceId: workspaceId,
+      predecessorTranscriptFingerprint: 'not-a-digest',
+      projectId: 'relay',
+      projectPath: '/Users/example/relay',
+      chatId: 'malformed',
+    },
+  })
+  assert.equal(normalized.legacy.predecessorTranscriptFingerprint, null)
+  assert.equal(normalized.malformed.predecessorTranscriptFingerprint, null)
 })
 
 test('occupied admission accepts the shared 100,000-character prompt bound and rejects one over', () => {

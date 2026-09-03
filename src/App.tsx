@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import {
-  AlertTriangle,
   ArrowDown,
   ArrowRight,
   ArrowUp,
@@ -105,9 +104,6 @@ import {
   writeStoredFallbackProviderOrder,
 } from './lib/automaticRoutingPreferences.mjs'
 import { buildAutoContextPrompt } from './lib/autoContextPrompt.mjs'
-import {
-  withProviderRunnerInstructions,
-} from '../host/provider-runner-contract.mjs'
 import { appendFallbackReason, safeFallbackProof } from './lib/safeFallback.mjs'
 import { retryableFailedTurn } from './lib/failedTurnRetry.mjs'
 import {
@@ -122,12 +118,14 @@ import {
 import { createChatRunRegistry } from './lib/chatRunRegistry.mjs'
 import { createChatRunCancellationRegistry } from './lib/chatRunCancellation.mjs'
 import {
-  activeWorkspaceOverlaps,
-  workspaceOverlapSummary,
-} from './lib/workspaceOverlap.mjs'
-import {
   adoptReconnectableHostJobState,
+  beginRunAfterPredecessorFingerprint,
+  canonicalPredecessorTranscript,
+  createOccupiedJobProbeCoordinator,
+  predecessorTranscriptFingerprint,
+  retryableOccupiedJobProbes,
   runningHostJobCandidates,
+  shouldSuppressOccupiedJobProbe,
 } from './lib/hostJobRecovery.mjs'
 import { extractEnsyncContinuation } from './lib/ensyncContinuation.mjs'
 import { chatAutoScrollContentRevision } from './lib/chatAutoScroll.mjs'
@@ -319,8 +317,6 @@ type StoredState = {
   conversationLayout?: ConversationLayoutMode
   autoFallback: boolean
   autoContextSkill?: boolean
-  /** Whether verified successful local runs land their work automatically. */
-  autoLandAgentWork?: boolean
   fallbackProviderOrder?: ProviderId[]
   /** Latest completed agent-message ID the user opened, keyed by stable chat ID. */
   readCompletionByChat?: Record<string, string>
@@ -497,7 +493,6 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     setupKind: status.setupKind,
     documentationUrl: status.documentationUrl,
     catalogReason: status.catalogReason,
-    agentCoordination: status.agentCoordination ?? current.agentCoordination,
     checkedAt: status.checkedAt,
   }
 }
@@ -813,7 +808,6 @@ function App() {
   const [conversationLayout, setConversationLayout] = useState<ConversationLayoutMode>(hydrated?.conversationLayout === 'tabs' ? 'tabs' : 'split')
   const [autoFallback, setAutoFallback] = useState(hydrated?.autoFallback ?? true)
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
-  const [autoLandAgentWork, setAutoLandAgentWork] = useState(hydrated?.autoLandAgentWork ?? true)
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
     resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
@@ -869,8 +863,11 @@ function App() {
   const rediscoveringHostJobsRef = useRef(false)
   const rediscoveredHostJobsRef = useRef(false)
   const steeringChatIdsRef = useRef(new Set<string>())
-  const occupiedOwnerProbeAttemptedRef = useRef(new Set<string>())
+  const occupiedOwnerMissingExactJobRef = useRef(new Set<string>())
   const occupiedOwnerPollCountRef = useRef(new Map<string, number>())
+  const occupiedJobProbeCoordinatorRef = useRef(createOccupiedJobProbeCoordinator())
+  const occupiedOwnerAdoptionRef = useRef(new Set<string>())
+  const recoverDetachedRunRef = useRef<(chatId: string, run: PersistedInFlightRun) => void>(() => {})
   const completedNativeRunsRef = useRef(new Map<string, CompletedNativeRunBinding>())
   const handoffActionsInvokedRef = useRef(new Set<string>())
   const transferringChatIdsRef = useRef(new Set<string>())
@@ -904,6 +901,7 @@ function App() {
     hydrated?.inFlightRuns ?? {},
   )
   const [hostJobRecoveryRetry, setHostJobRecoveryRetry] = useState(0)
+  const [occupiedJobProbeRetry, setOccupiedJobProbeRetry] = useState(0)
   const [promptQueues, setPromptQueues] = useState<PromptQueues>(() => normalizePromptQueues(hydrated?.promptQueues))
   const [occupiedRuns, setOccupiedRuns] = useState<OccupiedRuns>(() => normalizeOccupiedRuns(hydrated?.occupiedRuns))
   // Shell reachability is live native authority, never retained workspace data.
@@ -975,7 +973,6 @@ function App() {
     conversationLayout,
     autoFallback,
     autoContextSkill,
-    autoLandAgentWork,
     readCompletionByChat,
     executionPanelOpenByChat,
     drafts,
@@ -1201,9 +1198,6 @@ function App() {
     () => prepareAccountWorkspace({ chats, projects }),
     [chats, projects],
   )
-  const workspaceBranchTitles = useMemo(() => Object.fromEntries(
-    chats.flatMap((chat) => chat.workspace?.branch ? [[chat.workspace.branch, chat.title]] : []),
-  ), [chats])
   const owningConversationTargets = useMemo<Record<string, ReferencedOwningConversation>>(() => {
     if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return {}
     const retainedWorkspaces = getRetainedNativeWorkspaces()
@@ -1259,14 +1253,11 @@ function App() {
     const next = { ...chatExecutionEventsRef.current, [chatId]: retained }
     chatExecutionEventsRef.current = next
     setChatExecutionEvents(next)
-    if (event.type === 'notice' && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? '')) {
-      const subtitle = ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(event.code ?? '')
-        ? 'Waiting for this chat workspace'
-        : 'Working in protected branch'
+    if (event.type === 'notice' && event.code === 'project_workspace_ready') {
       const nextChats = chatsRef.current.map((chat) => chat.id === chatId ? {
         ...chat,
-        subtitle,
-        workspace: event.code === 'project_workspace_ready' && event.workspace
+        subtitle: 'Working in protected branch',
+        workspace: event.workspace
           ? { path: event.workspace.path, branch: event.workspace.branch }
           : chat.workspace,
       } : chat)
@@ -1973,10 +1964,31 @@ function App() {
   useEffect(() => {
     const publish = window.ensyncDesktop?.publishActiveRuns
     if (typeof publish !== 'function' || !isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return
-    const activeRuns = Object.fromEntries(Object.entries(inFlightRuns)
-      .filter(([chatId]) => sendingChatIds.has(chatId)))
-    void publish(activeNativeRunBindings(activeRuns, nativeWorkspaceIdentity.id))
-      .catch((error) => console.error('[ensync-active-run-roster]', error))
+    let cancelled = false
+    let timer: number | null = null
+    const publishRoster = async () => {
+      if (occupiedOwnerAdoptionRef.current.size > 0) {
+        if (!cancelled) timer = window.setTimeout(publishRoster, 250)
+        return
+      }
+      const activeChatIds = chatRunRegistryRef.current.snapshot()
+      const activeRuns = Object.fromEntries(Object.entries(inFlightRunsRef.current)
+        .filter(([chatId]) => activeChatIds.has(chatId)))
+      const bindings = activeNativeRunBindings(activeRuns, nativeWorkspaceIdentity.id)
+      let accepted = false
+      try {
+        accepted = await publish(bindings)
+      } catch (error) {
+        console.error('[ensync-active-run-roster]', error)
+      }
+      if (cancelled || bindings.length === 0) return
+      timer = window.setTimeout(publishRoster, accepted ? 5_000 : 1_000)
+    }
+    void publishRoster()
+    return () => {
+      cancelled = true
+      if (timer !== null) window.clearTimeout(timer)
+    }
   }, [inFlightRuns, nativeWorkspaceIdentity, sendingChatIds])
 
   useEffect(() => {
@@ -1988,12 +2000,15 @@ function App() {
 
   useEffect(() => {
     if (hostOnline) {
-      occupiedOwnerProbeAttemptedRef.current.clear()
+      occupiedOwnerMissingExactJobRef.current.clear()
       return
     }
+    occupiedJobProbeCoordinatorRef.current.invalidateAll()
     occupiedShellReachabilityRef.current = {}
     setOccupiedShellReachability({})
   }, [hostOnline])
+
+  useEffect(() => () => occupiedJobProbeCoordinatorRef.current.invalidateAll(), [])
 
   // Mirror the Automatic ranking to the Host whenever it changes or the Host
   // reappears. Agents that run outside this window read the ranking from there,
@@ -2009,24 +2024,27 @@ function App() {
 
   useEffect(() => {
     if (!hostOnline) return
-    const timers: number[] = []
-    let cancelled = false
-    for (const [chatId, owner] of Object.entries(occupiedRuns)) {
-      if (!owner.ownerJobId || !owner.turnId || owner.targetKind !== 'local') continue
-      const ownerKey = `${chatId}\0${owner.ownerJobId}`
-      if (!owner.controllable && occupiedOwnerProbeAttemptedRef.current.has(ownerKey)) continue
-      occupiedOwnerProbeAttemptedRef.current.add(ownerKey)
+    for (const { chatId, owner, ownerKey } of retryableOccupiedJobProbes(
+      occupiedRuns,
+      occupiedOwnerMissingExactJobRef.current,
+    )) {
+      const probe = occupiedJobProbeCoordinatorRef.current.reserve(ownerKey)
+      if (!probe) continue
+      const ownerTurnId = owner.turnId
       const pollCount = occupiedOwnerPollCountRef.current.get(ownerKey) ?? 0
-      const delay = owner.controllable
-        ? Math.min(10_000, 1_000 * (2 ** Math.min(pollCount, 3)))
-        : 0
+      const delay = pollCount === 0
+        ? 0
+        : Math.min(10_000, 1_000 * (2 ** Math.min(pollCount - 1, 3)))
       occupiedOwnerPollCountRef.current.set(ownerKey, pollCount + 1)
-      timers.push(window.setTimeout(() => {
+      window.setTimeout(() => {
+        if (!probe.start()) return
         void (async () => {
           try {
+            if (occupiedRunsRef.current[chatId]?.ownerJobId !== owner.ownerJobId) return
             const response = await ensyncHost.chatJob(owner.ownerJobId)
-            if (cancelled || response.job.id !== owner.ownerJobId) return
-            if (response.job.state === 'running') {
+            if (!probe.isCurrent() || response.job.id !== owner.ownerJobId) return
+            occupiedOwnerMissingExactJobRef.current.delete(ownerKey)
+            if (response.job.state === 'running' || response.job.state === 'completed') {
               let shellReachable = false
               if (owner.nativeWorkspaceId && typeof window.ensyncDesktop?.matchesActiveRun === 'function') {
                 try {
@@ -2040,6 +2058,186 @@ function App() {
                 } catch {
                   shellReachable = false
                 }
+              }
+              if (!shellReachable
+                && owner.nativeWorkspaceId
+                && isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+                && typeof window.ensyncDesktop?.claimActiveRun === 'function'
+                && typeof window.ensyncDesktop?.finalizeActiveRunClaim === 'function'
+                && typeof window.ensyncDesktop?.releaseActiveRunClaim === 'function'
+                && !occupiedOwnerAdoptionRef.current.has(ownerKey)) {
+                const claimActiveRun = window.ensyncDesktop.claimActiveRun
+                const finalizeActiveRunClaim = window.ensyncDesktop.finalizeActiveRunClaim
+                const releaseActiveRunClaim = window.ensyncDesktop.releaseActiveRunClaim
+                const chat = chatsRef.current.find((candidate) => candidate.id === chatId)
+                const project = projectsRef.current.find((candidate) => candidate.id === owner.projectId
+                  && candidate.path === owner.projectPath)
+                const provider = providersRef.current.find(
+                  (candidate): candidate is Provider & { id: ChatProviderId } =>
+                    supportsChat(candidate) && candidate.id === owner.provider,
+                )
+                const jobPrefix = `job-${ownerTurnId}-${owner.provider}-`
+                const attempt = Number(owner.ownerJobId.slice(jobPrefix.length))
+                const candidate = chat && provider
+                  && Number.isSafeInteger(attempt) && attempt > 0
+                  && owner.ownerJobId === `${jobPrefix}${attempt}`
+                  ? {
+                      chatId: owner.chatId,
+                      turnId: ownerTurnId,
+                      provider: provider.id,
+                      attempt,
+                      jobId: owner.ownerJobId,
+                    }
+                  : null
+                if (chat && project && candidate && executionTargetRef.current.kind === 'local') {
+                  const originalTarget: NativeExactRunTarget = {
+                    workspaceId: owner.nativeWorkspaceId,
+                    projectId: owner.projectId,
+                    projectPath: owner.projectPath,
+                    chatId: owner.chatId,
+                    jobId: owner.ownerJobId,
+                  }
+                  const replacementTarget: NativeExactRunTarget = {
+                    ...originalTarget,
+                    workspaceId: nativeWorkspaceIdentity.id,
+                  }
+                  const currentAdoptionCoordinates = () => {
+                    const currentOwner = occupiedRunsRef.current[chatId]
+                    const currentChat = chatsRef.current.find((current) => current.id === chatId)
+                    if (!currentOwner
+                      || !currentChat
+                      || currentOwner.ownerJobId !== owner.ownerJobId
+                      || currentOwner.turnId !== owner.turnId
+                      || currentOwner.provider !== owner.provider
+                      || currentOwner.targetKind !== owner.targetKind
+                      || currentOwner.projectId !== owner.projectId
+                      || currentOwner.projectPath !== owner.projectPath
+                      || currentOwner.chatId !== owner.chatId
+                      || currentOwner.nativeWorkspaceId !== owner.nativeWorkspaceId
+                      || currentOwner.predecessorTranscriptFingerprint
+                        !== owner.predecessorTranscriptFingerprint
+                      || executionTargetRef.current.kind !== 'local'
+                      || !providersRef.current.some((currentProvider) =>
+                        supportsChat(currentProvider) && currentProvider.id === candidate.provider)
+                      || !projectsRef.current.some((currentProject) => currentProject.id === currentOwner.projectId
+                        && currentProject.path === currentOwner.projectPath)) return null
+                    return { currentOwner, currentChat }
+                  }
+                  const prepareCurrentAdoption = async () => {
+                    const before = currentAdoptionCoordinates()
+                    if (!before) return null
+                    const canonical = canonicalPredecessorTranscript(before.currentChat.messages, candidate.turnId)
+                    if (canonical === null) return null
+                    const fingerprint = await predecessorTranscriptFingerprint(
+                      before.currentChat.messages,
+                      candidate.turnId,
+                    )
+                    const after = currentAdoptionCoordinates()
+                    if (!after || !fingerprint
+                      || canonicalPredecessorTranscript(after.currentChat.messages, candidate.turnId) !== canonical) {
+                      return null
+                    }
+                    const currentAdoptionRequest = {
+                      candidate,
+                      job: response.job,
+                      projectPath: after.currentOwner.projectPath,
+                      executionTarget: 'local',
+                      predecessorTranscriptFingerprint: fingerprint,
+                      occupied: {
+                        owner: after.currentOwner,
+                        replacementWorkspaceId: nativeWorkspaceIdentity.id,
+                      },
+                    }
+                    return adoptReconnectableHostJobState({
+                      chats: chatsRef.current,
+                      chatErrors: chatErrorsRef.current,
+                      chatExecutionEvents: chatExecutionEventsRef.current,
+                      inFlightRuns: inFlightRunsRef.current,
+                    }, currentAdoptionRequest)
+                  }
+                  const releaseClaim = async (token: string) => {
+                    for (let releaseAttempt = 0; releaseAttempt < 3; releaseAttempt += 1) {
+                      try {
+                        if (await releaseActiveRunClaim({ token, target: replacementTarget })) return
+                      } catch (error) {
+                        if (releaseAttempt === 2) console.error('[ensync-active-run-claim-release]', error)
+                      }
+                      if (releaseAttempt < 2) {
+                        await new Promise<void>((resolve) => window.setTimeout(resolve, 100 * (releaseAttempt + 1)))
+                      }
+                    }
+                  }
+                  const initialAdoption = await prepareCurrentAdoption()
+                  if (initialAdoption && probe.isCurrent()) {
+                    occupiedOwnerAdoptionRef.current.add(ownerKey)
+                    try {
+                      const claim = await claimActiveRun({ original: originalTarget, replacement: replacementTarget })
+                      if (claim.status !== 'claimed' || typeof claim.token !== 'string' || !claim.token) return
+                      // Claiming yields to main. Rebuild from refs so a newer
+                      // transcript, error, run, or occupied owner is never
+                      // overwritten by the snapshot prepared beforehand.
+                      if (!probe.isCurrent() || !await prepareCurrentAdoption()) {
+                        await releaseClaim(claim.token)
+                        return
+                      }
+                      if (!await finalizeActiveRunClaim({ token: claim.token, target: replacementTarget })) {
+                        await releaseClaim(claim.token)
+                        return
+                      }
+                      const adopted = probe.isCurrent() ? await prepareCurrentAdoption() : null
+                      if (!adopted) {
+                        await releaseClaim(claim.token)
+                        return
+                      }
+                      const nextOccupied = { ...occupiedRunsRef.current }
+                      delete nextOccupied[chatId]
+                      const nextChats = adopted.chats as Chat[]
+                      const nextErrors = adopted.chatErrors
+                      const nextEvents = adopted.chatExecutionEvents as Record<string, ChatExecutionEvent[]>
+                      const nextRuns = adopted.inFlightRuns as Record<string, PersistedInFlightRun>
+                      const recoveredRun = adopted.inFlightRun as PersistedInFlightRun
+                      const persisted = commitWorkspace({
+                        chats: nextChats,
+                        chatErrors: nextErrors,
+                        chatExecutionEvents: nextEvents,
+                        inFlightRuns: nextRuns,
+                        occupiedRuns: nextOccupied,
+                      })
+                      if (!persisted) {
+                        await releaseClaim(claim.token)
+                        return
+                      }
+                      chatsRef.current = nextChats
+                      chatErrorsRef.current = nextErrors
+                      chatExecutionEventsRef.current = nextEvents
+                      inFlightRunsRef.current = nextRuns
+                      occupiedRunsRef.current = nextOccupied
+                      setChats(nextChats)
+                      setChatErrors(nextErrors)
+                      setChatExecutionEvents(nextEvents)
+                      setInFlightRuns(nextRuns)
+                      setOccupiedRuns(nextOccupied)
+                      updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+                      occupiedOwnerPollCountRef.current.delete(ownerKey)
+                      occupiedOwnerMissingExactJobRef.current.delete(ownerKey)
+                      recoverDetachedRunRef.current(chatId, recoveredRun)
+                      return
+                    } finally {
+                      occupiedOwnerAdoptionRef.current.delete(ownerKey)
+                    }
+                  }
+                }
+              }
+              if (response.job.state === 'completed') {
+                const current = occupiedRunsRef.current[chatId]
+                if (!current || current.ownerJobId !== owner.ownerJobId) return
+                const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'terminal' })
+                occupiedOwnerPollCountRef.current.delete(ownerKey)
+                updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
+                updateOccupiedRuns(next)
+                commitWorkspace({ occupiedRuns: next })
+                queueMicrotask(() => drainPromptQueueRef.current(chatId))
+                return
               }
               const current = occupiedRunsRef.current[chatId]
               if (!current || current.ownerJobId !== owner.ownerJobId) return
@@ -2061,24 +2259,31 @@ function App() {
             updateOccupiedRuns(next)
             commitWorkspace({ occupiedRuns: next })
             queueMicrotask(() => drainPromptQueueRef.current(chatId))
-          } catch {
-            if (cancelled) return
+          } catch (error) {
+            if (!probe.isCurrent()) return
             const current = occupiedRunsRef.current[chatId]
             if (!current || current.ownerJobId !== owner.ownerJobId) return
+            const missingExactJob = error instanceof EnsyncHostError
+              && shouldSuppressOccupiedJobProbe(error.status)
+            if (missingExactJob) occupiedOwnerMissingExactJobRef.current.add(ownerKey)
+            else occupiedOwnerMissingExactJobRef.current.delete(ownerKey)
             const next = applyOccupiedJobObservation(occupiedRunsRef.current, chatId, { kind: 'unavailable' })
-            occupiedOwnerPollCountRef.current.delete(ownerKey)
+            if (missingExactJob) occupiedOwnerPollCountRef.current.delete(ownerKey)
             updateOccupiedShellReachability(chatId, owner.ownerJobId, false)
             updateOccupiedRuns(next)
             commitWorkspace({ occupiedRuns: next })
+          } finally {
+            const current = occupiedRunsRef.current[chatId]
+            const retry = probe.isCurrent()
+              && current?.ownerJobId === owner.ownerJobId
+              && !occupiedOwnerMissingExactJobRef.current.has(ownerKey)
+            probe.finish()
+            if (retry) setOccupiedJobProbeRetry((currentRetry) => currentRetry + 1)
           }
         })()
-      }, delay))
+      }, delay)
     }
-    return () => {
-      cancelled = true
-      timers.forEach((timer) => window.clearTimeout(timer))
-    }
-  }, [commitWorkspace, hostOnline, occupiedRuns, updateOccupiedRuns, updateOccupiedShellReachability])
+  }, [commitWorkspace, hostOnline, nativeWorkspaceIdentity, occupiedJobProbeRetry, occupiedRuns, updateOccupiedRuns, updateOccupiedShellReachability])
 
   useEffect(() => window.ensyncDesktop?.onWorkspaceProjectFocus?.((request) => {
     if (!request || typeof request.projectId !== 'string' || typeof request.projectPath !== 'string') return
@@ -2921,6 +3126,10 @@ function App() {
     setDrafts(draftsRef.current)
     draftAttachmentsRef.current = { ...draftAttachmentsRef.current, [chatId]: [] }
     setDraftAttachments(draftAttachmentsRef.current)
+    const predecessorFingerprintPromise = predecessorTranscriptFingerprint(
+      runningChats.find((current) => current.id === chatId)?.messages ?? [],
+      turnId,
+    )
 
     const run = async (target: Provider, prompt: string) => {
       if (!supportsChat(target)) throw new Error(`${target.name} chat execution is not supported.`)
@@ -2956,85 +3165,87 @@ function App() {
             providerMode: chatToSend.providerMode ?? 'auto',
           })
         : canResume || !transcript ? prompt : `${transcript}\n\nUser: ${prompt}`
-      const effectivePrompt = withProviderRunnerInstructions(
-        targetProviderId,
-        runTarget.kind === 'local' ? 'local' : 'ssh',
-        basePrompt,
-      )
+      const effectivePrompt = basePrompt
       const requestedModel = null
       const requestedEffort = runPreferences.requestedEffort
       const jobId = `job-${turnId}-${targetProviderId}-${attemptedProviders.length}`
-      if (runTarget.kind === 'ssh') providerProcessStarted = true
-      const nextRuns = updateInFlightRun(chatId, (current) => ({
-          ...(current ?? {
-            turnId,
-            sizeTier: chatToSend.sizeTier ?? null,
-            executionTarget: runTargetKey,
-            providerProcessStarted: false,
-            startedAt: runStartedAt,
-            gitBefore: continuationGit(handoffGitStatus),
-          }),
-          provider: targetProviderId,
-          attemptedProviders: [...attemptedProviders],
-          fallbackReason,
-          providerProcessStarted: runTarget.kind === 'ssh' || current?.providerProcessStarted === true,
-          jobId,
-          lastEventSequence: 0,
-          projectId: runProject.id,
-          projectPath: runProject.path,
-          liveSteerReady: false,
-          continuityStateRequired: continuityCapsuleRequired,
-          gitReason: handoffGitStatusReason,
-        }))
-      // Persist the reconnect key and pending user turn before the Host is
-      // allowed to start a provider process.
-      commitWorkspace({
-        chats: chatsRef.current,
-        chatExecutionEvents: chatExecutionEventsRef.current,
-        chatErrors: chatErrorsRef.current,
-        inFlightRuns: nextRuns,
-      })
-      const jobRequest = runTarget.kind === 'ssh'
-        ? {
-            connection: runTarget.connection,
-            provider: target.id,
-            workspaceKey: agentWorkspaceKey,
-            prompt: effectivePrompt,
-            sessionId: canResume ? session.sessionId : null,
-            model: requestedModel,
-            effort: requestedEffort,
-            autoLand: autoLandAgentWork,
-          }
-        : {
-            provider: target.id,
+      return beginRunAfterPredecessorFingerprint(
+        predecessorFingerprintPromise,
+        runController.signal,
+        async (predecessorFingerprint) => {
+          if (runController.signal.aborted) throw cancelledRunError()
+          if (runTarget.kind === 'ssh') providerProcessStarted = true
+          const nextRuns = updateInFlightRun(chatId, (current) => ({
+            ...(current ?? {
+              turnId,
+              sizeTier: chatToSend.sizeTier ?? null,
+              executionTarget: runTargetKey,
+              providerProcessStarted: false,
+              startedAt: runStartedAt,
+              gitBefore: continuationGit(handoffGitStatus),
+            }),
+            provider: targetProviderId,
+            attemptedProviders: [...attemptedProviders],
+            fallbackReason,
+            providerProcessStarted: runTarget.kind === 'ssh' || current?.providerProcessStarted === true,
+            jobId,
+            lastEventSequence: 0,
+            projectId: runProject.id,
             projectPath: runProject.path,
-            workspaceKey: agentWorkspaceKey,
-            prompt: effectivePrompt,
-            attachments: attachments.map((attachment) => attachment.path),
-            sessionId: canResume ? session.sessionId : null,
-            model: requestedModel,
-            effort: requestedEffort,
-            autoLand: autoLandAgentWork,
-          }
-      return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
-        if (event.type === 'started') providerProcessStarted = true
-        if (event.type !== 'finished' && typeof event.sequence === 'number') {
-          updateInFlightRun(chatId, (current) => current ? {
-            ...current,
-            providerProcessStarted: providerProcessStarted || current.providerProcessStarted,
-            liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
-            lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
-          } : current)
-        }
-        appendChatExecutionEvent(chatId, event)
-      }, runController.signal, {
-        nativeWorkspaceId: isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
-          ? nativeWorkspaceIdentity.id
-          : null,
-        projectId: runProject.id,
-        chatId,
-        turnId,
-      })
+            liveSteerReady: false,
+            continuityStateRequired: continuityCapsuleRequired,
+            gitReason: handoffGitStatusReason,
+          }))
+          // Persist the reconnect key and pending user turn before the Host is
+          // allowed to start a provider process.
+          commitWorkspace({
+            chats: chatsRef.current,
+            chatExecutionEvents: chatExecutionEventsRef.current,
+            chatErrors: chatErrorsRef.current,
+            inFlightRuns: nextRuns,
+          })
+          const jobRequest = runTarget.kind === 'ssh'
+            ? {
+                connection: runTarget.connection,
+                provider: target.id,
+                workspaceKey: agentWorkspaceKey,
+                prompt: effectivePrompt,
+                sessionId: canResume ? session.sessionId : null,
+                model: requestedModel,
+                effort: requestedEffort,
+              }
+            : {
+                provider: target.id,
+                projectPath: runProject.path,
+                workspaceKey: agentWorkspaceKey,
+                prompt: effectivePrompt,
+                attachments: attachments.map((attachment) => attachment.path),
+                sessionId: canResume ? session.sessionId : null,
+                model: requestedModel,
+                effort: requestedEffort,
+              }
+          return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
+            if (event.type === 'started') providerProcessStarted = true
+            if (event.type !== 'finished' && typeof event.sequence === 'number') {
+              updateInFlightRun(chatId, (current) => current ? {
+                ...current,
+                providerProcessStarted: providerProcessStarted || current.providerProcessStarted,
+                liveSteerReady: liveSteerReadyAfterEvent(current.liveSteerReady, event),
+                lastEventSequence: Math.max(current.lastEventSequence ?? 0, event.sequence!),
+              } : current)
+            }
+            appendChatExecutionEvent(chatId, event)
+          }, runController.signal, {
+            nativeWorkspaceId: isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
+              ? nativeWorkspaceIdentity.id
+              : null,
+            projectId: runProject.id,
+            chatId,
+            turnId,
+            predecessorTranscriptFingerprint: predecessorFingerprint,
+          })
+        },
+      )
     }
 
     let queueMayAdvance = false
@@ -3732,6 +3943,7 @@ function App() {
       }
     }
   }, [appendChatExecutionEvent, commitWorkspace, completeChatRun, finishDetachedRunFailure, markDetachedRunInterrupted, refreshProviders, rememberCompletedNativeRun, updateInFlightRun])
+  recoverDetachedRunRef.current = (chatId, run) => { void recoverDetachedRun(chatId, run) }
 
   useEffect(() => {
     for (const [chatId, run] of Object.entries(inFlightRunsRef.current)) {
@@ -3741,8 +3953,13 @@ function App() {
 
   useEffect(() => {
     if (rediscoveredHostJobsRef.current || rediscoveringHostJobsRef.current) return
-    const candidates = runningHostJobCandidates(chatsRef.current)
-      .filter((candidate) => !inFlightRunsRef.current[candidate.chatId])
+    const recoveryCandidateOptions = {
+      maximumTurns: 12,
+      excludedChatIds: Object.keys(occupiedRunsRef.current),
+    }
+    const candidates = runningHostJobCandidates(chatsRef.current, recoveryCandidateOptions)
+      .filter((candidate) => !inFlightRunsRef.current[candidate.chatId]
+        && !occupiedRunsRef.current[candidate.chatId])
     if (candidates.length === 0) {
       rediscoveredHostJobsRef.current = true
       return
@@ -3785,7 +4002,8 @@ function App() {
       }
 
       for (const { candidate, job } of reconnectableByChat.values()) {
-        if (!job || inFlightRunsRef.current[candidate.chatId]) continue
+        if (!job || inFlightRunsRef.current[candidate.chatId]
+          || occupiedRunsRef.current[candidate.chatId]) continue
         const chat = chatsRef.current.find((item) => item.id === candidate.chatId)
         const project = projectsRef.current.find((item) => item.id === chat?.projectId)
         const exactExecutionTarget = job.kind === 'local'
@@ -3813,6 +4031,12 @@ function App() {
         const nextEvents = adopted.chatExecutionEvents as Record<string, ChatExecutionEvent[]>
         const nextRuns = adopted.inFlightRuns as Record<string, PersistedInFlightRun>
         const recoveredRun = adopted.inFlightRun as PersistedInFlightRun
+        if (occupiedRunsRef.current[candidate.chatId] || !commitWorkspace({
+          chats: nextChats,
+          chatErrors: nextErrors,
+          chatExecutionEvents: nextEvents,
+          inFlightRuns: nextRuns,
+        })) continue
         chatsRef.current = nextChats
         chatErrorsRef.current = nextErrors
         chatExecutionEventsRef.current = nextEvents
@@ -3821,16 +4045,10 @@ function App() {
         setChatErrors(nextErrors)
         setChatExecutionEvents(nextEvents)
         setInFlightRuns(nextRuns)
-        commitWorkspace({
-          chats: nextChats,
-          chatErrors: nextErrors,
-          chatExecutionEvents: nextEvents,
-          inFlightRuns: nextRuns,
-        })
         void recoverDetachedRun(candidate.chatId, recoveredRun)
       }
 
-      // A Host 404 proves that the exact candidate is absent. Transport/lease
+      // A Host 404 proves that the exact candidate is absent. Transport/ownership
       // failures leave discovery eligible for the next healthy Host refresh.
       if (inspected.every((item) => item.hostReached)) {
         rediscoveredHostJobsRef.current = true
@@ -4122,7 +4340,6 @@ function App() {
                 autoContextSkill={autoContextSkill}
                 fallbackProviders={fallbackProviders}
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
-                workspaceBranchTitles={workspaceBranchTitles}
                 owningConversation={owningConversation}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
                 onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
@@ -4216,7 +4433,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} autoLandAgentWork={autoLandAgentWork} setAutoLandAgentWork={setAutoLandAgentWork} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -4273,7 +4490,6 @@ function ConversationPane({
   autoContextSkill,
   fallbackProviders,
   executionEvents,
-  workspaceBranchTitles,
   owningConversation,
   executionPanelOpen,
   onAnswerQuestion,
@@ -4336,7 +4552,6 @@ function ConversationPane({
   autoContextSkill: boolean
   fallbackProviders: Provider[]
   executionEvents: ChatExecutionEvent[]
-  workspaceBranchTitles: Record<string, string>
   owningConversation: ReferencedOwningConversation | null
   executionPanelOpen: boolean
   onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
@@ -4421,10 +4636,6 @@ function ConversationPane({
   // that reconnects mid-turn still sees the question the provider is blocked on.
   const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
   const questionMessageProvider = providers.find((item) => item.id === pendingQuestion?.provider) ?? provider
-  const workspaceOverlap = useMemo(() => workspaceOverlapSummary(
-    activeWorkspaceOverlaps(executionEvents),
-    workspaceBranchTitles,
-  ), [executionEvents, workspaceBranchTitles])
   const [answeringQuestionId, setAnsweringQuestionId] = useState<string | null>(null)
   const [questionError, setQuestionError] = useState<string | null>(null)
   const submitQuestionAnswer = useCallback(async (
@@ -4771,8 +4982,6 @@ function ConversationPane({
         />
       )}
 
-      {workspaceOverlap && <WorkspaceOverlapBanner summary={workspaceOverlap} />}
-
       <div className="composer-zone" {...getSectionProps('composerStatus')}>
         <div className="composer">
           {attachments.length > 0 && (
@@ -4828,19 +5037,6 @@ function ConversationPane({
           </button>
         </div>
       )}
-    </div>
-  )
-}
-
-function WorkspaceOverlapBanner({
-  summary,
-}: {
-  summary: NonNullable<ReturnType<typeof workspaceOverlapSummary>>
-}) {
-  return (
-    <div className="workspace-overlap-banner" role="status" aria-live="polite">
-      <AlertTriangle size={16} aria-hidden="true" />
-      <span>{summary.message}</span>
     </div>
   )
 }
@@ -4907,12 +5103,6 @@ function ExecutionPanel({
 }) {
   const outputRef = useRef<HTMLPreElement>(null)
   const latestProviderNote = [...events].reverse().find((event) => event.type === 'note')
-  const latestWorkspaceState = [...events].reverse().find((event) =>
-    event.type === 'notice'
-    && ['project_write_lock_waiting', 'workspace_write_lock_waiting', 'project_workspace_ready'].includes(event.code ?? ''))
-  const waitingForWorkspace = sending
-    && latestWorkspaceState?.type === 'notice'
-    && ['project_write_lock_waiting', 'workspace_write_lock_waiting'].includes(latestWorkspaceState.code ?? '')
 
   useLayoutEffect(() => {
     if (!open || !outputRef.current) return
@@ -4932,12 +5122,10 @@ function ExecutionPanel({
         >
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <TerminalSquare size={14} />
-          <strong>{sending ? waitingForWorkspace ? 'Waiting for workspace' : 'Live CLI execution' : 'CLI execution'}</strong>
-          {sending && <span className="execution-panel__live"><i /> {waitingForWorkspace ? 'same chat already running' : 'running'}</span>}
+          <strong>{sending ? 'Live CLI execution' : 'CLI execution'}</strong>
+          {sending && <span className="execution-panel__live"><i /> running</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
-            {waitingForWorkspace
-              ? 'This older run cannot identify its owner window. Quit Ensync completely and reopen it before relying on active-run controls.'
-              : latestProviderNote?.type === 'note'
+            {latestProviderNote?.type === 'note'
               ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>
@@ -5203,7 +5391,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, autoLandAgentWork, setAutoLandAgentWork, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; autoLandAgentWork: boolean; setAutoLandAgentWork: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -5249,7 +5437,6 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <NativeUpdatePreferences />
           <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
           <section className="setting-section">
-            <div className="setting-title"><div><h3>Automatic landing</h3><p>Merge each verified successful run on this computer into the project history automatically. When the baseline moved during the run, an agent resolves the conflict inside the conversation's protected workspace before landing. Turn off to review and land agent work yourself from Git workflows.</p></div><Toggle enabled={autoLandAgentWork} onChange={() => setAutoLandAgentWork(!autoLandAgentWork)} label="Automatic landing" /></div>
           </section>
           <section className="setting-section">
             <div className="setting-title"><div><h3>Ensync Auto Context skill</h3><p>Keep one task synchronized with Auto or a provider you pin, on this computer or the selected SSH/VM worker.</p></div><Toggle enabled={autoContextSkill} onChange={() => setAutoContextSkill(!autoContextSkill)} label="Ensync Auto Context skill" /></div>

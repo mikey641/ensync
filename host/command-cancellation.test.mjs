@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { access, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 
 import { runProcess } from './command.mjs'
@@ -22,6 +25,95 @@ test('process cancellation is bounded even when the child ignores graceful termi
   assert.equal(result.timedOut, false)
   assert.ok(Date.now() - startedAt < 2_000)
   assert.notEqual(result.exitCode, 0)
+})
+
+test('isolated process-tree cancellation kills a detached tool descendant before settling', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-process-tree-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const marker = join(directory, 'descendant-survived')
+  const descendant = [
+    'const fs=require("node:fs");',
+    'process.on("SIGTERM",()=>{});',
+    `setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},"survived"),400);`,
+    'setInterval(()=>{},1000);',
+  ].join('')
+  const parent = [
+    'const {spawn}=require("node:child_process");',
+    `spawn(process.execPath,["-e",${JSON.stringify(descendant)}],{detached:true,stdio:"ignore"}).unref();`,
+    'process.stdout.write("ready");',
+    'setInterval(()=>{},1000);',
+  ].join('')
+  const controller = new AbortController()
+
+  const result = await runProcess(process.execPath, ['-e', parent], {
+    signal: controller.signal,
+    hardTimeoutMs: 5_000,
+    terminationGraceMs: 50,
+    killProcessTree: true,
+    onStdout: () => controller.abort(),
+  })
+
+  assert.equal(result.aborted, true)
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  await assert.rejects(access(marker), (error) => error?.code === 'ENOENT')
+})
+
+test('a successful isolated process is quiescent before a detached tool can mutate later', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-success-tree-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const marker = join(directory, 'late-descendant-write')
+  const descendant = [
+    'const fs=require("node:fs");',
+    `setTimeout(()=>fs.writeFileSync(${JSON.stringify(marker)},"survived"),400);`,
+    'setInterval(()=>{},1000);',
+  ].join('')
+  const parent = [
+    'const {spawn}=require("node:child_process");',
+    `spawn(process.execPath,["-e",${JSON.stringify(descendant)}],{detached:true,stdio:"ignore"}).unref();`,
+    'process.stdout.write("done");',
+    'setTimeout(()=>process.exit(0),150);',
+  ].join('')
+
+  const result = await runProcess(process.execPath, ['-e', parent], {
+    hardTimeoutMs: 5_000,
+    terminationGraceMs: 50,
+    killProcessTree: true,
+  })
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.processTreeQuiescent, true)
+  await new Promise((resolve) => setTimeout(resolve, 500))
+  await assert.rejects(access(marker), (error) => error?.code === 'ENOENT')
+})
+
+test('successful Windows resolver cleanup targets surviving children after the parent closes', async () => {
+  let snapshots = 0
+  const killed = []
+  const result = await runProcess(
+    process.execPath,
+    ['-e', 'process.stdout.write("done")'],
+    {
+      hardTimeoutMs: 5_000,
+      killProcessTree: true,
+      processTreePlatform: 'win32',
+      windowsProcessSnapshot: (rootPid) => {
+        snapshots += 1
+        return snapshots === 1
+          ? [{ pid: rootPid + 10_000, parentPid: rootPid, identity: '20260903120000.000000+000' }]
+          : []
+      },
+      processTreeTaskkill: async (pid, force) => {
+        killed.push({ pid, force })
+        return true
+      },
+    },
+  )
+
+  assert.equal(result.exitCode, 0)
+  assert.equal(result.processTreeQuiescent, true)
+  assert.equal(snapshots, 2)
+  assert.equal(killed.length, 1)
+  assert.equal(killed[0].force, true)
 })
 
 test('process inactivity watchdog refreshes on real stdout and stderr progress', async () => {

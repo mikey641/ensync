@@ -30,8 +30,14 @@ import {
   TITLEBAR_APPEARANCE_CHANNEL,
 } from './native-windows.mjs'
 import {
+  ACTIVE_RUN_CLAIM_CHANNEL,
+  ACTIVE_RUN_CLAIM_FINALIZE_CHANNEL,
+  ACTIVE_RUN_CLAIM_RELEASE_CHANNEL,
   ACTIVE_RUN_MATCH_CHANNEL,
   ACTIVE_RUNS_PUBLISH_CHANNEL,
+  createActiveRunClaimHandler,
+  createActiveRunClaimFinalizeHandler,
+  createActiveRunClaimReleaseHandler,
   createActiveRunMatchHandler,
   createActiveRunRoster,
   createNativeWorkspaceStore,
@@ -269,6 +275,23 @@ function registerNativeBridge() {
     isAuthorized: isAuthorizedNativeEvent,
     activeRuns: activeRunRoster,
   }))
+  ipcMain.handle(ACTIVE_RUN_CLAIM_CHANNEL, createActiveRunClaimHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+    activeRuns: activeRunRoster,
+    windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+  }))
+  ipcMain.handle(ACTIVE_RUN_CLAIM_FINALIZE_CHANNEL, createActiveRunClaimFinalizeHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+    activeRuns: activeRunRoster,
+    windowForWorkspace: (workspaceId) => nativeWindows.windowForWorkspace(workspaceId),
+  }))
+  ipcMain.handle(ACTIVE_RUN_CLAIM_RELEASE_CHANNEL, createActiveRunClaimReleaseHandler({
+    isAuthorized: isAuthorizedNativeEvent,
+    identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
+    activeRuns: activeRunRoster,
+  }))
   ipcMain.handle(WORKSPACE_FOCUS_CHANNEL, createWorkspaceFocusHandler({
     isAuthorized: isAuthorizedNativeEvent,
     identityForWebContents: (webContents) => nativeWindows.workspaceForWebContents(webContents),
@@ -398,6 +421,9 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(TITLEBAR_APPEARANCE_CHANNEL)
   ipcMain.removeHandler(ACTIVE_RUNS_PUBLISH_CHANNEL)
   ipcMain.removeHandler(ACTIVE_RUN_MATCH_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUN_CLAIM_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUN_CLAIM_FINALIZE_CHANNEL)
+  ipcMain.removeHandler(ACTIVE_RUN_CLAIM_RELEASE_CHANNEL)
   ipcMain.removeHandler(WORKSPACE_FOCUS_CHANNEL)
   ipcMain.removeHandler(QUEUED_MESSAGE_HANDOFF_CHANNEL)
   ipcMain.removeListener(QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL, queuedMessageHandoffs.ack)

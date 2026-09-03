@@ -1,8 +1,8 @@
+import { execFile as execFileCallback } from 'node:child_process'
 import { open, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
-import { autoLandWorkspace } from './auto-land.mjs'
+import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
+import { promisify } from 'node:util'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
-import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { CodebuddyExecError, CodebuddyExecRunner, CODEBUDDY_PERMISSION_MODE } from './codebuddy-exec.mjs'
@@ -14,18 +14,19 @@ import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionCha
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
-import {
-  withoutLeadingEnsyncMultiAgentInstructions,
-  withEnsyncMultiAgentInstructions,
-} from './multi-agent-prompt.mjs'
 
-const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid', 'cursor'])
+const execFile = promisify(execFileCallback)
+
+const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
+const CONTAINED_LANDING_RESOLVERS = new Set(['codex'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
 // whose catalog entry is still `discovery_only`. They are refused at validation
 // with their exact outstanding requirement instead of a generic message, so the
 // runner cannot be reached by Auto routing, a fixed selection, or fallback until
 // the catalog is promoted.
 const GATED_CHAT_PROVIDERS = new Map([
+  ['cursor', 'Cursor account login does not prove that paid Additional Usage is disabled. Ensync will not run Cursor until its CLI provides a machine-verifiable per-run no-overage boundary.'],
+  ['droid', 'Factory browser login and Standard quota telemetry do not prove that paid Extra Usage is disabled. Ensync will not run Droid until its CLI provides a machine-verifiable per-run no-overage boundary.'],
   // GitHub Copilot CLI 1.0.79 maps cleanly onto every Ensync requirement except
   // prompt delivery: its only non-interactive prompt input is `-p/--prompt <text>`,
   // which puts the prompt in argv, and Ensync never does that. Its
@@ -242,18 +243,9 @@ const CHAT_PROVIDER_CONTAINMENT = {
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 // A question card holds the inactivity watchdog for as long as a person needs
-// to read it, but never longer than this: an unanswered question also pins this
-// conversation's workspace lease, so every other message in the same chat waits
-// behind it. One hour is far past a real answer and far short of a lost evening.
+// to read it, but never longer than this. One hour is far past a real answer
+// and far short of a lost evening.
 const DEFAULT_QUESTION_HOLD_TIMEOUT_MS = 60 * 60 * 1_000
-// Automatic landing runs after the provider has already finished, inside the
-// same await that marks the job complete. Its own waits are unbounded by
-// design — the repository land lease polls until it is free, and a conflict
-// resolution agent runs as long as it needs — so a land that never returns
-// pins a finished run as "Working" forever and queues every later message in
-// that chat behind a turn that ended. This ceiling only ends the *landing*:
-// the run's outcome and its committed branch are already safe either way.
-const DEFAULT_AUTO_LAND_TIMEOUT_MS = 30 * 60 * 1_000
 // There is no absolute run ceiling by default; this conservative ceiling is
 // applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
 const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
@@ -316,6 +308,10 @@ function cancelledRunError() {
   )
 }
 
+function failCompletedRunWithoutDurableWork(error) {
+  if (error) throw error
+}
+
 function throwIfCancelled(signal) {
   if (signal?.aborted) throw cancelledRunError()
 }
@@ -350,20 +346,6 @@ export function workspaceBaseSummary(workspace) {
   return `Base: ${base.sha}.`
 }
 
-export function workspaceOverlapPrompt(overlaps) {
-  if (!Array.isArray(overlaps) || overlaps.length === 0) return ''
-  const paths = [...new Set(overlaps.flatMap((overlap) => Array.isArray(overlap?.paths) ? overlap.paths : []))]
-    .filter((path) => typeof path === 'string' && path.length > 0)
-    .sort((left, right) => left.localeCompare(right))
-    .slice(0, 20)
-  if (paths.length === 0) return ''
-  return `[ENSYNC HOST CROSS-CONVERSATION FILE AWARENESS]
-Another Ensync conversation is actively editing or has unlanded changes in files this branch also changes:
-${paths.map((path) => `- ${path}`).join('\n')}
-Before changing these paths, re-read their current contents and preserve compatible work. Do not access another checkout or worktree, and do not push or land; Ensync Host rechecks and lands this branch.
-`
-}
-
 function boundedBaselineConflict(workspace) {
   const conflict = workspace?.baselineConflict
   if (!conflict || !/^[0-9a-f]{40,64}$/i.test(conflict.baselineSha ?? '')) return null
@@ -394,45 +376,13 @@ Ensync aborted the failed merge and verified that this exact conversation branch
 `
 }
 
-function overlapUnavailableNotice(error) {
-  return {
-    type: 'notice',
-    code: 'workspace_overlap_unavailable',
-    message: `Ensync could not refresh cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
-    at: new Date().toISOString(),
-  }
-}
-
-async function refreshOverlapSession(session, onEvent) {
-  if (!session) return []
-  try {
-    return await session.refresh()
-  } catch (error) {
-    onEvent?.(overlapUnavailableNotice(error))
-    try {
-      return session.current()
-    } catch {
-      return []
-    }
-  }
-}
-
-async function stopOverlapSession(session, onEvent) {
-  if (!session) return
-  try {
-    await session.stop()
-  } catch (error) {
-    onEvent?.(overlapUnavailableNotice(error))
-  }
-}
-
-function isolatedPrompt(prompt, workspace, overlaps = []) {
+function isolatedPrompt(prompt, workspace) {
   if (!workspace) return prompt
   const base = workspaceBaseSummary(workspace)
   const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
     && workspace.integration.unintegratedCommits > 0
     && !boundedBaselineConflict(workspace)
-    ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
+    ? `This branch has ${workspace.integration.unintegratedCommits} saved commit(s) awaiting Ensync's automatic landing queue.\n`
     : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
@@ -440,32 +390,20 @@ Treat the current working directory as the only writable project for this task. 
 Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.
-  ${base ? `${base}\n` : ''}${deferredBaselinePrompt(workspace)}${unintegrated}${workspaceOverlapPrompt(overlaps)}
+  ${base ? `${base}\n` : ''}${deferredBaselinePrompt(workspace)}${unintegrated}
   ${prompt}`
 }
 
-function conflictResolutionPrompt({ branch, baselineSha, conflictFiles, overlaps = [] }) {
-  return `[ENSYNC HOST CONFLICT RESOLUTION]
-Ensync merged baseline commit ${baselineSha} into this conversation's protected branch ${branch} so the finished work can land, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
+function conflictResolutionPrompt({ item, conflictFiles }) {
+  return `[ENSYNC HOST AUTOMATIC LANDING CONFLICT]
+Ensync is integrating the exact saved commit ${item.savedSha} from ${item.branch} in a temporary landing worktree, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
 1. Inspect the conflicts with \`git status\` and \`git diff\`.
-2. Edit each conflicted file so the baseline changes and this branch's changes are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible; prefer the baseline's intent for changes this conversation did not make.
+2. Edit each conflicted file so the already-landed changes and this saved commit are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible.
 3. Stage each resolved file with \`git add\`.
 4. Conclude the merge with \`git commit --no-verify --no-edit\`.
 Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
 Conflicted files:
-  ${conflictFiles.map((file) => `- ${file}`).join('\n')}
-  ${workspaceOverlapPrompt(overlaps)}`
-}
-
-function landCheckRepairPrompt({ branch, baselineSha, reason, output, overlaps = [] }) {
-  return `[ENSYNC HOST LAND CHECK REPAIR]
-Ensync merged this conversation's branch ${branch} into the baseline and ran the repository's land check (npm run land:check). The check failed, so the merge was rolled back. Baseline commit ${baselineSha} is already merged into the protected worktree that is the current working directory. Your only task is to make the land check pass here:
-1. Reproduce the failure if possible (npm run land:check) or work from the failure output below.
-2. This failure usually means the merge silently dropped code one side depends on — for example a declaration or import whose usages survived. Compare this branch with the baseline (git log, git show, git diff) and restore the missing code. Do not delete working features just to silence the check.
-3. Commit the fix with git add and git commit --no-verify.
-Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
-  Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}
-  ${workspaceOverlapPrompt(overlaps)}`
+  ${conflictFiles.map((file) => `- ${file}`).join('\n')}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -633,6 +571,34 @@ function redactedRunEvent(event) {
   return { ...event, text: safe.text, redacted: safe.redacted }
 }
 
+function emitAdvisory(onEvent, event) {
+  try {
+    onEvent?.(event)
+  } catch {
+    // Renderer/status observers never own provider, snapshot, or queue truth.
+  }
+}
+
+async function commonGitDirectory(path) {
+  const result = await execFile('git', [
+    'rev-parse', '--path-format=absolute', '--git-common-dir',
+  ], {
+    cwd: path,
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024,
+    shell: false,
+    timeout: 30_000,
+    windowsHide: true,
+  })
+  return realpath(resolve(path, result.stdout.trim()))
+}
+
+function samePath(left, right) {
+  return process.platform === 'win32'
+    ? left.toLowerCase() === right.toLowerCase()
+    : left === right
+}
+
 function outputForwarder(onEvent, provider, { onStdoutLine, onQuestionMessage } = {}) {
   if (typeof onEvent !== 'function' && typeof onStdoutLine !== 'function') {
     return { stdout() {}, stderr() {}, flush() {} }
@@ -646,7 +612,7 @@ function outputForwarder(onEvent, provider, { onStdoutLine, onQuestionMessage } 
     if (stream === 'stdout') onStdoutLine?.(text)
     if (typeof onEvent !== 'function') return
     const safe = redactTerminalText(text)
-    onEvent({
+    emitAdvisory(onEvent, {
       type: 'output',
       stream,
       text: safe.text,
@@ -664,7 +630,7 @@ function outputForwarder(onEvent, provider, { onStdoutLine, onQuestionMessage } 
     const note = noteFromEvent(structured)
     if (!note) return
     const safeNote = redactTerminalText(note)
-    onEvent({
+    emitAdvisory(onEvent, {
       type: 'note',
       provider,
       text: safeNote.text,
@@ -848,9 +814,6 @@ function validateRequest(request) {
       `The timeout must be between 1,000 and ${MAX_TIMEOUT_MS.toLocaleString()} milliseconds.`,
     )
   }
-  if (request.autoLand != null && typeof request.autoLand !== 'boolean') {
-    throw new ChatRunError('invalid_auto_land', 'The automatic landing preference must be true or false.')
-  }
 }
 
 function subscriptionAuthenticationAllowed(provider) {
@@ -859,15 +822,6 @@ function subscriptionAuthenticationAllowed(provider) {
   if (provider.id === 'claude') {
     return ['claude.ai', 'oauth', 'subscription'].some((signal) => method.includes(signal))
   }
-  // Factory Droid's browser login is the only subscription-eligible credential:
-  // `subscriptionEnvironment` already removes `FACTORY_API_KEY`, and the runner
-  // maps a `model_authentication_failed` turn back to `provider_not_authenticated`.
-  // The probe reports the stored login as 'Factory browser login'.
-  if (provider.id === 'droid') return method.includes('browser login')
-  // Cursor's stored browser login is the only subscription-eligible credential:
-  // `subscriptionEnvironment` already removes `CURSOR_API_KEY`, and the probe
-  // reports the stored login as 'Cursor login'.
-  if (provider.id === 'cursor') return method.includes('cursor login')
   return false
 }
 
@@ -1233,13 +1187,7 @@ export class ChatRunService {
   /** Live Claude interactive channels, keyed by the retained job that owns them. */
   #claudeQuestionChannels = new Map()
   #projectIsolation
-  #workspaceOverlapMonitor
-  #autoLand
-  #autoPushLanded
-  #autoLandWorkspace
-  #autoLandTimeoutMs
-  #gitExecutable
-  #landCheck
+  #landingCoordinator
   #activeRuns = 0
 
   constructor(options = {}) {
@@ -1253,13 +1201,7 @@ export class ChatRunService {
     this.#hardTimeoutMs = options.hardTimeoutMs
       ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
-    this.#workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? null
-    this.#autoLand = options.autoLand !== false
-    this.#autoPushLanded = options.autoPushLanded !== false
-    this.#autoLandWorkspace = options.autoLandWorkspace ?? autoLandWorkspace
-    this.#autoLandTimeoutMs = options.autoLandTimeoutMs ?? DEFAULT_AUTO_LAND_TIMEOUT_MS
-    this.#gitExecutable = options.gitExecutable
-    this.#landCheck = options.landCheck ?? runLandCheck
+    this.#landingCoordinator = options.landingCoordinator ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -1320,20 +1262,12 @@ export class ChatRunService {
     let workspaceLease = options.preAcquiredWorkspaceLease ?? null
     const ownsWorkspaceLease = workspaceLease === null
     let workspace = null
-    let workspaceOverlapSession = null
-    let workspaceOverlaps = []
     let combinedSignal = { signal: options.signal, dispose() {} }
     if (workspaceLease || this.#projectIsolation) {
       try {
         if (!workspaceLease) {
           workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
             signal: options.signal,
-            onWait: () => options.onEvent?.({
-              type: 'notice',
-              code: 'workspace_write_lock_waiting',
-              message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
-              at: new Date().toISOString(),
-            }),
           })
         }
         workspace = workspaceLease.workspace
@@ -1343,7 +1277,7 @@ export class ChatRunService {
         const deferredBaselineSummary = baselineConflict
           ? ` Baseline reconciliation is deferred until landing; Ensync restored this exact conversation branch to a clean state so work can continue now.`
           : ''
-        options.onEvent?.({
+        emitAdvisory(options.onEvent, {
           type: 'notice',
           code: 'project_workspace_ready',
           message: `Protected workspace ready on ${workspace.branch} at ${workspace.projectPath}. The shared checkout will not be used as the provider working directory.${baseSummary ? ` ${baseSummary}` : ''}${deferredBaselineSummary}`,
@@ -1367,36 +1301,9 @@ export class ChatRunService {
       }
     }
     const executionProjectPath = workspace?.projectPath ?? projectPath
-    if (workspace && this.#workspaceOverlapMonitor) {
-      try {
-        workspaceOverlapSession = await this.#workspaceOverlapMonitor.start(workspace, {
-          jobId: typeof options.liveTurnId === 'string' && options.liveTurnId
-            ? options.liveTurnId
-            : workspace.branch,
-          signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(event),
-        })
-        workspaceOverlaps = workspaceOverlapSession.current()
-      } catch (error) {
-        options.onEvent?.({
-          type: 'notice',
-          code: 'workspace_overlap_unavailable',
-          message: `Ensync could not start cross-conversation file awareness: ${error instanceof Error ? error.message : 'unknown error'}. Protected workspace isolation remains active.`,
-          at: new Date().toISOString(),
-        })
-      }
-    }
-    // Every provider runner — codex exec, the codex live turn, claude resume,
-    // and droid — receives the same bundled Ensync agent-coordination contract
-    // ahead of the user's prompt (and ahead of any workspace isolation header).
-    // Remove a renderer-supplied complete envelope before adding isolation, then
-    // always apply the current contract so marker-shaped user text cannot bypass it.
-    const promptBody = withoutLeadingEnsyncMultiAgentInstructions(request.prompt)
     const executionRequest = {
       ...request,
-      prompt: withEnsyncMultiAgentInstructions(
-        workspace ? isolatedPrompt(promptBody, workspace, workspaceOverlaps) : promptBody,
-      ),
+      prompt: workspace ? isolatedPrompt(request.prompt, workspace) : request.prompt,
     }
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
@@ -1437,7 +1344,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+          onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1447,7 +1354,7 @@ export class ChatRunService {
           const reason = workspaceLease.signal.reason
           throw new ChatRunError(
             'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            reason instanceof Error ? reason.message : 'Ensync Host lost process-local ownership of the protected workspace. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -1483,7 +1390,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+          onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1493,7 +1400,7 @@ export class ChatRunService {
           const reason = workspaceLease.signal.reason
           throw new ChatRunError(
             'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            reason instanceof Error ? reason.message : 'Ensync Host lost process-local ownership of the protected workspace. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -1527,7 +1434,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+          onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1537,7 +1444,7 @@ export class ChatRunService {
           const reason = workspaceLease.signal.reason
           throw new ChatRunError(
             'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            reason instanceof Error ? reason.message : 'Ensync Host lost process-local ownership of the protected workspace. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -1575,7 +1482,7 @@ export class ChatRunService {
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: combinedSignal.signal,
-          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+          onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
         })
         workspaceLease?.assertHeld()
         runOutcome = 'succeeded'
@@ -1585,7 +1492,7 @@ export class ChatRunService {
           const reason = workspaceLease.signal.reason
           throw new ChatRunError(
             'workspace_write_lock_lost',
-            reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+            reason instanceof Error ? reason.message : 'Ensync Host lost process-local ownership of the protected workspace. Partial work may exist in the protected worktree.',
             409,
             false,
           )
@@ -1618,7 +1525,7 @@ export class ChatRunService {
           endInput: () => session?.endInput(),
           hold: () => session?.holdInactivity(),
           release: () => session?.releaseInactivity(),
-          onEvent: (event) => options.onEvent?.(redactedRunEvent(event)),
+          onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
         })
       : null
     const args = argumentsFor(executionRequest, attachmentPaths, containment, { questions: questionsEnabled })
@@ -1632,7 +1539,7 @@ export class ChatRunService {
     this.#activeRuns += 1
     let processResult
     try {
-      options.onEvent?.({
+      emitAdvisory(options.onEvent, {
         type: 'started',
         provider: request.provider,
         cwd: executionProjectPath,
@@ -1674,7 +1581,7 @@ export class ChatRunService {
       const reason = workspaceLease.signal.reason
       throw new ChatRunError(
         'workspace_write_lock_lost',
-        reason instanceof Error ? reason.message : 'Ensync Host lost the protected workspace write lease. Partial work may exist in the protected worktree.',
+        reason instanceof Error ? reason.message : 'Ensync Host lost process-local ownership of the protected workspace. Partial work may exist in the protected worktree.',
         409,
         false,
       )
@@ -1758,16 +1665,19 @@ export class ChatRunService {
       throw error
     } finally {
       combinedSignal.dispose()
+      let completionPersistenceError = null
       if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
         let agentWorkSaved = true
+        let savedHead = null
         try {
           const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
             outcome: runOutcome,
             provider: request.provider,
             jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
           })
+          savedHead = typeof workCommit.head === 'string' ? workCommit.head : null
           if (workCommit.committed) {
-            options.onEvent?.({
+            emitAdvisory(options.onEvent, {
               type: 'notice',
               code: 'agent_work_committed',
               message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
@@ -1776,10 +1686,18 @@ export class ChatRunService {
           }
         } catch (commitError) {
           agentWorkSaved = false
-          options.onEvent?.({
+          if (runOutcome === 'succeeded') {
+            completionPersistenceError = new ChatRunError(
+              'agent_work_save_failed',
+              `Ensync could not save this completed run to ${workspace.branch}. Its changes remain in the protected worktree and automatic landing did not start.`,
+              500,
+              false,
+            )
+          }
+          emitAdvisory(options.onEvent, {
             type: 'notice',
             code: 'agent_work_commit_failed',
-            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and automatic landing did not start.`,
             at: new Date().toISOString(),
           })
         }
@@ -1791,7 +1709,7 @@ export class ChatRunService {
               : sharedCheck.landed
                 ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
                 : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
-            options.onEvent?.({
+            emitAdvisory(options.onEvent, {
               type: 'notice',
               code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
               message,
@@ -1799,136 +1717,216 @@ export class ChatRunService {
             })
           }
         } catch {
-          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
+          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip ownership release.
         }
-        await refreshOverlapSession(workspaceOverlapSession, options.onEvent)
-        if (runOutcome === 'succeeded' && this.#autoLand && request.autoLand !== false && agentWorkSaved && !options.signal?.aborted) {
-          await this.#autoLandAfterRun(
-            provider,
-            request,
-            workspace,
-            containment,
-            workspaceLease,
-            workspaceOverlapSession,
-            options,
-          )
+        if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved) {
+          let landingError = null
+          if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(savedHead ?? '')) {
+            landingError = new Error('the protected branch did not return an exact saved commit')
+          } else if (
+            typeof workspace.base?.branch !== 'string'
+            || !workspace.base.branch
+            || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(workspace.base?.canonicalSha ?? '')
+          ) {
+            landingError = new Error('the protected workspace did not retain its target branch and base commit')
+          } else {
+            try {
+              const landing = await this.#landingCoordinator.enqueue({
+                repositoryPath: workspace.shared.repositoryPath,
+                commonGitDirectory: workspace.commonGitDirectory,
+                projectPath: workspace.canonicalProjectPath,
+                workspacePath: workspace.repositoryPath,
+                branch: workspace.branch,
+                savedSha: savedHead,
+                targetBranch: workspace.base.branch,
+                targetBaseSha: workspace.base.canonicalSha,
+                provider: request.provider,
+              })
+              emitAdvisory(options.onEvent, {
+                type: 'notice',
+                code: 'automatic_landing_queued',
+                message: `Queued ${workspace.branch} at ${savedHead.slice(0, 12)} for immediate automatic landing (FIFO ${landing.completionSequence ?? 'pending'}).`,
+                at: new Date().toISOString(),
+              })
+            } catch (error) {
+              landingError = error
+            }
+          }
+          if (landingError) {
+            completionPersistenceError = new ChatRunError(
+              'automatic_landing_queue_failed',
+              `Ensync saved ${workspace.branch}, but could not durably queue its exact commit for automatic landing. The saved commit remains recoverable.`,
+              503,
+              false,
+            )
+            emitAdvisory(options.onEvent, {
+              type: 'notice',
+              code: 'automatic_landing_queue_failed',
+              message: `Ensync saved ${workspace.branch}, but could not queue automatic landing: ${landingError instanceof Error ? landingError.message : 'unknown error'}. The saved commit remains recoverable.`,
+              at: new Date().toISOString(),
+            })
+          }
         }
       }
-      await stopOverlapSession(workspaceOverlapSession, options.onEvent)
       const leaseRelease = ownsWorkspaceLease ? await workspaceLease?.release() : null
-      // A lease that could not be deleted is the one failure nobody sees from
-      // the outside: this run ends normally while the next message in the same
-      // conversation waits on a lock with nothing behind it.
+      // This is only process-local ownership; no filesystem lock or waiter
+      // exists. A failed release is an invariant error and must be visible.
       if (leaseRelease && leaseRelease.removed === false) {
-        options.onEvent?.({
+        emitAdvisory(options.onEvent, {
           type: 'notice',
-          code: 'workspace_lease_release_failed',
-          message: `${leaseRelease.reason} Ensync Host reclaims it automatically once it goes stale, so the next message in this conversation may wait briefly before it starts.`,
+          code: 'workspace_ownership_release_failed',
+          message: `${leaseRelease.reason} No filesystem lock was created; a duplicate same-conversation start will be rejected until this Host exits.`,
           at: new Date().toISOString(),
         })
       }
+      // This error exists only after provider success, so it cannot mask an
+      // earlier provider failure while the finally block releases ownership.
+      failCompletedRunWithoutDurableWork(completionPersistenceError)
     }
   }
 
   /**
-   * Automatic landing runs only for verified successful local runs whose work
-   * committed cleanly; failed, cancelled, timed-out, and SSH runs keep their
-   * branches unlanded for explicit review. Any failure here is reported as a
-   * notice and never changes the finished run's outcome.
+   * Resolve a genuine background-train conflict with an OS-contained,
+   * subscription-authenticated provider. Prefer the originating provider when
+   * it has that boundary; otherwise use the first connected contained runner.
+   * This run belongs to the landing coordinator, never to the completed chat.
    */
-  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, overlapSession, options) {
-    const landTimeout = new AbortController()
-    let landTimedOut = false
-    const landTimer = this.#autoLandTimeoutMs > 0
-      ? setTimeout(() => {
-        landTimedOut = true
-        options.onEvent?.({
-          type: 'notice',
-          code: 'auto_land_timed_out',
-          message: `Automatic landing of ${workspace.branch} did not finish within ${Math.round(this.#autoLandTimeoutMs / 60_000)} minutes and was stopped. The work stays on ${workspace.branch} for explicit review and landing.`,
-          at: new Date().toISOString(),
-        })
-        landTimeout.abort(new Error('Automatic landing exceeded its time limit.'))
-      }, this.#autoLandTimeoutMs)
-      : null
-    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal, landTimeout.signal)
+  async resolveLandingConflict(details, runtime = {}) {
+    const originatingProviderId = details?.item?.provider
+    if (
+      !isAbsolute(details?.worktreePath ?? '')
+      || !isAbsolute(details?.projectPath ?? '')
+      || !isAbsolute(details?.item?.repositoryPath ?? '')
+    ) {
+      throw new ChatRunError('invalid_project', 'The automatic landing conflict escaped its temporary worktree.', 409)
+    }
+    let worktreePath
+    let projectPath
+    let repositoryPath
+    let verifiedCommonGitDirectory
     try {
-      await this.#autoLandWorkspace(workspace, {
-        allowedRoots: this.#allowedRoots,
-        gitExecutable: this.#gitExecutable,
-        signal: landSignal.signal,
-        onNotice: (code, message) => options.onEvent?.({
-          type: 'notice',
-          code,
-          message,
-          at: new Date().toISOString(),
-        }),
-        runConflictAgent: async (details) => {
-          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
-          return this.#runConflictResolutionAgent(provider, request, workspace, containment, {
-            ...details,
-            overlaps,
-          }, {
-            onEvent: options.onEvent,
-            signal: landSignal.signal,
-          })
-        },
-        verifyLand: (details) => this.#landCheck(details.repositoryPath, {
-          environment: this.#environment,
-          signal: landSignal.signal,
-        }),
-        runRepairAgent: async (details) => {
-          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
-          return this.#runLandCheckRepairAgent(provider, request, workspace, containment, {
-            ...details,
-            overlaps,
-          }, {
-            onEvent: options.onEvent,
-            signal: landSignal.signal,
-          })
-        },
-        autoPush: this.#autoPushLanded,
-      })
-    } catch (error) {
-      // A timed-out land already reported itself; the abort it raises here is
-      // that same stop, not a second, different failure.
-      if (!landTimedOut) {
-        options.onEvent?.({
-          type: 'notice',
-          code: 'auto_land_failed',
-          message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
-          at: new Date().toISOString(),
-        })
+      [worktreePath, projectPath, repositoryPath] = await Promise.all([
+        realpath(details.worktreePath),
+        realpath(details.projectPath),
+        realpath(details.item.repositoryPath),
+      ])
+      const [worktreeInfo, projectInfo, repositoryInfo] = await Promise.all([
+        stat(worktreePath),
+        stat(projectPath),
+        stat(repositoryPath),
+      ])
+      if (!worktreeInfo.isDirectory() || !projectInfo.isDirectory() || !repositoryInfo.isDirectory()) {
+        throw new Error('landing paths must be directories')
       }
-    } finally {
-      if (landTimer) clearTimeout(landTimer)
-      landSignal.dispose()
+      const [worktreeCommon, projectCommon, repositoryCommon] = await Promise.all([
+        commonGitDirectory(worktreePath),
+        commonGitDirectory(projectPath),
+        commonGitDirectory(repositoryPath),
+      ])
+      verifiedCommonGitDirectory = worktreeCommon
+      if (
+        !samePath(worktreeCommon, projectCommon)
+        || !samePath(worktreeCommon, repositoryCommon)
+      ) throw new Error('worktrees belong to different repositories')
+      if (details.commonGitDirectory) {
+        const expectedCommon = await realpath(details.commonGitDirectory)
+        if (!samePath(worktreeCommon, expectedCommon)) throw new Error('the common Git directory changed')
+      }
+    } catch {
+      throw new ChatRunError('invalid_project', 'Ensync could not verify the automatic landing conflict inside the intended repository worktree.', 409)
     }
-  }
-
-  /**
-   * Runs the same provider CLI as a fresh, sessionless turn inside the
-   * protected worktree to resolve an in-progress baseline merge. The run is
-   * verified the same way a normal run is: process exit, cancellation,
-   * timeout, and a parseable completed provider result.
-   */
-  async #runConflictResolutionAgent(provider, request, workspace, containment, details, runtime) {
-    await this.#runWorktreeAgentRun(provider, request, workspace, containment, conflictResolutionPrompt(details), {
-      code: 'conflict_resolution_failed',
-      label: 'conflict-resolution',
-    }, runtime)
-  }
-
-  /** Same contained provider run, prompted to repair a rolled-back land check. */
-  async #runLandCheckRepairAgent(provider, request, workspace, containment, details, runtime) {
-    await this.#runWorktreeAgentRun(provider, request, workspace, containment, landCheckRepairPrompt(details), {
-      code: 'land_check_repair_failed',
-      label: 'land-check repair',
-    }, runtime)
+    const projectRelativePath = relative(worktreePath, projectPath)
+    if (
+      projectRelativePath === '..'
+      || projectRelativePath.startsWith(`..${sep}`)
+      || isAbsolute(projectRelativePath)
+    ) {
+      throw new ChatRunError('invalid_project', 'The automatic landing conflict escaped its temporary worktree.', 409)
+    }
+    const safeDetails = {
+      ...details,
+      worktreePath,
+      projectPath,
+      commonGitDirectory: verifiedCommonGitDirectory,
+      item: { ...details.item, repositoryPath },
+    }
+    const providerCandidates = [
+      ...(CONTAINED_LANDING_RESOLVERS.has(originatingProviderId) ? [originatingProviderId] : []),
+      ...[...CONTAINED_LANDING_RESOLVERS].filter((candidate) => candidate !== originatingProviderId),
+    ]
+    let provider = null
+    for (const candidate of providerCandidates) {
+      try {
+        const status = await this.#statusService.get(candidate, { refresh: true })
+        if (
+          status?.id === candidate
+          && status.installed
+          && status.executable
+          && status.authentication?.state === 'authenticated'
+          && subscriptionAuthenticationAllowed(status)
+        ) {
+          provider = status
+          break
+        }
+      } catch {
+        // Continue to the next OS-contained subscription runner.
+      }
+    }
+    if (!provider) {
+      throw new ChatRunError(
+        'conflict_resolution_provider_unavailable',
+        `Automatic landing needs a connected Codex subscription to resolve this ${providerLabel(originatingProviderId)} conflict inside the temporary worktree. The saved snapshot will retry automatically.`,
+        409,
+        true,
+      )
+    }
+    const providerId = provider.id
+    const request = { provider: providerId, model: null, effort: null }
+    const workspace = { repositoryPath: projectPath }
+    const containment = {
+      worktreePath,
+      canonicalRepositoryPath: repositoryPath,
+    }
+    if (providerId === 'cursor') {
+      const runner = this.#cursorAgentRuns
+      this.#activeRuns += 1
+      try {
+        await runner.run({
+          executable: provider.executable,
+          projectPath: workspace.repositoryPath,
+          prompt: conflictResolutionPrompt(safeDetails),
+          sessionId: null,
+          model: null,
+          effort: null,
+          env: subscriptionEnvironment(this.#environment),
+        }, {
+          signal: details.signal ?? runtime.signal,
+          onEvent: (event) => emitAdvisory(runtime.onEvent, redactedRunEvent(event)),
+        })
+        return
+      } catch (error) {
+        if (error instanceof DroidExecError || error instanceof CursorAgentError) {
+          throw new ChatRunError(error.code, error.message, error.status, error.safeToRetry)
+        }
+        throw error
+      } finally {
+        this.#activeRuns -= 1
+        this.#statusService.invalidate?.()
+      }
+    }
+    await this.#runWorktreeAgentRun(
+      provider,
+      request,
+      workspace,
+      containment,
+      conflictResolutionPrompt(safeDetails),
+      { code: 'conflict_resolution_failed', label: 'conflict-resolution' },
+      { onEvent: runtime.onEvent, signal: details.signal ?? runtime.signal },
+    )
   }
 
   async #runWorktreeAgentRun(provider, request, workspace, containment, rawPrompt, failure, runtime) {
-    const prompt = withEnsyncMultiAgentInstructions(rawPrompt)
+    const prompt = rawPrompt
     const subRequest = {
       provider: request.provider,
       prompt,
@@ -1952,6 +1950,7 @@ export class ChatRunService {
         onStdout: forwarder.stdout,
         onStderr: forwarder.stderr,
         signal: runtime.signal,
+        killProcessTree: true,
       })
     } finally {
       this.#activeRuns -= 1
@@ -1963,6 +1962,13 @@ export class ChatRunService {
     }
     if (processResult.timedOut) {
       throw new ChatRunError('run_timed_out', timeoutMessage(provider.name, processResult.timeoutReason), 504)
+    }
+    if (processResult.processTreeQuiescent === false) {
+      throw new ChatRunError(
+        failure.code,
+        `The ${failure.label} agent left an unconfirmed background process, so Ensync refused to publish its worktree.`,
+        502,
+      )
     }
     if (processResult.error || processResult.exitCode !== 0) {
       const output = processResult.stderr || processResult.stdout
