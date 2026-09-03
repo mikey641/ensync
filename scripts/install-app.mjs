@@ -30,6 +30,7 @@ import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { promisify } from 'node:util'
+import { stageAgentWorktree } from './stage-agent-worktree.mjs'
 
 const execFile = promisify(execFileCallback)
 const APP_PATH = process.env.ENSYNC_APP_PATH ?? '/Applications/Ensync.app'
@@ -119,16 +120,23 @@ export async function installApp({ repoRoot, appPath = APP_PATH, log = console.l
   log('[install] Building renderer...')
   await run('npm', ['run', 'build'], { cwd: repoRoot })
 
+  const stagedTools = join(repoRoot, 'desktop', 'build', 'tools')
+  await rm(stagedTools, { recursive: true, force: true })
+  await stageAgentWorktree({ repoRoot, toolsDirectory: stagedTools })
+
   const resources = join(appPath, 'Contents', 'Resources')
   const backup = await mkdtemp(join(tmpdir(), 'ensync-app-backup-'))
   await cp(join(resources, 'ui'), join(backup, 'ui'), { recursive: true })
   await cp(join(resources, 'host'), join(backup, 'host'), { recursive: true })
   await cp(join(resources, 'app.asar'), join(backup, 'app.asar'))
+  const toolsExisted = await exists(join(resources, 'tools'))
+  if (toolsExisted) await cp(join(resources, 'tools'), join(backup, 'tools'), { recursive: true })
   log(`[install] Previous bundle backed up to ${backup}`)
 
   try {
     await run('rsync', ['-a', '--delete', `${join(repoRoot, 'dist')}/`, `${join(resources, 'ui')}/`])
     await run('rsync', ['-a', '--delete', '--exclude=*.test.mjs', `${join(repoRoot, 'host')}/`, `${join(resources, 'host')}/`])
+    await run('rsync', ['-a', '--delete', `${stagedTools}/`, `${join(resources, 'tools')}/`])
     // electron-builder maps desktop/src/host-bootstrap.mjs to this top-level
     // copy; syncing only host/ leaves the daemon entry point behind.
     await run('cp', [join(repoRoot, 'desktop', 'src', 'host-bootstrap.mjs'), join(resources, 'desktop-host-bootstrap.mjs')])
@@ -139,6 +147,11 @@ export async function installApp({ repoRoot, appPath = APP_PATH, log = console.l
     log(`[install] FAILED (${error.message}); restoring the previous bundle.`)
     await run('rsync', ['-a', '--delete', `${join(backup, 'ui')}/`, `${join(resources, 'ui')}/`])
     await run('rsync', ['-a', '--delete', `${join(backup, 'host')}/`, `${join(resources, 'host')}/`])
+    if (toolsExisted) {
+      await run('rsync', ['-a', '--delete', `${join(backup, 'tools')}/`, `${join(resources, 'tools')}/`])
+    } else {
+      await rm(join(resources, 'tools'), { recursive: true, force: true }).catch(() => {})
+    }
     await cp(join(backup, 'app.asar'), join(resources, 'app.asar')).catch(() => {})
     await run('codesign', ['--force', '--deep', '--sign', '-', appPath]).catch(() => {})
     return { installed: false, reason: 'install_failed', backup }

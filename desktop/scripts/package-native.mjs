@@ -1,10 +1,11 @@
 import { spawn } from 'node:child_process'
-import { readFile, unlink } from 'node:fs/promises'
+import { readFile, rm, unlink } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { resolveWindowsSigning } from './release-prerequisites.mjs'
 import { resolveWindowsStorePackageConfig } from './windows-store.mjs'
 import { writeBuildInfo } from './write-build-info.mjs'
+import { stageAgentWorktree } from '../../scripts/stage-agent-worktree.mjs'
 
 const platformIndex = process.argv.indexOf('--platform')
 const platform = platformIndex >= 0 ? process.argv[platformIndex + 1] : null
@@ -52,6 +53,12 @@ if (windowsStore) env.ENSYNC_WINDOWS_STORE_PACKAGE_VERSION = windowsStore.packag
 
 const buildInfo = await writeBuildInfo()
 console.log(`Packaging build ${buildInfo.buildId} from ${buildInfo.sourceCommit} (${buildInfo.sourceDirty ? 'dirty' : 'clean'} ${buildInfo.channel}).`)
+const toolsDirectory = join(desktopRoot, 'build', 'tools')
+await rm(toolsDirectory, { recursive: true, force: true })
+await stageAgentWorktree({
+  repoRoot: resolve(desktopRoot, '..'),
+  toolsDirectory,
+})
 await unlink(join(desktopRoot, 'release', `attestation-${platform}.json`)).catch((error) => {
   if (error?.code !== 'ENOENT') throw error
 })
