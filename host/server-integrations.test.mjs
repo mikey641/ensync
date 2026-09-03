@@ -462,7 +462,15 @@ test('git unlanded and land routes delegate to the git workflow service', async 
     },
     land: async (input) => {
       calls.push(['land', input])
-      return { land: { branch: input.branch, mergedInto: 'main', mergeHead: 'def', completedAt: 'now' }, git: {} }
+      return {
+        land: {
+          disposition: 'queued',
+          branch: input.branch,
+          savedSha: 'd'.repeat(40),
+          completionSequence: 3,
+          queuedAt: 'now',
+        },
+      }
     },
   }
   const baseUrl = await withHost(context, { gitService: fakeGit })
@@ -483,7 +491,8 @@ test('git unlanded and land routes delegate to the git workflow service', async 
   })
   assert.equal(landResponse.status, 200)
   const landBody = await landResponse.json()
-  assert.equal(landBody.land.mergedInto, 'main')
+  assert.equal(landBody.land.disposition, 'queued')
+  assert.equal(landBody.land.completionSequence, 3)
 
   assert.deepEqual(calls.map(([name]) => name), ['unlanded', 'land'])
 })

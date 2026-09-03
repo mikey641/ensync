@@ -18,7 +18,6 @@ import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
-import { runLandCheck } from './land-check.mjs'
 import { LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
@@ -344,7 +343,7 @@ export function createEnsyncHost(options = {}) {
   })
   const git = options.gitService ?? new GitWorkflowService({
     allowedRoots: options.allowedProjectRoots,
-    verifyLand: (details) => runLandCheck(details.repositoryPath),
+    landingCoordinator,
   })
   const remoteSsh = options.remoteSshService ?? new RemoteSshService()
   const admitSshChat = createSshChatAdmissions()
@@ -1132,14 +1131,6 @@ export function startEnsyncHost(options = {}) {
     console.log(`Ensync Host listening on http://${host}:${resolvedPort}`)
     server.ensyncServices?.landingCoordinator?.start?.().catch((error) => {
       console.error('Ensync automatic-landing recovery failed:', error instanceof Error ? error.message : error)
-    })
-    const isolation = server.ensyncServices?.projectIsolation
-    isolation?.recoverStrandedWorktrees?.().then((summary) => {
-      if (summary.recovered.length > 0) {
-        console.log(`Ensync recovered uncommitted agent work in ${summary.recovered.length} worktree(s).`)
-      }
-    }).catch((error) => {
-      console.error('Ensync stranded-work recovery failed:', error instanceof Error ? error.message : error)
     })
   })
   return server
