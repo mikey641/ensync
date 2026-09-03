@@ -17,8 +17,8 @@ import { decodeJsonEventStream } from './json-event-repair.mjs'
 
 const execFile = promisify(execFileCallback)
 
-const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude'])
-const CONTAINED_LANDING_RESOLVERS = new Set(['codex'])
+const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
+const CONTAINED_LANDING_RESOLVERS = new Set(['codex', 'claude', 'droid'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
 // whose catalog entry is still `discovery_only`. They are refused at validation
 // with their exact outstanding requirement instead of a generic message, so the
@@ -26,7 +26,6 @@ const CONTAINED_LANDING_RESOLVERS = new Set(['codex'])
 // the catalog is promoted.
 const GATED_CHAT_PROVIDERS = new Map([
   ['cursor', 'Cursor account login does not prove that paid Additional Usage is disabled. Ensync will not run Cursor until its CLI provides a machine-verifiable per-run no-overage boundary.'],
-  ['droid', 'Factory browser login and Standard quota telemetry do not prove that paid Extra Usage is disabled. Ensync will not run Droid until its CLI provides a machine-verifiable per-run no-overage boundary.'],
   // GitHub Copilot CLI 1.0.79 maps cleanly onto every Ensync requirement except
   // prompt delivery: its only non-interactive prompt input is `-p/--prompt <text>`,
   // which puts the prompt in argv, and Ensync never does that. Its
@@ -1877,7 +1876,7 @@ export class ChatRunService {
     if (!provider) {
       throw new ChatRunError(
         'conflict_resolution_provider_unavailable',
-        `Automatic landing needs a connected Codex subscription to resolve this ${providerLabel(originatingProviderId)} conflict inside the temporary worktree. The saved snapshot will retry automatically.`,
+        `Automatic landing needs a connected subscription runner to resolve this ${providerLabel(originatingProviderId)} conflict inside the temporary worktree. The saved snapshot will retry automatically.`,
         409,
         true,
       )
@@ -1889,8 +1888,8 @@ export class ChatRunService {
       worktreePath,
       canonicalRepositoryPath: repositoryPath,
     }
-    if (providerId === 'cursor') {
-      const runner = this.#cursorAgentRuns
+    if (providerId === 'droid' || providerId === 'cursor') {
+      const runner = providerId === 'droid' ? this.#droidExecRuns : this.#cursorAgentRuns
       this.#activeRuns += 1
       try {
         await runner.run({

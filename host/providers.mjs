@@ -341,10 +341,10 @@ const providerCatalog = {
   },
   droid: {
     routeKind: 'subscription',
-    chatExecution: 'discovery_only',
+    chatExecution: 'supported',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'The structured runner and Standard quota probe are implemented, but Factory browser login does not prove paid Extra Usage is disabled. Execution remains off until the CLI exposes a machine-verifiable per-run no-overage boundary.',
+    catalogReason: 'Ensync Host has a tested structured Factory Droid runner with Standard quota telemetry.',
   },
   auggie: {
     routeKind: 'subscription',

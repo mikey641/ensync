@@ -1,5 +1,5 @@
 const providerRunners = Object.freeze({
-  local: Object.freeze(['codex', 'claude']),
+  local: Object.freeze(['codex', 'claude', 'droid']),
   ssh: Object.freeze(['codex', 'claude']),
 })
 

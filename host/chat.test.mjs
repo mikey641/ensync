@@ -1162,7 +1162,7 @@ test('codebuddy and ollama are refused with their own exact outstanding requirem
   assert.equal(processCalls, 0)
 })
 
-for (const providerId of ['droid', 'cursor']) {
+for (const providerId of ['cursor']) {
 test(`${providerId} stays discovery-only until paid overage can be disabled per run`, async (context) => {
   const projectPath = await projectFixture(context)
   let runnerCalls = 0
@@ -1965,7 +1965,7 @@ test('a Claude conflict falls back to an authenticated contained Codex resolver'
   assert.equal(runs, 1)
 })
 
-for (const providerId of ['claude', 'droid', 'cursor']) {
+for (const providerId of ['cursor']) {
   test(`background conflict resolution retries ${providerId} work when no contained resolver is connected`, async (context) => {
     const worktreePath = await gitProjectFixture(context)
     let runs = 0
