@@ -313,10 +313,10 @@ const providerCatalog = {
   },
   cursor: {
     routeKind: 'subscription',
-    chatExecution: 'supported',
+    chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.cursor.com/en/cli/installation',
-    catalogReason: 'Chat runs headless through `--print --output-format stream-json` with the prompt on stdin and the stored Cursor login, and a turn counts as finished only when the CLI emits its terminal success result. Containment is the pinned `--sandbox enabled` OS sandbox, which a headless run refuses to start without. Verified against cursor-agent 2026.08.04 from its own bundled sources; no live end-to-end run was observed, because this machine reports the CLI as signed out.',
+    catalogReason: 'The structured runner and OS sandbox are implemented, but Cursor login does not prove paid Additional Usage is disabled. Execution remains off until the CLI exposes a machine-verifiable per-run no-overage boundary.',
   },
   kiro: {
     routeKind: 'subscription',
@@ -341,10 +341,10 @@ const providerCatalog = {
   },
   droid: {
     routeKind: 'subscription',
-    chatExecution: 'supported',
+    chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
-    catalogReason: 'Chat runs through the droid exec stream-jsonrpc session runner with the stored browser login. Usage comes from the TUI /limits panel, driven in a disposable PTY and strictly parsed (verified against droid 0.191.1); an unverifiable capture degrades to honest-unknown capacity.',
+    catalogReason: 'The structured runner and Standard quota probe are implemented, but Factory browser login does not prove paid Extra Usage is disabled. Execution remains off until the CLI exposes a machine-verifiable per-run no-overage boundary.',
   },
   auggie: {
     routeKind: 'subscription',

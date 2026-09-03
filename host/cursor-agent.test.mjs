@@ -35,6 +35,7 @@ function fakeCursorAgent(options = {}) {
   child.kill = (signal) => {
     child.killed.push(signal)
     child.exitCode = 0
+    queueMicrotask(() => child.emit('close', child.exitCode, null))
     return true
   }
 
@@ -297,6 +298,41 @@ test('cancelling a run stops the process and reports the cancellation', async ()
     return true
   })
   assert.equal(server.child.killed.includes('SIGINT'), true)
+})
+
+test('cancellation waits for the Cursor process close event', async () => {
+  const server = fakeCursorAgent({ script: [systemInit()], hang: true })
+  let releaseClose
+  server.child.kill = (signal) => {
+    server.child.killed.push(signal)
+    releaseClose = () => {
+      server.child.exitCode = 0
+      server.child.emit('close', 0, null)
+    }
+    return true
+  }
+  const controller = new AbortController()
+  let settled = false
+  const pending = runCursor(server, {}, { signal: controller.signal })
+    .catch(() => { settled = true })
+  controller.abort()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(settled, false)
+  releaseClose()
+  await pending
+  assert.equal(settled, true)
+})
+
+test('a terminal Cursor result force-closes a provider process that does not exit', async () => {
+  const server = fakeCursorAgent({ script: [systemInit(), resultSuccess()], hang: true })
+  const keepAlive = setInterval(() => {}, 10)
+  try {
+    const result = await runCursor(server)
+    assert.equal(result.response, 'pong')
+    assert.deepEqual(server.child.killed, ['SIGKILL'])
+  } finally {
+    clearInterval(keepAlive)
+  }
 })
 
 test('a silent CLI is stopped at the inactivity limit rather than left working forever', async () => {

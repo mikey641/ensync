@@ -18,7 +18,7 @@ import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService } from './git.mjs'
-import { LandingCoordinator } from './landing-coordinator.mjs'
+import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
@@ -300,9 +300,11 @@ export function createEnsyncHost(options = {}) {
   }
   const landingCoordinator = options.landingCoordinator ?? (options.chatService ? null : new LandingCoordinator({
     journal: landingJournal,
-    integrate: async (train) => {
+    anchorSnapshot: (input) => anchorLandingSnapshot(input),
+    integrate: async (train, runtime = {}) => {
       const integrator = await resolveLandingIntegrator()
       return integrator.integrate(train, {
+        signal: runtime.signal,
         resolveConflict: (details) => chats.resolveLandingConflict(details),
       })
     },
@@ -353,8 +355,11 @@ export function createEnsyncHost(options = {}) {
   const chatJobs = options.chatJobService ?? new ChatJobService({
     runLocal: (request, runOptions) => chats.run(request, runOptions),
     runRemote: (request, runOptions) => remoteSsh.runChat(request, runOptions),
-    admit: (input, owner) => input.kind === 'local'
-      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, { owner })
+    admit: (input, owner, runtime = {}) => input.kind === 'local'
+      ? projectIsolation.tryAcquireOrDescribe(input.request.projectPath, input.request.workspaceKey, {
+          owner,
+          signal: runtime.signal,
+        })
       : admitSshChat(input.request, owner),
     steerLocal: (jobId, input) => chats.steer(jobId, input),
     canSteerLocal: (jobId) => chats.canSteer(jobId),

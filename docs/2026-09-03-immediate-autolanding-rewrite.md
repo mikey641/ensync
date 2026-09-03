@@ -23,9 +23,9 @@ Three approaches were considered:
 
 1. Patch the current leases and auto-land timeouts. This is the smallest change, but it retains the architecture that already produced leaked workspace locks, hour-long conflict-agent waits, and code-destroying sweeps.
 2. Replace Git worktrees with Jujutsu workspaces. Jujutsu's first-class conflicts and operation log are attractive, but the project still describes itself as experimental and documents Git interoperability and repository-feature gaps. It is too large a compatibility change for projects that users already operate with Git.
-3. Keep Git compatibility while delegating worktree lifecycle and merging to the open-source `agent-worktree` CLI, and adopt Mergetrain's completion-order integration model plus Pact's test-gated Arbiter behavior. This is the selected approach. It preserves ordinary Git repositories, has macOS and Windows binaries through its npm distribution, and returns a bounded machine-readable result instead of leaving Ensync to infer merge state.
+3. Keep Git compatibility while delegating worktree lifecycle and merging to the open-source `agent-worktree` CLI, and adopt Mergetrain's completion-order integration model. This is the selected approach. It preserves ordinary Git repositories and has macOS and Windows binaries through its npm distribution. Ensync converts the tool's exit status and bounded output into typed internal results.
 
-`agent-worktree` is pinned as a runtime tool. Ensync owns only provider routing, the completion-order queue, UI events, and subscription-backed conflict-agent selection. It no longer implements Git worktree creation, branch synchronization, merge cleanup, or merge-state recovery itself.
+`agent-worktree` is pinned as a runtime tool. Ensync owns only provider routing, the completion-order queue, UI events, dependency-free structural and ancestry gates, and subscription-backed conflict-agent selection. It never runs repository-owned tests or hooks. It delegates worktree creation, item synchronization, publication, and merge-state cleanup to that tool.
 
 ## Runtime architecture
 
@@ -42,7 +42,7 @@ A focused `AgentWorktreeClient` invokes the pinned `wt` executable with argument
 - create or locate the stable conversation worktree;
 - report machine-readable status;
 - synchronize a conversation worktree from its base;
-- merge a completed conversation branch into the configured base;
+- publish a verified integration worktree into its explicitly captured target;
 - continue or abort tool-owned synchronization after automated resolution.
 
 The adapter writes an Ensync-private runtime config with hooks, copied files, and automatic submodule cloning disabled. Upstream 0.13.6 has no command flag that disables project-level config, whose hooks run without a sandbox or timeout, so Ensync fails fast if `.agent-worktree.toml` exists instead of granting it Host authority or risking another unbounded wait.
@@ -61,20 +61,20 @@ The implemented fast path is:
 
 1. Ask agent-worktree to synchronize and merge each train item in order inside an isolated integration working copy.
 2. Reject an unavailable input SHA, unmerged paths, committed conflict markers, a dirty canonical checkout, or a moved target ref.
-3. Run `git diff --check` and the repository's optional bounded `land:quick` gate. If the script is absent, the dependency-free structural gate is sufficient; an unbounded full suite is never substituted.
-4. Ask agent-worktree to publish the whole verified integration branch into the target once, then emit `landed` events for the contained items.
+3. Run only dependency-free ancestry, clean-index, conflict-marker, and `git diff --check` gates. Automatic landing never executes repository package scripts.
+4. Preflight added paths, then ask agent-worktree to publish the whole verified integration branch into the explicit target once without force. A reference-transaction guard requires the exact inspected old target SHA, and every postcheck uses one pinned published SHA before the final target ref is observed; emit `landed` only after the target is clean and contains every accepted SHA.
 
 There is no artificial batching delay. A single completion starts at once. Several completions already waiting are integrated as one train so shared checks run once and the canonical ref advances once.
 
 ### Automated conflict resolution
 
-If deterministic merging cannot resolve an item, the coordinator immediately starts a one-shot resolver through Ensync's existing subscription-authenticated provider adapter. It runs only in the isolated integration workspace, receives the base/left/right identities and bounded conflict paths, and cannot push, land, or access another checkout.
+If deterministic merging cannot resolve an item, the coordinator immediately starts a one-shot resolver through an authenticated Codex subscription adapter. Codex has an OS-enforced boundary around the isolated integration workspace. The resolver receives only the merge instruction and a strictly bounded conflict-path set. Cursor and Droid remain discovery-only until paid overage can be disabled and proved per run, so they are never used for landing resolution.
 
-The proposed resolution is accepted only when conflict markers are gone and the structural and optional `land:quick` gates pass. The resolver gets a bounded time budget. If it cannot produce an acceptable result, that item moves to a retry lane with its branch intact and later compatible items continue in the same train. Retry-lane items are attempted automatically on Host startup and ahead of the next completion for that repository. The UI never requests manual merge review.
+The proposed resolution is accepted only when conflict markers are gone, original-target and saved-SHA ancestry remains intact, files outside the reported conflict set are unchanged, and the dependency-free structural gates pass. The resolver gets a bounded time budget and its process must actually close before the worktree can be reused. If it cannot produce an acceptable result, that item moves to a retry lane with its branch intact and later compatible items continue in the same train. Retry-lane items are attempted automatically on Host startup and ahead of the next completion for that repository. The UI never requests manual merge review.
 
 ### Recovery
 
-Landing state is separate from the chat-job journal and contains no prompts, provider output, or secrets. Each item stores repository identity, conversation branch, exact saved SHA, completion sequence, state, attempts, and last bounded error. Writes use the project's existing atomic primary/staging/backup pattern.
+Landing state is separate from the chat-job journal and contains no prompts, provider output, or secrets. Each item stores repository identity, conversation branch, exact saved SHA, exact target branch/base SHA, completion sequence, state, attempts, and last bounded error. Writes use the project's existing atomic primary/staging/backup pattern. Before the append, Git anchors the saved object under `refs/ensync/landing-snapshots/`; anchors are retained so cleanup cannot race a duplicate enqueue of the same SHA.
 
 On Host startup, `integrating` items return to `queued`; the coordinator verifies the current target and each immutable saved SHA before doing anything. Missing SHAs are never guessed or replayed. Tool-owned integration worktrees are removed after each attempt, while the source conversation branches remain available.
 
@@ -109,6 +109,6 @@ The reusable Ensync Auto Context skill remains because it is a product feature a
 
 ## Verification
 
-Tests prove that provider completion is not delayed by a never-resolving landing promise; success requires a durable exact-SHA enqueue; FIFO order follows branch-snapshot completion; arrivals during one train form the next train; dirty targets remain byte-for-byte unchanged; conflict items enter automatic retry without blocking compatible work; restart recovery neither duplicates nor loses landing; later chat commits cannot change an already queued snapshot; legacy branches remain discoverable; and macOS/Windows tool resolution chooses the correct packaged binary.
+Tests prove that provider completion is not delayed by a never-resolving landing promise; success requires a durable exact-SHA enqueue; FIFO order follows branch-snapshot completion; arrivals during one train form the next train; dirty and ignored local files remain byte-for-byte unchanged; conflict items enter automatic retry without blocking compatible work; provider processes close before reuse; resolver edits outside the conflict set and target-history rewrites are rejected; restart recovery neither duplicates nor loses landing; later chat commits cannot change an already queued snapshot; legacy branches remain discoverable; and macOS/Windows tool resolution chooses the correct packaged binary.
 
 The complete release gate includes lint, TypeScript, Host tests, desktop tests, packaging checks, a production renderer build, a desktop Host smoke, public-site validation, and temporary-repository integration tests that apply multiple conversation worktrees in completion order.

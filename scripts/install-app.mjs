@@ -2,13 +2,9 @@
 /**
  * Installs the CURRENT CHECKOUT into /Applications/Ensync.app.
  *
- * This exists so installing is a consequence of landing, never a step a
- * conversation performs from its own branch. Chats used to build and install
- * straight from their worktree, so whichever chat installed last won and
- * unlanded work silently replaced landed work — the installed app could hold
- * code that was on no branch, and the next install from main would revert it
- * with no trace. The sweep calls this only after a merge has passed
- * land:check, so what runs is always something that landed.
+ * This manual developer utility installs only a clean baseline checkout.
+ * Conversations never invoke it from their protected worktrees, so an
+ * unfinished chat cannot replace the installed app with unlanded code.
  *
  * Refuses to install anything unverified: the checkout must be clean and must
  * be the repository's baseline branch. It ships the renderer bundle, the host

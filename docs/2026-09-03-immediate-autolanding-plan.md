@@ -37,11 +37,11 @@
 **Interfaces:**
 - Produces: `resolveAgentWorktreeExecutable(options): Promise<string>`.
 - Produces: `AgentWorktreeClient` with `list(repositoryPath)`, `create(input)`, `status(worktreePath)`, `sync(input)`, `continueSync(input)`, `abortSync(input)`, and `merge(input)`.
-- Every operation returns bounded structured data and uses `execFile` argument arrays with `shell: false`.
+- Every operation returns bounded structured data and uses supervised argument-array process spawning with `shell: false`.
 
 - [ ] **Step 1: Write failing executable-resolution and command-contract tests**
 
-  Test source-mode resolution through `node_modules/.bin/wt`, packaged resolution through `ENSYNC_AGENT_WORKTREE_EXECUTABLE`, rejection of a missing executable, fixed `AGENT_WORKTREE_DIR`, JSON parsing for `wt ls --json`/`wt status --json`, and exit-code classification for merge conflict versus command failure.
+  Test source-mode resolution through `node_modules/.bin/wt`, packaged resolution through the staged native resource, rejection of a missing or unpinned executable, fixed `AGENT_WORKTREE_DIR`, JSON parsing for `wt ls --json`/`wt status --json`, and bounded process-tree shutdown.
 
 - [ ] **Step 2: Run the focused test and verify RED**
 
@@ -53,7 +53,7 @@
 
   Run: `npm install --save-exact agent-worktree@0.13.6`
 
-  Implement the tested client. Never pass user text through a shell. Limit captured stdout/stderr and map `wt merge` exit 13 to `{ disposition: 'conflict' }`.
+  Implement the tested client. Never pass user text through a shell. Limit captured stdout/stderr, supervise the native process tree through close, and let the integrator inspect Git's actual unmerged state after a failed sync.
 
 - [ ] **Step 4: Stage the correct native binary for source installs and target-native releases**
 
@@ -117,8 +117,6 @@
 **Files:**
 - Create: `host/landing-integrator.mjs`
 - Create: `host/landing-integrator.test.mjs`
-- Modify: `host/land-check.mjs`
-- Modify: `host/land-check.test.mjs`
 
 **Interfaces:**
 - Consumes: `AgentWorktreeClient` and immutable `LandingItem.savedSha` values.
@@ -137,11 +135,11 @@
 
 - [ ] **Step 3: Implement isolated train assembly**
 
-  Create a short-lived `ensync/landing-*` agent-worktree based on the captured target. Apply each verified item via `wt sync --from <immutable-item-ref>` in order, run structural checks plus optional `land:quick`, and publish via `wt merge --into <target>`. Keep source chat worktrees untouched.
+  Create a short-lived `ensync/landing-*` agent-worktree based on the captured target. Apply each verified item via `wt sync --from <immutable-item-ref>` in order, run dependency-free structural/ancestry checks without repository scripts, and publish via `wt merge --into <target> --skip-hooks`. Keep source chat worktrees untouched.
 
 - [ ] **Step 4: Write conflict and retry tests**
 
-  Prove deterministic conflicts call the injected resolver once; accepted resolutions must remove unmerged entries and pass `land:quick`; rejected/timed-out resolution returns only that item to retry; compatible later items are rebuilt and land; and tool-owned sync is aborted before reuse after a failed resolver.
+  Prove deterministic conflicts call the injected resolver once; accepted resolutions must remove unmerged entries, preserve target ancestry, and leave non-conflict files unchanged; rejected/timed-out resolution returns only that item to retry; compatible later items are rebuilt and land; and tool-owned sync is aborted before reuse after a failed resolver.
 
 - [ ] **Step 5: Implement bounded automated resolution**
 
@@ -149,9 +147,9 @@
 
 - [ ] **Step 6: Verify and commit**
 
-  Run: `node --test host/landing-integrator.test.mjs host/agent-worktree-client.test.mjs host/land-check.test.mjs`
+  Run: `node --test host/landing-integrator.test.mjs host/agent-worktree-client.test.mjs`
 
-  Run: `git add host/landing-integrator.mjs host/landing-integrator.test.mjs host/land-check.mjs host/land-check.test.mjs && git commit -m "feat: integrate completion-order trains"`
+  Run: `git add host/landing-integrator.mjs host/landing-integrator.test.mjs host/agent-worktree-client.mjs host/agent-worktree-client.test.mjs && git commit -m "feat: integrate completion-order trains"`
 
 ### Task 4: Detach landing from provider jobs
 

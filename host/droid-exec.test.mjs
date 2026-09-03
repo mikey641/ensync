@@ -70,8 +70,14 @@ function fakeDroidExec(options = {}) {
   child.signalCode = null
   child.kill = () => {
     child.exitCode = 0
+    queueMicrotask(() => child.emit('close', child.exitCode, null))
     return true
   }
+  child.stdin.on('end', () => {
+    if (options.closeOnStdinEnd === false) return
+    if (child.exitCode === null) child.exitCode = 0
+    queueMicrotask(() => child.emit('close', child.exitCode, null))
+  })
 
   const requests = []
   const appliedAutonomy = options.appliedAutonomyLevel ?? DROID_AUTONOMY_LEVEL
@@ -363,6 +369,47 @@ test('a user stop cancels the run without claiming a provider failure', async ()
     assert.equal(error.safeToRetry, false)
     return true
   })
+})
+
+test('a cancelled run does not settle until the provider process has closed', async () => {
+  const controller = new AbortController()
+  const server = fakeDroidExec({ script: [], closeOnStdinEnd: false })
+  let releaseClose
+  server.child.kill = () => {
+    releaseClose = () => {
+      server.child.exitCode = 0
+      server.child.emit('close', 0, null)
+    }
+    return true
+  }
+  let settled = false
+  const pending = runDroid(server, {}, { signal: controller.signal })
+    .catch(() => { settled = true })
+  controller.abort()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  assert.equal(settled, false)
+  releaseClose()
+  await pending
+  assert.equal(settled, true)
+})
+
+test('a terminal Droid result force-closes a provider process that does not exit', async () => {
+  const server = fakeDroidExec({ closeOnStdinEnd: false })
+  const signals = []
+  server.child.kill = (signal) => {
+    signals.push(signal)
+    server.child.exitCode = 0
+    queueMicrotask(() => server.child.emit('close', 0, null))
+    return true
+  }
+  const keepAlive = setInterval(() => {}, 10)
+  try {
+    const result = await runDroid(server)
+    assert.equal(result.response, 'pong')
+    assert.deepEqual(signals, ['SIGKILL'])
+  } finally {
+    clearInterval(keepAlive)
+  }
 })
 
 test('droidTurnProvesNoActivity rejects unknown notification types', () => {

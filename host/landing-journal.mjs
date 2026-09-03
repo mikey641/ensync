@@ -4,10 +4,10 @@ import {
   access,
   chmod,
   mkdir,
+  open,
   readFile,
   rename,
   rm,
-  writeFile,
 } from 'node:fs/promises'
 import { dirname, isAbsolute } from 'node:path'
 
@@ -34,10 +34,13 @@ function normalizeItem(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
   const id = boundedString(value.id, 160)
   const repositoryPath = boundedString(value.repositoryPath, 8_192)
+  const commonGitDirectory = boundedString(value.commonGitDirectory, 8_192)
   const projectPath = boundedString(value.projectPath, 8_192)
   const workspacePath = boundedString(value.workspacePath, 8_192)
   const branch = boundedString(value.branch, 512)
   const savedSha = boundedString(value.savedSha, 64)?.toLowerCase()
+  const targetBranch = boundedString(value.targetBranch, 512)
+  const targetBaseSha = boundedString(value.targetBaseSha, 64)?.toLowerCase()
   const provider = boundedString(value.provider, 128)
   const createdAt = validDate(value.createdAt)
   const updatedAt = validDate(value.updatedAt)
@@ -47,8 +50,12 @@ function normalizeItem(value) {
     || !projectPath
     || !workspacePath
     || ![repositoryPath, projectPath, workspacePath].every(isAbsolute)
+    || (commonGitDirectory !== null && !isAbsolute(commonGitDirectory))
     || !branch
     || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(savedSha ?? '')
+    || ((targetBranch === null) !== (targetBaseSha === undefined || targetBaseSha === null))
+    || (targetBaseSha !== undefined && targetBaseSha !== null
+      && !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(targetBaseSha))
     || !provider
     || !Number.isSafeInteger(value.completionSequence)
     || value.completionSequence < 1
@@ -61,10 +68,13 @@ function normalizeItem(value) {
   return {
     id,
     repositoryPath,
+    commonGitDirectory,
     projectPath,
     workspacePath,
     branch,
     savedSha,
+    targetBranch,
+    targetBaseSha: targetBaseSha ?? null,
     provider,
     completionSequence: value.completionSequence,
     state: value.state,
@@ -108,6 +118,22 @@ async function exists(path) {
   }
 }
 
+async function syncDirectory(path) {
+  let directory
+  try {
+    directory = await open(path, 'r')
+    await directory.sync()
+  } catch (error) {
+    if (
+      process.platform === 'win32'
+      && ['EACCES', 'EINVAL', 'EISDIR', 'ENOTSUP', 'EPERM'].includes(error?.code)
+    ) return
+    throw error
+  } finally {
+    await directory?.close().catch(() => {})
+  }
+}
+
 export class LandingJournal {
   constructor(options = {}) {
     if (typeof options.filePath !== 'string' || !isAbsolute(options.filePath)) {
@@ -139,10 +165,13 @@ export class LandingJournal {
       const item = normalizeItem({
         id: this.idFactory(),
         repositoryPath: input.repositoryPath,
+        commonGitDirectory: input.commonGitDirectory,
         projectPath: input.projectPath,
         workspacePath: input.workspacePath,
         branch: input.branch,
         savedSha: input.savedSha,
+        targetBranch: input.targetBranch,
+        targetBaseSha: input.targetBaseSha,
         provider: input.provider,
         completionSequence: this.nextSequence,
         state: 'queued',
@@ -151,10 +180,10 @@ export class LandingJournal {
         updatedAt: now,
         error: null,
       })
-      if (!item) throw new TypeError('Landing metadata is incomplete or invalid.')
-      this.nextSequence += 1
-      this.items.push(item)
-      await this.#save()
+      if (!item || !item.commonGitDirectory || !item.targetBranch || !item.targetBaseSha) {
+        throw new TypeError('Landing metadata is incomplete or invalid.')
+      }
+      await this.#save([...this.items, item], this.nextSequence + 1)
       return cloneItem(item)
     })
   }
@@ -182,8 +211,9 @@ export class LandingJournal {
         updatedAt: this.clock().toISOString(),
       })
       if (!updated) throw new TypeError('Landing transition is invalid.')
-      this.items[index] = updated
-      await this.#save()
+      const nextItems = [...this.items]
+      nextItems[index] = updated
+      await this.#save(nextItems, this.nextSequence)
       return cloneItem(updated)
     })
   }
@@ -201,15 +231,18 @@ export class LandingJournal {
       this.backupPath,
     ].map(async (path) => {
       try {
-        return { path, payload: decode(await readFile(path, 'utf8')) }
-      } catch {
-        return { path, payload: null }
+        return { path, payload: decode(await readFile(path, 'utf8')), exists: true }
+      } catch (error) {
+        return { path, payload: null, exists: error?.code !== 'ENOENT' }
       }
     }))
     const selected = candidates
       .filter((candidate) => candidate.payload)
       .sort((left, right) => right.payload.revision - left.payload.revision)[0]
     if (!selected) {
+      if (candidates.some((candidate) => candidate.exists)) {
+        throw new Error('The automatic-landing journal is corrupt or unreadable. Ensync stopped landing so saved work is not discarded.')
+      }
       this.items = []
       this.revision = 0
       this.nextSequence = 1
@@ -217,7 +250,7 @@ export class LandingJournal {
       return
     }
 
-    this.items = selected.payload.items
+    const recoveredItems = selected.payload.items
       .map((item) => item.state === 'integrating'
         ? {
             ...item,
@@ -227,46 +260,61 @@ export class LandingJournal {
           }
         : item)
       .sort((left, right) => left.completionSequence - right.completionSequence)
-    this.revision = selected.payload.revision
-    const sequenceFloor = this.items.reduce(
+    const sequenceFloor = recoveredItems.reduce(
       (maximum, item) => Math.max(maximum, item.completionSequence + 1),
       1,
     )
-    this.nextSequence = Math.max(selected.payload.nextSequence, sequenceFloor)
-    this.loaded = true
+    const recoveredNextSequence = Math.max(selected.payload.nextSequence, sequenceFloor)
 
-    const recoveredIntegration = this.items.some((item, index) => (
+    const recoveredIntegration = recoveredItems.some((item, index) => (
       selected.payload.items[index]?.state === 'integrating' && item.state === 'queued'
     ))
-    if (selected.path !== this.filePath || recoveredIntegration) await this.#save()
+    if (selected.path !== this.filePath || recoveredIntegration) {
+      await this.#save(recoveredItems, recoveredNextSequence, selected.payload.revision)
+    } else {
+      this.items = recoveredItems
+      this.revision = selected.payload.revision
+      this.nextSequence = recoveredNextSequence
+    }
+    this.loaded = true
   }
 
-  async #save() {
-    const active = this.items.filter((item) => item.state !== 'landed')
-    const terminal = this.items
+  async #save(candidateItems, candidateNextSequence, baseRevision = this.revision) {
+    const active = candidateItems.filter((item) => item.state !== 'landed')
+    const terminal = candidateItems
       .filter((item) => item.state === 'landed')
       .slice(-MAX_TERMINAL_ITEMS)
-    this.items = [...active, ...terminal]
+    const retainedItems = [...active, ...terminal]
       .sort((left, right) => left.completionSequence - right.completionSequence)
     const payload = {
-      revision: this.revision + 1,
+      revision: baseRevision + 1,
       savedAt: this.clock().toISOString(),
-      nextSequence: this.nextSequence,
-      items: this.items,
+      nextSequence: candidateNextSequence,
+      items: retainedItems,
     }
     const envelope = JSON.stringify({
       version: JOURNAL_VERSION,
       checksum: checksum(payload),
       payload,
     })
-    await mkdir(dirname(this.filePath), { recursive: true, mode: 0o700 })
-    await writeFile(this.stagingPath, envelope, { encoding: 'utf8', mode: 0o600 })
+    const directoryPath = dirname(this.filePath)
+    await mkdir(directoryPath, { recursive: true, mode: 0o700 })
+    const staging = await open(this.stagingPath, 'w', 0o600)
+    try {
+      await staging.writeFile(envelope, { encoding: 'utf8' })
+      await staging.sync()
+    } finally {
+      await staging.close()
+    }
     try { await chmod(this.stagingPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
     if (await exists(this.filePath)) {
       await rm(this.backupPath, { force: true })
       await rename(this.filePath, this.backupPath)
     }
     await rename(this.stagingPath, this.filePath)
+    await syncDirectory(directoryPath)
+    this.items = retainedItems
+    this.nextSequence = candidateNextSequence
     this.revision = payload.revision
   }
 }

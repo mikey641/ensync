@@ -5,6 +5,8 @@ description: Desktop packaging, signed release manifest, and public Vercel downl
 
 # Product distribution
 
+For daemon lifecycle, a durable automatic-landing `retry` entry is terminal for the current active attempt: it remains recoverable in the journal but does not keep the daemon alive or poll. The next Host startup or repository completion retrains it. Thus “all work is terminal” below includes durable retry state, not only successful landing.
+
 The public Ensync product site lives in `site/` and is deployed from that directory to the Vercel project `ensync`. Its public production URL is `https://ensync.vercel.app`. The site includes landing, product documentation, support, privacy/billing, and responsive light/dark pages.
 
 The landing page uses a conversation-first, ChatGPT-inspired interaction rhythm without OpenAI branding: a persistent product sidebar, familiar chat composer, prompt suggestions, conversational feature sections, and an Ensync tabs/split-panes preview. The interactive hero is explicitly a no-execution product preview. Copy emphasizes provider-neutral continuity, supported subscription routing, tabs outside an editor, and safe pre-mutation fallback without claiming that discovery-only providers can run. `site/public/og.png` is the matching social card, and the homepage owns absolute Open Graph/X metadata for the canonical production URL.

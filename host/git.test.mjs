@@ -1,11 +1,14 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { EventEmitter } from 'node:events'
 import { mkdir, mkdtemp, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import { PassThrough } from 'node:stream'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import test from 'node:test'
 import {
+  captureLandingTarget,
   cloneGitRepository,
   getGitStatus,
   GitWorkflowError,
@@ -13,10 +16,89 @@ import {
   listUnlandedAgentWork,
   pushGit,
   queueAgentBranchLanding,
+  runGit,
   verifyGitRemote,
 } from './git.mjs'
 
 const execFileAsync = promisify(execFile)
+
+test('runGit escalates a timeout and settles only after the Git process closes', async () => {
+  const child = new EventEmitter()
+  child.pid = 123
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  const signals = []
+  child.kill = (signal = 'SIGTERM') => {
+    signals.push(signal)
+    if (signal === 'SIGKILL') setImmediate(() => child.emit('close', null, 'SIGKILL'))
+    return true
+  }
+
+  await assert.rejects(
+    runGit(['status'], {
+      spawn: () => child,
+      timeoutMs: 5,
+      terminationGraceMs: 5,
+    }),
+    (error) => error instanceof GitWorkflowError && error.code === 'git_timeout',
+  )
+
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+})
+
+test('runGit aborts and settles only after the Git process closes', async () => {
+  const child = new EventEmitter()
+  child.pid = 123
+  child.stdout = new PassThrough()
+  child.stderr = new PassThrough()
+  const signals = []
+  child.kill = (signal = 'SIGTERM') => {
+    signals.push(signal)
+    if (signal === 'SIGKILL') setImmediate(() => child.emit('close', null, 'SIGKILL'))
+    return true
+  }
+  const controller = new AbortController()
+  const pending = runGit(['status'], {
+    spawn: () => child,
+    signal: controller.signal,
+    timeoutMs: 1_000,
+    terminationGraceMs: 5,
+  })
+
+  controller.abort()
+  await assert.rejects(
+    pending,
+    (error) => error instanceof GitWorkflowError && error.code === 'git_aborted',
+  )
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL'])
+})
+
+test('landing target capture retries a checkout interleave and binds the SHA to the same branch', async () => {
+  const calls = []
+  const results = [
+    { stdout: 'main\n' },
+    { stdout: `${'a'.repeat(40)}\n` },
+    { stdout: 'release\n' },
+    { stdout: 'release\n' },
+    { stdout: `${'b'.repeat(40)}\n` },
+    { stdout: 'release\n' },
+  ]
+  const target = await captureLandingTarget('/repo', {
+    checkedGit: async (args) => {
+      calls.push(args)
+      return results.shift()
+    },
+  })
+
+  assert.deepEqual(target, {
+    targetBranch: 'release',
+    targetBaseSha: 'b'.repeat(40),
+  })
+  assert.deepEqual(calls.filter((args) => args[0] === 'rev-parse').map((args) => args.at(-1)), [
+    'refs/heads/main^{commit}',
+    'refs/heads/release^{commit}',
+  ])
+})
 
 async function git(args, options = {}) {
   return execFileAsync('git', args, {
@@ -230,7 +312,10 @@ test('explicit land snapshots the exact branch SHA into the immediate queue with
   assert.match(queued[0].savedSha, /^[a-f0-9]{40}$/)
   assert.equal(queued[0].savedSha, result.land.savedSha)
   assert.equal(queued[0].provider, 'codex')
+  assert.equal(queued[0].targetBranch, 'main')
+  assert.equal(queued[0].targetBaseSha, headBefore)
   assert.equal(queued[0].repositoryPath, await realpath(fixture.seed))
+  assert.equal(queued[0].commonGitDirectory, await realpath(join(fixture.seed, '.git')))
   assert.equal((await git(['rev-parse', 'HEAD'], { cwd: fixture.seed })).stdout.trim(), headBefore)
   await assert.rejects(stat(join(fixture.seed, '.git', 'ensync', 'repository-land.lock')))
 })

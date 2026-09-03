@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict'
+import { execFile as execFileCallback } from 'node:child_process'
 import { once } from 'node:events'
-import { mkdtemp, realpath, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import test from 'node:test'
 import {
   argumentsFor,
@@ -16,11 +18,18 @@ import {
   validateProjectPath,
 } from './chat.mjs'
 import { createRelayHost } from './server.mjs'
-import { CursorAgentError } from './cursor-agent.mjs'
+
+const execFile = promisify(execFileCallback)
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-chat-test-'))
   context.after(() => rm(projectPath, { recursive: true, force: true }))
+  return projectPath
+}
+
+async function gitProjectFixture(context) {
+  const projectPath = await projectFixture(context)
+  await execFile('git', ['init', '-b', 'main'], { cwd: projectPath })
   return projectPath
 }
 
@@ -1077,105 +1086,34 @@ test('codebuddy and ollama are refused with their own exact outstanding requirem
   assert.equal(processCalls, 0)
 })
 
-test('a supported droid run reaches the exec runner and returns its result', async (context) => {
+for (const providerId of ['droid', 'cursor']) {
+test(`${providerId} stays discovery-only until paid overage can be disabled per run`, async (context) => {
   const projectPath = await projectFixture(context)
-  let droidRuns = 0
+  let runnerCalls = 0
+  const runner = {
+    run: async () => {
+      runnerCalls += 1
+      throw new Error('gated runner must not run')
+    },
+  }
   const service = new ChatRunService({
-    statusService: statusService(readyProvider('droid')),
+    statusService: statusService(readyProvider(providerId)),
     processRunner: async () => {
       throw new Error('process must not run')
     },
-    droidExecRunner: {
-      run: async () => {
-        droidRuns += 1
-        return {
-          provider: 'droid',
-          response: 'pong',
-          sessionId: '05fff43e-686d-4c7c-9932-705556882455',
-          model: 'claude-opus-5',
-          requestedModel: null,
-          requestedEffort: null,
-          usage: null,
-          outputRecovery: null,
-          durationMs: 100,
-          completedAt: '2026-08-09T00:00:00.000Z',
-        }
-      },
-    },
-  })
-
-  const result = await service.run({ provider: 'droid', projectPath, prompt: 'Hello' })
-  assert.equal(droidRuns, 1)
-  assert.equal(result.provider, 'droid')
-  assert.equal(result.response, 'pong')
-})
-
-test('a supported cursor run reaches the cursor runner with the contained cwd and unchanged prompt', async (context) => {
-  const projectPath = await projectFixture(context)
-  const seen = []
-  const service = new ChatRunService({
-    statusService: statusService(readyProvider('cursor')),
-    environment: { PATH: '/usr/bin', CURSOR_API_KEY: 'must-not-reach-the-run' },
-    processRunner: async () => {
-      throw new Error('process must not run')
-    },
-    cursorAgentRunner: {
-      run: async (input) => {
-        seen.push(input)
-        return {
-          provider: 'cursor',
-          response: 'pong',
-          sessionId: '0f3b1d94-6a4e-4c2f-9a7d-2b8c5e1f0a63',
-          model: 'claude-opus-5',
-          requestedModel: null,
-          requestedEffort: null,
-          usage: null,
-          outputRecovery: null,
-          durationMs: 100,
-          completedAt: '2026-08-10T00:00:00.000Z',
-        }
-      },
-    },
-  })
-
-  const result = await service.run({ provider: 'cursor', projectPath, prompt: 'Hello' })
-  assert.equal(seen.length, 1)
-  assert.equal(result.provider, 'cursor')
-  assert.equal(result.response, 'pong')
-  assert.equal(seen[0].executable, '/test/bin/cursor')
-  assert.equal(seen[0].projectPath, await realpath(projectPath))
-  assert.equal(seen[0].prompt, 'Hello')
-  // A paid-credential override must never reach a subscription run.
-  assert.equal('CURSOR_API_KEY' in seen[0].env, false)
-})
-
-test('a cursor runner failure keeps its own code, status, and retry safety', async (context) => {
-  const projectPath = await projectFixture(context)
-  const service = new ChatRunService({
-    statusService: statusService(readyProvider('cursor')),
-    processRunner: async () => {
-      throw new Error('process must not run')
-    },
-    cursorAgentRunner: {
-      run: async () => {
-        throw new CursorAgentError(
-          'provider_containment_unverified',
-          'Cursor Agent could not apply the pinned sandbox.',
-          409,
-          false,
-        )
-      },
-    },
+    droidExecRunner: runner,
+    cursorAgentRunner: runner,
   })
 
   await assert.rejects(
-    service.run({ provider: 'cursor', projectPath, prompt: 'Hello' }),
+    service.run({ provider: providerId, projectPath, prompt: 'Hello' }),
     (error) => error instanceof ChatRunError
-      && error.code === 'provider_containment_unverified'
-      && error.status === 409
-      && error.safeToRetry === false,
+      && error.code === 'provider_execution_gated'
+      && /paid|overage|Extra Usage|Additional Usage/i.test(error.message),
   )
+  assert.equal(runnerCalls, 0)
 })
+}
 
 test('chat timeout and malformed CLI output are explicit failures', async (context) => {
   const projectPath = await projectFixture(context)
@@ -1684,8 +1622,9 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
       canonicalProjectPath: projectPath,
       projectPath,
       repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
       branch: 'ensync/chat-detached-land',
-      base: null,
+      base: { branch: 'main', canonicalSha: 'c'.repeat(40) },
       integration: null,
       gitBefore: { dirty: false, changedFiles: 0 },
       shared: { repositoryPath: projectPath },
@@ -1694,7 +1633,7 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
     assertHeld() {},
     async release() {},
   }
-  const notices = []
+  const observerCalls = []
   const landingNeverFinishes = new Promise(() => {})
   let enqueued = null
   const service = new ChatRunService({
@@ -1722,19 +1661,29 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
 
   const result = await service.run(
     { provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-hung-land' },
-    { preAcquiredWorkspaceLease: lease, onEvent: (event) => { if (event.type === 'notice') notices.push(event) } },
+    {
+      preAcquiredWorkspaceLease: lease,
+      onEvent: (event) => {
+        observerCalls.push(event.code)
+        throw new Error('renderer disconnected')
+      },
+    },
   )
 
   assert.equal(result.response, 'done')
   assert.deepEqual(enqueued, {
     repositoryPath: projectPath,
+    commonGitDirectory: join(projectPath, '.git'),
     projectPath,
     workspacePath: projectPath,
     branch: 'ensync/chat-detached-land',
     savedSha,
+    targetBranch: 'main',
+    targetBaseSha: 'c'.repeat(40),
     provider: 'codex',
   })
-  assert.ok(notices.some((notice) => notice.code === 'automatic_landing_queued'))
+  assert.ok(observerCalls.includes('agent_work_committed'))
+  assert.ok(observerCalls.includes('automatic_landing_queued'))
 })
 
 test('ChatRunService fails a successful provider run when its exact work snapshot cannot be saved', async (context) => {
@@ -1856,7 +1805,7 @@ test('ChatRunService fails a successful provider run when its exact SHA cannot b
 })
 
 test('background conflict resolution keeps subscription auth and temporary-worktree containment', async (context) => {
-  const worktreePath = await projectFixture(context)
+  const worktreePath = await gitProjectFixture(context)
   let processOptions = null
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
@@ -1883,13 +1832,124 @@ test('background conflict resolution keeps subscription auth and temporary-workt
     worktreePath,
     projectPath: worktreePath,
     conflictFiles: ['src/feature.ts'],
+    commonGitDirectory: join(worktreePath, '.git'),
     signal: new AbortController().signal,
   })
 
-  assert.equal(processOptions.cwd, worktreePath)
+  assert.equal(processOptions.cwd, await realpath(worktreePath))
   assert.match(processOptions.input, /ENSYNC HOST AUTOMATIC LANDING CONFLICT/)
   assert.match(processOptions.input, new RegExp('b{40}'))
   assert.match(processOptions.input, /src\/feature\.ts/)
+})
+
+test('a Claude conflict falls back to an authenticated contained Codex resolver', async (context) => {
+  const worktreePath = await gitProjectFixture(context)
+  let runs = 0
+  const service = new ChatRunService({
+    statusService: {
+      async get(id) {
+        return id === 'codex' ? readyProvider('codex') : { id, installed: false }
+      },
+    },
+    processRunner: async () => {
+      runs += 1
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'resolved' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.resolveLandingConflict({
+    item: {
+      provider: 'claude',
+      branch: 'ensync/chat-conflict',
+      savedSha: 'd'.repeat(40),
+      repositoryPath: worktreePath,
+    },
+    worktreePath,
+    projectPath: worktreePath,
+    conflictFiles: ['src/conflict.ts'],
+    commonGitDirectory: join(worktreePath, '.git'),
+  })
+
+  assert.equal(runs, 1)
+})
+
+for (const providerId of ['claude', 'droid', 'cursor']) {
+  test(`background conflict resolution retries ${providerId} work when no contained resolver is connected`, async (context) => {
+    const worktreePath = await gitProjectFixture(context)
+    let runs = 0
+    const runner = {
+      async run() {
+        runs += 1
+        return { response: 'resolved', sessionId: null, model: null, usage: null }
+      },
+    }
+    const service = new ChatRunService({
+      statusService: {
+        async get(id) { return id === providerId ? readyProvider(providerId) : { id, installed: false } },
+      },
+      processRunner: async () => {
+        runs += 1
+        return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: '' }
+      },
+      droidExecRunner: providerId === 'droid' ? runner : undefined,
+    })
+
+    await assert.rejects(service.resolveLandingConflict({
+      item: {
+        provider: providerId,
+        branch: 'ensync/chat-conflict',
+        savedSha: 'd'.repeat(40),
+        repositoryPath: worktreePath,
+      },
+      worktreePath,
+      projectPath: worktreePath,
+      conflictFiles: ['src/conflict.ts'],
+      commonGitDirectory: join(worktreePath, '.git'),
+    }), (error) => error instanceof ChatRunError
+      && error.code === 'conflict_resolution_provider_unavailable'
+      && error.safeToRetry === true)
+
+    assert.equal(runs, 0)
+  })
+}
+
+test('background conflict resolution rejects a project symlink that escapes the worktree', {
+  skip: process.platform === 'win32',
+}, async (context) => {
+  const worktreePath = await gitProjectFixture(context)
+  const outsidePath = await projectFixture(context)
+  const linkedProject = join(worktreePath, 'linked-project')
+  await symlink(outsidePath, linkedProject)
+  let runs = 0
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    processRunner: async () => {
+      runs += 1
+      return { exitCode: 0, error: null, timedOut: false, stderr: '', stdout: '' }
+    },
+  })
+
+  await assert.rejects(service.resolveLandingConflict({
+    item: {
+      provider: 'codex',
+      branch: 'ensync/chat-conflict',
+      savedSha: 'b'.repeat(40),
+      repositoryPath: worktreePath,
+    },
+    worktreePath,
+    projectPath: linkedProject,
+    conflictFiles: ['src/feature.ts'],
+    commonGitDirectory: join(worktreePath, '.git'),
+  }), (error) => error instanceof ChatRunError && error.code === 'invalid_project')
+
+  assert.equal(runs, 0)
 })
 
 // `AskUserQuestion` is the one Claude tool that is not work: it is the agent

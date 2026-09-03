@@ -21,7 +21,7 @@ function requiredAbsolutePath(value, label) {
   return value
 }
 
-async function runCommand(executable, args, options = {}) {
+export async function runCommand(executable, args, options = {}) {
   return await new Promise((resolveRun, rejectRun) => {
     const child = spawn(executable, args, {
       cwd: options.cwd,
@@ -37,7 +37,7 @@ async function runCommand(executable, args, options = {}) {
     child.stdout.on('data', (chunk) => { stdout += chunk })
     child.stderr.on('data', (chunk) => { stderr += chunk })
     child.once('error', rejectRun)
-    child.once('exit', (code, signal) => {
+    child.once('close', (code, signal) => {
       if (code === 0) return resolveRun({ stdout, stderr })
       rejectRun(new Error(`${basename(executable)} failed (${signal ?? code ?? 'unknown'}): ${stderr.trim() || stdout.trim() || 'no output'}`))
     })

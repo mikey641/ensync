@@ -1,7 +1,5 @@
 const providerRunners = Object.freeze({
-  local: Object.freeze(['codex', 'claude', 'droid', 'cursor']),
-  // Droid needs its stream-jsonrpc adapter over SSH. Cursor's remote runner
-  // still lacks the per-run sandbox flag used by the local runner.
+  local: Object.freeze(['codex', 'claude']),
   ssh: Object.freeze(['codex', 'claude']),
 })
 

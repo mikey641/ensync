@@ -128,6 +128,7 @@ async function stop(exitCode = 0) {
   const forceExit = setTimeout(() => process.exit(1), 6_000)
   forceExit.unref?.()
   await server.ensyncServices.chatJobs.shutdown()
+  await server.ensyncServices.landingCoordinator?.shutdown?.()
   await new Promise((resolve) => server.close(resolve))
   if (detachedMode) await removeOwnDescriptor()
   clearTimeout(forceExit)

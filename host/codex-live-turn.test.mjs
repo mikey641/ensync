@@ -27,6 +27,8 @@ function fakeCodexAppServer(options = {}) {
   const requests = []
   let inputBuffer = ''
   let turnActivated = false
+  const killSignals = []
+  let closed = false
   const send = (message) => child.stdout.write(`${JSON.stringify(message)}\n`)
   const activateTurn = () => {
     if (turnActivated) return
@@ -133,16 +135,25 @@ function fakeCodexAppServer(options = {}) {
     }
   })
   child.stdin.on('finish', () => {
+    if (options.ignoreStdinEnd) return
     child.exitCode = 0
-    queueMicrotask(() => child.emit('close', 0, null))
+    queueMicrotask(() => {
+      closed = true
+      child.emit('close', 0, null)
+    })
   })
   child.kill = (signal = 'SIGTERM') => {
+    killSignals.push(signal)
+    if (options.ignoreSigterm && signal === 'SIGTERM') return true
     child.signalCode = signal
-    queueMicrotask(() => child.emit('close', null, signal))
+    queueMicrotask(() => {
+      closed = true
+      child.emit('close', null, signal)
+    })
     return true
   }
   queueMicrotask(() => child.emit('spawn'))
-  return { child, requests, send }
+  return { child, get closed() { return closed }, killSignals, requests, send }
 }
 
 test('Codex live turns accept a steering instruction before one verified completion', async () => {
@@ -206,6 +217,35 @@ test('steering a missing live turn is explicitly safe to fall back to FIFO', asy
     runner.steer('job_2222222222222222', 'Follow up', []),
     (error) => error.code === 'live_steer_unavailable' && error.safeToRetry === true,
   )
+})
+
+test('a completed live turn waits for a TERM-ignoring app-server to be killed and closed', async () => {
+  const fake = fakeCodexAppServer({ ignoreStdinEnd: true, ignoreSigterm: true })
+  const runner = new CodexLiveTurnRunner({
+    spawnProcess: () => fake.child,
+    inactivityTimeoutMs: 5_000,
+    hardTimeoutMs: 5_000,
+    shutdownTimeoutMs: 10,
+  })
+  const run = runner.run({
+    id: 'job_9999999999999999',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Build the feature',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  })
+
+  await waitFor(() => runner.canSteer('job_9999999999999999'))
+  await runner.steer('job_9999999999999999', 'Finish now', [])
+  const result = await run
+
+  assert.equal(result.response, 'Applied the correction.')
+  assert.equal(fake.closed, true)
+  assert.deepEqual(fake.killSignals, ['SIGKILL'])
 })
 
 test('an app-server stream beyond the repair bound is never replayable', async () => {

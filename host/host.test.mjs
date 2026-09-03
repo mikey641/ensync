@@ -233,7 +233,7 @@ test('host returns real provider states and never invents usage numbers', async 
 
   assert.deepEqual(
     payload.providers.filter((provider) => provider.chatExecution === 'supported').map((provider) => provider.id).sort(),
-    ['claude', 'codex', 'cursor', 'droid'],
+    ['claude', 'codex'],
   )
 
   const usage = await fetch(`${baseUrl}/api/usage`).then((response) => response.json())

@@ -6,6 +6,7 @@ import { inspectProject } from './projects.mjs'
 import { validateProjectPath } from './chat.mjs'
 
 const DEFAULT_TIMEOUT_MS = 30_000
+const DEFAULT_TERMINATION_GRACE_MS = 2_000
 const MAX_OUTPUT_BYTES = 512 * 1024
 const MAX_REPOSITORY_URL_LENGTH = 4_096
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
@@ -107,8 +108,16 @@ export function runGit(args, options = {}) {
 
   const executable = options.gitExecutable ?? 'git'
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
+  const terminationGraceMs = options.terminationGraceMs ?? DEFAULT_TERMINATION_GRACE_MS
+  const spawnProcess = options.spawn ?? spawn
+  if (options.signal?.aborted) {
+    return Promise.reject(new GitWorkflowError('Git was stopped before completing.', {
+      code: 'git_aborted',
+      status: 499,
+    }))
+  }
   return new Promise((resolvePromise, rejectPromise) => {
-    const child = spawn(executable, args, {
+    const child = spawnProcess(executable, args, {
       cwd: options.cwd,
       env: {
         ...process.env,
@@ -124,22 +133,43 @@ export function runGit(args, options = {}) {
     let stderr = ''
     let outputBytes = 0
     let settled = false
+    let stoppingError = null
+    let forceTimer = null
+    let captureOutput = true
+    let timer = null
+    const onAbort = () => stopAfterClose(new GitWorkflowError('Git was stopped before completing.', {
+      code: 'git_aborted',
+      status: 499,
+    }))
 
     const finish = (callback) => {
       if (settled) return
       settled = true
       clearTimeout(timer)
+      clearTimeout(forceTimer)
+      options.signal?.removeEventListener('abort', onAbort)
       callback()
     }
 
+    const stopAfterClose = (error) => {
+      if (stoppingError) return
+      stoppingError = error
+      captureOutput = false
+      clearTimeout(timer)
+      try { child.kill('SIGTERM') } catch { /* close/error remains authoritative */ }
+      forceTimer = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch { /* close/error remains authoritative */ }
+      }, terminationGraceMs)
+    }
+
     const collect = (target, chunk) => {
+      if (!captureOutput) return target
       outputBytes += chunk.length
       if (outputBytes > MAX_OUTPUT_BYTES) {
-        child.kill()
-        finish(() => rejectPromise(new GitWorkflowError('Git produced too much output.', {
+        stopAfterClose(new GitWorkflowError('Git produced too much output.', {
           code: 'git_output_limit',
           status: 502,
-        })))
+        }))
         return target
       }
       return target + chunk.toString('utf8')
@@ -147,25 +177,33 @@ export function runGit(args, options = {}) {
 
     child.stdout.on('data', (chunk) => { stdout = collect(stdout, chunk) })
     child.stderr.on('data', (chunk) => { stderr = collect(stderr, chunk) })
-    child.on('error', (error) => finish(() => rejectPromise(new GitWorkflowError(
-      error && typeof error === 'object' && error.code === 'ENOENT'
+    child.on('error', (error) => {
+      const workflowError = new GitWorkflowError(
+        error && typeof error === 'object' && error.code === 'ENOENT'
         ? 'Git is not installed or is not available on PATH.'
         : 'Ensync Host could not start Git.',
-      { code: 'git_unavailable', status: 503 },
-    ))))
-    child.on('close', (exitCode, signal) => finish(() => resolvePromise({
-      exitCode: exitCode ?? -1,
-      signal,
-      stdout,
-      stderr,
-    })))
+        { code: 'git_unavailable', status: 503 },
+      )
+      if (!child.pid) finish(() => rejectPromise(workflowError))
+      else stopAfterClose(workflowError)
+    })
+    child.on('close', (exitCode, signal) => finish(() => {
+      if (stoppingError) rejectPromise(stoppingError)
+      else resolvePromise({
+        exitCode: exitCode ?? -1,
+        signal,
+        stdout,
+        stderr,
+      })
+    }))
 
-    const timer = setTimeout(() => {
-      child.kill()
-      finish(() => rejectPromise(new GitWorkflowError('Git timed out without completing.', {
+    options.signal?.addEventListener('abort', onAbort, { once: true })
+    if (options.signal?.aborted) onAbort()
+    timer = setTimeout(() => {
+      stopAfterClose(new GitWorkflowError('Git timed out without completing.', {
         code: 'git_timeout',
         status: 504,
-      })))
+      }))
     }, timeoutMs)
   })
 }
@@ -743,6 +781,36 @@ function providerFromCommitMessage(value) {
   return provider || 'codex'
 }
 
+export async function captureLandingTarget(repositoryPath, options = {}) {
+  const invoke = options.checkedGit ?? checkedGit
+  const commandOptions = {
+    cwd: repositoryPath,
+    gitExecutable: options.gitExecutable,
+    code: 'landing_target_unavailable',
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const before = await invoke(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      ...commandOptions,
+      failureMessage: 'Check out the branch this saved conversation should land into.',
+    })
+    const targetBranch = before.stdout.trim()
+    const targetBase = await invoke([
+      'rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`,
+    ], commandOptions)
+    const after = await invoke(['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      ...commandOptions,
+      failureMessage: 'Check out the branch this saved conversation should land into.',
+    })
+    if (after.stdout.trim() === targetBranch) {
+      return { targetBranch, targetBaseSha: targetBase.stdout.trim() }
+    }
+  }
+  throw new GitWorkflowError('The checked-out branch changed while Ensync captured the automatic landing target. Retry after the checkout is stable.', {
+    code: 'landing_target_changed',
+    status: 409,
+  })
+}
+
 /**
  * Compatibility path for the old explicit Land button. It snapshots the exact
  * branch SHA into the same event-driven landing queue used at chat completion;
@@ -772,7 +840,7 @@ export async function queueAgentBranchLanding(input, options = {}) {
     failureMessage: `The agent branch ${branch} does not exist in this repository.`,
   })
   const savedSha = saved.stdout.trim()
-  const [worktrees, commit] = await Promise.all([
+  const [worktrees, commit, commonGitResult] = await Promise.all([
     checkedGit(['worktree', 'list', '--porcelain'], {
       cwd: repositoryPath,
       gitExecutable: options.gitExecutable,
@@ -781,13 +849,27 @@ export async function queueAgentBranchLanding(input, options = {}) {
       cwd: repositoryPath,
       gitExecutable: options.gitExecutable,
     }),
+    checkedGit(['rev-parse', '--path-format=absolute', '--git-common-dir'], {
+      cwd: repositoryPath,
+      gitExecutable: options.gitExecutable,
+      code: 'landing_target_unavailable',
+      failureMessage: 'Ensync could not identify the repository shared Git directory.',
+    }),
   ])
+  const target = await captureLandingTarget(repositoryPath, options)
+  const commonValue = commonGitResult.stdout.trim()
+  const commonGitDirectory = await realpath(
+    isAbsolute(commonValue) ? commonValue : resolve(repositoryPath, commonValue),
+  )
   const item = await options.landingCoordinator.enqueue({
     repositoryPath,
+    commonGitDirectory,
     projectPath,
     workspacePath: worktreePathForBranch(worktrees.stdout, branch) ?? repositoryPath,
     branch,
     savedSha,
+    targetBranch: target.targetBranch,
+    targetBaseSha: target.targetBaseSha,
     provider: providerFromCommitMessage(commit.stdout),
   })
   return {

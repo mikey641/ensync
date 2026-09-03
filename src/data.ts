@@ -270,7 +270,7 @@ const defaultProviderCatalog: Provider[] = [
     usageReason: 'Waiting for the local Ensync Host.',
     canConnect: false,
     routeKind: 'subscription',
-    chatExecution: 'supported',
+    chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.factory.ai/cli/getting-started/quickstart',
     catalogReason: 'Waiting for Ensync Host capability data.',

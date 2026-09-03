@@ -520,7 +520,9 @@ function fakeDroidExec({ askUser = true, permission = null } = {}) {
   child.exitCode = null
   child.signalCode = null
   child.kill = () => {
+    if (child.exitCode !== null || child.signalCode !== null) return true
     child.exitCode = 0
+    queueMicrotask(() => child.emit('close', child.exitCode, child.signalCode))
     return true
   }
 

@@ -68,6 +68,36 @@ test('a detached subscriber can reconnect without cancelling the provider job', 
   assert.equal(service.get(JOB_A).providerProcessStarted, true)
 })
 
+test('a throwing subscriber cannot fail a provider job or another subscriber', async () => {
+  let release
+  const service = new ChatJobService({
+    runLocal: async (_request, options) => {
+      options.onEvent({ type: 'started', provider: 'codex', cwd: '/project', command: 'codex exec -' })
+      await new Promise((resolve) => { release = resolve })
+      options.onEvent({ type: 'notice', message: 'working' })
+      return { provider: 'codex', response: 'done' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'continue' } })
+  service.subscribe(JOB_A, {
+    onEvent() { throw new Error('disconnected renderer') },
+    onEnd() { throw new Error('disconnected renderer') },
+  })
+  const events = []
+  let ended = false
+  service.subscribe(JOB_A, {
+    onEvent: (event) => events.push(event.type),
+    onEnd: () => { ended = true },
+  })
+  await waitFor(() => typeof release === 'function')
+  release()
+  await waitFor(() => service.get(JOB_A).state === 'completed' && ended)
+
+  assert.deepEqual(events, ['started', 'notice', 'completed'])
+})
+
 test('background landing cannot pin terminal state, subscribers, or the next same-chat job', async () => {
   const landingNeverFinishes = new Promise(() => {})
   let workspaceOwned = false
@@ -509,6 +539,31 @@ test('shutdown fences a pending admission, releases its acquired lease, and reje
   assert.equal(laterError?.code, 'chat_job_shutting_down')
   assert.equal(providerRuns, 0)
   assert.equal(releases, 1)
+  assert.equal(service.hasRunningJobs(), false)
+})
+
+test('shutdown aborts and awaits a cancellation-aware pending admission', async () => {
+  let admissionSignal = null
+  let admissionStarted
+  const started = new Promise((resolve) => { admissionStarted = resolve })
+  const service = new ChatJobService({
+    admit: async (_input, _owner, runtime) => {
+      admissionSignal = runtime.signal
+      admissionStarted()
+      await new Promise((resolve) => runtime.signal.addEventListener('abort', resolve, { once: true }))
+      throw new ChatJobError('run_cancelled', 'admission stopped', 499)
+    },
+    runLocal: async () => { throw new Error('provider must not run') },
+    runRemote: async () => { throw new Error('provider must not run') },
+  })
+  const starting = service.start({ jobId: JOB_A, kind: 'local', request: { prompt: 'pending' } })
+  await started
+
+  const shutdown = service.shutdown()
+
+  assert.equal(admissionSignal.aborted, true)
+  await assert.rejects(starting, (error) => error?.code === 'run_cancelled')
+  await shutdown
   assert.equal(service.hasRunningJobs(), false)
 })
 

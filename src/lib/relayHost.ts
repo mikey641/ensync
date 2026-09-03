@@ -244,11 +244,16 @@ export interface GitUnlandedResult {
 }
 
 export interface GitLandResult {
-  land: { branch: string; mergedInto: string; mergeHead: string; completedAt: string }
-  git: GitStatus
+  land: {
+    disposition: 'queued'
+    branch: string
+    savedSha: string
+    completionSequence: number | null
+    queuedAt: string
+  }
 }
 
-export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid'>
+export type ChatProviderId = Extract<CliProviderId, 'codex' | 'claude' | 'droid' | 'cursor'>
 export type ChatModelEffort = 'low' | 'medium' | 'high' | 'max'
 
 export type ChatRunRequest = {
