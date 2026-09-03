@@ -821,6 +821,7 @@ function subscriptionAuthenticationAllowed(provider) {
   if (provider.id === 'claude') {
     return ['claude.ai', 'oauth', 'subscription'].some((signal) => method.includes(signal))
   }
+  if (provider.id === 'droid') return method.includes('factory')
   return false
 }
 
