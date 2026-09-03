@@ -1,8 +1,6 @@
 import { open, realpath, stat } from 'node:fs/promises'
-import { basename, dirname, extname, isAbsolute, relative } from 'node:path'
-import { autoLandWorkspace } from './auto-land.mjs'
+import { basename, dirname, extname, isAbsolute, relative, sep } from 'node:path'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
-import { runLandCheck } from './land-check.mjs'
 import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { CodebuddyExecError, CodebuddyExecRunner, CODEBUDDY_PERMISSION_MODE } from './codebuddy-exec.mjs'
@@ -253,7 +251,6 @@ const DEFAULT_QUESTION_HOLD_TIMEOUT_MS = 60 * 60 * 1_000
 // pins a finished run as "Working" forever and queues every later message in
 // that chat behind a turn that ended. This ceiling only ends the *landing*:
 // the run's outcome and its committed branch are already safe either way.
-const DEFAULT_AUTO_LAND_TIMEOUT_MS = 30 * 60 * 1_000
 // There is no absolute run ceiling by default; this conservative ceiling is
 // applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
 const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
@@ -444,28 +441,16 @@ Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${worksp
   ${prompt}`
 }
 
-function conflictResolutionPrompt({ branch, baselineSha, conflictFiles, overlaps = [] }) {
-  return `[ENSYNC HOST CONFLICT RESOLUTION]
-Ensync merged baseline commit ${baselineSha} into this conversation's protected branch ${branch} so the finished work can land, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
+function conflictResolutionPrompt({ item, conflictFiles }) {
+  return `[ENSYNC HOST AUTOMATIC LANDING CONFLICT]
+Ensync is integrating the exact saved commit ${item.savedSha} from ${item.branch} in a temporary landing worktree, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
 1. Inspect the conflicts with \`git status\` and \`git diff\`.
-2. Edit each conflicted file so the baseline changes and this branch's changes are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible; prefer the baseline's intent for changes this conversation did not make.
+2. Edit each conflicted file so the already-landed changes and this saved commit are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible.
 3. Stage each resolved file with \`git add\`.
 4. Conclude the merge with \`git commit --no-verify --no-edit\`.
 Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
 Conflicted files:
-  ${conflictFiles.map((file) => `- ${file}`).join('\n')}
-  ${workspaceOverlapPrompt(overlaps)}`
-}
-
-function landCheckRepairPrompt({ branch, baselineSha, reason, output, overlaps = [] }) {
-  return `[ENSYNC HOST LAND CHECK REPAIR]
-Ensync merged this conversation's branch ${branch} into the baseline and ran the repository's land check (npm run land:check). The check failed, so the merge was rolled back. Baseline commit ${baselineSha} is already merged into the protected worktree that is the current working directory. Your only task is to make the land check pass here:
-1. Reproduce the failure if possible (npm run land:check) or work from the failure output below.
-2. This failure usually means the merge silently dropped code one side depends on — for example a declaration or import whose usages survived. Compare this branch with the baseline (git log, git show, git diff) and restore the missing code. Do not delete working features just to silence the check.
-3. Commit the fix with git add and git commit --no-verify.
-Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
-  Failure: ${reason}${output ? `\nCheck output:\n${output}` : ''}
-  ${workspaceOverlapPrompt(overlaps)}`
+  ${conflictFiles.map((file) => `- ${file}`).join('\n')}`
 }
 
 function timeoutMessage(providerName, timeoutReason) {
@@ -1234,12 +1219,7 @@ export class ChatRunService {
   #claudeQuestionChannels = new Map()
   #projectIsolation
   #workspaceOverlapMonitor
-  #autoLand
-  #autoPushLanded
-  #autoLandWorkspace
-  #autoLandTimeoutMs
-  #gitExecutable
-  #landCheck
+  #landingCoordinator
   #activeRuns = 0
 
   constructor(options = {}) {
@@ -1254,12 +1234,7 @@ export class ChatRunService {
       ?? configuredHardTimeoutMs(this.#environment, INVALID_HARD_TIMEOUT_FALLBACK_MS)
     this.#projectIsolation = options.projectIsolation ?? null
     this.#workspaceOverlapMonitor = options.workspaceOverlapMonitor ?? null
-    this.#autoLand = options.autoLand !== false
-    this.#autoPushLanded = options.autoPushLanded !== false
-    this.#autoLandWorkspace = options.autoLandWorkspace ?? autoLandWorkspace
-    this.#autoLandTimeoutMs = options.autoLandTimeoutMs ?? DEFAULT_AUTO_LAND_TIMEOUT_MS
-    this.#gitExecutable = options.gitExecutable
-    this.#landCheck = options.landCheck ?? runLandCheck
+    this.#landingCoordinator = options.landingCoordinator ?? null
     this.#codexLiveTurns = options.codexLiveTurnRunner ?? new CodexLiveTurnRunner({
       inactivityTimeoutMs: this.#inactivityTimeoutMs,
       hardTimeoutMs: this.#hardTimeoutMs,
@@ -1760,12 +1735,14 @@ export class ChatRunService {
       combinedSignal.dispose()
       if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
         let agentWorkSaved = true
+        let savedHead = null
         try {
           const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
             outcome: runOutcome,
             provider: request.provider,
             jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
           })
+          savedHead = typeof workCommit.head === 'string' ? workCommit.head : null
           if (workCommit.committed) {
             options.onEvent?.({
               type: 'notice',
@@ -1802,16 +1779,38 @@ export class ChatRunService {
           // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip lease release.
         }
         await refreshOverlapSession(workspaceOverlapSession, options.onEvent)
-        if (runOutcome === 'succeeded' && this.#autoLand && request.autoLand !== false && agentWorkSaved && !options.signal?.aborted) {
-          await this.#autoLandAfterRun(
-            provider,
-            request,
-            workspace,
-            containment,
-            workspaceLease,
-            workspaceOverlapSession,
-            options,
-          )
+        if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved) {
+          let landingError = null
+          if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(savedHead ?? '')) {
+            landingError = new Error('the protected branch did not return an exact saved commit')
+          } else {
+            try {
+              const landing = await this.#landingCoordinator.enqueue({
+                repositoryPath: workspace.shared.repositoryPath,
+                projectPath: workspace.canonicalProjectPath,
+                workspacePath: workspace.repositoryPath,
+                branch: workspace.branch,
+                savedSha: savedHead,
+                provider: request.provider,
+              })
+              options.onEvent?.({
+                type: 'notice',
+                code: 'automatic_landing_queued',
+                message: `Queued ${workspace.branch} at ${savedHead.slice(0, 12)} for immediate automatic landing (FIFO ${landing.completionSequence ?? 'pending'}).`,
+                at: new Date().toISOString(),
+              })
+            } catch (error) {
+              landingError = error
+            }
+          }
+          if (landingError) {
+            options.onEvent?.({
+              type: 'notice',
+              code: 'automatic_landing_queue_failed',
+              message: `Ensync saved ${workspace.branch}, but could not queue automatic landing: ${landingError instanceof Error ? landingError.message : 'unknown error'}. The saved commit remains recoverable.`,
+              at: new Date().toISOString(),
+            })
+          }
         }
       }
       await stopOverlapSession(workspaceOverlapSession, options.onEvent)
@@ -1831,100 +1830,43 @@ export class ChatRunService {
   }
 
   /**
-   * Automatic landing runs only for verified successful local runs whose work
-   * committed cleanly; failed, cancelled, timed-out, and SSH runs keep their
-   * branches unlanded for explicit review. Any failure here is reported as a
-   * notice and never changes the finished run's outcome.
+   * Resolve a genuine background-train conflict with the same verified,
+   * subscription-authenticated provider that produced the saved snapshot.
+   * This run belongs to the landing coordinator, never to the completed chat.
    */
-  async #autoLandAfterRun(provider, request, workspace, containment, workspaceLease, overlapSession, options) {
-    const landTimeout = new AbortController()
-    let landTimedOut = false
-    const landTimer = this.#autoLandTimeoutMs > 0
-      ? setTimeout(() => {
-        landTimedOut = true
-        options.onEvent?.({
-          type: 'notice',
-          code: 'auto_land_timed_out',
-          message: `Automatic landing of ${workspace.branch} did not finish within ${Math.round(this.#autoLandTimeoutMs / 60_000)} minutes and was stopped. The work stays on ${workspace.branch} for explicit review and landing.`,
-          at: new Date().toISOString(),
-        })
-        landTimeout.abort(new Error('Automatic landing exceeded its time limit.'))
-      }, this.#autoLandTimeoutMs)
-      : null
-    const landSignal = combinedAbortSignal(options.signal, workspaceLease?.signal, landTimeout.signal)
-    try {
-      await this.#autoLandWorkspace(workspace, {
-        allowedRoots: this.#allowedRoots,
-        gitExecutable: this.#gitExecutable,
-        signal: landSignal.signal,
-        onNotice: (code, message) => options.onEvent?.({
-          type: 'notice',
-          code,
-          message,
-          at: new Date().toISOString(),
-        }),
-        runConflictAgent: async (details) => {
-          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
-          return this.#runConflictResolutionAgent(provider, request, workspace, containment, {
-            ...details,
-            overlaps,
-          }, {
-            onEvent: options.onEvent,
-            signal: landSignal.signal,
-          })
-        },
-        verifyLand: (details) => this.#landCheck(details.repositoryPath, {
-          environment: this.#environment,
-          signal: landSignal.signal,
-        }),
-        runRepairAgent: async (details) => {
-          const overlaps = await refreshOverlapSession(overlapSession, options.onEvent)
-          return this.#runLandCheckRepairAgent(provider, request, workspace, containment, {
-            ...details,
-            overlaps,
-          }, {
-            onEvent: options.onEvent,
-            signal: landSignal.signal,
-          })
-        },
-        autoPush: this.#autoPushLanded,
-      })
-    } catch (error) {
-      // A timed-out land already reported itself; the abort it raises here is
-      // that same stop, not a second, different failure.
-      if (!landTimedOut) {
-        options.onEvent?.({
-          type: 'notice',
-          code: 'auto_land_failed',
-          message: `Automatic landing of ${workspace.branch} failed: ${error instanceof Error ? error.message : 'unknown error'}. The work stays on ${workspace.branch} for explicit review and landing.`,
-          at: new Date().toISOString(),
-        })
-      }
-    } finally {
-      if (landTimer) clearTimeout(landTimer)
-      landSignal.dispose()
+  async resolveLandingConflict(details, runtime = {}) {
+    const providerId = details?.item?.provider
+    const provider = await this.#statusService.get(providerId, { refresh: true })
+    if (!provider?.installed || !provider.executable) {
+      throw new ChatRunError('provider_unavailable', `${providerLabel(providerId)} is unavailable for automatic conflict resolution.`, 409, true)
     }
-  }
-
-  /**
-   * Runs the same provider CLI as a fresh, sessionless turn inside the
-   * protected worktree to resolve an in-progress baseline merge. The run is
-   * verified the same way a normal run is: process exit, cancellation,
-   * timeout, and a parseable completed provider result.
-   */
-  async #runConflictResolutionAgent(provider, request, workspace, containment, details, runtime) {
-    await this.#runWorktreeAgentRun(provider, request, workspace, containment, conflictResolutionPrompt(details), {
-      code: 'conflict_resolution_failed',
-      label: 'conflict-resolution',
-    }, runtime)
-  }
-
-  /** Same contained provider run, prompted to repair a rolled-back land check. */
-  async #runLandCheckRepairAgent(provider, request, workspace, containment, details, runtime) {
-    await this.#runWorktreeAgentRun(provider, request, workspace, containment, landCheckRepairPrompt(details), {
-      code: 'land_check_repair_failed',
-      label: 'land-check repair',
-    }, runtime)
+    if (provider.authentication?.state !== 'authenticated' || !subscriptionAuthenticationAllowed(provider)) {
+      throw new ChatRunError('subscription_auth_required', `${provider.name} needs its subscription login before it can resolve automatic landing conflicts.`, 409, true)
+    }
+    const projectRelativePath = relative(details?.worktreePath ?? '', details?.projectPath ?? '')
+    if (
+      !isAbsolute(details.worktreePath)
+      || !isAbsolute(details.projectPath)
+      || projectRelativePath === '..'
+      || projectRelativePath.startsWith(`..${sep}`)
+    ) {
+      throw new ChatRunError('invalid_project', 'The automatic landing conflict escaped its temporary worktree.', 409)
+    }
+    const request = { provider: providerId, model: null, effort: null }
+    const workspace = { repositoryPath: details.projectPath }
+    const containment = {
+      worktreePath: details.worktreePath,
+      canonicalRepositoryPath: details.item.repositoryPath,
+    }
+    await this.#runWorktreeAgentRun(
+      provider,
+      request,
+      workspace,
+      containment,
+      conflictResolutionPrompt(details),
+      { code: 'conflict_resolution_failed', label: 'conflict-resolution' },
+      { onEvent: runtime.onEvent, signal: details.signal ?? runtime.signal },
+    )
   }
 
   async #runWorktreeAgentRun(provider, request, workspace, containment, rawPrompt, failure, runtime) {

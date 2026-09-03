@@ -1751,11 +1751,17 @@ test('arguments carry no containment flags without a protected workspace', () =>
   }
 })
 
-test('ChatRunService bounds a hung automatic land so the finished run still completes', { timeout: 10_000 }, async (context) => {
+test('ChatRunService completes after exact-SHA enqueue without awaiting background landing', { timeout: 10_000 }, async (context) => {
   const projectPath = await projectFixture(context)
+  const savedSha = 'a'.repeat(40)
   const lease = {
     workspace: {
-      projectPath, repositoryPath: projectPath, branch: 'ensync/chat-hung-land', base: null, integration: null,
+      canonicalProjectPath: projectPath,
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-detached-land',
+      base: null,
+      integration: null,
       gitBefore: { dirty: false, changedFiles: 0 },
       shared: { repositoryPath: projectPath },
     },
@@ -1764,22 +1770,21 @@ test('ChatRunService bounds a hung automatic land so the finished run still comp
     async release() {},
   }
   const notices = []
-  let landAborted = false
+  const landingNeverFinishes = new Promise(() => {})
+  let enqueued = null
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
     projectIsolation: {
-      async commitAgentWork() { return { committed: true, changedFiles: 1 } },
+      async commitAgentWork() { return { committed: true, changedFiles: 1, head: savedSha } },
       async checkSharedCheckout() { return { available: false } },
     },
-    autoLandTimeoutMs: 25,
-    // A land that never settles on its own: exactly the stall that pinned a
-    // finished run as "Working" until the window was reopened.
-    autoLandWorkspace: (_workspace, options) => new Promise((_resolve, reject) => {
-      options.signal.addEventListener('abort', () => {
-        landAborted = true
-        reject(new Error('landing aborted'))
-      }, { once: true })
-    }),
+    landingCoordinator: {
+      async enqueue(input) {
+        enqueued = input
+        queueMicrotask(() => void landingNeverFinishes)
+        return { ...input, id: 'landing-1', state: 'queued' }
+      },
+    },
     processRunner: async () => ({
       exitCode: 0, error: null, timedOut: false, stderr: '',
       stdout: [
@@ -1796,10 +1801,52 @@ test('ChatRunService bounds a hung automatic land so the finished run still comp
   )
 
   assert.equal(result.response, 'done')
-  assert.equal(landAborted, true)
-  const timedOut = notices.find((notice) => notice.code === 'auto_land_timed_out')
-  assert.ok(timedOut, `expected an auto_land_timed_out notice, saw: ${notices.map((n) => n.code).join(', ')}`)
-  assert.match(timedOut.message, /ensync\/chat-hung-land/)
+  assert.deepEqual(enqueued, {
+    repositoryPath: projectPath,
+    projectPath,
+    workspacePath: projectPath,
+    branch: 'ensync/chat-detached-land',
+    savedSha,
+    provider: 'codex',
+  })
+  assert.ok(notices.some((notice) => notice.code === 'automatic_landing_queued'))
+})
+
+test('background conflict resolution keeps subscription auth and temporary-worktree containment', async (context) => {
+  const worktreePath = await projectFixture(context)
+  let processOptions = null
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    processRunner: async (_executable, _args, options) => {
+      processOptions = options
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'resolved' } }),
+          JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.resolveLandingConflict({
+    item: {
+      provider: 'codex',
+      branch: 'ensync/chat-conflict',
+      savedSha: 'b'.repeat(40),
+      repositoryPath: worktreePath,
+    },
+    worktreePath,
+    projectPath: worktreePath,
+    conflictFiles: ['src/feature.ts'],
+    signal: new AbortController().signal,
+  })
+
+  assert.equal(processOptions.cwd, worktreePath)
+  assert.match(processOptions.input, /ENSYNC HOST AUTOMATIC LANDING CONFLICT/)
+  assert.match(processOptions.input, new RegExp('b{40}'))
+  assert.match(processOptions.input, /src\/feature\.ts/)
 })
 
 // `AskUserQuestion` is the one Claude tool that is not work: it is the agent

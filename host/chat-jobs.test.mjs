@@ -68,6 +68,41 @@ test('a detached subscriber can reconnect without cancelling the provider job', 
   assert.equal(service.get(JOB_A).providerProcessStarted, true)
 })
 
+test('background landing cannot pin terminal state, subscribers, or the next same-chat job', async () => {
+  const landingNeverFinishes = new Promise(() => {})
+  let workspaceOwned = false
+  let executions = 0
+  const service = new ChatJobService({
+    admit: async () => {
+      if (workspaceOwned) return { disposition: 'occupied', owner: { jobId: JOB_A } }
+      workspaceOwned = true
+      return {
+        disposition: 'acquired',
+        lease: {
+          async release() { workspaceOwned = false },
+        },
+      }
+    },
+    runLocal: async (_request, options) => {
+      executions += 1
+      options.onEvent({ type: 'notice', code: 'automatic_landing_queued', at: new Date().toISOString() })
+      queueMicrotask(() => void landingNeverFinishes)
+      return { provider: 'codex', response: 'done', completedAt: new Date().toISOString() }
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'first' } })
+  let firstEnded = false
+  service.subscribe(JOB_A, { onEvent() {}, onEnd() { firstEnded = true } })
+  await waitFor(() => service.get(JOB_A).state === 'completed' && firstEnded)
+  await service.start({ jobId: JOB_B, kind: 'local', request: { provider: 'codex', prompt: 'second' } })
+  await waitFor(() => service.get(JOB_B).state === 'completed')
+
+  assert.equal(executions, 2)
+  assert.equal(workspaceOwned, false)
+})
+
 test('a repaired provider stream is reported as recovery instead of a chat error', async () => {
   const service = new ChatJobService({
     runLocal: async () => ({

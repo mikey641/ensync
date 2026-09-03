@@ -136,7 +136,8 @@ async function stop(exitCode = 0) {
 
 function daemonBusy() {
   const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
-  return brokerConnected || shouldKeepDaemonAlive(
+  const landingActive = server.ensyncServices.landingCoordinator?.hasActiveWork?.() === true
+  return brokerConnected || landingActive || shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )

@@ -60,6 +60,10 @@ export class LandingCoordinator {
     return new Promise((resolve) => this.idleWaiters.add(resolve))
   }
 
+  hasActiveWork() {
+    return !this.#isIdle()
+  }
+
   #repositoryKey(path) {
     return this.platform === 'win32' ? path.toLowerCase() : path
   }
