@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { runLandCheck } from './land-check.mjs'
+import { runLandCheck, runLandQuickCheck } from './land-check.mjs'
 
 async function repositoryFixture(context, scripts) {
   const repositoryPath = await mkdtemp(join(tmpdir(), 'relay-land-check-test-'))
@@ -82,4 +82,35 @@ test('a timed-out land check skips verification instead of blocking automerge', 
   assert.equal(result.ok, true)
   assert.equal(result.skipped, true)
   assert.match(result.reason, /did not finish/)
+})
+
+test('land:quick is optional but runs once with a short bounded gate when present', async (context) => {
+  const repositoryPath = await repositoryFixture(context, { 'land:quick': 'npm test -- --quick' })
+  const calls = []
+  const result = await runLandQuickCheck(repositoryPath, {
+    processRunner: async (executable, args, options) => {
+      calls.push({ executable, args, options })
+      return { exitCode: 0, error: null, timedOut: false, stdout: '', stderr: '' }
+    },
+  })
+
+  assert.equal(result.ok, true)
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].args, ['run', 'land:quick'])
+  assert.ok(calls[0].options.hardTimeoutMs < 5 * 60_000)
+})
+
+test('an unavailable or timed-out land:quick gate fails closed', async (context) => {
+  const repositoryPath = await repositoryFixture(context, { 'land:quick': 'npm test -- --quick' })
+  const unavailable = await runLandQuickCheck(repositoryPath, {
+    processRunner: async () => ({ exitCode: null, error: 'spawn npm ENOENT', timedOut: false, stdout: '', stderr: '' }),
+  })
+  const timedOut = await runLandQuickCheck(repositoryPath, {
+    processRunner: async () => ({ exitCode: null, error: null, timedOut: true, stdout: '', stderr: '' }),
+  })
+
+  assert.equal(unavailable.ok, false)
+  assert.equal(timedOut.ok, false)
+  assert.match(unavailable.reason, /could not run/)
+  assert.match(timedOut.reason, /did not finish/)
 })

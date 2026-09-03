@@ -170,6 +170,15 @@ export class AgentWorktreeClient {
     }
   }
 
+  async remove(input = {}) {
+    const repositoryPath = requiredPath(input.repositoryPath, 'repository path')
+    const branch = requiredName(input.branch, 'branch')
+    const args = ['rm']
+    if (input.force) args.push('--force')
+    args.push('--', branch)
+    return this.#invoke('remove', args, repositoryPath)
+  }
+
   async #invoke(operation, args, cwd) {
     try {
       const result = await this.run(this.executable, args, {

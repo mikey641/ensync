@@ -3,7 +3,9 @@ import { join } from 'node:path'
 import { runProcess } from './command.mjs'
 
 export const LAND_CHECK_SCRIPT = 'land:check'
+export const LAND_QUICK_CHECK_SCRIPT = 'land:quick'
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1_000
+const DEFAULT_QUICK_TIMEOUT_MS = 60_000
 const OUTPUT_TAIL_CHARACTERS = 4_000
 const MAX_CHECK_OUTPUT_BYTES = 256 * 1024
 
@@ -22,19 +24,43 @@ function outputTail(result) {
  * completion and failed reports ok: false.
  */
 export async function runLandCheck(repositoryPath, options = {}) {
+  return runRepositoryCheck(repositoryPath, LAND_CHECK_SCRIPT, {
+    ...options,
+    failClosedOnInfrastructure: false,
+    retryOnFailure: options.retryOnFailure !== false,
+    timeoutMs: options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  })
+}
+
+/**
+ * Optional fast gate used by automatic landing trains. Unlike the historical
+ * full gate, an explicitly configured quick check fails closed when its
+ * executable disappears or times out; configured verification is never
+ * silently bypassed.
+ */
+export async function runLandQuickCheck(repositoryPath, options = {}) {
+  return runRepositoryCheck(repositoryPath, LAND_QUICK_CHECK_SCRIPT, {
+    ...options,
+    failClosedOnInfrastructure: true,
+    retryOnFailure: false,
+    timeoutMs: options.timeoutMs ?? DEFAULT_QUICK_TIMEOUT_MS,
+  })
+}
+
+async function runRepositoryCheck(repositoryPath, scriptName, options) {
   let scripts
   try {
     scripts = JSON.parse(await readFile(join(repositoryPath, 'package.json'), 'utf8'))?.scripts
   } catch {
-    return { ok: true, skipped: true, reason: 'This repository has no readable package.json, so there is no land check to run.' }
+    return { ok: true, skipped: true, reason: `This repository has no readable package.json, so there is no ${scriptName} check to run.` }
   }
-  if (typeof scripts?.[LAND_CHECK_SCRIPT] !== 'string' || !scripts[LAND_CHECK_SCRIPT].trim()) {
-    return { ok: true, skipped: true, reason: `This repository defines no ${LAND_CHECK_SCRIPT} script, so there is no land check to run.` }
+  if (typeof scripts?.[scriptName] !== 'string' || !scripts[scriptName].trim()) {
+    return { ok: true, skipped: true, reason: `This repository defines no ${scriptName} script, so there is no check to run.` }
   }
 
   const run = options.processRunner ?? runProcess
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-  const invoke = () => run(options.npmExecutable ?? 'npm', ['run', LAND_CHECK_SCRIPT], {
+  const timeoutMs = options.timeoutMs
+  const invoke = () => run(options.npmExecutable ?? 'npm', ['run', scriptName], {
     cwd: repositoryPath,
     env: options.environment ?? process.env,
     inactivityTimeoutMs: timeoutMs,
@@ -47,20 +73,22 @@ export async function runLandCheck(repositoryPath, options = {}) {
   // Suites with timing-sensitive tests can fail under the load of concurrent
   // agent runs. A flaky red would roll back a good merge, so a failure is
   // confirmed by a second run; a genuine break fails both times.
-  if (!result.error && !result.timedOut && result.exitCode !== 0 && options.retryOnFailure !== false) {
+  if (!result.error && !result.timedOut && result.exitCode !== 0 && options.retryOnFailure) {
     result = await invoke()
   }
 
   if (result.error) {
-    return { ok: true, skipped: true, reason: `npm could not run the ${LAND_CHECK_SCRIPT} script (${result.error}), so the land was not verified.` }
+    const failure = { reason: `npm could not run the ${scriptName} script (${result.error}), so the land was not verified.` }
+    return options.failClosedOnInfrastructure ? { ok: false, ...failure } : { ok: true, skipped: true, ...failure }
   }
   if (result.timedOut) {
-    return { ok: true, skipped: true, reason: `The ${LAND_CHECK_SCRIPT} script did not finish within its time limit, so the land was not verified.` }
+    const failure = { reason: `The ${scriptName} script did not finish within its time limit, so the land was not verified.` }
+    return options.failClosedOnInfrastructure ? { ok: false, ...failure } : { ok: true, skipped: true, ...failure }
   }
   if (result.exitCode === 0) return { ok: true }
   return {
     ok: false,
-    reason: `The repository's ${LAND_CHECK_SCRIPT} script failed (exit ${result.exitCode}).`,
+    reason: `The repository's ${scriptName} script failed (exit ${result.exitCode}).`,
     output: outputTail(result),
   }
 }

@@ -103,6 +103,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
   await client.continueSync({ worktreePath: '/repo/chat-1' })
   await client.abortSync({ worktreePath: '/repo/chat-1' })
   await client.merge({ worktreePath: '/repo/chat-1', into: 'main', strategy: 'merge', delete: true })
+  await client.remove({ repositoryPath: '/repo', branch: 'ensync/chat-1' })
 
   assert.deepEqual(calls.map(({ args }) => args), [
     ['ls', '--json'],
@@ -113,6 +114,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
     ['sync', '--continue'],
     ['sync', '--abort'],
     ['merge', '--strategy', 'merge', '--into', 'main', '--delete'],
+    ['rm', '--', 'ensync/chat-1'],
   ])
   for (const call of calls) {
     assert.equal(call.file, '/tools/wt')
