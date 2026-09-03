@@ -2034,6 +2034,7 @@ kbd {
 }
 
 .message--user {
+  position: relative;
   width: fit-content;
   max-width: min(82%, 640px);
   margin-left: auto;
@@ -2054,6 +2055,13 @@ kbd {
 
 .message--user .message__body {
   padding-top: 0;
+}
+
+.message--user .message-actions {
+  position: absolute;
+  inset-inline-end: 0;
+  inset-block-end: -29px;
+  margin-top: 0;
 }
 
 .message--user p {
