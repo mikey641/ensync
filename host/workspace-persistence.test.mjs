@@ -13,6 +13,7 @@ import {
   reconcileInterruptedWorkspaceState,
 } from '../src/lib/workspacePersistence.mjs'
 import { workspaceStorageKey } from '../src/lib/nativeWorkspaceIdentity.mjs'
+import * as splitLayoutPersistence from '../src/lib/splitLayoutPersistence.mjs'
 import {
   largestPaneScrollLeft,
   selectSplitLayoutSource,
@@ -49,6 +50,46 @@ test('temporary largest-pane sizing keeps every visible pane in the layout', () 
     storedSizes,
   )
   assert.deepEqual(storedSizes, { 'tab-a': 2, 'tab-b': 0.5, 'tab-c': 2 })
+})
+
+test('an ordinary active split pane becomes the viewport alignment target', () => {
+  assert.equal(
+    splitLayoutPersistence.splitPaneAlignmentTabId?.(
+      'split',
+      'tab-right',
+      null,
+      ['tab-left', 'tab-right'],
+    ),
+    'tab-right',
+  )
+})
+
+test('active-pane alignment chooses a scroll-snap point that fully reveals the pane', () => {
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 0,
+      paneLeft: 612,
+      paneWidth: 306,
+      viewportWidth: 812,
+      scrollWidth: 1224,
+      snapPoints: [0, 306, 612, 924],
+    }),
+    306,
+  )
+})
+
+test('fractional snap geometry never leaves a sliver of the active pane clipped', () => {
+  assert.equal(
+    largestPaneScrollLeft({
+      scrollLeft: 0,
+      paneLeft: 306,
+      paneWidth: 506.4,
+      viewportWidth: 812,
+      scrollWidth: 1224,
+      snapPoints: [0, 306, 612, 924],
+    }),
+    306,
+  )
 })
 
 test('the largest pane scrolls fully into view instead of hanging past the right window edge', () => {
