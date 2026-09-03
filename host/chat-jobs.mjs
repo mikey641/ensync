@@ -284,6 +284,7 @@ export class ChatJobService {
       eventCharacters: 0,
       subscribers: new Set(),
       controller: new AbortController(),
+      cancellationReason: null,
       completion: null,
       workspaceLease: admission.lease ?? null,
       steerDeliveries: new Map(),
@@ -336,7 +337,10 @@ export class ChatJobService {
   cancel(jobId) {
     const job = this.#jobs.get(assertJobId(jobId))
     if (!job) throw new ChatJobError('chat_job_not_found', 'That chat job is no longer available.', 404)
-    if (job.state === 'running' && !job.controller.signal.aborted) job.controller.abort()
+    if (job.state === 'running' && !job.controller.signal.aborted) {
+      job.cancellationReason = 'user'
+      job.controller.abort()
+    }
     return this.#publicJob(job)
   }
 
@@ -359,7 +363,10 @@ export class ChatJobService {
     const pending = starting.map((item) => item.promise)
     await Promise.allSettled(pending)
     const running = [...this.#jobs.values()].filter((job) => job.state === 'running')
-    for (const job of running) job.controller.abort()
+    for (const job of running) {
+      job.cancellationReason = 'host_shutdown'
+      job.controller.abort()
+    }
     await Promise.allSettled(running.map((job) => job.completion).filter(Boolean))
     this.#flushPersist()
   }
@@ -531,6 +538,19 @@ export class ChatJobService {
       this.#record(job, { type: 'completed', result, at: job.finishedAt })
     } catch (error) {
       const payload = this.#normalizeError(error)
+      if (job.cancellationReason === 'host_shutdown') {
+        job.state = 'failed'
+        job.finishedAt = this.#now()
+        this.#record(job, {
+          type: 'error',
+          error: 'Ensync Host ended before this provider run reported a terminal result. Project activity may be partial; reconcile before continuing.',
+          code: 'host_job_orphaned',
+          status: 409,
+          safeToRetry: false,
+          at: job.finishedAt,
+        })
+        return
+      }
       const cancelled = payload.code === 'run_cancelled' || job.controller.signal.aborted
       job.state = cancelled ? 'cancelled' : 'failed'
       job.finishedAt = this.#now()
@@ -624,6 +644,7 @@ export class ChatJobService {
   #restoreJournal() {
     if (!this.#journal) return
     const restored = this.#journal.load()
+    let journalNeedsRewrite = false
     for (const item of restored) {
       if (!item || typeof item !== 'object') continue
       try { assertJobId(item.id) } catch { continue }
@@ -649,6 +670,7 @@ export class ChatJobService {
         eventCharacters: events.reduce((total, event) => total + eventSize(event), 0),
         subscribers: new Set(),
         controller: new AbortController(),
+        cancellationReason: null,
         completion: null,
         workspaceLease: null,
         steerDeliveries: new Map(),
@@ -656,8 +678,12 @@ export class ChatJobService {
         navigationPredecessorFingerprint: null,
       }
       this.#jobs.set(job.id, job)
+      if (job.state !== 'running'
+        && (events.length !== 1 || !['completed', 'error', 'cancelled'].includes(events[0]?.type))) {
+        journalNeedsRewrite = true
+      }
     }
-    this.#trimExpiredJobs()
+    journalNeedsRewrite = this.#trimExpiredJobs() || journalNeedsRewrite
     let reconciled = false
     for (const job of this.#jobs.values()) {
       if (job.state !== 'running') continue
@@ -676,7 +702,7 @@ export class ChatJobService {
       job.eventCharacters += eventSize(recorded)
       reconciled = true
     }
-    if (reconciled) this.#persist()
+    if (reconciled || journalNeedsRewrite) this.#persist()
   }
 
   #persist() {
@@ -690,7 +716,13 @@ export class ChatJobService {
       finishedAt: job.finishedAt,
       providerProcessStarted: job.providerProcessStarted,
       sequence: job.sequence,
-      events: job.events.map(journalSafe),
+      // A finished job's terminal event contains the complete result or exact
+      // failure needed for renderer recovery. Persisting its entire live
+      // stream forever made every active checkpoint rewrite all prior output.
+      events: (job.state === 'running'
+        ? job.events
+        : job.events.filter((event) => ['completed', 'error', 'cancelled'].includes(event.type)).slice(-1)
+      ).map(journalSafe),
     }))
     this.#journal.save(jobs)
   }

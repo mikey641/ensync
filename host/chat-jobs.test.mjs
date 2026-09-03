@@ -581,6 +581,30 @@ test('shutdown aborts and awaits a cancellation-aware pending admission', async 
   assert.equal(service.hasRunningJobs(), false)
 })
 
+test('Host shutdown marks an active provider run interrupted instead of stopped by the user', async () => {
+  let providerStarted
+  const started = new Promise((resolve) => { providerStarted = resolve })
+  const service = new ChatJobService({
+    runLocal: async (_request, options) => {
+      providerStarted()
+      await new Promise((resolve) => options.signal.addEventListener('abort', resolve, { once: true }))
+      throw new ChatJobError('run_cancelled', 'Run stopped by user.', 499)
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { prompt: 'active work' } })
+  await started
+  await service.shutdown()
+
+  assert.equal(service.get(JOB_A).state, 'failed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  assert.equal(events.at(-1).type, 'error')
+  assert.equal(events.at(-1).code, 'host_job_orphaned')
+  assert.doesNotMatch(events.at(-1).error, /stopped by user/i)
+})
+
 test('a running local Codex job accepts steering while unsupported jobs reject it safely', async () => {
   let releaseCodex
   let codexStarted = false
@@ -879,6 +903,68 @@ test('frequent live output checkpoints are batched while terminal events remain 
   release()
   await waitFor(() => service.get(JOB_A).state === 'completed')
   assert.equal(saves, 4)
+})
+
+test('finished jobs persist only the terminal recovery event', async () => {
+  const saves = []
+  const journal = {
+    load: () => [],
+    save: (jobs) => saves.push(structuredClone(jobs)),
+  }
+  const service = new ChatJobService({
+    journal,
+    runLocal: async (_request, options) => {
+      options.onEvent({ type: 'started', at: '2026-08-07T10:00:00.000Z' })
+      options.onEvent({ type: 'output', text: 'large transient provider output' })
+      return { provider: 'codex', response: 'durable final response' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'continue' } })
+  await waitFor(() => service.get(JOB_A).state === 'completed')
+
+  const persisted = saves.at(-1).find((job) => job.id === JOB_A)
+  assert.deepEqual(persisted.events.map((event) => event.type), ['completed'])
+  assert.equal(persisted.events[0].result.response, 'durable final response')
+})
+
+test('restoring a legacy finished stream rewrites it as one terminal recovery event', () => {
+  const saves = []
+  const now = new Date().toISOString()
+  const journal = {
+    load: () => [{
+      id: JOB_A,
+      kind: 'local',
+      requestHash: 'legacy-request-hash',
+      state: 'completed',
+      startedAt: now,
+      finishedAt: now,
+      providerProcessStarted: true,
+      sequence: 3,
+      events: [
+        { type: 'started', sequence: 1, at: now },
+        { type: 'output', text: 'large legacy provider output', sequence: 2, at: now },
+        {
+          type: 'completed',
+          result: { provider: 'codex', response: 'durable final response' },
+          sequence: 3,
+          at: now,
+        },
+      ],
+    }],
+    save: (jobs) => saves.push(structuredClone(jobs)),
+  }
+
+  new ChatJobService({
+    journal,
+    runLocal: async () => { throw new Error('not used') },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  assert.equal(saves.length, 1)
+  assert.deepEqual(saves[0][0].events.map((event) => event.type), ['completed'])
+  assert.equal(saves[0][0].events[0].result.response, 'durable final response')
 })
 
 // Fixtures the production writer cannot produce: a save() always stamps

@@ -1231,6 +1231,14 @@ test('quota retry safety requires a structured terminal failure with zero activi
     JSON.stringify({ type: 'system', subtype: 'init' }),
     JSON.stringify({ type: 'result', is_error: true, result: 'Quota exceeded' }),
   ].join('\n')
+  const claudeSessionLimit = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({
+      type: 'result',
+      is_error: true,
+      result: "You've hit your session limit · resets 5:10pm (Asia/Jerusalem)",
+    }),
+  ].join('\n')
   const claudeWithTool = [
     JSON.stringify({ type: 'system', subtype: 'init' }),
     JSON.stringify({
@@ -1261,6 +1269,7 @@ test('quota retry safety requires a structured terminal failure with zero activi
   assert.equal(quotaFailureIsSafe('codex', `\u001b[32m${codexSafe}\u001b[0m`), false)
   assert.equal(quotaFailureIsSafe('codex', '', 'Usage limit reached'), false)
   assert.equal(quotaFailureIsSafe('claude', claudeSafe), true)
+  assert.equal(quotaFailureIsSafe('claude', claudeSessionLimit), true)
   assert.equal(quotaFailureIsSafe('claude', claudeWithTool), false)
   assert.equal(quotaFailureIsSafe('claude', claudeWithUnknownBlock), false)
   assert.equal(quotaFailureIsSafe('claude', claudeIncomplete), false)
