@@ -1,12 +1,27 @@
 import { randomUUID } from 'node:crypto'
 import { mkdir, readFile, rename, rm, rmdir, stat, unlink, writeFile } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path'
+import { processIsLiveSince } from './process-liveness.mjs'
 
 const SCHEMA_VERSION = 1
 const DEFAULT_POLL_MS = 250
 const DEFAULT_HEARTBEAT_MS = 5_000
 const DEFAULT_STALE_MS = 30_000
+// `updatedAt` is a renewable heartbeat written after the owner process starts,
+// so this lease needs only enough tolerance for `ps`'s one-second precision and
+// modest clock jitter. Five seconds is the initial cap, bounded below a custom
+// stale window and reduced by every millisecond spent past that boundary. The
+// grace therefore reaches zero instead of letting an immediately recycled PID
+// impersonate the retired owner indefinitely.
+const PROCESS_START_TOLERANCE_CAP_MS = 5_000
 const LIVE_TOKENS = new Set()
+
+function processStartToleranceMs(staleMs, staleByMs) {
+  const initial = Number.isFinite(staleMs) && staleMs > 0
+    ? Math.min(PROCESS_START_TOLERANCE_CAP_MS, staleMs / 2)
+    : 0
+  return Math.max(0, initial - Math.max(0, staleByMs))
+}
 
 export class RepositoryLandLeaseError extends Error {
   constructor(code, message) {
@@ -45,16 +60,6 @@ function wait(delayMs, signal) {
   })
 }
 
-function processAlive(pid) {
-  if (!Number.isSafeInteger(pid) || pid < 1) return false
-  try {
-    process.kill(pid, 0)
-    return true
-  } catch (error) {
-    return error?.code === 'EPERM'
-  }
-}
-
 async function readOwner(ownerPath) {
   try {
     const value = JSON.parse(await readFile(ownerPath, 'utf8'))
@@ -68,12 +73,18 @@ async function readOwner(ownerPath) {
   }
 }
 
-async function lockIsReclaimable(lockPath, ownerPath, now, staleMs, pidIsAlive) {
+async function lockIsReclaimable(lockPath, ownerPath, now, staleMs) {
   const owner = await readOwner(ownerPath)
   if (owner) {
-    const stale = now - Date.parse(owner.updatedAt) > staleMs
+    const recordedAtMs = Date.parse(owner.updatedAt)
+    const staleByMs = now - recordedAtMs - staleMs
+    const stale = staleByMs > 0
     if (!stale || LIVE_TOKENS.has(owner.token)) return false
-    if (owner.pid !== process.pid && pidIsAlive(owner.pid)) return false
+    if (owner.pid !== process.pid
+      && processIsLiveSince(owner.pid, recordedAtMs, {
+        now,
+        toleranceMs: processStartToleranceMs(staleMs, staleByMs),
+      })) return false
     return true
   }
   try {
@@ -94,7 +105,6 @@ export async function withRepositoryLandLease(commonGitDirectory, callback, opti
   const staleMs = options.staleMs ?? DEFAULT_STALE_MS
   const now = options.now ?? Date.now
   const uuid = options.randomUUID ?? randomUUID
-  const pidIsAlive = options.processAlive ?? processAlive
   const parentPath = join(commonGitDirectory, 'ensync')
   const lockPath = join(parentPath, 'repository-land.lock')
   const ownerPath = join(lockPath, 'owner.json')
@@ -111,7 +121,7 @@ export async function withRepositoryLandLease(commonGitDirectory, callback, opti
       if (error?.code !== 'EEXIST') throw error
     }
 
-    if (await lockIsReclaimable(lockPath, ownerPath, now(), staleMs, pidIsAlive)) {
+    if (await lockIsReclaimable(lockPath, ownerPath, now(), staleMs)) {
       const quarantine = `${lockPath}.stale-${uuid()}`
       try {
         await rename(lockPath, quarantine)

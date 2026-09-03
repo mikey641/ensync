@@ -244,6 +244,7 @@ test('workspace snapshots transactionally preserve bounded occupied-run ownershi
     providerProcessStarted: true,
     steerable: true,
     nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
+    predecessorTranscriptFingerprint: 'a'.repeat(64),
     projectId: 'relay',
     projectPath: '/Users/example/relay',
     chatId: 'chat-a',

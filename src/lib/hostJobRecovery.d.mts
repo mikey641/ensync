@@ -1,5 +1,6 @@
-import type { Chat } from '../types'
+import type { Chat, Message } from '../types'
 import type { ChatJobSnapshot, ChatProviderId } from './relayHost'
+import type { OccupiedRun, OccupiedRuns } from './occupiedRunState.mjs'
 
 export type RunningHostJobCandidate = {
   chatId: string
@@ -11,8 +12,37 @@ export type RunningHostJobCandidate = {
 
 export function runningHostJobCandidates(
   chats: Chat[],
-  options?: { maximumTurns?: number; maximumAttempts?: number },
+  options?: { maximumTurns?: number; maximumAttempts?: number; excludedChatIds?: string[] },
 ): RunningHostJobCandidate[]
+
+export function retryableOccupiedJobProbes(
+  occupiedRuns: OccupiedRuns,
+  missingExactOwnerKeys?: Iterable<string>,
+): Array<{
+  chatId: string
+  owner: OccupiedRun & { turnId: string; targetKind: 'local' }
+  ownerKey: string
+}>
+
+export type OccupiedJobProbeLease = {
+  start(): boolean
+  isCurrent(): boolean
+  finish(): boolean
+}
+
+export function createOccupiedJobProbeCoordinator(): {
+  reserve(ownerKey: string): OccupiedJobProbeLease | null
+  invalidateAll(): void
+}
+
+export function shouldSuppressOccupiedJobProbe(status: unknown): boolean
+export function canonicalPredecessorTranscript(messages: Message[], turnId: string): string | null
+export function predecessorTranscriptFingerprint(messages: Message[], turnId: string): Promise<string | null>
+export function beginRunAfterPredecessorFingerprint<T>(
+  fingerprintPromise: PromiseLike<string | null>,
+  signal: AbortSignal,
+  begin: (fingerprint: string | null) => T | Promise<T>,
+): Promise<T>
 
 export function adoptReconnectableHostJobState<T extends {
   chats: Chat[]
@@ -24,6 +54,11 @@ export function adoptReconnectableHostJobState<T extends {
   job: ChatJobSnapshot
   projectPath: string
   executionTarget: string
+  predecessorTranscriptFingerprint?: string | null
+  occupied?: {
+    owner: OccupiedRun
+    replacementWorkspaceId: string
+  }
 }): null | {
   chats: Chat[]
   chatErrors: Record<string, string | null>

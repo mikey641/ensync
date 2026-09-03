@@ -84,6 +84,7 @@ test('occupied job admission returns bounded owner data without request details'
       startedAt: '2026-08-11T10:00:00.000Z', providerProcessStarted: true,
       steerable: true, nativeWorkspaceId: '11111111-1111-4111-8111-111111111111',
       turnId: null,
+      predecessorTranscriptFingerprint: null,
     },
   })
   assertNoForbiddenJobData(payload)

@@ -231,6 +231,9 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'getWorkspaceIdentity',
     'publishActiveRuns',
     'matchesActiveRun',
+    'claimActiveRun',
+    'finalizeActiveRunClaim',
+    'releaseActiveRunClaim',
     'focusWorkspace',
     'handoffQueuedMessage',
     'onQueuedMessageHandoff',
@@ -276,6 +279,34 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     chatId: 'chat-relay',
     jobId: 'job-relay',
   })
+  await exposed[0].value.claimActiveRun({
+    original: {
+      workspaceId: '11111111-1111-4111-8111-111111111111',
+      projectId: 'relay',
+      projectPath: '/work/relay',
+      chatId: 'chat-relay',
+      jobId: 'job-relay',
+    },
+    replacement: {
+      workspaceId: '22222222-2222-4222-8222-222222222222',
+      projectId: 'relay',
+      projectPath: '/work/relay',
+      chatId: 'chat-relay',
+      jobId: 'job-relay',
+    },
+  })
+  const claimTokenRequest = {
+    token: 'claim-token',
+    target: {
+      workspaceId: '22222222-2222-4222-8222-222222222222',
+      projectId: 'relay',
+      projectPath: '/work/relay',
+      chatId: 'chat-relay',
+      jobId: 'job-relay',
+    },
+  }
+  await exposed[0].value.finalizeActiveRunClaim(claimTokenRequest)
+  await exposed[0].value.releaseActiveRunClaim(claimTokenRequest)
   await exposed[0].value.focusWorkspace({
     workspaceId: '11111111-1111-4111-8111-111111111111',
     projectId: 'relay',
@@ -311,6 +342,24 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
       chatId: 'chat-relay',
       jobId: 'job-relay',
     }],
+    ['ensync:workspace:claim-active-run', {
+      original: {
+        workspaceId: '11111111-1111-4111-8111-111111111111',
+        projectId: 'relay',
+        projectPath: '/work/relay',
+        chatId: 'chat-relay',
+        jobId: 'job-relay',
+      },
+      replacement: {
+        workspaceId: '22222222-2222-4222-8222-222222222222',
+        projectId: 'relay',
+        projectPath: '/work/relay',
+        chatId: 'chat-relay',
+        jobId: 'job-relay',
+      },
+    }],
+    ['ensync:workspace:finalize-active-run-claim', claimTokenRequest],
+    ['ensync:workspace:release-active-run-claim', claimTokenRequest],
     ['ensync:workspace:focus', {
       workspaceId: '11111111-1111-4111-8111-111111111111',
       projectId: 'relay',
@@ -337,7 +386,7 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.cancelUpdateDownload()
   await exposed[0].value.openUpdateInstaller()
   await exposed[0].value.setUpdateChannel('beta')
-  assert.deepEqual(invocations.slice(15), [
+  assert.deepEqual(invocations.slice(18), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],

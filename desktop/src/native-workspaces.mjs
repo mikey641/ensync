@@ -8,6 +8,9 @@ export const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
 export const WORKSPACE_PROJECT_FOCUS_CHANNEL = 'ensync:workspace:focus-project'
 export const ACTIVE_RUNS_PUBLISH_CHANNEL = 'ensync:workspace:publish-active-runs'
 export const ACTIVE_RUN_MATCH_CHANNEL = 'ensync:workspace:match-active-run'
+export const ACTIVE_RUN_CLAIM_CHANNEL = 'ensync:workspace:claim-active-run'
+export const ACTIVE_RUN_CLAIM_FINALIZE_CHANNEL = 'ensync:workspace:finalize-active-run-claim'
+export const ACTIVE_RUN_CLAIM_RELEASE_CHANNEL = 'ensync:workspace:release-active-run-claim'
 export const QUEUED_MESSAGE_HANDOFF_CHANNEL = 'ensync:workspace:handoff-queued-message'
 export const QUEUED_MESSAGE_HANDOFF_ACK_CHANNEL = 'ensync:workspace:queued-message-handoff-ack'
 export const QUEUED_MESSAGE_HANDOFF_EVENT_CHANNEL = 'ensync:workspace:queued-message-handoff'
@@ -17,6 +20,7 @@ export const NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3
 const FORMAT = 'ensync-native-workspaces'
 const VERSION = 1
 const ACTIVE_RUN_LIMIT = 32
+const ACTIVE_RUN_CLAIM_TTL_MS = 15_000
 const HANDOFF_TIMEOUT_MS = 5_000
 const HANDOFF_RECORD_LIMIT = 128
 const QUEUED_PROMPT_MAX_LENGTH = 100_000
@@ -245,18 +249,82 @@ function sameExactRunTarget(left, right) {
     && left.jobId === right.jobId
 }
 
+function sameExactRunExceptWorkspace(left, right) {
+  return left.projectId === right.projectId
+    && left.projectPath === right.projectPath
+    && left.chatId === right.chatId
+    && left.jobId === right.jobId
+}
+
+function hasExactKeys(value, expected) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const keys = Object.keys(value)
+  return keys.length === expected.length && expected.every((key) => keys.includes(key))
+}
+
+const EXACT_RUN_TARGET_KEYS = ['workspaceId', 'projectId', 'projectPath', 'chatId', 'jobId']
+
+function normalizeStrictExactRunTarget(value) {
+  return hasExactKeys(value, EXACT_RUN_TARGET_KEYS) ? normalizeExactRunTarget(value) : null
+}
+
+function exactRunKey(target) {
+  return JSON.stringify([target.projectId, target.projectPath, target.chatId, target.jobId])
+}
+
+const rejectedClaim = () => ({ status: 'rejected' })
+
 /**
  * Keeps the native process as the sole authority for live run coordinates.
  * A renderer can replace only the roster for its own authenticated workspace.
  */
-export function createActiveRunRoster({ isAuthorized, identityForWebContents }) {
+export function createActiveRunRoster({
+  isAuthorized,
+  identityForWebContents,
+  now = Date.now,
+  claimTtlMs = ACTIVE_RUN_CLAIM_TTL_MS,
+  createClaimToken = randomUUID,
+}) {
   if (typeof isAuthorized !== 'function' || typeof identityForWebContents !== 'function') {
     throw new TypeError('Active run authorization is required.')
   }
+  if (typeof now !== 'function' || typeof createClaimToken !== 'function'
+    || !Number.isSafeInteger(claimTtlMs) || claimTtlMs < 1) {
+    throw new TypeError('Active run claim timing is invalid.')
+  }
   const entriesByWorkspace = new Map()
+  const claimsByRun = new Map()
+
+  const removeClaim = (claim) => {
+    claimsByRun.delete(exactRunKey(claim.replacement))
+    if (claim.state !== 'finalized') return
+    const entries = entriesByWorkspace.get(claim.replacement.workspaceId) ?? []
+    entriesByWorkspace.set(
+      claim.replacement.workspaceId,
+      entries.filter((entry) => !sameExactRunTarget(entry, claim.replacement)),
+    )
+  }
+
+  const purgeExpiredClaims = () => {
+    const timestamp = now()
+    for (const claim of claimsByRun.values()) {
+      if (claim.state === 'provisional' && claim.expiresAt <= timestamp) removeClaim(claim)
+    }
+  }
+
+  const liveDistinctOriginal = (claim, windowForWorkspace) => claim.original.workspaceId !== claim.replacement.workspaceId
+    && Boolean(windowForWorkspace(claim.original.workspaceId))
+
+  const claimForToken = (token) => {
+    for (const claim of claimsByRun.values()) {
+      if (claim.token === token) return claim
+    }
+    return null
+  }
 
   return Object.freeze({
     publish(event, entries) {
+      purgeExpiredClaims()
       if (!isAuthorized(event) || !Array.isArray(entries) || entries.length > ACTIVE_RUN_LIMIT) return false
       const identity = identityForWebContents(event.sender)
       if (!isNativeWorkspaceIdentity(identity)) return false
@@ -267,21 +335,145 @@ export function createActiveRunRoster({ isAuthorized, identityForWebContents }) 
         const key = JSON.stringify(entry)
         if (seen.has(key)) return false
         seen.add(key)
+        for (const [workspaceId, presented] of entriesByWorkspace) {
+          if (workspaceId !== identity.id
+            && presented.some((candidate) => sameExactRunExceptWorkspace(candidate, entry))) return false
+        }
+        const claim = claimsByRun.get(exactRunKey(entry))
+        if (claim && claim.replacement.workspaceId !== identity.id) return false
       }
-      entriesByWorkspace.set(identity.id, normalized.map((entry) => ({ ...entry })))
+
+      const nextEntries = normalized.map((entry) => ({ ...entry }))
+      const claimsToConfirm = []
+      const claimsToRemove = []
+      for (const claim of claimsByRun.values()) {
+        if (claim.replacement.workspaceId !== identity.id) continue
+        const includesClaim = nextEntries.some((entry) => sameExactRunTarget(entry, claim.replacement))
+        if (claim.state === 'provisional') continue
+        if (!claim.confirmed) {
+          if (includesClaim) claimsToConfirm.push(claim)
+          else {
+            if (nextEntries.length >= ACTIVE_RUN_LIMIT) return false
+            nextEntries.push({ ...claim.replacement })
+          }
+        } else if (!includesClaim) {
+          claimsToRemove.push(claim)
+        }
+      }
+
+      entriesByWorkspace.set(identity.id, nextEntries)
+      for (const claim of claimsToConfirm) {
+        claim.confirmed = true
+        claim.expiresAt = null
+      }
+      for (const claim of claimsToRemove) claimsByRun.delete(exactRunKey(claim.replacement))
       return true
     },
     matches(target) {
+      purgeExpiredClaims()
       const normalized = normalizeExactRunTarget(target)
       return Boolean(normalized && entriesByWorkspace.get(normalized.workspaceId)
         ?.some((entry) => sameExactRunTarget(entry, normalized)))
     },
+    claim(event, request, windowForWorkspace) {
+      purgeExpiredClaims()
+      if (!isAuthorized(event) || typeof windowForWorkspace !== 'function'
+        || !hasExactKeys(request, ['original', 'replacement'])) return rejectedClaim()
+      const identity = identityForWebContents(event.sender)
+      const original = normalizeStrictExactRunTarget(request.original)
+      const replacement = normalizeStrictExactRunTarget(request.replacement)
+      if (!isNativeWorkspaceIdentity(identity) || !original || !replacement
+        || replacement.workspaceId !== identity.id
+        || !sameExactRunExceptWorkspace(original, replacement)) return rejectedClaim()
+
+      const runKey = exactRunKey(replacement)
+      const existingClaim = claimsByRun.get(runKey)
+      const proposedClaim = existingClaim ?? { original, replacement }
+      // Re-check before every response, including an idempotent retry. A
+      // renderer that has come back owns presentation again; an unconfirmed
+      // adoption reservation must not keep it out.
+      if (liveDistinctOriginal(proposedClaim, windowForWorkspace)) {
+        if (existingClaim && !existingClaim.confirmed) removeClaim(existingClaim)
+        return rejectedClaim()
+      }
+
+      if (existingClaim) {
+        return sameExactRunTarget(existingClaim.original, original)
+          && sameExactRunTarget(existingClaim.replacement, replacement)
+          ? { status: 'claimed', token: existingClaim.token }
+          : rejectedClaim()
+      }
+
+      for (const entries of entriesByWorkspace.values()) {
+        if (!entries.some((entry) => sameExactRunExceptWorkspace(entry, replacement))) continue
+        return rejectedClaim()
+      }
+
+      const replacementEntries = entriesByWorkspace.get(replacement.workspaceId) ?? []
+      const pendingCount = [...claimsByRun.values()]
+        .filter((claim) => claim.replacement.workspaceId === replacement.workspaceId).length
+      if (replacementEntries.length + pendingCount >= ACTIVE_RUN_LIMIT) return rejectedClaim()
+      const token = createClaimToken()
+      if (!nonEmptyString(token) || claimForToken(token)) return rejectedClaim()
+      claimsByRun.set(runKey, {
+        token,
+        original: { ...original },
+        replacement: { ...replacement },
+        state: 'provisional',
+        confirmed: false,
+        expiresAt: now() + claimTtlMs,
+      })
+      return { status: 'claimed', token }
+    },
+    finalize(event, request, windowForWorkspace) {
+      purgeExpiredClaims()
+      if (!isAuthorized(event) || typeof windowForWorkspace !== 'function'
+        || !hasExactKeys(request, ['token', 'target'])
+        || !nonEmptyString(request.token)) return false
+      const identity = identityForWebContents(event.sender)
+      const target = normalizeStrictExactRunTarget(request.target)
+      if (!isNativeWorkspaceIdentity(identity) || !target || target.workspaceId !== identity.id) return false
+      const claim = claimForToken(request.token)
+      if (!claim || !sameExactRunTarget(claim.replacement, target)) return false
+      if (liveDistinctOriginal(claim, windowForWorkspace)) {
+        if (!claim.confirmed) removeClaim(claim)
+        return false
+      }
+      if (claim.state === 'finalized') return true
+      const entries = entriesByWorkspace.get(identity.id) ?? []
+      if (!entries.some((entry) => sameExactRunTarget(entry, target))) {
+        if (entries.length >= ACTIVE_RUN_LIMIT) return false
+        entriesByWorkspace.set(identity.id, [...entries.map((entry) => ({ ...entry })), { ...target }])
+      }
+      claim.state = 'finalized'
+      claim.expiresAt = null
+      return true
+    },
+    release(event, request) {
+      purgeExpiredClaims()
+      if (!isAuthorized(event) || !hasExactKeys(request, ['token', 'target'])
+        || !nonEmptyString(request.token)) return false
+      const identity = identityForWebContents(event.sender)
+      const target = normalizeStrictExactRunTarget(request.target)
+      if (!isNativeWorkspaceIdentity(identity) || !target || target.workspaceId !== identity.id) return false
+      const claim = claimForToken(request.token)
+      if (!claim) return true
+      if (!sameExactRunTarget(claim.replacement, target)) return false
+      removeClaim(claim)
+      return true
+    },
     removeWorkspace(workspaceId) {
+      purgeExpiredClaims()
       const normalizedWorkspaceId = typeof workspaceId === 'string' ? workspaceId.toLowerCase() : ''
       if (!NATIVE_WORKSPACE_ID_PATTERN.test(normalizedWorkspaceId)) return false
-      return entriesByWorkspace.delete(normalizedWorkspaceId)
+      const removed = entriesByWorkspace.delete(normalizedWorkspaceId)
+      for (const claim of [...claimsByRun.values()]) {
+        if (claim.replacement.workspaceId === normalizedWorkspaceId) claimsByRun.delete(exactRunKey(claim.replacement))
+      }
+      return removed
     },
     listForWorkspace(workspaceId) {
+      purgeExpiredClaims()
       const normalizedWorkspaceId = typeof workspaceId === 'string' ? workspaceId.toLowerCase() : ''
       if (!NATIVE_WORKSPACE_ID_PATTERN.test(normalizedWorkspaceId)) return []
       return (entriesByWorkspace.get(normalizedWorkspaceId) ?? []).map((entry) => ({ ...entry }))
@@ -295,6 +487,74 @@ export function createActiveRunMatchHandler({ isAuthorized, activeRuns }) {
     throw new TypeError('Active run match authorization is required.')
   }
   return (event, request) => Boolean(isAuthorized(event) && activeRuns.matches(request))
+}
+
+/** Atomically transfers only native presentation authority for one exact job. */
+export function createActiveRunClaimHandler({
+  isAuthorized,
+  identityForWebContents,
+  activeRuns,
+  windowForWorkspace,
+}) {
+  if (typeof isAuthorized !== 'function' || typeof identityForWebContents !== 'function'
+    || !activeRuns || typeof activeRuns.claim !== 'function'
+    || typeof windowForWorkspace !== 'function') {
+    throw new TypeError('Active run claim authorization is required.')
+  }
+  return (event, request) => {
+    if (!isAuthorized(event)) return rejectedClaim()
+    const identity = identityForWebContents(event.sender)
+    const replacementWorkspaceId = typeof request?.replacement?.workspaceId === 'string'
+      ? request.replacement.workspaceId.toLowerCase()
+      : ''
+    if (!isNativeWorkspaceIdentity(identity)
+      || replacementWorkspaceId !== identity.id) return rejectedClaim()
+    return activeRuns.claim(event, request, windowForWorkspace)
+  }
+}
+
+/** Commits a provisional exact-run claim to the replacement roster. */
+export function createActiveRunClaimFinalizeHandler({
+  isAuthorized,
+  identityForWebContents,
+  activeRuns,
+  windowForWorkspace,
+}) {
+  if (typeof isAuthorized !== 'function' || typeof identityForWebContents !== 'function'
+    || !activeRuns || typeof activeRuns.finalize !== 'function'
+    || typeof windowForWorkspace !== 'function') {
+    throw new TypeError('Active run claim finalization authorization is required.')
+  }
+  return (event, request) => {
+    if (!isAuthorized(event)) return false
+    const identity = identityForWebContents(event.sender)
+    const targetWorkspaceId = typeof request?.target?.workspaceId === 'string'
+      ? request.target.workspaceId.toLowerCase()
+      : ''
+    if (!isNativeWorkspaceIdentity(identity) || targetWorkspaceId !== identity.id) return false
+    return activeRuns.finalize(event, request, windowForWorkspace)
+  }
+}
+
+/** Releases only the authenticated renderer's exact provisional/finalized claim. */
+export function createActiveRunClaimReleaseHandler({
+  isAuthorized,
+  identityForWebContents,
+  activeRuns,
+}) {
+  if (typeof isAuthorized !== 'function' || typeof identityForWebContents !== 'function'
+    || !activeRuns || typeof activeRuns.release !== 'function') {
+    throw new TypeError('Active run claim release authorization is required.')
+  }
+  return (event, request) => {
+    if (!isAuthorized(event)) return false
+    const identity = identityForWebContents(event.sender)
+    const targetWorkspaceId = typeof request?.target?.workspaceId === 'string'
+      ? request.target.workspaceId.toLowerCase()
+      : ''
+    if (!isNativeWorkspaceIdentity(identity) || targetWorkspaceId !== identity.id) return false
+    return activeRuns.release(event, request)
+  }
 }
 
 function normalizeAttachment(value) {

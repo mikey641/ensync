@@ -489,6 +489,8 @@ export type OccupiedChatJobOwner = {
   nativeWorkspaceId: string | null
   /** Present only when this Host still retains the exact live job in memory. */
   turnId: string | null
+  /** Live-only transcript binding for that retained turn; never lease/journal data. */
+  predecessorTranscriptFingerprint: string | null
 }
 
 export type ChatJobNavigation = {
@@ -496,6 +498,8 @@ export type ChatJobNavigation = {
   projectId: string
   chatId: string
   turnId: string
+  /** Null keeps admission usable when browser hashing is unavailable. */
+  predecessorTranscriptFingerprint: string | null
 }
 
 export type ChatJobAdmission =
