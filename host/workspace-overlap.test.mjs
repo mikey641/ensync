@@ -16,6 +16,12 @@ async function git(cwd, args) {
   return result.stdout.trim()
 }
 
+function deferred() {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+
 async function fixture(context) {
   const root = await mkdtemp(join(tmpdir(), 'ensync-overlap-test-'))
   const repository = join(root, 'repository')
@@ -59,6 +65,177 @@ async function fixture(context) {
 function detected(events) {
   return events.filter((event) => event.code === 'workspace_file_overlap_detected')
 }
+
+test('slow polling coalesces repeated ticks into one trailing overlap refresh', async (context) => {
+  const f = await fixture(context)
+  let tick = null
+  let blockRefreshes = false
+  let refreshStatusCalls = 0
+  const firstRefreshStarted = deferred()
+  const releaseFirstRefresh = deferred()
+  const monitor = new WorkspaceOverlapMonitor({
+    pollMs: 1,
+    setInterval: (callback) => {
+      tick = callback
+      return { unref() {} }
+    },
+    clearInterval: () => {},
+    gitRunner: async (args, options) => {
+      if (blockRefreshes && options.cwd === f.first.repositoryPath && args[0] === 'status') {
+        refreshStatusCalls += 1
+        if (refreshStatusCalls === 1) {
+          firstRefreshStarted.resolve()
+          await releaseFirstRefresh.promise
+        }
+      }
+      return runGit(args, options)
+    },
+  })
+  const session = await monitor.start(f.first, { jobId: 'job-coalesced-refresh' })
+  context.after(() => session.stop())
+  blockRefreshes = true
+
+  tick()
+  await firstRefreshStarted.promise
+  for (let index = 0; index < 50; index += 1) tick()
+  const finalRefresh = session.refresh()
+  releaseFirstRefresh.resolve()
+  await finalRefresh
+
+  assert.equal(refreshStatusCalls, 2)
+})
+
+test('ticks during the trailing scan cannot extend one overlap refresh operation', async (context) => {
+  const f = await fixture(context)
+  let tick = null
+  let blockRefreshes = false
+  let refreshStatusCalls = 0
+  const firstRefreshStarted = deferred()
+  const releaseFirstRefresh = deferred()
+  const trailingRefreshStarted = deferred()
+  const releaseTrailingRefresh = deferred()
+  const monitor = new WorkspaceOverlapMonitor({
+    pollMs: 1,
+    setInterval: (callback) => {
+      tick = callback
+      return { unref() {} }
+    },
+    clearInterval: () => {},
+    gitRunner: async (args, options) => {
+      if (blockRefreshes && options.cwd === f.first.repositoryPath && args[0] === 'status') {
+        refreshStatusCalls += 1
+        if (refreshStatusCalls === 1) {
+          firstRefreshStarted.resolve()
+          await releaseFirstRefresh.promise
+        } else if (refreshStatusCalls === 2) {
+          trailingRefreshStarted.resolve()
+          await releaseTrailingRefresh.promise
+        }
+      }
+      return runGit(args, options)
+    },
+  })
+  const session = await monitor.start(f.first, { jobId: 'job-bounded-trailing-refresh' })
+  context.after(() => session.stop())
+  blockRefreshes = true
+
+  tick()
+  await firstRefreshStarted.promise
+  for (let index = 0; index < 50; index += 1) tick()
+  const sharedRefresh = session.refresh()
+  releaseFirstRefresh.resolve()
+  await trailingRefreshStarted.promise
+  for (let index = 0; index < 50; index += 1) tick()
+  session.refresh()
+  releaseTrailingRefresh.resolve()
+  await sharedRefresh
+
+  assert.equal(refreshStatusCalls, 2)
+})
+
+test('a failed active scan still consumes its coalesced trailing refresh', async (context) => {
+  const f = await fixture(context)
+  let tick = null
+  let failRefreshes = false
+  let refreshStatusCalls = 0
+  const firstRefreshStarted = deferred()
+  const releaseFirstRefresh = deferred()
+  const events = []
+  const monitor = new WorkspaceOverlapMonitor({
+    pollMs: 1,
+    setInterval: (callback) => {
+      tick = callback
+      return { unref() {} }
+    },
+    clearInterval: () => {},
+    gitRunner: async (args, options) => {
+      if (failRefreshes && options.cwd === f.first.repositoryPath && args[0] === 'status') {
+        refreshStatusCalls += 1
+        if (refreshStatusCalls === 1) {
+          firstRefreshStarted.resolve()
+          await releaseFirstRefresh.promise
+          throw new Error('planned overlap refresh failure')
+        }
+      }
+      return runGit(args, options)
+    },
+  })
+  const session = await monitor.start(f.first, {
+    jobId: 'job-retried-refresh-failure',
+    onEvent: (event) => events.push(event),
+  })
+  context.after(() => session.stop())
+  failRefreshes = true
+
+  tick()
+  await firstRefreshStarted.promise
+  const sharedRefresh = session.refresh()
+  releaseFirstRefresh.resolve()
+  await sharedRefresh
+
+  assert.equal(refreshStatusCalls, 2)
+  assert.equal(events.filter((event) => event.code === 'workspace_overlap_unavailable').length, 1)
+})
+
+test('stopping a slow overlap session suppresses trailing refreshes and removes its record', async (context) => {
+  const f = await fixture(context)
+  let tick = null
+  let blockRefreshes = false
+  let refreshStatusCalls = 0
+  const firstRefreshStarted = deferred()
+  const releaseFirstRefresh = deferred()
+  const monitor = new WorkspaceOverlapMonitor({
+    pollMs: 1,
+    setInterval: (callback) => {
+      tick = callback
+      return { unref() {} }
+    },
+    clearInterval: () => {},
+    gitRunner: async (args, options) => {
+      if (blockRefreshes && options.cwd === f.first.repositoryPath && args[0] === 'status') {
+        refreshStatusCalls += 1
+        if (refreshStatusCalls === 1) {
+          firstRefreshStarted.resolve()
+          await releaseFirstRefresh.promise
+        }
+      }
+      return runGit(args, options)
+    },
+  })
+  const session = await monitor.start(f.first, { jobId: 'job-stopped-refresh' })
+  blockRefreshes = true
+  tick()
+  await firstRefreshStarted.promise
+  for (let index = 0; index < 50; index += 1) tick()
+
+  const stopped = session.stop()
+  releaseFirstRefresh.resolve()
+  await stopped
+
+  assert.equal(refreshStatusCalls, 1)
+  const recordPath = join(f.commonGitDirectory, 'ensync', 'active-workspace-edits', 'aaaaaaaaaaaaaaaaaaaaaaaa.json')
+  await assert.rejects(readFile(recordPath, 'utf8'), (error) => error?.code === 'ENOENT')
+})
 
 test('active conversations warn only after changing the exact same file', async (context) => {
   const f = await fixture(context)

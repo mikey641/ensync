@@ -12,8 +12,9 @@ Each overlap session will permit one active refresh and at most one trailing ref
 
 - A refresh requested while idle starts immediately.
 - A refresh requested while a scan is active sets one trailing-refresh flag and shares the active operation’s completion promise.
-- Any number of additional timer or explicit requests while that flag is set are coalesced into the same trailing scan.
+- Any number of additional timer or explicit requests while that trailing scan is pending or running share the current completion promise and cannot extend the drain with a third scan.
 - When the active scan completes, exactly one trailing scan runs if one was requested and the session has not stopped.
+- A failed active scan reports the advisory failure but still consumes an already requested trailing scan, allowing the bounded retry to recover fresh overlap state.
 - `stop()` clears the interval, suppresses a pending trailing scan, waits only for the currently active scan, and then removes the session’s owned activity record.
 
 An explicit final refresh still observes changes that arrive during an active scan because it requests the single trailing scan. Polling cannot build an unbounded backlog.

@@ -259,7 +259,8 @@ export class WorkspaceOverlapMonitor {
     const currentOverlaps = new Map()
     let stopped = false
     let failureReported = false
-    let operation = Promise.resolve([])
+    let operation = null
+    let refreshAgain = false
 
     const writeRecord = async (paths) => {
       await mkdir(directory, { recursive: true, mode: 0o700 })
@@ -300,8 +301,10 @@ export class WorkspaceOverlapMonitor {
       return overlaps
     }
 
-    const refresh = () => {
-      operation = operation.then(refreshNow, refreshNow).catch((error) => {
+    const refreshOnce = async () => {
+      try {
+        return await refreshNow()
+      } catch (error) {
         if (!failureReported) {
           failureReported = true
           options.onEvent?.({
@@ -312,6 +315,26 @@ export class WorkspaceOverlapMonitor {
           })
         }
         return [...currentOverlaps.values()]
+      }
+    }
+
+    const refresh = () => {
+      if (stopped) return operation ?? Promise.resolve([...currentOverlaps.values()])
+      if (operation) {
+        refreshAgain = true
+        return operation
+      }
+      refreshAgain = false
+      operation = (async () => {
+        let overlaps = await refreshOnce()
+        if (refreshAgain && !stopped) {
+          refreshAgain = false
+          overlaps = await refreshOnce()
+        }
+        return overlaps
+      })().finally(() => {
+        refreshAgain = false
+        operation = null
       })
       return operation
     }
@@ -326,8 +349,9 @@ export class WorkspaceOverlapMonitor {
       stop: async () => {
         if (stopped) return
         stopped = true
+        refreshAgain = false
         this.#clearInterval(timer)
-        await operation.catch(() => {})
+        await operation?.catch(() => {})
         try {
           const record = JSON.parse(await readFile(recordPath, 'utf8'))
           if (record?.token === token) await unlink(recordPath)
