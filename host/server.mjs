@@ -366,6 +366,7 @@ export function createEnsyncHost(options = {}) {
     answerLocal: (jobId, input) => chats.answerQuestion(jobId, input),
     pendingQuestionsLocal: (jobId) => chats.pendingQuestions(jobId),
     normalizeError: chatJobErrorPayload,
+    checkWorktreeClean: (request) => projectIsolation.isWorktreeClean(request.projectPath, request.workspaceKey),
     journal: chatJobJournal,
   })
   const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({

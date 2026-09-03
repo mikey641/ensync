@@ -605,6 +605,125 @@ test('Host shutdown marks an active provider run interrupted instead of stopped 
   assert.doesNotMatch(events.at(-1).error, /stopped by user/i)
 })
 
+test('an output-limit failure auto-continues with a fresh session when the worktree is clean', async () => {
+  let attempts = 0
+  const service = new ChatJobService({
+    runLocal: async (request, options) => {
+      attempts++
+      options.onEvent({ type: 'started', provider: 'codex', cwd: '/project', command: 'codex exec -', at: '2026-08-07T10:00:00.000Z' })
+      if (attempts === 1) {
+        throw new ChatJobError('invalid_cli_output', 'Codex produced more output than the verified limit.', 502, false)
+      }
+      return { provider: 'codex', response: 'done', completedAt: '2026-08-07T10:00:03.000Z' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => true,
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'work', sessionId: 'session-1' } })
+  await waitFor(() => service.get(JOB_A).state === 'completed')
+
+  assert.equal(attempts, 2)
+  assert.equal(service.get(JOB_A).state, 'completed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  assert.ok(events.some((event) => event.type === 'notice' && event.code === 'auto_continuation'))
+  assert.equal(events.at(-1).type, 'completed')
+})
+
+test('an output-limit failure does not auto-continue when the worktree has mutations', async () => {
+  let attempts = 0
+  const service = new ChatJobService({
+    runLocal: async () => {
+      attempts++
+      throw new ChatJobError('invalid_cli_output', 'Codex produced more output than the verified limit.', 502, false)
+    },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => false,
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'work', sessionId: 'session-1' } })
+  await waitFor(() => service.get(JOB_A).state === 'failed')
+
+  assert.equal(attempts, 1)
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  assert.equal(events.at(-1).type, 'error')
+  assert.equal(events.at(-1).code, 'invalid_cli_output')
+})
+
+test('a journal restore marks an orphaned job safe to retry when the worktree is clean', async () => {
+  const now = '2026-08-07T10:00:00.000Z'
+  const journal = {
+    load: () => [{
+      id: JOB_A,
+      kind: 'local',
+      requestHash: 'abc123',
+      projectPath: '/project',
+      workspaceKey: 'conversation:test-1',
+      state: 'running',
+      startedAt: now,
+      finishedAt: null,
+      providerProcessStarted: true,
+      sequence: 1,
+      events: [{ type: 'started', sequence: 1, at: now }],
+    }],
+    save: () => {},
+  }
+
+  const service = new ChatJobService({
+    journal,
+    runLocal: async () => { throw new Error('not used') },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => true,
+    now: () => now,
+  })
+
+  await service.ready()
+  assert.equal(service.get(JOB_A).state, 'failed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  assert.equal(events.at(-1).type, 'error')
+  assert.equal(events.at(-1).code, 'host_job_orphaned_retry')
+  assert.equal(events.at(-1).safeToRetry, true)
+})
+
+test('a journal restore keeps an orphaned job non-retryable when the worktree is dirty', async () => {
+  const now = '2026-08-07T10:00:00.000Z'
+  const journal = {
+    load: () => [{
+      id: JOB_A,
+      kind: 'local',
+      requestHash: 'abc123',
+      projectPath: '/project',
+      workspaceKey: 'conversation:test-1',
+      state: 'running',
+      startedAt: now,
+      finishedAt: null,
+      providerProcessStarted: true,
+      sequence: 1,
+      events: [{ type: 'started', sequence: 1, at: now }],
+    }],
+    save: () => {},
+  }
+
+  const service = new ChatJobService({
+    journal,
+    runLocal: async () => { throw new Error('not used') },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => false,
+    now: () => now,
+  })
+
+  await service.ready()
+  assert.equal(service.get(JOB_A).state, 'failed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  assert.equal(events.at(-1).type, 'error')
+  assert.equal(events.at(-1).code, 'host_job_orphaned')
+  assert.equal(events.at(-1).safeToRetry, false)
+})
+
 test('a running local Codex job accepts steering while unsupported jobs reject it safely', async () => {
   let releaseCodex
   let codexStarted = false

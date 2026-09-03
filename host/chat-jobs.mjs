@@ -158,6 +158,7 @@ export class ChatJobService {
   #answerLocal
   #pendingQuestionsLocal
   #normalizeError
+  #checkWorktreeClean
   #now
   #maxJobs
   #maxEvents
@@ -167,6 +168,7 @@ export class ChatJobService {
   #persistTimer = null
   #admit
   #shuttingDown = false
+  #restorationPromise = null
 
   constructor(options = {}) {
     if (typeof options.runLocal !== 'function' || typeof options.runRemote !== 'function') {
@@ -179,6 +181,7 @@ export class ChatJobService {
     this.#answerLocal = options.answerLocal
     this.#pendingQuestionsLocal = options.pendingQuestionsLocal
     this.#normalizeError = options.normalizeError ?? defaultErrorPayload
+    this.#checkWorktreeClean = options.checkWorktreeClean ?? null
     this.#now = options.now ?? (() => new Date().toISOString())
     this.#maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS
     this.#maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS
@@ -186,10 +189,18 @@ export class ChatJobService {
     this.#finishedTtlMs = options.finishedTtlMs ?? DEFAULT_FINISHED_TTL_MS
     this.#journal = options.journal ?? null
     this.#admit = options.admit ?? (async () => ({ disposition: 'acquired', lease: null }))
-    this.#restoreJournal()
+    this.#restorationPromise = this.#restoreJournal()
+  }
+
+  async ready() {
+    if (this.#restorationPromise) {
+      await this.#restorationPromise
+      this.#restorationPromise = null
+    }
   }
 
   async start(input) {
+    await this.ready()
     if (!input || typeof input !== 'object') {
       throw new ChatJobError('invalid_chat_job', 'A chat job request is required.', 400)
     }
@@ -500,34 +511,61 @@ export class ChatJobService {
   async #execute(job) {
     try {
       let result
-      if (job.kind === 'local') {
-        result = await this.#runLocal(job.request, {
-          liveTurnId: job.id,
-          signal: job.controller.signal,
-          preAcquiredWorkspaceLease: job.workspaceLease,
-          onEvent: (event) => {
-            if (event?.type === 'started') {
-              job.providerProcessStarted = true
-              updateLeaseOwner(job.workspaceLease, { providerProcessStarted: true })
-            }
-            if (event?.code === 'live_steer_ready') {
-              updateLeaseOwner(job.workspaceLease, { steerable: true })
-            } else if (event?.code === 'live_steer_closed') {
-              updateLeaseOwner(job.workspaceLease, { steerable: false })
-            }
-            this.#record(job, event)
-          },
-        })
-      } else {
-        this.#record(job, {
-          type: 'notice',
-          message: 'SSH execution is continuing in Ensync Host. Provider output remains buffered by the verified SSH bridge.',
-          at: this.#now(),
-        })
-        result = await this.#runRemote(job.request, {
-          signal: job.controller.signal,
-          onEvent: (event) => this.#record(job, event),
-        })
+      let attempt = 0
+      const MAX_AUTO_CONTINUATIONS = 1
+      while (true) {
+        try {
+          if (job.kind === 'local') {
+            result = await this.#runLocal(job.request, {
+              liveTurnId: job.id,
+              signal: job.controller.signal,
+              preAcquiredWorkspaceLease: job.workspaceLease,
+              onEvent: (event) => {
+                if (event?.type === 'started') {
+                  job.providerProcessStarted = true
+                  updateLeaseOwner(job.workspaceLease, { providerProcessStarted: true })
+                }
+                if (event?.code === 'live_steer_ready') {
+                  updateLeaseOwner(job.workspaceLease, { steerable: true })
+                } else if (event?.code === 'live_steer_closed') {
+                  updateLeaseOwner(job.workspaceLease, { steerable: false })
+                }
+                this.#record(job, event)
+              },
+            })
+          } else {
+            this.#record(job, {
+              type: 'notice',
+              message: 'SSH execution is continuing in Ensync Host. Provider output remains buffered by the verified SSH bridge.',
+              at: this.#now(),
+            })
+            result = await this.#runRemote(job.request, {
+              signal: job.controller.signal,
+              onEvent: (event) => this.#record(job, event),
+            })
+          }
+          break
+        } catch (runError) {
+          const runPayload = this.#normalizeError(runError)
+          if (
+            attempt < MAX_AUTO_CONTINUATIONS
+            && runPayload.code === 'invalid_cli_output'
+            && job.kind === 'local'
+            && this.#checkWorktreeClean
+            && await this.#checkWorktreeClean(job.request)
+          ) {
+            attempt++
+            this.#record(job, {
+              type: 'notice',
+              message: 'Provider output exceeded the verified limit. The worktree is clean, so Ensync is continuing with a fresh session.',
+              code: 'auto_continuation',
+              at: this.#now(),
+            })
+            job.request = { ...job.request, sessionId: null }
+            continue
+          }
+          throw runError
+        }
       }
       job.state = 'completed'
       job.finishedAt = this.#now()
@@ -641,7 +679,7 @@ export class ChatJobService {
     return changed
   }
 
-  #restoreJournal() {
+  async #restoreJournal() {
     if (!this.#journal) return
     const restored = this.#journal.load()
     let journalNeedsRewrite = false
@@ -661,6 +699,8 @@ export class ChatJobService {
         request: null,
         requestKey: null,
         requestHash: item.requestHash,
+        projectPath: item.projectPath ?? null,
+        workspaceKey: item.workspaceKey ?? null,
         state: item.state,
         startedAt: item.startedAt,
         finishedAt: item.finishedAt ?? null,
@@ -689,7 +729,18 @@ export class ChatJobService {
       if (job.state !== 'running') continue
       job.state = 'failed'
       job.finishedAt = this.#now()
-      const recorded = journalSafe({
+      const worktreeClean = this.#checkWorktreeClean && job.projectPath && job.workspaceKey
+        ? await this.#checkWorktreeClean({ projectPath: job.projectPath, workspaceKey: job.workspaceKey })
+        : false
+      const recorded = journalSafe(worktreeClean ? {
+        type: 'error',
+        error: 'The detached Ensync Host ended before this provider run reported a terminal result. The worktree is clean, so this run can be continued safely.',
+        code: 'host_job_orphaned_retry',
+        status: 409,
+        safeToRetry: true,
+        at: job.finishedAt,
+        sequence: ++job.sequence,
+      } : {
         type: 'error',
         error: 'The detached Ensync Host ended before this provider run reported a terminal result. Project activity may be partial; reconcile before continuing.',
         code: 'host_job_orphaned',
@@ -711,6 +762,8 @@ export class ChatJobService {
       id: job.id,
       kind: job.kind,
       requestHash: job.requestHash,
+      projectPath: job.request?.projectPath ?? null,
+      workspaceKey: job.request?.workspaceKey ?? null,
       state: job.state,
       startedAt: job.startedAt,
       finishedAt: job.finishedAt,

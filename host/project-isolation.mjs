@@ -307,6 +307,35 @@ export class ProjectIsolationService {
     }
   }
 
+  /**
+   * Checks whether the conversation worktree for the given project and workspace
+   * key has no uncommitted changes. Used by the chat job service to decide
+   * whether a failed run can be safely auto-continued with a fresh session.
+   */
+  async isWorktreeClean(projectPath, rawWorkspaceKey) {
+    try {
+      const key = workspaceKey(rawWorkspaceKey)
+      const canonicalProjectPath = await canonicalDirectory(
+        projectPath,
+        'invalid_project',
+        '',
+      )
+      const repository = await this.#repository(canonicalProjectPath)
+      const branch = `ensync/chat-${digest(key)}`
+      const branchRef = `refs/heads/${branch}`
+      const worktreeList = await this.#git(['worktree', 'list', '--porcelain'], {
+        cwd: repository.repositoryPath,
+      })
+      const registered = parseWorktrees(worktreeList.stdout).find((wt) => wt.branch === branchRef)
+      if (!registered || registered.prunable) return false
+      const wtPath = await canonicalDirectory(registered.path, 'managed_worktree_missing', '')
+      const status = await this.#git(['status', '--porcelain'], { cwd: wtPath })
+      return status.stdout.trim() === ''
+    } catch {
+      return false
+    }
+  }
+
   async #clientForRun() {
     if (this.#client) return this.#client
     this.#clientPromise ??= (async () => new AgentWorktreeClient({
