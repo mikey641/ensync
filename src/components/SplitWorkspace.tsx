@@ -19,6 +19,7 @@ import { fileDragContainsFiles } from '../lib/fileAttachments.mjs'
 import {
   largestPaneScrollLeft,
   selectSplitLayoutSource,
+  splitPaneAlignmentTabId,
   splitPaneDisplayWeights,
 } from '../lib/splitLayoutPersistence.mjs'
 import './SplitWorkspace.css'
@@ -453,37 +454,44 @@ export function SplitWorkspace({
 
   const renderedTabIdsKey = renderedTabs.map((tab) => tab.id).join('\n')
 
-  // Sibling minimum widths lay the enlarged pane out past the viewport's
-  // right edge; keep it fully in view on maximize and while sizes change.
+  // Keep the selected pane fully in view on activation and while sizes change.
+  // A temporary largest pane retains priority over ordinary active panes.
   useLayoutEffect(() => {
     const viewport = viewportRef.current
-    const largestTabId = viewMode === 'split' ? layout.maximizedTabId : null
-    if (!viewport || !largestTabId
-      || !renderedTabIdsKey.split('\n').includes(largestTabId)) return undefined
+    const alignedTabId = splitPaneAlignmentTabId(
+      viewMode,
+      resolvedActiveTabId,
+      layout.maximizedTabId,
+      renderedTabIdsKey ? renderedTabIdsKey.split('\n') : [],
+    )
+    if (!viewport || !alignedTabId) return undefined
 
-    const alignLargestPane = () => {
+    const alignSelectedPane = () => {
       const row = viewport.firstElementChild
-      const pane = Array.from(viewport.querySelectorAll<HTMLElement>('[data-tab-id]'))
-        .find((element) => element.dataset.tabId === largestTabId)
+      const panes = Array.from(viewport.querySelectorAll<HTMLElement>('[data-tab-id]'))
+      const pane = panes
+        .find((element) => element.dataset.tabId === alignedTabId)
       if (!row || !pane) return
+      const rowBounds = row.getBoundingClientRect()
       const paneBounds = pane.getBoundingClientRect()
       const target = largestPaneScrollLeft({
         scrollLeft: viewport.scrollLeft,
-        paneLeft: paneBounds.left - row.getBoundingClientRect().left,
+        paneLeft: paneBounds.left - rowBounds.left,
         paneWidth: paneBounds.width,
         viewportWidth: viewport.clientWidth,
         scrollWidth: viewport.scrollWidth,
+        snapPoints: panes.map((element) => element.getBoundingClientRect().left - rowBounds.left),
       })
       if (target !== viewport.scrollLeft) viewport.scrollLeft = target
     }
 
-    alignLargestPane()
+    alignSelectedPane()
     if (typeof ResizeObserver === 'undefined') return undefined
-    const observer = new ResizeObserver(alignLargestPane)
+    const observer = new ResizeObserver(alignSelectedPane)
     observer.observe(viewport)
     if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
     return () => observer.disconnect()
-  }, [viewMode, layout.maximizedTabId, renderedTabIdsKey])
+  }, [viewMode, resolvedActiveTabId, layout.maximizedTabId, renderedTabIdsKey])
 
   useEffect(() => {
     if (!tabDragState) return undefined
