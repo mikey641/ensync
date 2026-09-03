@@ -301,6 +301,10 @@ function cancelledRunError() {
   )
 }
 
+function failCompletedRunWithoutDurableWork(error) {
+  if (error) throw error
+}
+
 function throwIfCancelled(signal) {
   if (signal?.aborted) throw cancelledRunError()
 }
@@ -1635,6 +1639,7 @@ export class ChatRunService {
       throw error
     } finally {
       combinedSignal.dispose()
+      let completionPersistenceError = null
       if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
         let agentWorkSaved = true
         let savedHead = null
@@ -1655,10 +1660,18 @@ export class ChatRunService {
           }
         } catch (commitError) {
           agentWorkSaved = false
+          if (runOutcome === 'succeeded') {
+            completionPersistenceError = new ChatRunError(
+              'agent_work_save_failed',
+              `Ensync could not save this completed run to ${workspace.branch}. Its changes remain in the protected worktree and automatic landing did not start.`,
+              500,
+              false,
+            )
+          }
           options.onEvent?.({
             type: 'notice',
             code: 'agent_work_commit_failed',
-            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and need review.`,
+            message: `Ensync could not save this run's work to ${workspace.branch}: ${commitError instanceof Error ? commitError.message : 'unknown error'}. The changes remain in the protected worktree and automatic landing did not start.`,
             at: new Date().toISOString(),
           })
         }
@@ -1705,6 +1718,12 @@ export class ChatRunService {
             }
           }
           if (landingError) {
+            completionPersistenceError = new ChatRunError(
+              'automatic_landing_queue_failed',
+              `Ensync saved ${workspace.branch}, but could not durably queue its exact commit for automatic landing. The saved commit remains recoverable.`,
+              503,
+              false,
+            )
             options.onEvent?.({
               type: 'notice',
               code: 'automatic_landing_queue_failed',
@@ -1725,6 +1744,9 @@ export class ChatRunService {
           at: new Date().toISOString(),
         })
       }
+      // This error exists only after provider success, so it cannot mask an
+      // earlier provider failure while the finally block releases ownership.
+      failCompletedRunWithoutDurableWork(completionPersistenceError)
     }
   }
 

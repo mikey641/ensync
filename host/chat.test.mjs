@@ -1737,6 +1737,124 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
   assert.ok(notices.some((notice) => notice.code === 'automatic_landing_queued'))
 })
 
+test('ChatRunService fails a successful provider run when its exact work snapshot cannot be saved', async (context) => {
+  const projectPath = await projectFixture(context)
+  let releaseCalls = 0
+  let enqueueCalls = 0
+  const notices = []
+  const lease = {
+    workspace: {
+      canonicalProjectPath: projectPath,
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-save-failure',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0 },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {
+      releaseCalls += 1
+      return { removed: true, reason: null }
+    },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async acquire() { return lease },
+      async commitAgentWork() { throw new Error('snapshot storage unavailable') },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    landingCoordinator: {
+      async enqueue() {
+        enqueueCalls += 1
+        return { completionSequence: 1 }
+      },
+    },
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+
+  await assert.rejects(
+    service.run(
+      { provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-save-failure' },
+      { onEvent: (event) => { if (event.type === 'notice') notices.push(event) } },
+    ),
+    (error) => error instanceof ChatRunError
+      && error.code === 'agent_work_save_failed'
+      && error.safeToRetry === false,
+  )
+
+  assert.equal(enqueueCalls, 0)
+  assert.equal(releaseCalls, 1)
+  assert.ok(notices.some((notice) => notice.code === 'agent_work_commit_failed'))
+})
+
+test('ChatRunService fails a successful provider run when its exact SHA cannot be durably queued', async (context) => {
+  const projectPath = await projectFixture(context)
+  const savedSha = 'b'.repeat(40)
+  let releaseCalls = 0
+  const notices = []
+  const lease = {
+    workspace: {
+      canonicalProjectPath: projectPath,
+      projectPath,
+      repositoryPath: projectPath,
+      branch: 'ensync/chat-queue-failure',
+      base: null,
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0 },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {
+      releaseCalls += 1
+      return { removed: true, reason: null }
+    },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async acquire() { return lease },
+      async commitAgentWork() { return { committed: true, changedFiles: 1, head: savedSha } },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    landingCoordinator: {
+      async enqueue() { throw new Error('landing journal unavailable') },
+    },
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'done' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+
+  await assert.rejects(
+    service.run(
+      { provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-queue-failure' },
+      { onEvent: (event) => { if (event.type === 'notice') notices.push(event) } },
+    ),
+    (error) => error instanceof ChatRunError
+      && error.code === 'automatic_landing_queue_failed'
+      && error.safeToRetry === false,
+  )
+
+  assert.equal(releaseCalls, 1)
+  assert.ok(notices.some((notice) => notice.code === 'automatic_landing_queue_failed'))
+})
+
 test('background conflict resolution keeps subscription auth and temporary-worktree containment', async (context) => {
   const worktreePath = await projectFixture(context)
   let processOptions = null
