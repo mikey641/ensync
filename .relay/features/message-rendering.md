@@ -39,8 +39,10 @@ Link and file-opening rules:
 Every prose block keeps the bidirectional-text contract from display preferences:
 `dir="auto"` plus `unicode-bidi: plaintext` on paragraphs, headings, list items, table
 cells, and blockquotes, while code blocks and inline code stay LTR-isolated. All styling
-uses the shared semantic tokens in `theme.css`; the message copy action still copies the
-original Markdown source unchanged.
+uses the shared semantic tokens in `theme.css`. Every stored user and agent message
+exposes the same copy action, which copies the original Markdown source unchanged rather
+than rendered text or bidi markup. The action appears on pointer hover and keyboard
+focus, stays visible for touch input, and does not apply to temporary provider notes.
 
 Within a block, phrases written in the opposite direction render inside `<bdi>`. A cursor
 from `src/lib/bidiText.mjs` walks one block at a time — across bold, links, and plain text

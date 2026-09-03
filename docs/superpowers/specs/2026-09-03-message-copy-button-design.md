@@ -1,6 +1,6 @@
 # Message Copy Button
 
-**Status:** Approved design direction; implementation pending
+**Status:** Implemented
 
 **Date:** 2026-09-03
 
@@ -41,7 +41,7 @@ hover/focus/touch behavior matches the approved interaction with less complexity
   it without a hidden gesture.
 - Activating the action writes `message.content`, not rendered text, to the browser or
   desktop renderer clipboard.
-- A successful write temporarily changes the button's accessible and visible status
+- A successful write changes the button's accessible and visible status
   to **Copied**. A rejected or unavailable clipboard reports **Copy failed** and keeps
   the existing explanatory tooltip.
 - Pending provider-question preamble messages retain their existing copy action.
