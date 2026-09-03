@@ -233,6 +233,9 @@ test('Droid limits probe returns usage through an injected expect run', async ()
       calls.push(['find', command])
       return '/usr/bin/expect'
     },
+    mkdir: async (path, options) => {
+      calls.push(['mkdir', path, options])
+    },
     runProcess: async (executable, args, options) => {
       calls.push(['run', executable, args, options.cwd, options.env.TERM])
       assert.match(options.input, /send "\/limits\\r"/)
@@ -243,7 +246,42 @@ test('Droid limits probe returns usage through an injected expect run', async ()
 
   assert.equal(usage.usedPercent, 38)
   assert.deepEqual(calls[0], ['find', 'expect'])
-  assert.deepEqual(calls[1], ['run', '/usr/bin/expect', ['-f', '-'], '/Users/probe-home', 'xterm-256color'])
+  assert.deepEqual(calls[1], ['mkdir', '/Users/probe-home/.ensync/droid-limits-probe-v1', { recursive: true, mode: 0o700 }])
+  assert.deepEqual(calls[2], ['run', '/usr/bin/expect', ['-f', '-'], '/Users/probe-home/.ensync/droid-limits-probe-v1', 'xterm-256color'])
+})
+
+// The droid TUI indexes whatever directory it starts in. Started in the home
+// directory it walks Contacts, Photos, Documents, and other apps' containers,
+// and macOS raises a privacy prompt attributed to Ensync on every probe. The
+// probe therefore always starts the TUI in an empty Ensync-owned directory,
+// and refuses to run at all when that directory cannot be created.
+test('Droid limits probe never starts the TUI in the home directory', async () => {
+  const cwds = []
+  await probeDroidLimits('/usr/local/bin/droid', CHECKED_AT, {
+    findExecutable: async () => '/usr/bin/expect',
+    mkdir: async () => {},
+    runProcess: async (_executable, _args, options) => {
+      cwds.push(options.cwd)
+      return captureResult(limitsFrame())
+    },
+    home: '/Users/probe-home',
+  })
+  assert.deepEqual(cwds, ['/Users/probe-home/.ensync/droid-limits-probe-v1'])
+
+  const runs = []
+  const usage = await probeDroidLimits('/usr/local/bin/droid', CHECKED_AT, {
+    findExecutable: async () => '/usr/bin/expect',
+    mkdir: async () => {
+      throw new Error('EROFS: read-only file system')
+    },
+    runProcess: async (_executable, _args, options) => {
+      runs.push(options.cwd)
+      return captureResult(limitsFrame())
+    },
+    home: '/Users/probe-home',
+  })
+  assert.equal(usage, null)
+  assert.deepEqual(runs, [])
 })
 
 test('Droid limits probe degrades to null without expect or with a rejected executable', async () => {
