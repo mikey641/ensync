@@ -17,7 +17,7 @@ import { ChatRunError, ChatRunService } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
-import { GitWorkflowError, GitWorkflowService } from './git.mjs'
+import { GitWorkflowError, GitWorkflowService, runGit } from './git.mjs'
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
@@ -313,6 +313,20 @@ export function createEnsyncHost(options = {}) {
         console.log(`Ensync automatically landed ${event.item.branch} (FIFO ${event.item.completionSequence}).`)
       } else if (event.type === 'retry') {
         console.error(`Ensync will retry automatic landing for ${event.item.branch}: ${event.error}`)
+      } else if (event.type === 'pushed') {
+        console.log(`Ensync automatically pushed ${event.repositoryPath} to origin.`)
+      } else if (event.type === 'push-failed') {
+        console.error(`Ensync could not auto-push ${event.repositoryPath} to origin: ${event.error}`)
+      }
+    },
+    push: async ({ repositoryPath, targetBranch }) => {
+      const result = await runGit(['push', '--no-verify', 'origin', targetBranch], {
+        cwd: repositoryPath,
+        gitExecutable: options.gitExecutable,
+        timeoutMs: 60_000,
+      })
+      if (result.exitCode !== 0) {
+        throw new Error(result.stderr?.trim() || result.stdout?.trim() || `git push origin ${targetBranch} failed.`)
       }
     },
   }))

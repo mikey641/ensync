@@ -515,3 +515,72 @@ test('shutdown aborts the active train, waits for it to settle, and leaves the i
   assert.equal(coordinator.hasActiveWork(), false)
   assert.equal(journal.items.find((candidate) => candidate.id === item.id).state, 'retry')
 })
+
+test('a successful landing auto-pushes the target branch to origin', async () => {
+  const journal = new MemoryJournal()
+  const pushed = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async (train) => ({
+      landedIds: train.map((item) => item.id),
+      retryIds: [],
+      errors: {},
+      head: SHA_B,
+    }),
+    push: async ({ repositoryPath, targetBranch }) => {
+      pushed.push({ repositoryPath, targetBranch })
+    },
+  })
+
+  await coordinator.enqueue(input('ensync/chat-auto-push'))
+  await coordinator.whenIdle()
+
+  assert.equal(pushed.length, 1)
+  assert.equal(pushed[0].targetBranch, 'main')
+  assert.equal(pushed[0].repositoryPath, '/repo')
+})
+
+test('a failed landing does not auto-push', async () => {
+  const journal = new MemoryJournal()
+  const pushed = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async (train) => ({
+      landedIds: [],
+      retryIds: train.map((item) => item.id),
+      errors: Object.fromEntries(train.map((item) => [item.id, 'conflict'])),
+    }),
+    push: async ({ repositoryPath, targetBranch }) => {
+      pushed.push({ repositoryPath, targetBranch })
+    },
+  })
+
+  await coordinator.enqueue(input('ensync/chat-no-push'))
+  await coordinator.whenIdle()
+
+  assert.equal(pushed.length, 0)
+})
+
+test('a push failure does not undo the landing', async () => {
+  const journal = new MemoryJournal()
+  const events = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async (train) => ({
+      landedIds: train.map((item) => item.id),
+      retryIds: [],
+      errors: {},
+      head: SHA_B,
+    }),
+    push: async () => { throw new Error('non-fast-forward') },
+    onEvent: (event) => events.push(event),
+  })
+
+  await coordinator.enqueue(input('ensync/chat-push-fail'))
+  await coordinator.whenIdle()
+
+  assert.ok(events.some((event) => event.type === 'landed'))
+  assert.ok(events.some((event) => event.type === 'push-failed'))
+  assert.ok(!events.some((event) => event.type === 'pushed'))
+  assert.equal(journal.items.find((item) => item.branch === 'ensync/chat-push-fail').state, 'landed')
+})

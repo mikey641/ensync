@@ -71,6 +71,7 @@ export class LandingCoordinator {
       throw new TypeError('LandingCoordinator requires a durable snapshot anchor.')
     }
     this.integrate = options.integrate
+    this.push = typeof options.push === 'function' ? options.push : null
     this.onEvent = typeof options.onEvent === 'function' ? options.onEvent : () => {}
     this.platform = options.platform ?? process.platform
     this.persistenceRetryDelays = options.persistenceRetryDelays ?? [100, 500, 2_000]
@@ -284,6 +285,23 @@ export class LandingCoordinator {
           )
           const transitioned = await this.journal.transition(item.id, 'integrating', 'retry', { error: message })
           if (transitioned) this.#emit('retry', transitioned, message)
+        }
+
+        // Auto-push the target branch after a successful train landing. The
+        // landing system already verified the merge with a no-force commit and
+        // a reference-transaction guard; the push uses the same no-force policy.
+        const landedAny = train.some((item) => result.landedIds.has(item.id) && !result.retryIds.has(item.id))
+        if (landedAny && this.push) {
+          const targetBranch = train[0]?.targetBranch ?? null
+          const repositoryPath = train[0]?.repositoryPath ?? null
+          if (targetBranch && repositoryPath) {
+            try {
+              await this.push({ repositoryPath, targetBranch })
+              this.#emit('pushed', null, null, repositoryPath)
+            } catch (error) {
+              this.#emit('push-failed', null, boundedError(error), repositoryPath)
+            }
+          }
         }
         recoveryItems = []
         state.persistenceFailures = 0
