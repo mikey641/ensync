@@ -8,7 +8,6 @@ import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
 import { rankProvidersByAvailability } from './provider-availability.mjs'
-import { ENSYNC_AGENT_COORDINATION_POLICY } from './multi-agent-prompt.mjs'
 
 // Tie-breaker only. Live provider lists are ordered by real availability (see
 // provider-availability.mjs); this order decides what happens when two
@@ -392,16 +391,9 @@ const providerCatalog = {
 }
 
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
-const universalAgentCoordination = Object.freeze({
-  policy: ENSYNC_AGENT_COORDINATION_POLICY,
-  delivery: 'ensync_prompt',
-})
 
 function providerCatalogEntry(id) {
-  return {
-    ...providerCatalog[id],
-    agentCoordination: universalAgentCoordination,
-  }
+  return { ...providerCatalog[id] }
 }
 
 function now() {

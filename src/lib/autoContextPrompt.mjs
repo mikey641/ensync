@@ -1,8 +1,3 @@
-import {
-  ENSYNC_MULTI_AGENT_INSTRUCTIONS,
-  withEnsyncMultiAgentInstructions,
-} from '../../host/multi-agent-prompt.mjs'
-
 export const AUTO_CONTEXT_PROMPT_LIMIT = 96_000
 
 function executionDetails(project, target) {
@@ -87,8 +82,7 @@ Before editing, read the applicable repository instructions and relevant .relay 
   const continuation = `End the response with a concise Markdown heading named "Ensync continuation" followed by: outcome and remaining work; decisions/user corrections to preserve; files changed; verification actually completed; and one next action or "none". This is private provider-handoff metadata: Ensync removes it from the user-visible answer and stores it separately. Never claim unverified work. Ensync attaches verified provider, reported model, target, session, fallback, and Git metadata separately.`
   const transcriptLabel = transcript ? '\n\nConversation before this request:\n' : ''
   const requestBlock = `\n\nCurrent user request:\n${prompt}\n\n${continuation}`
-  const fixedLength = ENSYNC_MULTI_AGENT_INSTRUCTIONS.length + 2
-    + header.length + transcriptLabel.length + requestBlock.length
+  const fixedLength = header.length + transcriptLabel.length + requestBlock.length
   let transcriptBudget = Math.max(0, AUTO_CONTEXT_PROMPT_LIMIT - fixedLength)
   let retainedTranscript = transcript
   let omissionNotice = ''
@@ -107,7 +101,5 @@ Before editing, read the applicable repository instructions and relevant .relay 
     const omittedCharacters = transcript.length - retainedTranscript.length
     omissionNotice = `[${omittedCharacters.toLocaleString()} characters from the oldest conversation turns were omitted because the verified host input limit would otherwise be exceeded. Reconcile with durable project files and the retained continuation state.]\n\n`
   }
-  return withEnsyncMultiAgentInstructions(
-    `${header}${transcriptLabel}${omissionNotice}${retainedTranscript}${requestBlock}`,
-  )
+  return `${header}${transcriptLabel}${omissionNotice}${retainedTranscript}${requestBlock}`
 }

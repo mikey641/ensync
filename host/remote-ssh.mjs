@@ -9,7 +9,6 @@ import {
 import { configuredHardTimeoutMs, describeProcessExit, findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 import {
   supportsProviderRunner,
-  withProviderRunnerInstructions,
 } from './provider-runner-contract.mjs'
 import {
   createRemoteBridgeInput,
@@ -541,7 +540,7 @@ export class RemoteSshService {
         provider: request.provider,
         projectPath: connection.projectPath,
         workspaceKey: request.workspaceKey,
-        prompt: withProviderRunnerInstructions(request.provider, 'ssh', request.prompt),
+        prompt: request.prompt,
         sessionId: request.sessionId ?? null,
         model: request.model ?? null,
         effort: request.effort ?? null,

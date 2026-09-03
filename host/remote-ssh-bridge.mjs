@@ -31,7 +31,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
   const PROTOCOL = 'ensync-ssh-bridge-v1'
   const MAX_PROBE_BYTES = 512 * 1024
   const MAX_CHAT_BYTES = 4 * 1024 * 1024
-  const BYTE_PRESERVING_GIT_CONFIG = ['-c', 'core.autocrlf=false', '-c', 'core.safecrlf=false']
   const PAID_PROVIDER_KEYS = new Set([
     'ANTHROPIC_API_KEY',
     'ANTHROPIC_AUTH_TOKEN',
@@ -388,153 +387,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
     }
   }
 
-  async function snapshotRemoteSharedCheckout(gitExecutable, repository, environment) {
-    const snapshotParent = path.join(repository.commonGitDirectory, 'ensync')
-    await fs.promises.mkdir(snapshotParent, { recursive: true, mode: 0o700 })
-    const snapshotDirectory = await fs.promises.mkdtemp(path.join(snapshotParent, 'workspace-snapshot-'))
-    const snapshotEnvironment = {
-      ...environment,
-      GIT_INDEX_FILE: path.join(snapshotDirectory, 'index'),
-      GIT_WORK_TREE: repository.path,
-      GIT_AUTHOR_NAME: 'Ensync Workspace Snapshot',
-      GIT_AUTHOR_EMAIL: 'workspace-snapshot@ensync.local',
-      GIT_AUTHOR_DATE: new Date().toISOString(),
-      GIT_COMMITTER_NAME: 'Ensync Workspace Snapshot',
-      GIT_COMMITTER_EMAIL: 'workspace-snapshot@ensync.local',
-      GIT_COMMITTER_DATE: new Date().toISOString(),
-    }
-    try {
-      await runGit(gitExecutable, repository.path, ['read-tree', repository.head], {
-        environment: snapshotEnvironment,
-      })
-      await runGit(gitExecutable, repository.path, [...BYTE_PRESERVING_GIT_CONFIG, 'add', '-A', '--', '.'], {
-        environment: snapshotEnvironment,
-        code: 'shared_checkout_snapshot_failed',
-        message: 'Git could not capture the remote shared checkout for the protected workspace.',
-      })
-      const tree = await runGit(gitExecutable, repository.path, ['write-tree'], {
-        environment: snapshotEnvironment,
-      })
-      const commit = await runGit(
-        gitExecutable,
-        repository.path,
-        ['commit-tree', firstLine(tree.stdout), '-p', repository.head, '-m', 'Ensync protected workspace snapshot'],
-        {
-          environment: snapshotEnvironment,
-          code: 'shared_checkout_snapshot_failed',
-          message: 'Git could not finalize the remote protected workspace snapshot.',
-        },
-      )
-      return firstLine(commit.stdout)
-    } finally {
-      await fs.promises.rm(snapshotDirectory, { recursive: true, force: true }).catch(() => {})
-    }
-  }
-
-  async function acquireRemoteWorkspaceLease(commonGitDirectory, key) {
-    const workspaceHash = digest(key)
-    const lockParent = path.join(commonGitDirectory, 'ensync', 'workspace-write-locks')
-    const lockPath = path.join(lockParent, workspaceHash + '.lock')
-    const ownerPath = path.join(lockPath, 'owner.json')
-    await fs.promises.mkdir(lockParent, { recursive: true, mode: 0o700 })
-
-    for (;;) {
-      const token = crypto.randomUUID()
-      const acquiredAt = new Date().toISOString()
-      try {
-        await fs.promises.mkdir(lockPath, { mode: 0o700 })
-      } catch (error) {
-        if (error && error.code !== 'EEXIST') throw error
-        let freshest
-        let ownerPid = null
-        try {
-          const ownerInfo = await fs.promises.stat(ownerPath)
-          const lockInfo = await fs.promises.stat(lockPath)
-          freshest = Math.max(ownerInfo.mtimeMs, lockInfo.mtimeMs)
-          try {
-            const owner = JSON.parse(await fs.promises.readFile(ownerPath, 'utf8'))
-            if (Number.isInteger(owner && owner.pid) && owner.pid > 0) ownerPid = owner.pid
-            const heartbeat = Date.parse(owner && owner.heartbeatAt || '')
-            if (Number.isFinite(heartbeat)) freshest = Math.max(freshest, heartbeat)
-          } catch {
-            // File mtimes remain the conservative fallback for incomplete metadata.
-          }
-        } catch {
-          try { freshest = (await fs.promises.stat(lockPath)).mtimeMs } catch { continue }
-        }
-        let ownerAlive = false
-        if (ownerPid) {
-          try {
-            process.kill(ownerPid, 0)
-            ownerAlive = true
-          } catch (livenessError) {
-            ownerAlive = Boolean(livenessError && livenessError.code === 'EPERM')
-          }
-        }
-        if (!ownerAlive && Date.now() - freshest > 30_000) {
-          const quarantine = lockPath + '.stale-' + crypto.randomUUID()
-          try {
-            await fs.promises.rename(lockPath, quarantine)
-            await fs.promises.rm(quarantine, { recursive: true, force: true })
-            continue
-          } catch (quarantineError) {
-            if (quarantineError && quarantineError.code === 'ENOENT') continue
-          }
-        }
-        sendProgress('workspace_lock_wait')
-        await new Promise((resolveWait) => setTimeout(resolveWait, 250))
-        continue
-      }
-
-      try {
-        let released = false
-        const owner = () => JSON.stringify({
-          version: 2,
-          token,
-          pid: process.pid,
-          workspaceHash,
-          acquiredAt,
-          heartbeatAt: new Date().toISOString(),
-        })
-        const writeOwner = async () => {
-          await fs.promises.writeFile(ownerPath, owner(), { encoding: 'utf8', mode: 0o600 })
-          try { await fs.promises.chmod(ownerPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
-        }
-        await writeOwner()
-        const heartbeat = setInterval(() => {
-          void (async () => {
-            try {
-              const current = JSON.parse(await fs.promises.readFile(ownerPath, 'utf8'))
-              if (!current || current.token !== token) throw new Error('Remote protected workspace write lease ownership changed.')
-              await writeOwner()
-            } catch {
-              clearInterval(heartbeat)
-              try { process.kill(process.pid, 'SIGTERM') } catch { process.exit(1) }
-            }
-          })()
-        }, 5_000)
-        heartbeat.unref && heartbeat.unref()
-        return {
-          release: async () => {
-            if (released) return
-            released = true
-            clearInterval(heartbeat)
-            try {
-              const current = JSON.parse(await fs.promises.readFile(ownerPath, 'utf8'))
-              if (current && current.token === token) {
-                await fs.promises.rm(lockPath, { recursive: true, force: true })
-              }
-            } catch {
-              // A missing or replaced lock cannot authorize deleting another lease.
-            }
-          },
-        }
-      } catch (error) {
-        await fs.promises.rm(lockPath, { recursive: true, force: true }).catch(() => {})
-        throw error
-      }
-    }
-  }
 
   async function snapshotSharedCheckoutState(gitExecutable, root, environment) {
     const head = firstLine((await runGit(gitExecutable, root, ['rev-parse', '--verify', 'HEAD'], { environment })).stdout)
@@ -603,14 +455,24 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       code: 'project_baseline_unavailable',
       message: 'Create an initial remote Git commit before starting an isolated Ensync workspace.',
     })
+    const sharedStatus = await runGit(
+      git.executable,
+      repositoryPath,
+      ['status', '--porcelain=v1', '-z', '--untracked-files=all'],
+      { environment },
+    )
+    const sharedChanges = sharedStatus.stdout.split('\0').filter(Boolean).length
+    if (sharedChanges > 0) {
+      throw bridgeError(
+        'shared_checkout_dirty',
+        'The remote shared checkout has uncommitted changes. Commit or stash them before starting an Ensync chat.',
+      )
+    }
     const repository = {
       path: repositoryPath,
       commonGitDirectory,
       head: firstLine(headResult.stdout),
     }
-    const lease = await acquireRemoteWorkspaceLease(commonGitDirectory, key)
-
-    try {
       const workspaceHash = digest(key)
       const repositoryHash = digest(commonGitDirectory)
       const branch = 'ensync/chat-' + workspaceHash
@@ -620,7 +482,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       const registered = parseWorktrees(list.stdout).find((worktree) => worktree.branch === branchRef)
       let worktreePath
       let reused = false
-      let seededFromSharedCheckout = false
       if (registered) {
         if (registered.prunable) {
           throw bridgeError('managed_worktree_missing', 'The protected remote Ensync worktree is missing. Repair its Git worktree registration before continuing.')
@@ -637,25 +498,14 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
           allowFailure: true,
         })
         const branchExists = branchCheck.exitCode === 0
-        let startingPoint = repository.head
-        if (!branchExists) {
-          const status = await runGit(git.executable, repositoryPath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { environment })
-          const changedFiles = status.stdout.split('\0').filter(Boolean).length
-          if (changedFiles > 0) {
-            startingPoint = await snapshotRemoteSharedCheckout(git.executable, repository, environment)
-            seededFromSharedCheckout = true
-          }
-        }
         await fs.promises.mkdir(path.dirname(configuredPath), { recursive: true, mode: 0o700 })
         const worktreeArgs = branchExists
           ? ['worktree', 'add', configuredPath, branch]
-          : ['worktree', 'add', '-b', branch, configuredPath, startingPoint]
+          : ['worktree', 'add', '-b', branch, configuredPath, repository.head]
         await runGit(
           git.executable,
           repositoryPath,
-          seededFromSharedCheckout
-            ? [...BYTE_PRESERVING_GIT_CONFIG, ...worktreeArgs]
-            : worktreeArgs,
+          worktreeArgs,
           {
             environment,
             code: 'managed_worktree_create_failed',
@@ -667,13 +517,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
           'managed_worktree_create_failed',
           'The protected remote Ensync worktree was not created correctly.',
         )
-        if (seededFromSharedCheckout) {
-          await runGit(git.executable, worktreePath, ['reset', '--mixed', repository.head], {
-            environment,
-            code: 'managed_worktree_create_failed',
-            message: 'Git could not expose the remote shared-checkout snapshot in the protected workspace.',
-          })
-        }
       }
 
       const actualBranch = await runGit(git.executable, worktreePath, ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
@@ -697,20 +540,16 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       const status = await runGit(git.executable, worktreePath, ['status', '--porcelain=v1', '-z', '--untracked-files=all'], { environment })
       const changedFiles = status.stdout.split('\0').filter(Boolean).length
       const head = await runGit(git.executable, worktreePath, ['rev-parse', '--verify', 'HEAD'], { environment })
-      let shared = null
-      try {
-        shared = { root: repositoryPath, ...(await snapshotSharedCheckoutState(git.executable, repositoryPath, environment)) }
-      } catch {
-        shared = null
-      }
+      const shared = await snapshotSharedCheckoutState(git.executable, repositoryPath, environment)
+        .then((state) => ({ root: repositoryPath, ...state }))
+        .catch(() => null)
       return {
-        lease,
         workspace: {
           path: workspaceProjectPath,
           repositoryPath: worktreePath,
           branch,
           reused,
-          seededFromSharedCheckout,
+          seededFromSharedCheckout: false,
           gitBefore: {
             branch,
             head: firstLine(head.stdout),
@@ -722,10 +561,6 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
         git,
         shared,
       }
-    } catch (error) {
-      await lease.release()
-      throw error
-    }
   }
 
   function authFrom(provider, result) {
@@ -935,20 +770,15 @@ async function remoteBridgeMain(encodedPayload, chatArguments) {
       + (isolated.workspace.gitBefore.dirty ? isolated.workspace.gitBefore.changedFiles + ' changed files' : 'clean')
       + ' at ' + isolated.workspace.gitBefore.head + '.\n\n'
       + payload.prompt
-    let result
-    try {
-      result = await runCaptured(found.executable, chatArguments(payload), {
-        cwd: isolated.workspace.path,
-        env: environment,
-        input: protectedPrompt,
-        inactivityTimeoutMs: payload.inactivityTimeoutMs ?? payload.timeoutMs,
-        hardTimeoutMs: payload.hardTimeoutMs ?? payload.timeoutMs,
-        maxBytes: MAX_CHAT_BYTES,
-        reportProgress: sendProgress,
-      })
-    } finally {
-      await isolated.lease.release()
-    }
+    const result = await runCaptured(found.executable, chatArguments(payload), {
+      cwd: isolated.workspace.path,
+      env: environment,
+      input: protectedPrompt,
+      inactivityTimeoutMs: payload.inactivityTimeoutMs ?? payload.timeoutMs,
+      hardTimeoutMs: payload.hardTimeoutMs ?? payload.timeoutMs,
+      maxBytes: MAX_CHAT_BYTES,
+      reportProgress: sendProgress,
+    })
     let sharedCheckout = null
     if (isolated.shared) {
       try {

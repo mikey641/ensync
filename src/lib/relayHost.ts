@@ -78,11 +78,6 @@ export type CliModel = {
   isDefault: boolean
 }
 
-export type AgentCoordinationPolicy = {
-  policy: 'ensync_agent_coordination_v1'
-  delivery: 'ensync_prompt'
-}
-
 export type CliProviderStatus = {
   id: CliProviderId
   name: string
@@ -104,7 +99,6 @@ export type CliProviderStatus = {
   setupKind: 'login_command' | 'interactive_onboarding' | 'none'
   documentationUrl: string | null
   catalogReason: string
-  agentCoordination: AgentCoordinationPolicy
   checkedAt: string
 }
 
@@ -269,8 +263,6 @@ export type ChatRunRequest = {
   model?: string | null
   effort?: ChatModelEffort | null
   timeoutMs?: number
-  /** False keeps this run's work unlanded for explicit review; the host-wide switch still wins. */
-  autoLand?: boolean
 }
 
 export type ChatRunUsage = {
@@ -383,7 +375,7 @@ export type ChatExecutionEvent =
   | {
       type: 'notice'
       message: string
-      code?: 'project_write_lock_waiting' | 'workspace_write_lock_waiting' | 'project_workspace_ready' | string
+      code?: 'project_workspace_ready' | string
       workspace?: {
         path: string
         branch: string

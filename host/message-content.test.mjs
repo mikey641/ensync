@@ -185,9 +185,9 @@ test('inline parsing links only safe destinations', () => {
 
 test('message content renders the reported broken message as structured blocks', () => {
   const content = [
-    '## What Superpowers is',
+    '## What the feature is',
     '',
-    'Superpowers is a **prompt-level behavior layer for one agent inside one session**.',
+    'This feature is a **prompt-level behavior layer for one agent inside one session**.',
     '',
     '- `repository.head` is `git rev-parse HEAD` in the local checkout.',
     '- Nothing ever integrates back.',
@@ -196,7 +196,7 @@ test('message content renders the reported broken message as structured blocks',
   const blocks = parseMessageContent(content)
   assert.deepEqual(blocks.map(block => block.type), ['heading', 'paragraph', 'list'])
   assert.equal(blocks[0].level, 2)
-  assert.equal(blocks[0].text, 'What Superpowers is')
+  assert.equal(blocks[0].text, 'What the feature is')
   assert.equal(blocks[2].items.length, 2)
   assert.deepEqual(parseInline(blocks[1].text).map(node => node.type), ['text', 'strong', 'text'])
 })

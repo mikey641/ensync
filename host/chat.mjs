@@ -12,10 +12,6 @@ import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionCha
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
-import {
-  withoutLeadingEnsyncMultiAgentInstructions,
-  withEnsyncMultiAgentInstructions,
-} from './multi-agent-prompt.mjs'
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid', 'cursor'])
 // Providers whose Ensync Host runner is implemented and containment-recorded but
@@ -240,17 +236,9 @@ const CHAT_PROVIDER_CONTAINMENT = {
 }
 const DEFAULT_INACTIVITY_TIMEOUT_MS = 15 * 60 * 1_000
 // A question card holds the inactivity watchdog for as long as a person needs
-// to read it, but never longer than this: an unanswered question also pins this
-// conversation's workspace lease, so every other message in the same chat waits
-// behind it. One hour is far past a real answer and far short of a lost evening.
+// to read it, but never longer than this. One hour is far past a real answer
+// and far short of a lost evening.
 const DEFAULT_QUESTION_HOLD_TIMEOUT_MS = 60 * 60 * 1_000
-// Automatic landing runs after the provider has already finished, inside the
-// same await that marks the job complete. Its own waits are unbounded by
-// design — the repository land lease polls until it is free, and a conflict
-// resolution agent runs as long as it needs — so a land that never returns
-// pins a finished run as "Working" forever and queues every later message in
-// that chat behind a turn that ended. This ceiling only ends the *landing*:
-// the run's outcome and its committed branch are already safe either way.
 // There is no absolute run ceiling by default; this conservative ceiling is
 // applied only when ENSYNC_CHAT_HARD_TIMEOUT_MS is present but unverifiable.
 const INVALID_HARD_TIMEOUT_FALLBACK_MS = 24 * 60 * 60 * 1_000
@@ -429,7 +417,7 @@ function isolatedPrompt(prompt, workspace, overlaps = []) {
   const unintegrated = Number.isInteger(workspace.integration?.unintegratedCommits)
     && workspace.integration.unintegratedCommits > 0
     && !boundedBaselineConflict(workspace)
-    ? `This branch has ${workspace.integration.unintegratedCommits} commit(s) that the canonical branch does not contain yet. Ensync never merges them for you.\n`
+    ? `This branch has ${workspace.integration.unintegratedCommits} saved commit(s) awaiting Ensync's automatic landing queue.\n`
     : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
@@ -832,9 +820,6 @@ function validateRequest(request) {
       'invalid_timeout',
       `The timeout must be between 1,000 and ${MAX_TIMEOUT_MS.toLocaleString()} milliseconds.`,
     )
-  }
-  if (request.autoLand != null && typeof request.autoLand !== 'boolean') {
-    throw new ChatRunError('invalid_auto_land', 'The automatic landing preference must be true or false.')
   }
 }
 
@@ -1303,12 +1288,6 @@ export class ChatRunService {
         if (!workspaceLease) {
           workspaceLease = await this.#projectIsolation.acquire(projectPath, request.workspaceKey, {
             signal: options.signal,
-            onWait: () => options.onEvent?.({
-              type: 'notice',
-              code: 'workspace_write_lock_waiting',
-              message: 'Waiting for this conversation’s protected workspace to become available. Another run in this same chat is using it; other chats can run concurrently. No provider process has started.',
-              at: new Date().toISOString(),
-            }),
           })
         }
         workspace = workspaceLease.workspace
@@ -1361,17 +1340,9 @@ export class ChatRunService {
         })
       }
     }
-    // Every provider runner — codex exec, the codex live turn, claude resume,
-    // and droid — receives the same bundled Ensync agent-coordination contract
-    // ahead of the user's prompt (and ahead of any workspace isolation header).
-    // Remove a renderer-supplied complete envelope before adding isolation, then
-    // always apply the current contract so marker-shaped user text cannot bypass it.
-    const promptBody = withoutLeadingEnsyncMultiAgentInstructions(request.prompt)
     const executionRequest = {
       ...request,
-      prompt: withEnsyncMultiAgentInstructions(
-        workspace ? isolatedPrompt(promptBody, workspace, workspaceOverlaps) : promptBody,
-      ),
+      prompt: workspace ? isolatedPrompt(request.prompt, workspace, workspaceOverlaps) : request.prompt,
     }
     const publicWorkspace = workspace ? {
       path: workspace.projectPath,
@@ -1870,7 +1841,7 @@ export class ChatRunService {
   }
 
   async #runWorktreeAgentRun(provider, request, workspace, containment, rawPrompt, failure, runtime) {
-    const prompt = withEnsyncMultiAgentInstructions(rawPrompt)
+    const prompt = rawPrompt
     const subRequest = {
       provider: request.provider,
       prompt,

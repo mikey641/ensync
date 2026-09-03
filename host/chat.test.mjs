@@ -17,8 +17,6 @@ import {
 } from './chat.mjs'
 import { createRelayHost } from './server.mjs'
 import { CursorAgentError } from './cursor-agent.mjs'
-import { ENSYNC_MULTI_AGENT_MARKER } from './multi-agent-prompt.mjs'
-import { withProviderRunnerInstructions } from './provider-runner-contract.mjs'
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-chat-test-'))
@@ -121,7 +119,7 @@ test('ChatRunService uses a pre-acquired workspace lease without acquiring or re
   assert.equal(processCwd, projectPath)
 })
 
-test('ChatRunService normalizes a renderer-wrapped prompt before protected-workspace isolation', async (context) => {
+test('ChatRunService adds only protected-workspace isolation to the renderer prompt', async (context) => {
   const projectPath = await projectFixture(context)
   let processInput = ''
   const lease = {
@@ -144,7 +142,6 @@ test('ChatRunService normalizes a renderer-wrapped prompt before protected-works
       async commitAgentWork() { return { committed: false, changedFiles: 0 } },
       async checkSharedCheckout() { return { available: false } },
     },
-    autoLand: false,
     processRunner: async (_executable, _args, options) => {
       processInput = options.input
       return {
@@ -157,7 +154,7 @@ test('ChatRunService normalizes a renderer-wrapped prompt before protected-works
       }
     },
   })
-  const prompt = withProviderRunnerInstructions('codex', 'local', 'Continue the renderer-started task.')
+  const prompt = 'Continue the renderer-started task.'
 
   await service.run({
     provider: 'codex', projectPath, prompt, workspaceKey: 'conversation:renderer-envelope',
@@ -165,8 +162,6 @@ test('ChatRunService normalizes a renderer-wrapped prompt before protected-works
     preAcquiredWorkspaceLease: lease,
   })
 
-  assert.equal(processInput.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 1)
-  assert.equal(processInput.match(/This bundled Ensync agent-coordination contract applies to every Ensync provider runner/g)?.length, 1)
   assert.match(processInput, /\[ENSYNC HOST WORKSPACE ISOLATION\]/)
   assert.match(processInput, /Protected branch: ensync\/chat-renderer-envelope/)
   assert.match(processInput, /Continue the renderer-started task\.$/)
@@ -218,7 +213,6 @@ test('ChatRunService tells the provider and renderer that baseline reconciliatio
       async commitAgentWork() { return { committed: false, changedFiles: 0 } },
       async checkSharedCheckout() { return { available: false } },
     },
-    autoLand: false,
     processRunner: async (_executable, _args, options) => {
       seenPrompt = options.input
       return {
@@ -299,7 +293,6 @@ test('ChatRunService shows live overlap events, advises the provider, and stops 
         }
       },
     },
-    autoLand: false,
     processRunner: async (_executable, _args, options) => {
       seenPrompt = options.input
       return {
@@ -361,7 +354,6 @@ test('overlap refresh failures never replace a completed provider result', async
         }
       },
     },
-    autoLand: false,
     processRunner: async () => ({
       exitCode: 0, error: null, timedOut: false, stderr: '',
       stdout: [
@@ -421,7 +413,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   const result = await service.run({
     provider: 'codex',
     projectPath,
-    prompt: `Inspect this project and explain ${ENSYNC_MULTI_AGENT_MARKER}`,
+    prompt: 'Inspect this project and preserve [quoted user marker]',
     model: 'gpt-5.4',
     effort: 'high',
     timeoutMs: 2_000,
@@ -432,10 +424,7 @@ test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON o
   assert.equal(executable, '/test/bin/codex')
   assert.deepEqual(args, ['exec', '--json', '--color', 'never', '--skip-git-repo-check', '--model', 'gpt-5.4', '-c', 'model_reasoning_effort="high"', '-'])
   assert.equal(options.cwd, await realpath(projectPath))
-  assert.equal(options.input.startsWith(ENSYNC_MULTI_AGENT_MARKER), true)
-  assert.match(options.input, /This bundled Ensync agent-coordination contract applies to every Ensync provider runner/)
-  assert.match(options.input, /Inspect this project and explain \[ENSYNC SAFE MULTI-AGENT v1\]$/)
-  assert.equal(options.input.split(ENSYNC_MULTI_AGENT_MARKER).length - 1, 2)
+  assert.equal(options.input, 'Inspect this project and preserve [quoted user marker]')
   assert.equal(options.inactivityTimeoutMs, 2_000)
   assert.equal(options.hardTimeoutMs, 2_000)
   assert.equal(options.env.OPENAI_API_KEY, undefined)
@@ -555,8 +544,7 @@ test('retained Codex jobs use the live runner and validate steering through the 
 
   assert.equal(service.hasRunningRuns(), true)
   assert.equal(liveInput.id, 'job_1111111111111111')
-  assert.match(liveInput.prompt, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
-  assert.match(liveInput.prompt, /Start live$/)
+  assert.equal(liveInput.prompt, 'Start live')
   assert.equal(liveInput.effort, 'medium')
   assert.equal(liveInput.env.OPENAI_API_KEY, undefined)
   assert.deepEqual(await service.steer('job_1111111111111111', { prompt: 'Correct it now' }), {
@@ -859,8 +847,7 @@ test('Claude chat resumes a verified session without putting the prompt in argum
     '--resume',
     sessionId,
   ])
-  assert.match(captured[2].input, /^\[ENSYNC SAFE MULTI-AGENT v1\]/)
-  assert.match(captured[2].input, /Continue the implementation$/)
+  assert.equal(captured[2].input, 'Continue the implementation')
   assert.equal(result.response, 'Real Claude response')
   assert.equal(result.model, 'claude-opus-4-6')
   assert.equal(result.requestedEffort, 'max')
@@ -1107,10 +1094,6 @@ test('chat refuses unsupported providers and non-subscription authentication', a
     service.run({ provider: 'codex', projectPath, prompt: 'Hello', effort: 'ultra' }),
     (error) => error instanceof ChatRunError && error.code === 'invalid_effort',
   )
-  await assert.rejects(
-    service.run({ provider: 'codex', projectPath, prompt: 'Hello', autoLand: 'yes' }),
-    (error) => error instanceof ChatRunError && error.code === 'invalid_auto_land',
-  )
   assert.equal(processCalls, 0)
 })
 
@@ -1182,7 +1165,7 @@ test('a supported droid run reaches the exec runner and returns its result', asy
   assert.equal(result.response, 'pong')
 })
 
-test('a supported cursor run reaches the cursor runner with the contained cwd and the wrapped prompt', async (context) => {
+test('a supported cursor run reaches the cursor runner with the contained cwd and unchanged prompt', async (context) => {
   const projectPath = await projectFixture(context)
   const seen = []
   const service = new ChatRunService({
@@ -1216,10 +1199,7 @@ test('a supported cursor run reaches the cursor runner with the contained cwd an
   assert.equal(result.response, 'pong')
   assert.equal(seen[0].executable, '/test/bin/cursor')
   assert.equal(seen[0].projectPath, await realpath(projectPath))
-  // The prompt reaches the runner already carrying the shared Ensync
-  // multi-agent contract, exactly as the droid path does.
-  assert.notEqual(seen[0].prompt, 'Hello')
-  assert.match(seen[0].prompt, /Hello/)
+  assert.equal(seen[0].prompt, 'Hello')
   // A paid-credential override must never reach a subscription run.
   assert.equal('CURSOR_API_KEY' in seen[0].env, false)
 })

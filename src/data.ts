@@ -1,11 +1,6 @@
-import type { AgentCoordinationPolicy, Chat, Provider } from './types'
+import type { Chat, Provider } from './types'
 
-const defaultAgentCoordination: AgentCoordinationPolicy = {
-  policy: 'ensync_agent_coordination_v1',
-  delivery: 'ensync_prompt',
-}
-
-const defaultProviderCatalog: Array<Omit<Provider, 'agentCoordination'>> = [
+const defaultProviderCatalog: Provider[] = [
   {
     id: 'claude',
     name: 'Claude Code',
@@ -458,7 +453,7 @@ const providerNavigationOrder: Provider['id'][] = [
 export const defaultProviders: Provider[] = providerNavigationOrder.map((providerId) => {
   const provider = defaultProviderCatalog.find((candidate) => candidate.id === providerId)
   if (!provider) throw new Error(`Missing default provider definition for ${providerId}.`)
-  return { ...provider, agentCoordination: defaultAgentCoordination }
+  return { ...provider }
 })
 
 export const initialChats: Chat[] = [

@@ -1,27 +1,8 @@
-import {
-  ENSYNC_AGENT_COORDINATION_POLICY,
-  withEnsyncMultiAgentInstructions,
-} from './multi-agent-prompt.mjs'
-
 const providerRunners = Object.freeze({
-  local: Object.freeze([
-    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-    Object.freeze({ id: 'droid', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-    Object.freeze({ id: 'cursor', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-  ]),
-  // Droid has no ssh runner: remote-ssh.mjs drives plain argv+stdin CLIs, while
-  // droid needs its stream-jsonrpc session adapter. Listing it here before that
-  // bridge exists would let Auto routing dispatch runs that can only fail.
-  //
-  // Cursor has no ssh runner either, for a different reason: its containment is
-  // the argv-pinned `--sandbox enabled` flag that host/cursor-agent.mjs adds, and
-  // the ssh bridge builds its own argv without those flags. Listing it here would
-  // ship a remote Cursor run with no recorded containment at all.
-  ssh: Object.freeze([
-    Object.freeze({ id: 'codex', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-    Object.freeze({ id: 'claude', coordinationPolicy: ENSYNC_AGENT_COORDINATION_POLICY }),
-  ]),
+  local: Object.freeze(['codex', 'claude', 'droid', 'cursor']),
+  // Droid needs its stream-jsonrpc adapter over SSH. Cursor's remote runner
+  // still lacks the per-run sandbox flag used by the local runner.
+  ssh: Object.freeze(['codex', 'claude']),
 })
 
 function topologyRunners(topology) {
@@ -31,24 +12,13 @@ function topologyRunners(topology) {
 }
 
 export function providerRunnerIds(topology) {
-  return topologyRunners(topology).map((runner) => runner.id)
+  return [...topologyRunners(topology)]
 }
 
 export function supportsProviderRunner(providerId, topology) {
-  return topologyRunners(topology).some((runner) => runner.id === providerId)
+  return topologyRunners(topology).includes(providerId)
 }
 
 export function supportsAnyProviderRunner(providerId) {
   return Object.keys(providerRunners).some((topology) => supportsProviderRunner(providerId, topology))
-}
-
-export function withProviderRunnerInstructions(providerId, topology, prompt) {
-  const runner = topologyRunners(topology).find((candidate) => candidate.id === providerId)
-  if (!runner) {
-    throw new TypeError(`${providerId} does not have a tested ${topology} runner.`)
-  }
-  if (runner.coordinationPolicy !== ENSYNC_AGENT_COORDINATION_POLICY) {
-    throw new TypeError(`${providerId} does not implement Ensync's required agent-coordination policy.`)
-  }
-  return withEnsyncMultiAgentInstructions(prompt)
 }
