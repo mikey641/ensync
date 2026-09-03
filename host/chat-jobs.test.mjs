@@ -13,6 +13,7 @@ import { createEnsyncHost } from './server.mjs'
 const JOB_A = 'job_1111111111111111'
 const JOB_B = 'job_2222222222222222'
 const JOB_C = 'job_3333333333333333'
+const PREDECESSOR_FINGERPRINT = 'a'.repeat(64)
 
 function waitFor(predicate, timeoutMs = 1_000) {
   const startedAt = Date.now()
@@ -174,23 +175,29 @@ test('turn navigation stays live-only and is returned only for an occupied job r
   let releaseRun
   let providerRequest
   let providerOptions
+  let admittedOwner
   const journalWrites = []
   const service = new ChatJobService({
-    admit: async (input) => input.jobId === JOB_A
-      ? { disposition: 'acquired', lease: null }
-      : {
-          disposition: 'occupied',
-          owner: {
-            jobId: input.jobId === JOB_B ? JOB_A : 'job_other_host_00000001',
-            provider: 'codex',
-            targetKind: 'local',
-            startedAt: '2026-08-07T10:00:00.000Z',
-            providerProcessStarted: true,
-            steerable: true,
-            nativeWorkspaceId: null,
-            turnId: 'must-not-trust-cross-host-owner-data',
-          },
+    admit: async (input, owner) => {
+      if (input.jobId === JOB_A) {
+        admittedOwner = owner
+        return { disposition: 'acquired', lease: null }
+      }
+      return {
+        disposition: 'occupied',
+        owner: {
+          jobId: input.jobId === JOB_B ? JOB_A : 'job_other_host_00000001',
+          provider: 'codex',
+          targetKind: 'local',
+          startedAt: '2026-08-07T10:00:00.000Z',
+          providerProcessStarted: true,
+          steerable: true,
+          nativeWorkspaceId: null,
+          turnId: 'must-not-trust-cross-host-owner-data',
+          predecessorTranscriptFingerprint: 'b'.repeat(64),
         },
+      }
+    },
     journal: { load: () => [], save: (jobs) => journalWrites.push(structuredClone(jobs)) },
     runLocal: async (request, options) => {
       providerRequest = request
@@ -209,6 +216,7 @@ test('turn navigation stays live-only and is returned only for an occupied job r
       projectId: 'project-a',
       chatId: 'chat-a',
       turnId: 'turn-owner-a',
+      predecessorTranscriptFingerprint: PREDECESSOR_FINGERPRINT,
     },
   }
 
@@ -222,12 +230,16 @@ test('turn navigation stays live-only and is returned only for an occupied job r
   await waitFor(() => releaseRun)
 
   assert.equal(sameHost.disposition, 'occupied')
+  assert.equal('predecessorTranscriptFingerprint' in admittedOwner, false)
   assert.equal(sameHost.owner.turnId, 'turn-owner-a')
+  assert.equal(sameHost.owner.predecessorTranscriptFingerprint, PREDECESSOR_FINGERPRINT)
   assert.equal(crossHost.disposition, 'occupied')
   assert.equal(crossHost.owner.turnId, null)
+  assert.equal(crossHost.owner.predecessorTranscriptFingerprint, null)
   assert.deepEqual(providerRequest, input.request)
   assert.equal('navigation' in providerOptions, false)
   assert.equal(JSON.stringify(journalWrites).includes('turn-owner-a'), false)
+  assert.equal(JSON.stringify(journalWrites).includes(PREDECESSOR_FINGERPRINT), false)
 
   releaseRun()
   await waitFor(() => service.get(JOB_A).state === 'completed')
@@ -269,6 +281,7 @@ test('runChatJob serializes its optional navigation beside the provider request'
         steerable: true,
         nativeWorkspaceId: 'workspace-native-a',
         turnId: 'turn-owner-a',
+        predecessorTranscriptFingerprint: PREDECESSOR_FINGERPRINT,
       },
     }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   }
@@ -278,6 +291,7 @@ test('runChatJob serializes its optional navigation beside the provider request'
       projectId: 'project-a',
       chatId: 'chat-a',
       turnId: 'turn-owner-a',
+      predecessorTranscriptFingerprint: PREDECESSOR_FINGERPRINT,
     }
     const client = new relayHost.EnsyncHostClient('http://host.test/api')
     await assert.rejects(

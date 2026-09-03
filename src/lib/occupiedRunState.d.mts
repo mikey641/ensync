@@ -10,6 +10,8 @@ export type OccupiedRun = {
   providerProcessStarted: boolean
   steerable: boolean
   nativeWorkspaceId: string | null
+  /** Live-only Host transcript binding retained in the renderer snapshot. */
+  predecessorTranscriptFingerprint: string | null
   projectId: string
   projectPath: string
   chatId: string
@@ -65,6 +67,7 @@ export function convertPendingTurnToOccupiedQueue(input: {
     providerProcessStarted?: boolean
     steerable?: boolean
     nativeWorkspaceId?: string | null
+    predecessorTranscriptFingerprint?: string | null
   }
   binding: { projectId: string; projectPath: string; chatId: string }
 }): {

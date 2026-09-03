@@ -7,6 +7,7 @@ import {
 
 const OCCUPIED_RUN_LIMIT = 128
 const NATIVE_WORKSPACE_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+const TRANSCRIPT_FINGERPRINT_PATTERN = /^[0-9a-f]{64}$/
 
 function nonEmptyString(value, maximum = 4096) {
   return typeof value === 'string' && value.length > 0 && value.length <= maximum
@@ -42,6 +43,10 @@ function normalizedOwner(owner, binding) {
       && NATIVE_WORKSPACE_ID_PATTERN.test(owner.nativeWorkspaceId)
       ? owner.nativeWorkspaceId.toLowerCase()
       : null,
+    predecessorTranscriptFingerprint: typeof owner.predecessorTranscriptFingerprint === 'string'
+      && TRANSCRIPT_FINGERPRINT_PATTERN.test(owner.predecessorTranscriptFingerprint)
+      ? owner.predecessorTranscriptFingerprint
+      : null,
     projectId: binding.projectId,
     projectPath: binding.projectPath,
     chatId: binding.chatId,
@@ -66,6 +71,7 @@ export function normalizeOccupiedRuns(value) {
       providerProcessStarted: candidate.providerProcessStarted,
       steerable: candidate.steerable,
       nativeWorkspaceId: candidate.nativeWorkspaceId,
+      predecessorTranscriptFingerprint: candidate.predecessorTranscriptFingerprint,
     }, candidate)
     if (!owner) continue
     normalized[chatId] = { ...owner, controllable: false }

@@ -124,6 +124,10 @@ function boundedNavigationTurnId(value) {
     : null
 }
 
+function boundedNavigationPredecessorFingerprint(value) {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value) ? value : null
+}
+
 function updateLeaseOwner(lease, patch) {
   const update = lease?.updateOwner?.(patch)
   void update?.catch?.(() => {})
@@ -274,6 +278,9 @@ export class ChatJobService {
       workspaceLease: admission.lease ?? null,
       steerDeliveries: new Map(),
       navigationTurnId: boundedNavigationTurnId(input.navigation?.turnId),
+      navigationPredecessorFingerprint: boundedNavigationPredecessorFingerprint(
+        input.navigation?.predecessorTranscriptFingerprint,
+      ),
     }
     this.#jobs.set(input.jobId, job)
     // The idempotency record reaches durable storage before provider execution.
@@ -303,6 +310,9 @@ export class ChatJobService {
       owner: {
         ...(admission.owner ?? {}),
         turnId: retained?.state === 'running' ? retained.navigationTurnId : null,
+        predecessorTranscriptFingerprint: retained?.state === 'running'
+          ? retained.navigationPredecessorFingerprint
+          : null,
       },
     }
   }
@@ -619,6 +629,7 @@ export class ChatJobService {
         workspaceLease: null,
         steerDeliveries: new Map(),
         navigationTurnId: null,
+        navigationPredecessorFingerprint: null,
       }
       this.#jobs.set(job.id, job)
     }

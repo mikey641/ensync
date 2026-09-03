@@ -8,6 +8,16 @@ type NativeExactRunTarget = {
   jobId: string
 }
 
+type NativeExactRunClaimRequest = {
+  original: NativeExactRunTarget
+  replacement: NativeExactRunTarget
+}
+
+type NativeExactRunClaimTokenRequest = {
+  token: string
+  target: NativeExactRunTarget
+}
+
 type NativeExactChatTarget = {
   workspaceId: string
   projectId: string
@@ -56,6 +66,9 @@ interface Window {
     } | null>
     publishActiveRuns?: (entries: NativeExactRunTarget[]) => Promise<boolean>
     matchesActiveRun?: (request: NativeExactRunTarget) => Promise<boolean>
+    claimActiveRun?: (request: NativeExactRunClaimRequest) => Promise<{ status: 'claimed'; token: string } | { status: 'rejected' }>
+    finalizeActiveRunClaim?: (request: NativeExactRunClaimTokenRequest) => Promise<boolean>
+    releaseActiveRunClaim?: (request: NativeExactRunClaimTokenRequest) => Promise<boolean>
     focusWorkspace?: (request: NativeWorkspaceFocusRequest) => Promise<boolean>
     handoffQueuedMessage?: (request: {
       handoffId: string
