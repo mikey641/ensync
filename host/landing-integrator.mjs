@@ -8,6 +8,7 @@ import { runGit } from './git.mjs'
 const MAX_ERROR_LENGTH = 4_096
 const DEFAULT_RESOLUTION_TIMEOUT_MS = 2 * 60_000
 const DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS = 5_000
+const DEFAULT_CONFLICT_FALLBACK_THRESHOLD = 3
 const CONFLICT_MARKER_PATTERN = '^(<{7}|>{7})( |$)'
 const MAX_CONFLICT_FILES = 128
 const MAX_CONFLICT_PATH_BYTES = 32 * 1024
@@ -72,6 +73,8 @@ export class LandingIntegrator {
     this.resolutionTimeoutMs = options.resolutionTimeoutMs ?? DEFAULT_RESOLUTION_TIMEOUT_MS
     this.resolutionShutdownTimeoutMs = options.resolutionShutdownTimeoutMs
       ?? DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS
+    this.conflictFallbackThreshold = options.conflictFallbackThreshold
+      ?? DEFAULT_CONFLICT_FALLBACK_THRESHOLD
     this.operationContext = new AsyncLocalStorage()
   }
 
@@ -574,14 +577,6 @@ export class LandingIntegrator {
           reason: error instanceof Error ? error.message : 'agent-worktree could not apply the saved snapshot.',
         }
       }
-      if (typeof resolveConflict !== 'function') {
-        const restored = await this.#abortIfNeeded(integration.path)
-        return {
-          ok: false,
-          safeToContinue: restored,
-          reason: `Automatic integration found conflicts in: ${conflictFiles.join(', ')}. The saved snapshot will retry automatically.`,
-        }
-      }
       if (!conflictPathsAreBounded(conflictFiles)) {
         const restored = await this.#abortIfNeeded(integration.path)
         return {
@@ -591,18 +586,37 @@ export class LandingIntegrator {
         }
       }
 
-      try {
-        const protectedEntries = await this.#nonConflictIndexEntries(
-          integration.path,
-          conflictFiles,
-        )
-        const commonGit = await this.#git(
-          ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-          integration.path,
-        )
-        if (protectedEntries === null || commonGit.exitCode !== 0 || !firstLine(commonGit.stdout)) {
-          throw new Error('Ensync could not pin the integration worktree before conflict resolution.', { cause: error })
+      const protectedEntries = await this.#nonConflictIndexEntries(
+        integration.path,
+        conflictFiles,
+      )
+      const commonGit = await this.#git(
+        ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+        integration.path,
+      )
+      if (protectedEntries === null || commonGit.exitCode !== 0 || !firstLine(commonGit.stdout)) {
+        const restored = await this.#abortIfNeeded(integration.path)
+        return {
+          ok: false,
+          safeToContinue: restored,
+          reason: 'Ensync could not pin the integration worktree before conflict resolution.',
         }
+      }
+
+      if (typeof resolveConflict !== 'function') {
+        if ((item.attempts ?? 0) >= this.conflictFallbackThreshold) {
+          const fallback = await this.#theirsFallback(integration, item, identity, conflictFiles, protectedEntries)
+          if (fallback.ok) return { ok: true, safeToContinue: true }
+        }
+        const restored = await this.#abortIfNeeded(integration.path)
+        return {
+          ok: false,
+          safeToContinue: restored,
+          reason: `Automatic integration found conflicts in: ${conflictFiles.join(', ')}. The saved snapshot will retry automatically.`,
+        }
+      }
+
+      try {
         let resolutionFailure = null
         try {
           await this.#boundedResolution(resolveConflict, {
@@ -623,36 +637,8 @@ export class LandingIntegrator {
           throw unsafe
         }
         if (resolutionFailure) throw resolutionFailure
-        const markers = await this.#git(
-          ['grep', '-l', '-E', CONFLICT_MARKER_PATTERN, '--', ...conflictFiles],
-          integration.path,
-        )
-        if (markers.exitCode === 0) {
-          throw new Error(`Conflict markers remain in: ${markers.stdout.split(/\r?\n/).filter(Boolean).join(', ')}.`, { cause: error })
-        }
-        if (await this.#mergeInProgress(integration.path)) {
-          const staged = await this.#git(['add', '--', ...conflictFiles], integration.path)
-          if (staged.exitCode !== 0) throw new Error(firstLine(staged.stderr) || 'Git could not stage the resolved conflict files.', { cause: error })
-          const unresolved = await this.#unmergedFiles(integration.path)
-          if (unresolved.length > 0) throw new Error(`Conflicts remain unresolved in: ${unresolved.join(', ')}.`, { cause: error })
-          await this.client.continueSync({
-            worktreePath: integration.path,
-            identity,
-            signal: this.#signal(),
-          })
-        }
-        const contained = await this.#git(
-          ['merge-base', '--is-ancestor', item.savedSha, 'HEAD'],
-          integration.path,
-        )
-        if (contained.exitCode !== 0) throw new Error('The conflict resolution did not retain the exact saved commit.', { cause: error })
-        const resolvedEntries = await this.#nonConflictTreeEntries(
-          integration.path,
-          conflictFiles,
-        )
-        if (resolvedEntries === null || resolvedEntries !== protectedEntries) {
-          throw new Error('The conflict resolver changed files outside the reported conflict set.', { cause: error })
-        }
+        const finalized = await this.#finalizeResolution(integration, item, identity, conflictFiles, protectedEntries)
+        if (!finalized.ok) throw new Error(finalized.reason)
         return { ok: true, safeToContinue: true }
       } catch (resolutionError) {
         if (resolutionError?.unsafeWorktreeControl || resolutionError?.resolverStopped === false) {
@@ -662,6 +648,11 @@ export class LandingIntegrator {
             reason: resolutionError.message,
           }
         }
+        // Fallback: after repeated provider failures, resolve by taking the incoming (theirs) version
+        if ((item.attempts ?? 0) >= this.conflictFallbackThreshold) {
+          const fallback = await this.#theirsFallback(integration, item, identity, conflictFiles, protectedEntries)
+          if (fallback.ok) return { ok: true, safeToContinue: true }
+        }
         const restored = await this.#abortIfNeeded(integration.path)
         return {
           ok: false,
@@ -670,6 +661,49 @@ export class LandingIntegrator {
         }
       }
     }
+  }
+
+  async #theirsFallback(integration, item, identity, conflictFiles, protectedEntries) {
+    if (!(await this.#mergeInProgress(integration.path))) return { ok: false, reason: 'the merge is no longer in progress' }
+    for (const file of conflictFiles) {
+      const checkout = await this.#git(['checkout', '--theirs', '--', file], integration.path)
+      if (checkout.exitCode !== 0) return { ok: false, reason: `Git could not check out the incoming version of ${file}.` }
+    }
+    return this.#finalizeResolution(integration, item, identity, conflictFiles, protectedEntries)
+  }
+
+  async #finalizeResolution(integration, item, identity, conflictFiles, protectedEntries) {
+    const markers = await this.#git(
+      ['grep', '-l', '-E', CONFLICT_MARKER_PATTERN, '--', ...conflictFiles],
+      integration.path,
+    )
+    if (markers.exitCode === 0) {
+      return { ok: false, reason: `Conflict markers remain in: ${markers.stdout.split(/\r?\n/).filter(Boolean).join(', ')}.` }
+    }
+    if (await this.#mergeInProgress(integration.path)) {
+      const staged = await this.#git(['add', '--', ...conflictFiles], integration.path)
+      if (staged.exitCode !== 0) return { ok: false, reason: firstLine(staged.stderr) || 'Git could not stage the resolved conflict files.' }
+      const unresolved = await this.#unmergedFiles(integration.path)
+      if (unresolved.length > 0) return { ok: false, reason: `Conflicts remain unresolved in: ${unresolved.join(', ')}.` }
+      await this.client.continueSync({
+        worktreePath: integration.path,
+        identity,
+        signal: this.#signal(),
+      })
+    }
+    const contained = await this.#git(
+      ['merge-base', '--is-ancestor', item.savedSha, 'HEAD'],
+      integration.path,
+    )
+    if (contained.exitCode !== 0) return { ok: false, reason: 'The conflict resolution did not retain the exact saved commit.' }
+    const resolvedEntries = await this.#nonConflictTreeEntries(
+      integration.path,
+      conflictFiles,
+    )
+    if (resolvedEntries === null || resolvedEntries !== protectedEntries) {
+      return { ok: false, reason: 'The conflict resolver changed files outside the reported conflict set.' }
+    }
+    return { ok: true }
   }
 
   async #boundedResolution(resolveConflict, details) {

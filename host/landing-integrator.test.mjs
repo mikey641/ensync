@@ -822,3 +822,72 @@ test('post-publication checks stay pinned to one SHA and observe the final targe
   assert.deepEqual(result.retryIds, ['landing-1'])
   assert.equal(await git(current.repositoryPath, ['rev-parse', 'main']), current.baseline)
 })
+
+test('a failed provider resolution falls back to theirs and lands the incoming version', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-fallback-theirs', { 'README.md': '# chat version\n' })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const result = await integrator(current.nativeClient).integrate(
+    [{ ...item(current, conflicting, 1), attempts: 3 }],
+    { resolveConflict: async () => { throw new Error('provider cannot resolve') } },
+  )
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.deepEqual(result.retryIds, [])
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
+})
+
+test('the theirs fallback preserves non-conflicting files from the incoming branch', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-fallback-non-conflict', {
+    'README.md': '# chat version\n',
+    'new-file.txt': 'new content\n',
+  })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const result = await integrator(current.nativeClient).integrate(
+    [{ ...item(current, conflicting, 1), attempts: 3 }],
+    { resolveConflict: async () => { throw new Error('provider cannot resolve') } },
+  )
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
+  assert.equal(await readFile(join(current.repositoryPath, 'new-file.txt'), 'utf8'), 'new content\n')
+})
+
+test('a conflict without a resolver falls back to theirs after repeated attempts', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-no-resolver-fallback', { 'README.md': '# chat version\n' })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const result = await integrator(current.nativeClient).integrate(
+    [{ ...item(current, conflicting, 1), attempts: 3 }],
+  )
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.deepEqual(result.retryIds, [])
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
+})
+
+test('the theirs fallback is not attempted before the threshold is reached', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-fallback-threshold', { 'README.md': '# chat version\n' })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const result = await integrator(current.nativeClient).integrate([item(current, conflicting, 1)], {
+    resolveConflict: async () => { throw new Error('provider cannot resolve') },
+  })
+
+  assert.deepEqual(result.landedIds, [])
+  assert.deepEqual(result.retryIds, ['landing-1'])
+  assert.match(result.errors['landing-1'], /provider cannot resolve/i)
+})
