@@ -1,4 +1,6 @@
+import { mkdir as makeDirectory } from 'node:fs/promises'
 import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { findExecutable, runProcess, subscriptionEnvironment } from './command.mjs'
 
 // Verified against droid 0.191.1: `/limits` exists only in the interactive TUI.
@@ -22,6 +24,31 @@ const PANEL_WAIT_SECONDS = 15
 const PANEL_DRAIN_SECONDS = 3
 const PROBE_TIMEOUT_MS = 35_000
 const MAX_CAPTURE_BYTES = 512 * 1024
+
+// The droid TUI indexes whatever directory it starts in. Measured on macOS 26
+// (droid 0.204.0, 2026-09-03): started in the home directory it walked
+// Contacts, the media library, Documents, and other apps' data folders within
+// seconds, and macOS raised a "would like to access data from other apps"
+// prompt attributed to Ensync on every probe. The probe exits before anyone
+// can answer, so nothing is ever recorded and the prompt returns with the next
+// status sweep. The TUI therefore always starts in this empty Ensync-owned
+// directory. It lives inside the home directory so droid's folder trust for
+// the home directory still covers it; started in an empty directory, the same
+// TUI made no protected-folder access at all.
+const PROBE_DIRECTORY_SEGMENTS = ['.ensync', 'droid-limits-probe-v1']
+
+async function prepareProbeDirectory(options) {
+  const directory = join(options.home ?? homedir(), ...PROBE_DIRECTORY_SEGMENTS)
+  const mkdir = options.mkdir ?? makeDirectory
+  try {
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+  } catch {
+    // Without the empty directory the only alternative is the home directory,
+    // which is exactly what must never happen; unknown usage is the honest result.
+    return null
+  }
+  return directory
+}
 
 // The executable path is embedded in a Tcl brace word, where these characters
 // would change parsing. Droid installs never contain them, so the probe refuses
@@ -152,7 +179,9 @@ export async function probeDroidLimits(executable, checkedAt, options = {}) {
   const locate = options.findExecutable ?? findExecutable
   const expectExecutable = await locate('expect')
   if (!expectExecutable) return null
-  const capture = async () => runCapture(expectExecutable, script, checkedAt, options)
+  const probeDirectory = await prepareProbeDirectory(options)
+  if (!probeDirectory) return null
+  const capture = async () => runCapture(expectExecutable, script, checkedAt, probeDirectory, options)
   const first = await capture()
   if (first) return first
   // Two probes racing (a manual refresh landing on a scheduled one) leave the
@@ -162,14 +191,14 @@ export async function probeDroidLimits(executable, checkedAt, options = {}) {
   return options.retryOnEmptyCapture === false ? null : capture()
 }
 
-async function runCapture(expectExecutable, script, checkedAt, options) {
+async function runCapture(expectExecutable, script, checkedAt, probeDirectory, options) {
   const run = options.runProcess ?? runProcess
   const result = await run(expectExecutable, ['-f', '-'], {
     input: script,
-    // The home directory is the least surprising trusted folder; when droid
-    // does not trust it, the trust prompt blocks the panel and the parse
-    // degrades to the unavailable fallback.
-    cwd: options.home ?? homedir(),
+    // Never the home directory or a real project: see PROBE_DIRECTORY_SEGMENTS.
+    // When droid does not trust the directory, the trust prompt blocks the
+    // panel and the parse degrades to the unavailable fallback.
+    cwd: probeDirectory,
     env: { ...subscriptionEnvironment(), TERM: 'xterm-256color' },
     timeoutMs: PROBE_TIMEOUT_MS,
     maxCaptureBytes: MAX_CAPTURE_BYTES,
