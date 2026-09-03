@@ -21,6 +21,7 @@
     "start": "npm run open",
     "open": "npm run build:ui && node scripts/open.mjs",
     "start:foreground": "npm run build:ui && electron .",
+    "continuous-update": "node scripts/continuous-update.mjs",
     "test": "node test/run-tests.mjs",
     "smoke": "node scripts/smoke.mjs",
     "smoke:win-packaged": "node scripts/smoke-windows-package.mjs",
@@ -62,6 +63,7 @@
       "src/codex-conversation-import.mjs",
       "src/build-info.mjs",
       "src/native-updates.mjs",
+      "src/continuous-update.mjs",
       "src/runtime.mjs",
       "src/process-liveness.mjs",
       "package.json"
