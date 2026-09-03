@@ -114,7 +114,7 @@ export class LandingCoordinator {
     this.startPromise ??= (async () => {
       const items = await this.journal.load()
       for (const item of items) {
-        if (item.state === 'queued' || item.state === 'retry') this.#markReady(item)
+        if (item.state === 'queued' || item.state === 'retry' || item.state === 'integrating') this.#markReady(item)
       }
     })()
     return this.startPromise

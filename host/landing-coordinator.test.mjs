@@ -487,6 +487,36 @@ test('start resumes queued and retry entries once even when called repeatedly', 
   assert.ok(journal.items.every((item) => item.state === 'landed'))
 })
 
+test('start resumes integrating entries so a crashed Host does not strand them', async () => {
+  const recovered = [
+    {
+      ...input('ensync/integrating', '/repo', SHA_B),
+      id: 'landing-1',
+      completionSequence: 1,
+      state: 'integrating',
+      attempts: 3,
+      createdAt: '2026-09-03T00:00:01.000Z',
+      updatedAt: '2026-09-03T00:00:01.000Z',
+      error: null,
+    },
+  ]
+  const journal = new MemoryJournal(recovered)
+  const calls = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async (train) => {
+      calls.push(train.map((item) => item.id))
+      return { landedIds: train.map((item) => item.id), retryIds: [] }
+    },
+  })
+
+  await coordinator.start()
+  await coordinator.whenIdle()
+
+  assert.deepEqual(calls, [['landing-1']])
+  assert.equal(journal.items.find((item) => item.id === 'landing-1').state, 'landed')
+})
+
 test('shutdown aborts the active train, waits for it to settle, and leaves the item durable for restart', async () => {
   const integrationStarted = deferred()
   const integrationClosed = deferred()
