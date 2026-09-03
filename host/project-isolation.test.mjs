@@ -79,24 +79,20 @@ test('an identical active chat is rejected immediately by process-local ownershi
   await resumed.lease.release()
 })
 
-test('a dirty canonical checkout fails before worktree creation and preserves user bytes', async (context) => {
+test('a dirty canonical checkout does not block worktree creation and preserves user bytes', async (context) => {
   const current = await fixture(context)
   const dirtyPath = join(current.repository, 'README.md')
   await writeFile(dirtyPath, '# unsaved user work\n')
-  let creates = 0
-  const isolation = new ProjectIsolationService({
-    rootPath: current.workspaceRoot,
-    agentWorktreeClient: {
-      async create() { creates += 1; throw new Error('must not create') },
-    },
-  })
+  const isolation = new ProjectIsolationService({ rootPath: current.workspaceRoot })
 
-  await assert.rejects(
-    isolation.acquire(current.repository, 'chat:dirty'),
-    (error) => error instanceof ProjectIsolationError && error.code === 'shared_checkout_dirty',
-  )
-  assert.equal(creates, 0)
+  const lease = await isolation.acquire(current.repository, 'chat:dirty')
+  assert.equal(lease.workspace.reused, false)
+  // The worktree is created from HEAD, not from the dirty working tree.
+  const worktreeReadme = await readFile(join(lease.workspace.projectPath, 'README.md'), 'utf8')
+  assert.equal(worktreeReadme, '# project\n')
+  // The user's uncommitted changes are untouched in the shared checkout.
   assert.equal(await readFile(dirtyPath, 'utf8'), '# unsaved user work\n')
+  await lease.release()
 })
 
 test('new workspace target metadata is durable before agent-worktree creation starts', async (context) => {

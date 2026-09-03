@@ -501,13 +501,14 @@ export class ProjectIsolationService {
       cwd: repositoryPath,
     })
     const dirty = statusEntries(status.stdout)
-    if (dirty.length > 0) {
-      throw new ProjectIsolationError(
-        'shared_checkout_dirty',
-        `The shared checkout has ${dirty.length} uncommitted change${dirty.length === 1 ? '' : 's'}. Commit or stash them before starting an Ensync chat so no hidden history is created.`,
-        409,
-      )
-    }
+    // Uncommitted changes in the shared checkout do not block chat creation.
+    // The agent works in an isolated worktree branched from HEAD, so it never
+    // sees or touches these changes. The landing integrator has its own clean-
+    // checkout guard that waits until the user has committed or stashed before
+    // merging agent work back into the target branch. Blocking chat creation
+    // here only forced the user to leave the app to commit or stash every time
+    // they had work-in-progress, without protecting anything the worktree
+    // isolation and landing guards do not already cover.
     return {
       repositoryPath,
       commonGitDirectory,
