@@ -45,6 +45,8 @@ A focused `AgentWorktreeClient` invokes the pinned `wt` executable with argument
 - merge a completed conversation branch into the configured base;
 - continue or abort tool-owned synchronization after automated resolution.
 
+The adapter writes an Ensync-private runtime config with hooks, copied files, and automatic submodule cloning disabled. Upstream 0.13.6 has no command flag that disables project-level config, whose hooks run without a sandbox or timeout, so Ensync fails fast if `.agent-worktree.toml` exists instead of granting it Host authority or risking another unbounded wait.
+
 New workspaces use agent-worktree's storage and metadata. Existing `ensync/chat-*` branches and managed worktrees are discovered and adopted lazily so the migration cannot orphan completed work. Ensync keeps no renewable per-chat lock directories. Duplicate starts are rejected by the Host job registry before a provider process starts; the desktop Host remains a singleton authority for local execution.
 
 The canonical checkout is never cleaned, reset, stashed, or force-updated. If an external user edit makes immediate local integration unsafe, landing uses an isolated integration worktree and retries without touching those bytes. Immediately before delegated publication it rechecks both the target SHA and canonical status; a moved or dirty target makes the train retry.

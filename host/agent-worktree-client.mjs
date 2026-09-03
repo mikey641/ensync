@@ -1,6 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { constants } from 'node:fs'
-import { access } from 'node:fs/promises'
+import { access, chmod, mkdir, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,6 +10,19 @@ const execFile = promisify(execFileCallback)
 const MAX_OUTPUT_BYTES = 512 * 1024
 const MAX_ERROR_TEXT = 4_096
 const COMMAND_TIMEOUT_MS = 2 * 60_000
+const PROJECT_CONFIG_NAME = '.agent-worktree.toml'
+const SAFE_RUNTIME_CONFIG = `[general]
+merge_strategy = "merge"
+sync_strategy = "merge"
+copy_files = []
+submodules = false
+submodule_jobs = 1
+
+[hooks]
+post_create = []
+pre_merge = []
+post_merge = []
+`
 
 const PLATFORM_PACKAGES = Object.freeze({
   'darwin-arm64': '@nekocode/agent-worktree-darwin-arm64',
@@ -31,6 +44,13 @@ async function canExecute(path, platform, accessImpl) {
   } catch {
     return false
   }
+}
+
+async function prepareSafeRuntime(storagePath) {
+  await mkdir(storagePath, { recursive: true, mode: 0o700 })
+  const configPath = join(storagePath, 'config.toml')
+  await writeFile(configPath, SAFE_RUNTIME_CONFIG, { encoding: 'utf8', mode: 0o600 })
+  try { await chmod(configPath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
 }
 
 /**
@@ -106,6 +126,9 @@ export class AgentWorktreeClient {
     this.run = options.run ?? execFile
     this.environment = { ...(options.env ?? process.env) }
     this.timeoutMs = options.timeoutMs ?? COMMAND_TIMEOUT_MS
+    this.prepareRuntime = options.prepareRuntime ?? prepareSafeRuntime
+    this.projectConfigAccess = options.projectConfigAccess ?? access
+    this.runtimeReady = null
   }
 
   async list(repositoryPath) {
@@ -117,6 +140,7 @@ export class AgentWorktreeClient {
     const repositoryPath = requiredPath(input.repositoryPath, 'repository path')
     const branch = requiredName(input.branch, 'branch')
     const base = requiredName(input.base, 'base branch')
+    await this.#assertSafeConfiguration(repositoryPath)
     await this.#invoke('create', ['new', '--base', base, '--', branch], repositoryPath)
     const listed = await this.list(repositoryPath)
     const created = Array.isArray(listed?.worktrees)
@@ -149,9 +173,11 @@ export class AgentWorktreeClient {
   }
 
   async merge(input = {}) {
+    const repositoryPath = requiredPath(input.repositoryPath, 'repository path')
     const worktreePath = requiredPath(input.worktreePath, 'worktree path')
     const into = requiredName(input.into, 'target branch')
     const selectedStrategy = strategy(input.strategy ?? 'merge')
+    await this.#assertSafeConfiguration(repositoryPath)
     const args = ['merge', '--strategy', selectedStrategy, '--into', into]
     if (input.delete) args.push('--delete')
     if (input.skipHooks) args.push('--skip-hooks')
@@ -180,6 +206,7 @@ export class AgentWorktreeClient {
   }
 
   async #invoke(operation, args, cwd) {
+    await this.#ensureSafeRuntime()
     try {
       const result = await this.run(this.executable, args, {
         cwd,
@@ -208,6 +235,30 @@ export class AgentWorktreeClient {
         { cause, exitCode, stdout: cause?.stdout, stderr: cause?.stderr },
       )
     }
+  }
+
+  async #ensureSafeRuntime() {
+    this.runtimeReady ??= Promise.resolve().then(() => this.prepareRuntime(this.storagePath))
+    await this.runtimeReady
+  }
+
+  async #assertSafeConfiguration(repositoryPath) {
+    await this.#ensureSafeRuntime()
+    const projectConfigPath = join(repositoryPath, PROJECT_CONFIG_NAME)
+    try {
+      await this.projectConfigAccess(projectConfigPath, constants.F_OK)
+    } catch (cause) {
+      if (cause?.code === 'ENOENT') return
+      throw new AgentWorktreeCommandError(
+        'configuration',
+        `Ensync could not verify that agent-worktree project config is disabled at ${projectConfigPath}.`,
+        { cause },
+      )
+    }
+    throw new AgentWorktreeCommandError(
+      'configuration',
+      `agent-worktree project config is disabled in Ensync because version 0.13.6 can run its hooks without a sandbox or timeout. Move ${PROJECT_CONFIG_NAME} out of the repository before starting an Ensync chat.`,
+    )
   }
 
   #parseJson(operation, stdout) {

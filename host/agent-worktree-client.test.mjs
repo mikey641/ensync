@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -87,6 +87,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
     storagePath: '/state/agent-worktree',
     run,
     env: { PATH: '/usr/bin' },
+    prepareRuntime: async () => {},
   })
 
   assert.deepEqual(await client.list('/repo'), {
@@ -102,7 +103,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
   await client.sync({ worktreePath: '/repo/chat-1', from: 'main', strategy: 'merge' })
   await client.continueSync({ worktreePath: '/repo/chat-1' })
   await client.abortSync({ worktreePath: '/repo/chat-1' })
-  await client.merge({ worktreePath: '/repo/chat-1', into: 'main', strategy: 'merge', delete: true })
+  await client.merge({ repositoryPath: '/repo', worktreePath: '/repo/chat-1', into: 'main', strategy: 'merge', delete: true })
   await client.remove({ repositoryPath: '/repo', branch: 'ensync/chat-1' })
 
   assert.deepEqual(calls.map(({ args }) => args), [
@@ -134,9 +135,10 @@ test('merge exit 13 is a conflict disposition while other failures are typed err
     executable: '/tools/wt',
     storagePath: '/state/agent-worktree',
     run: async () => { throw conflict },
+    prepareRuntime: async () => {},
   })
 
-  assert.deepEqual(await client.merge({ worktreePath: '/repo/chat-1', into: 'main' }), {
+  assert.deepEqual(await client.merge({ repositoryPath: '/repo', worktreePath: '/repo/chat-1', into: 'main' }), {
     disposition: 'conflict',
     exitCode: 13,
     stdout: '',
@@ -145,7 +147,7 @@ test('merge exit 13 is a conflict disposition while other failures are typed err
 
   conflict.code = 2
   await assert.rejects(
-    client.merge({ worktreePath: '/repo/chat-1', into: 'main' }),
+    client.merge({ repositoryPath: '/repo', worktreePath: '/repo/chat-1', into: 'main' }),
     (error) => error instanceof AgentWorktreeCommandError
       && error.exitCode === 2
       && error.operation === 'merge',
@@ -157,6 +159,7 @@ test('malformed JSON never escapes as an untyped parser failure', async () => {
     executable: '/tools/wt',
     storagePath: '/state/agent-worktree',
     run: async () => ({ stdout: 'not-json', stderr: '' }),
+    prepareRuntime: async () => {},
   })
 
   await assert.rejects(
@@ -165,6 +168,60 @@ test('malformed JSON never escapes as an untyped parser failure', async () => {
       && error.operation === 'list'
       && /invalid JSON/i.test(error.message),
   )
+})
+
+test('client pins a no-hook no-submodule runtime configuration', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-wt-safe-runtime-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const repositoryPath = join(root, 'repository')
+  const storagePath = join(root, 'state')
+  await mkdir(repositoryPath)
+  const client = new AgentWorktreeClient({
+    executable: '/tools/wt',
+    storagePath,
+    run: async () => ({ stdout: JSON.stringify({ version: 1, worktrees: [] }), stderr: '' }),
+  })
+
+  await client.list(repositoryPath)
+  const config = await readFile(join(storagePath, 'config.toml'), 'utf8')
+
+  assert.match(config, /submodules\s*=\s*false/)
+  assert.match(config, /copy_files\s*=\s*\[\]/)
+  assert.match(config, /post_create\s*=\s*\[\]/)
+  assert.match(config, /pre_merge\s*=\s*\[\]/)
+  assert.match(config, /post_merge\s*=\s*\[\]/)
+})
+
+test('client refuses project agent-worktree config before create or merge can run hooks', async (context) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-wt-project-config-'))
+  context.after(() => rm(root, { recursive: true, force: true }))
+  const repositoryPath = join(root, 'repository')
+  const worktreePath = join(root, 'worktree')
+  await mkdir(repositoryPath)
+  await mkdir(worktreePath)
+  await writeFile(join(repositoryPath, '.agent-worktree.toml'), '[hooks]\npost_create = ["sleep 999"]\n')
+  let runCalls = 0
+  const client = new AgentWorktreeClient({
+    executable: '/tools/wt',
+    storagePath: join(root, 'state'),
+    run: async () => {
+      runCalls += 1
+      return { stdout: '', stderr: '' }
+    },
+  })
+
+  for (const operation of [
+    () => client.create({ repositoryPath, branch: 'ensync/chat-1', base: 'main' }),
+    () => client.merge({ repositoryPath, worktreePath, into: 'main' }),
+  ]) {
+    await assert.rejects(
+      operation(),
+      (error) => error instanceof AgentWorktreeCommandError
+        && error.operation === 'configuration'
+        && /project config.*disabled/i.test(error.message),
+    )
+  }
+  assert.equal(runCalls, 0)
 })
 
 test('native staging copies only the matching pinned platform executable', async () => {

@@ -175,6 +175,7 @@ export class LandingIntegrator {
       let published
       try {
         published = await this.client.merge({
+          repositoryPath,
           worktreePath: integration.path,
           into: target,
           strategy: 'merge',
