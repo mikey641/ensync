@@ -1701,23 +1701,25 @@ export class ChatRunService {
             at: new Date().toISOString(),
           })
         }
-        try {
-          const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
-          if (sharedCheck.available && sharedCheck.changed) {
-            const message = sharedCheck.destructive
-              ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
-              : sharedCheck.landed
-                ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
-                : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
-            emitAdvisory(options.onEvent, {
-              type: 'notice',
-              code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
-              message,
-              at: new Date().toISOString(),
-            })
+        if (runOutcome === 'succeeded') {
+          try {
+            const sharedCheck = await this.#projectIsolation.checkSharedCheckout(workspace)
+            if (sharedCheck.available && sharedCheck.changed) {
+              const message = sharedCheck.destructive
+                ? `Previously modified files in the shared checkout at ${workspace.shared.repositoryPath} were reverted while this run was active, with no commit containing those changes. Ensync did not change the shared checkout. Review it before relying on its state.`
+                : sharedCheck.landed
+                  ? `Explicit Ensync land merges arrived on ${workspace.shared.repositoryPath} while this run was active, and its uncommitted state also changed. Ensync changed it only through the explicit land; you may have edited concurrently.`
+                  : `The shared checkout at ${workspace.shared.repositoryPath} changed while this run was active. Ensync did not change it; you may have edited or committed concurrently.`
+              emitAdvisory(options.onEvent, {
+                type: 'notice',
+                code: sharedCheck.destructive ? 'shared_checkout_reverted' : 'shared_checkout_changed',
+                message,
+                at: new Date().toISOString(),
+              })
+            }
+          } catch {
+            // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip ownership release.
           }
-        } catch {
-          // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip ownership release.
         }
         if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved) {
           let landingError = null
