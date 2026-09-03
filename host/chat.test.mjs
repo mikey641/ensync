@@ -330,6 +330,82 @@ test('ChatRunService ignores the removed filesystem overlap monitor and prompt w
   assert.equal(startCalls, 0)
 })
 
+test('failed provider run publishes its terminal error without observing the shared checkout', async (context) => {
+  const projectPath = await projectFixture(context)
+  const events = []
+  let sharedCheckoutChecks = 0
+  let releases = 0
+  const lease = {
+    workspace: {
+      canonicalProjectPath: projectPath,
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-failed-terminal',
+      base: { branch: 'main', canonicalSha: 'c'.repeat(40) },
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: 'c'.repeat(40) },
+      shared: {
+        repositoryPath: projectPath,
+        head: 'c'.repeat(40),
+        statusEntries: [],
+      },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() {
+      releases += 1
+      return { removed: true, reason: null }
+    },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    projectIsolation: {
+      async acquire() { return lease },
+      async commitAgentWork() {
+        return { committed: true, changedFiles: 1, head: 'd'.repeat(40) }
+      },
+      async checkSharedCheckout() {
+        sharedCheckoutChecks += 1
+        return { available: false }
+      },
+    },
+    processRunner: async () => ({
+      exitCode: 1,
+      error: null,
+      timedOut: false,
+      stderr: 'Claude Code stopped after tool activity.',
+      stdout: [
+        JSON.stringify({
+          type: 'assistant',
+          message: { content: [{ type: 'tool_use', id: 'tool-1', name: 'Bash', input: { command: 'npm test' } }] },
+        }),
+        JSON.stringify({
+          type: 'result',
+          subtype: 'error_during_execution',
+          is_error: true,
+          result: 'You have hit your session limit.',
+        }),
+      ].join('\n'),
+    }),
+  })
+
+  await assert.rejects(
+    service.run({
+      provider: 'claude', projectPath, prompt: 'Continue', workspaceKey: 'conversation:failed-terminal',
+    }, {
+      onEvent: (event) => events.push(event),
+    }),
+    (error) => error instanceof ChatRunError
+      && error.code === 'cli_failed'
+      && error.safeToRetry === false,
+  )
+
+  assert.ok(events.some((event) => event.code === 'agent_work_committed'))
+  assert.equal(sharedCheckoutChecks, 0)
+  assert.equal(releases, 1)
+})
+
 
 test('Codex chat uses stdin, validated cwd, scrubbed environment, and CLI JSON only', async (context) => {
   const projectPath = await projectFixture(context)
