@@ -69,6 +69,38 @@ function bearerAuthorized(header, expected) {
   return actual.length === wanted.length && timingSafeEqual(actual, wanted)
 }
 
+/**
+ * Push a branch to origin with a no-force policy. If the remote has diverged
+ * (non-fast-forward rejection), fetch the remote, merge its changes into the
+ * local branch, and retry the push. If the merge conflicts, abort and throw
+ * so the landing coordinator logs the failure — never force-push.
+ */
+async function autoPushToOrigin(repositoryPath, targetBranch, gitExecutable) {
+  const pushArgs = ['push', '--no-verify', 'origin', targetBranch]
+  const pushOpts = { cwd: repositoryPath, gitExecutable, timeoutMs: 60_000 }
+  let result = await runGit(pushArgs, pushOpts)
+  if (result.exitCode === 0) return
+  const stderr = result.stderr?.trim() || ''
+  if (/(?:fetch first|non-fast-forward|rejected)/.test(stderr)) {
+    await runGit(['fetch', 'origin', targetBranch], {
+      cwd: repositoryPath, gitExecutable, timeoutMs: 60_000,
+    })
+    const mergeResult = await runGit(['merge', '--no-edit', `origin/${targetBranch}`], {
+      cwd: repositoryPath, gitExecutable, timeoutMs: 60_000,
+    })
+    if (mergeResult.exitCode !== 0) {
+      await runGit(['merge', '--abort'], {
+        cwd: repositoryPath, gitExecutable, timeoutMs: 10_000,
+      })
+      throw new Error(`Could not auto-push: origin/${targetBranch} diverged and the merge had conflicts. ${mergeResult.stderr?.trim() || ''}`)
+    }
+    result = await runGit(pushArgs, pushOpts)
+  }
+  if (result.exitCode !== 0) {
+    throw new Error(result.stderr?.trim() || result.stdout?.trim() || `git push origin ${targetBranch} failed.`)
+  }
+}
+
 function responseHeaders(origin) {
   const headers = {
     'Cache-Control': 'no-store',
@@ -322,14 +354,7 @@ export function createEnsyncHost(options = {}) {
       }
     },
     push: async ({ repositoryPath, targetBranch }) => {
-      const result = await runGit(['push', '--no-verify', 'origin', targetBranch], {
-        cwd: repositoryPath,
-        gitExecutable: options.gitExecutable,
-        timeoutMs: 60_000,
-      })
-      if (result.exitCode !== 0) {
-        throw new Error(result.stderr?.trim() || result.stdout?.trim() || `git push origin ${targetBranch} failed.`)
-      }
+      await autoPushToOrigin(repositoryPath, targetBranch, options.gitExecutable)
     },
   }))
 
@@ -369,9 +394,7 @@ export function createEnsyncHost(options = {}) {
         )
         const ahead = Number(aheadResult.stdout?.trim() ?? '0')
         if (ahead > 0) {
-          await runGit(['push', '--no-verify', 'origin', branch], {
-            cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 60_000,
-          })
+          await autoPushToOrigin(repoPath, branch, options.gitExecutable)
           console.log(`Ensync auto-push safety net pushed ${ahead} commit(s) on ${branch} for ${repoPath}.`)
         }
       } catch {
