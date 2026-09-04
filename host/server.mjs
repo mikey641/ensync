@@ -368,6 +368,121 @@ export function createEnsyncHost(options = {}) {
       }
     }
   }, 30_000)
+
+  // Periodic stranded-branch recovery: every 60s, scan known repositories for
+  // ensync/chat-* branches that have commits ahead of main but are not in the
+  // landing journal. This catches branches where the enqueue at job-completion
+  // failed (Host wasn't running, journal write error, etc.) so they don't sit
+  // stranded forever waiting for a manual land.
+  const strandedRecoveryInterval = setInterval(async () => {
+    const coordinator = server.ensyncServices?.landingCoordinator
+    if (!coordinator?.enqueue || typeof coordinator.enqueue !== 'function') return
+    const journal = coordinator.journal
+    const journalBranches = new Set()
+    try {
+      const items = await journal.load()
+      for (const item of items) {
+        if (item.state !== 'landed') journalBranches.add(item.branch)
+      }
+    } catch { return }
+
+    const repos = new Set()
+    if (options.defaultProjectPath) repos.add(options.defaultProjectPath)
+    for (const root of options.allowedProjectRoots ?? []) repos.add(root)
+
+    for (const repoPath of repos) {
+      try {
+        // List all ensync/chat-* branches
+        const branchList = await runGit(
+          ['branch', '--list', 'ensync/chat-*', '--format=%(refname:short)'],
+          { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000 },
+        )
+        const branches = (branchList.stdout ?? '').split('\n').map((b) => b.trim()).filter(Boolean)
+        if (branches.length === 0) continue
+
+        // Determine the target branch (usually main)
+        const targetResult = await runGit(['symbolic-ref', '--short', 'HEAD'], {
+          cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000,
+        })
+        const targetBranch = targetResult.stdout?.trim() || 'main'
+        if (targetBranch === 'HEAD') continue
+
+        // Get target base SHA
+        const targetBaseResult = await runGit(
+          ['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`],
+          { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000 },
+        )
+        const targetBaseSha = targetBaseResult.stdout?.trim()
+        if (!targetBaseSha) continue
+
+        // Get common git directory
+        const commonResult = await runGit(
+          ['rev-parse', '--path-format=absolute', '--git-common-dir'],
+          { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000 },
+        )
+        const commonValue = commonResult.stdout?.trim() || ''
+        const commonGitDirectory = await import('node:path').then((p) =>
+          import('node:url').then(() => p.isAbsolute(commonValue) ? commonValue : p.resolve(repoPath, commonValue))
+        ).then((p) => import('node:fs/promises').then((fs) => fs.realpath(p)))
+
+        for (const branch of branches) {
+          if (journalBranches.has(branch)) continue
+          // Check if branch has commits ahead of target
+          const aheadResult = await runGit(
+            ['rev-list', '--count', `${targetBranch}..${branch}`],
+            { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000 },
+          )
+          const ahead = Number(aheadResult.stdout?.trim() ?? '0')
+          if (ahead === 0) continue
+
+          // Get saved SHA
+          const savedResult = await runGit(
+            ['rev-parse', '--verify', `refs/heads/${branch}^{commit}`],
+            { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000 },
+          )
+          const savedSha = savedResult.stdout?.trim()
+          if (!savedSha) continue
+
+          // Find worktree path for this branch
+          const worktreesResult = await runGit(['worktree', 'list', '--porcelain'], {
+            cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000,
+          })
+          let workspacePath = repoPath
+          for (const line of (worktreesResult.stdout ?? '').split('\n')) {
+            if (line.startsWith('worktree ')) {
+              const wtPath = line.slice('worktree '.length).trim()
+              // Check if this worktree has the branch checked out
+              const headResult = await runGit(['symbolic-ref', '--short', 'HEAD'], {
+                cwd: wtPath, gitExecutable: options.gitExecutable, timeoutMs: 3_000,
+              }).catch(() => ({ stdout: '' }))
+              if (headResult.stdout?.trim() === branch) {
+                workspacePath = wtPath
+                break
+              }
+            }
+          }
+
+          try {
+            await coordinator.enqueue({
+              repositoryPath: repoPath,
+              commonGitDirectory,
+              projectPath: repoPath,
+              workspacePath,
+              branch,
+              savedSha,
+              targetBranch,
+              targetBaseSha,
+            })
+            console.log(`Ensync stranded-branch recovery enqueued ${branch} (${ahead} commit(s) ahead of ${targetBranch}).`)
+          } catch (error) {
+            console.error(`Ensync stranded-branch recovery failed for ${branch}: ${error instanceof Error ? error.message : error}`)
+          }
+        }
+      } catch {
+        // Non-fatal: repo may not exist, git may not be available, etc.
+      }
+    }
+  }, 60_000)
   chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
@@ -1172,6 +1287,7 @@ export function createEnsyncHost(options = {}) {
   })
   server.once('close', () => {
     clearInterval(autoPushInterval)
+    clearInterval(strandedRecoveryInterval)
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
