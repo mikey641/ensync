@@ -330,6 +330,44 @@ export function createEnsyncHost(options = {}) {
       }
     },
   }))
+
+  // Periodic auto-push safety net: every 30s, check repositories that have
+  // local commits ahead of their origin branch and push them. This catches
+  // direct commits to main that bypass the landing queue (e.g. agent sessions
+  // that commit on the worktree directly) and ensures origin never falls behind
+  // local state.
+  const autoPushInterval = setInterval(async () => {
+    if (server.ensyncServices?.landingCoordinator?.hasActiveWork?.()) return
+    const repos = new Set()
+    for (const state of server.ensyncServices?.landingCoordinator?.repositories?.values?.() ?? []) {
+      if (state.repositoryPath) repos.add(state.repositoryPath)
+    }
+    // Also check the default project path and all allowed project roots
+    if (options.defaultProjectPath) repos.add(options.defaultProjectPath)
+    for (const root of options.allowedProjectRoots ?? []) repos.add(root)
+    for (const repoPath of repos) {
+      try {
+        const branchResult = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], {
+          cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000,
+        })
+        const branch = branchResult.stdout?.trim()
+        if (!branch || branch === 'HEAD') continue // detached
+        const aheadResult = await runGit(
+          ['rev-list', '--count', `origin/${branch}..HEAD`],
+          { cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 5_000 },
+        )
+        const ahead = Number(aheadResult.stdout?.trim() ?? '0')
+        if (ahead > 0) {
+          await runGit(['push', '--no-verify', 'origin', branch], {
+            cwd: repoPath, gitExecutable: options.gitExecutable, timeoutMs: 60_000,
+          })
+          console.log(`Ensync auto-push safety net pushed ${ahead} commit(s) on ${branch} for ${repoPath}.`)
+        }
+      } catch {
+        // Non-fatal: origin may not exist, branch may not be tracking, etc.
+      }
+    }
+  }, 30_000)
   chats = options.chatService ?? new ChatRunService({
     statusService: statuses,
     allowedRoots: options.allowedProjectRoots,
@@ -1133,6 +1171,7 @@ export function createEnsyncHost(options = {}) {
     }
   })
   server.once('close', () => {
+    clearInterval(autoPushInterval)
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
