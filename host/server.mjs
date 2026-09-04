@@ -1,6 +1,7 @@
 import { createServer } from 'node:http'
 import { timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
+import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -342,9 +343,18 @@ export function createEnsyncHost(options = {}) {
     for (const state of server.ensyncServices?.landingCoordinator?.repositories?.values?.() ?? []) {
       if (state.repositoryPath) repos.add(state.repositoryPath)
     }
-    // Also check the default project path and all allowed project roots
+    // Also check the default project path, all allowed project roots, and recent projects
     if (options.defaultProjectPath) repos.add(options.defaultProjectPath)
     for (const root of options.allowedProjectRoots ?? []) repos.add(root)
+    try {
+      const recentPath = join(homedir(), 'Library', 'Application Support', 'Ensync', 'global-recent-projects-v1.json')
+      const raw = await readFile(recentPath, 'utf8')
+      const parsed = JSON.parse(raw)
+      const payload = typeof parsed.payload === 'string' ? JSON.parse(parsed.payload) : parsed.payload
+      for (const project of payload?.projects ?? []) {
+        if (project.path) repos.add(project.path)
+      }
+    } catch { /* file may not exist */ }
     for (const repoPath of repos) {
       try {
         const branchResult = await runGit(['rev-parse', '--abbrev-ref', 'HEAD'], {
@@ -389,6 +399,16 @@ export function createEnsyncHost(options = {}) {
     const repos = new Set()
     if (options.defaultProjectPath) repos.add(options.defaultProjectPath)
     for (const root of options.allowedProjectRoots ?? []) repos.add(root)
+    // Discover project paths from the Ensync recent-projects file
+    try {
+      const recentPath = join(homedir(), 'Library', 'Application Support', 'Ensync', 'global-recent-projects-v1.json')
+      const raw = await readFile(recentPath, 'utf8')
+      const parsed = JSON.parse(raw)
+      const payload = typeof parsed.payload === 'string' ? JSON.parse(parsed.payload) : parsed.payload
+      for (const project of payload?.projects ?? []) {
+        if (project.path) repos.add(project.path)
+      }
+    } catch { /* file may not exist */ }
 
     for (const repoPath of repos) {
       try {
