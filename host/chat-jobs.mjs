@@ -159,6 +159,7 @@ export class ChatJobService {
   #pendingQuestionsLocal
   #normalizeError
   #checkWorktreeClean
+  #selectFallbackProvider
   #now
   #maxJobs
   #maxEvents
@@ -182,6 +183,7 @@ export class ChatJobService {
     this.#pendingQuestionsLocal = options.pendingQuestionsLocal
     this.#normalizeError = options.normalizeError ?? defaultErrorPayload
     this.#checkWorktreeClean = options.checkWorktreeClean ?? null
+    this.#selectFallbackProvider = options.selectFallbackProvider ?? null
     this.#now = options.now ?? (() => new Date().toISOString())
     this.#maxJobs = options.maxJobs ?? DEFAULT_MAX_JOBS
     this.#maxEvents = options.maxEvents ?? DEFAULT_MAX_EVENTS
@@ -512,7 +514,8 @@ export class ChatJobService {
     try {
       let result
       let attempt = 0
-      const MAX_AUTO_CONTINUATIONS = 1
+      const MAX_AUTO_CONTINUATIONS = 3
+      const attemptedProviders = [job.request?.provider].filter(Boolean)
       while (true) {
         try {
           if (job.kind === 'local') {
@@ -547,21 +550,60 @@ export class ChatJobService {
           break
         } catch (runError) {
           const runPayload = this.#normalizeError(runError)
+          const isClean = job.kind === 'local'
+            && this.#checkWorktreeClean
+            && await this.#checkWorktreeClean(job.request)
+
+          // Provider quota exhaustion: switch to the next provider if the
+          // worktree is clean (no partial work would be lost).
+          if (
+            attempt < MAX_AUTO_CONTINUATIONS
+            && runPayload.code === 'provider_quota'
+            && runPayload.safeToRetry === true
+            && isClean
+            && this.#selectFallbackProvider
+          ) {
+            const nextProvider = await this.#selectFallbackProvider(attemptedProviders)
+            if (nextProvider) {
+              attempt++
+              attemptedProviders.push(nextProvider)
+              this.#record(job, {
+                type: 'notice',
+                message: `Provider ${job.request?.provider} exhausted its quota. The worktree is clean, so Ensync is continuing with ${nextProvider}.`,
+                code: 'auto_continuation',
+                at: this.#now(),
+              })
+              job.request = { ...job.request, provider: nextProvider, sessionId: null }
+              continue
+            }
+          }
+
+          // Context exhaustion (invalid_cli_output): continue with a fresh
+          // session on the same or next provider if the worktree is clean.
           if (
             attempt < MAX_AUTO_CONTINUATIONS
             && runPayload.code === 'invalid_cli_output'
-            && job.kind === 'local'
-            && this.#checkWorktreeClean
-            && await this.#checkWorktreeClean(job.request)
+            && isClean
           ) {
             attempt++
+            // Try to switch provider for better context capacity
+            let nextProvider = job.request?.provider
+            if (this.#selectFallbackProvider) {
+              const fallback = await this.#selectFallbackProvider(attemptedProviders)
+              if (fallback) {
+                nextProvider = fallback
+                attemptedProviders.push(fallback)
+              }
+            }
             this.#record(job, {
               type: 'notice',
-              message: 'Provider output exceeded the verified limit. The worktree is clean, so Ensync is continuing with a fresh session.',
+              message: nextProvider !== job.request?.provider
+                ? `Provider ${job.request?.provider} ran out of context. The worktree is clean, so Ensync is continuing with ${nextProvider}.`
+                : 'Provider output exceeded the verified limit. The worktree is clean, so Ensync is continuing with a fresh session.',
               code: 'auto_continuation',
               at: this.#now(),
             })
-            job.request = { ...job.request, sessionId: null }
+            job.request = { ...job.request, provider: nextProvider, sessionId: null }
             continue
           }
           throw runError
@@ -696,7 +738,7 @@ export class ChatJobService {
       const job = {
         id: item.id,
         kind: item.kind,
-        request: null,
+        request: item.request ?? null,
         requestKey: null,
         requestHash: item.requestHash,
         projectPath: item.projectPath ?? null,
@@ -752,6 +794,46 @@ export class ChatJobService {
       job.events.push(recorded)
       job.eventCharacters += eventSize(recorded)
       reconciled = true
+
+      // Auto-retry: if the worktree was clean and we have the original request,
+      // re-run the job with a fresh session instead of leaving it stranded.
+      if (worktreeClean && job.request) {
+        const retryJob = job
+        retryJob.state = 'running'
+        retryJob.finishedAt = null
+        retryJob.cancellationReason = null
+        retryJob.controller = new AbortController()
+        retryJob.completion = null
+        retryJob.workspaceLease = null
+        retryJob.steerDeliveries = new Map()
+        retryJob.navigationTurnId = null
+        retryJob.navigationPredecessorFingerprint = null
+        // Clear the session ID to start a fresh provider session
+        retryJob.request = { ...retryJob.request, sessionId: null }
+        this.#record(retryJob, {
+          type: 'notice',
+          message: 'Ensync Host restarted after an unexpected exit. The worktree is clean, so this run is continuing with a fresh session.',
+          code: 'auto_continuation',
+          at: this.#now(),
+        })
+        void this.#execute(retryJob).catch((retryError) => {
+          const retryPayload = this.#normalizeError(retryError)
+          retryJob.state = 'failed'
+          retryJob.finishedAt = this.#now()
+          const retryRecorded = journalSafe({
+            type: 'error',
+            error: retryPayload.message,
+            code: retryPayload.code,
+            status: retryPayload.status,
+            safeToRetry: retryPayload.safeToRetry,
+            at: retryJob.finishedAt,
+            sequence: ++retryJob.sequence,
+          })
+          retryJob.events.push(retryRecorded)
+          retryJob.eventCharacters += eventSize(retryRecorded)
+          this.#schedulePersist(retryJob)
+        })
+      }
     }
     if (reconciled || journalNeedsRewrite) this.#persist()
   }
@@ -762,6 +844,9 @@ export class ChatJobService {
       id: job.id,
       kind: job.kind,
       requestHash: job.requestHash,
+      // Persist the full request for running jobs so they can be auto-retried
+      // after a host restart. Completed/failed jobs don't need it.
+      request: job.state === 'running' ? job.request : null,
       projectPath: job.request?.projectPath ?? null,
       workspaceKey: job.request?.workspaceKey ?? null,
       state: job.state,

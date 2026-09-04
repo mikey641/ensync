@@ -19,6 +19,7 @@ import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService, runGit } from './git.mjs'
+import { selectAutomaticProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './automatic-routing.mjs'
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
@@ -554,6 +555,15 @@ export function createEnsyncHost(options = {}) {
     pendingQuestionsLocal: (jobId) => chats.pendingQuestions(jobId),
     normalizeError: chatJobErrorPayload,
     checkWorktreeClean: (request) => projectIsolation.isWorktreeClean(request.projectPath, request.workspaceKey),
+    selectFallbackProvider: async (attemptedProviderIds) => {
+      try {
+        const providers = await statuses.list()
+        const selected = selectAutomaticProvider(providers, DEFAULT_FALLBACK_PROVIDER_ORDER, attemptedProviderIds)
+        return selected?.id ?? null
+      } catch {
+        return null
+      }
+    },
     journal: chatJobJournal,
   })
   const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({
