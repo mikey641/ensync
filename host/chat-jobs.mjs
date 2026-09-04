@@ -835,6 +835,56 @@ export class ChatJobService {
         })
       }
     }
+
+    // Second pass: retry previously-failed orphaned jobs if the worktree is now
+    // clean and we have the original request. This catches jobs that were
+    // orphaned by a previous host crash and marked failed because the worktree
+    // was dirty at that moment, but have since been cleaned up.
+    for (const job of this.#jobs.values()) {
+      if (job.state !== 'failed' || !job.request) continue
+      const lastEvent = job.events[job.events.length - 1]
+      if (!lastEvent || !['host_job_orphaned', 'host_job_orphaned_retry'].includes(lastEvent.code)) continue
+      const worktreeClean = this.#checkWorktreeClean && job.projectPath && job.workspaceKey
+        ? await this.#checkWorktreeClean({ projectPath: job.projectPath, workspaceKey: job.workspaceKey })
+        : false
+      if (!worktreeClean) continue
+
+      job.state = 'running'
+      job.finishedAt = null
+      job.cancellationReason = null
+      job.controller = new AbortController()
+      job.completion = null
+      job.workspaceLease = null
+      job.steerDeliveries = new Map()
+      job.navigationTurnId = null
+      job.navigationPredecessorFingerprint = null
+      job.request = { ...job.request, sessionId: null }
+      this.#record(job, {
+        type: 'notice',
+        message: 'Ensync Host detected a previously orphaned run with a clean worktree. Continuing with a fresh session.',
+        code: 'auto_continuation',
+        at: this.#now(),
+      })
+      reconciled = true
+      void this.#execute(job).catch((retryError) => {
+        const retryPayload = this.#normalizeError(retryError)
+        job.state = 'failed'
+        job.finishedAt = this.#now()
+        const retryRecorded = journalSafe({
+          type: 'error',
+          error: retryPayload.message,
+          code: retryPayload.code,
+          status: retryPayload.status,
+          safeToRetry: retryPayload.safeToRetry,
+          at: job.finishedAt,
+          sequence: ++job.sequence,
+        })
+        job.events.push(retryRecorded)
+        job.eventCharacters += eventSize(retryRecorded)
+        this.#schedulePersist(job)
+      })
+    }
+
     if (reconciled || journalNeedsRewrite) this.#persist()
   }
 
