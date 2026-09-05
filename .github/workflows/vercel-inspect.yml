@@ -1,0 +1,26 @@
+name: Vercel inspect
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Authenticated account
+        run: npx --yes vercel@58.7.1 whoami --token "$VERCEL_TOKEN"
+      - name: List projects
+        run: npx --yes vercel@58.7.1 project ls --token "$VERCEL_TOKEN"
+      - name: List domains
+        run: npx --yes vercel@58.7.1 domains ls --token "$VERCEL_TOKEN"
+      - name: Inspect the current canonical domain
+        run: npx --yes vercel@58.7.1 inspect https://ensync.vercel.app --token "$VERCEL_TOKEN"
+      - name: Inspect the current production alias
+        run: npx --yes vercel@58.7.1 inspect https://site-silk-beta-91.vercel.app --token "$VERCEL_TOKEN"
