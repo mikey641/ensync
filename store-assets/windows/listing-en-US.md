@@ -51,11 +51,11 @@ Continue one coding task across supported subscription-backed AI agents with liv
 
 ## Privacy policy URL
 
-https://ensync.vercel.app/privacy/
+https://site-silk-beta-91.vercel.app/privacy/
 
 ## Website
 
-https://ensync.vercel.app/
+https://site-silk-beta-91.vercel.app/
 
 ## Support contact
 

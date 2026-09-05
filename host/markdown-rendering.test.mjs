@@ -190,7 +190,7 @@ test('backslash escapes render markdown punctuation literally', () => {
 })
 
 test('link targets classify external, local file, and refused schemes', () => {
-  assert.deepEqual(classifyLinkTarget('https://ensync.vercel.app'), { kind: 'external', url: 'https://ensync.vercel.app' })
+  assert.deepEqual(classifyLinkTarget('https://site-silk-beta-91.vercel.app'), { kind: 'external', url: 'https://site-silk-beta-91.vercel.app' })
   assert.deepEqual(classifyLinkTarget('http://localhost:5173'), { kind: 'external', url: 'http://localhost:5173' })
   assert.deepEqual(classifyLinkTarget('mailto:mikey641@gmail.com'), { kind: 'external', url: 'mailto:mikey641@gmail.com' })
   assert.deepEqual(classifyLinkTarget('/tmp/ensync-app-backup/chat.mjs'), { kind: 'file', path: '/tmp/ensync-app-backup/chat.mjs' })

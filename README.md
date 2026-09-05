@@ -4,7 +4,7 @@ Ensync is a universal AI agent workspace for continuing one coding task across s
 
 The desktop app (macOS/Windows) drives a local **Ensync Host** that runs the coding agents you already subscribe to, inside an isolated Git worktree, and can automatically merge (land) and deploy (deliver) the results. The **mobile app** (iOS/Android, or the same client installed as a web PWA) signs into your self-hosted **Ensync Sync** service and remotely starts, follows, stops, and steers those same jobs on your paired computer.
 
-- Public site: [ensync.vercel.app](https://ensync.vercel.app)
+- Public site: [site-silk-beta-91.vercel.app](https://site-silk-beta-91.vercel.app)
 - Source: [github.com/mikey641/ensync](https://github.com/mikey641/ensync) (MIT-licensed)
 - Full user guide: [USER-MANUAL.md](USER-MANUAL.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -147,7 +147,7 @@ Plain HTTP is accepted only for an exact loopback address. The service hashes ac
 4. (Optional) For remote control from your phone: run Sync over HTTPS, sign into the same account in desktop Settings → **Remote execution**, and pair the phone with the one-time code.
 5. Watch landing/delivery status per chat; merge/push/deploy according to the chosen destination.
 
-The full walkthrough, including SSH workers, VirtualBox, Telegram, and mobile step-by-step, is in [USER-MANUAL.md](USER-MANUAL.md). Every provider's official install link is listed in the app and on the [documentation site](https://ensync.vercel.app/docs/).
+The full walkthrough, including SSH workers, VirtualBox, Telegram, and mobile step-by-step, is in [USER-MANUAL.md](USER-MANUAL.md). Every provider's official install link is listed in the app and on the [documentation site](https://site-silk-beta-91.vercel.app/docs/).
 
 ## Understanding the pieces
 

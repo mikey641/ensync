@@ -183,7 +183,7 @@ jobs:
         run: |
           mkdir -p current-feeds
           for feed in releases.json releases-beta.json; do
-            status="$(curl --silent --show-error --location --output "current-feeds/$feed" --write-out '%{http_code}' "https://ensync.vercel.app/$feed")"
+            status="$(curl --silent --show-error --location --output "current-feeds/$feed" --write-out '%{http_code}' "https://site-silk-beta-91.vercel.app/$feed")"
             if [[ "$status" == "404" ]]; then
               cp "site/public/$feed" "current-feeds/$feed"
             elif [[ "$status" != "200" ]]; then
