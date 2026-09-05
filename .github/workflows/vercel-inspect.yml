@@ -14,13 +14,19 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
-      - name: Authenticated account
-        run: npx --yes vercel@58.7.1 whoami --token "$VERCEL_TOKEN"
-      - name: List projects
-        run: npx --yes vercel@58.7.1 project ls --token "$VERCEL_TOKEN"
-      - name: List domains
-        run: npx --yes vercel@58.7.1 domains ls --token "$VERCEL_TOKEN"
-      - name: Inspect the current canonical domain
-        run: npx --yes vercel@58.7.1 inspect https://ensync.vercel.app --token "$VERCEL_TOKEN"
-      - name: Inspect the current production alias
-        run: npx --yes vercel@58.7.1 inspect https://site-silk-beta-91.vercel.app --token "$VERCEL_TOKEN"
+      - name: List projects in team
+        run: |
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v9/projects?teamId=$VERCEL_ORG_ID&limit=100"
+      - name: List custom domains in team
+        run: |
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/domains?teamId=$VERCEL_ORG_ID&limit=100"
+      - name: Inspect current project
+        run: |
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
+      - name: Resolve ensync.vercel.app deployment
+        run: |
+          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?url=ensync.vercel.app&teamId=$VERCEL_ORG_ID&limit=5"
