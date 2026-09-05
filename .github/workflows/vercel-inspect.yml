@@ -14,23 +14,21 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
-      - name: List projects
+      - name: Alias command help
+        run: npx --yes vercel@58.7.1 alias --help --token "$VERCEL_TOKEN" 2>&1 | head -60
+      - name: Alias set help
+        run: npx --yes vercel@58.7.1 alias set --help --token "$VERCEL_TOKEN" 2>&1 | head -60
+      - name: Newest production deployment
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v9/projects?teamId=$VERCEL_ORG_ID&limit=100" \
-          | jq -r '.projects[] | [.id, .name, (.link.repo // .link // "")] | @tsv'
-      - name: Deployments aliased to ensync.vercel.app
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=3" \
+          | jq -r '.deployments[] | [.uid, .url, .ready, .created] | @tsv'
+      - name: Aliases on newest deployment
         run: |
+          uid=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=1" \
+            | jq -r '.deployments[0].uid')
+          echo "uid=$uid"
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/deployments?url=ensync.vercel.app&teamId=$VERCEL_ORG_ID&limit=20" \
-          | jq -r '.deployments[] | [.projectId, .name, .target, .state, .created, .url] | @tsv'
-      - name: Deployments aliased to site-silk-beta-91.vercel.app
-        run: |
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/deployments?url=site-silk-beta-91.vercel.app&teamId=$VERCEL_ORG_ID&limit=20" \
-          | jq -r '.deployments[] | [.projectId, .name, .target, .state, .created, .url] | @tsv'
-      - name: Current project deployment aliases
-        run: |
-          curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&limit=20" \
-          | jq -r '.deployments[] | [.uid, .target, .state, .created, .url, ((.alias // []) | join("|"))] | @tsv'
+            "https://api.vercel.com/v6/deployments/$uid/aliases" \
+          | jq -c .
