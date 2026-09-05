@@ -23,11 +23,20 @@ async function fixture({
   const output = join(root, 'output')
   await mkdir(input)
 
-  const names = [
-    `Ensync-${version}-mac-universal.dmg`,
-    `Ensync-${version}-mac-universal.zip`,
-  ]
-  if (includePrivateStorePackage) names.push(`Ensync-${version}-windows-store-x64.appx`)
+  const nameGroups = {
+    macos: [
+      `Ensync-${version}-mac-universal.dmg`,
+      `Ensync-${version}-mac-universal.zip`,
+    ],
+    windows: [
+      `Ensync-${version}-windows-x64.exe`,
+      `Ensync-${version}-windows-x64.zip`,
+    ],
+  }
+  const privateStoreNames = includePrivateStorePackage
+    ? [`Ensync-${version}-windows-store-x64.appx`]
+    : []
+  const names = [...nameGroups.macos, ...nameGroups.windows, ...privateStoreNames]
   const records = []
   for (const [index, name] of names.entries()) {
     const contents = Buffer.alloc(1_000_001, index + 1)
@@ -53,7 +62,7 @@ async function fixture({
       signed: macSigned,
       notarized: macNotarized,
       architectures: ['universal'],
-      artifacts: records.filter((record) => record.name.includes('-mac-')),
+      artifacts: records.filter((record) => nameGroups.macos.includes(record.name)),
     },
     {
       schemaVersion: 1,
@@ -67,7 +76,8 @@ async function fixture({
       signed: windowsSigned,
       notarized: null,
       architectures: ['x64'],
-      artifacts: records.filter((record) => record.name.includes('-windows-')),
+      distribution: 'direct',
+      artifacts: records.filter((record) => nameGroups.windows.includes(record.name)),
     },
   ]
   for (const attestation of attestations) {
@@ -91,23 +101,27 @@ function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
   ], { encoding: 'utf8' })
 }
 
-test('release generation publishes signed macOS artifacts and leaves Windows to Store certification', async () => {
+test('release generation publishes signed macOS and Windows direct artifacts', async () => {
   const { input, output } = await fixture()
   const result = generate(input, output)
   assert.equal(result.status, 0, result.stderr)
 
   const manifest = JSON.parse(await readFile(join(output, 'releases.json'), 'utf8'))
   assert.equal(manifest.channel, 'stable')
-  assert.equal(manifest.platforms.macos.status, 'available')
-  assert.equal(manifest.platforms.windows.status, 'unavailable')
-  assert.match(manifest.platforms.windows.reason, /Microsoft Store/)
-  assert.equal(manifest.channel, 'stable')
   assert.equal(manifest.sourceRevision, sourceCommit)
-  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\/ensync\/ensync-downloads\//)
+
+  assert.equal(manifest.platforms.macos.status, 'available')
   assert.equal(manifest.platforms.macos.buildId, 'a'.repeat(16))
   assert.equal(manifest.platforms.macos.signed, true)
   assert.equal(manifest.platforms.macos.notarized, true)
-  assert.equal(manifest.platforms.windows.url, null)
+  assert.match(manifest.platforms.macos.url, /^https:\/\/github\.com\/ensync\/ensync-downloads\//)
+
+  assert.equal(manifest.platforms.windows.status, 'available')
+  assert.equal(manifest.platforms.windows.reason, null)
+  assert.equal(manifest.platforms.windows.buildId, 'b'.repeat(16))
+  assert.equal(manifest.platforms.windows.signed, true)
+  assert.equal(manifest.platforms.windows.notarized, null)
+  assert.match(manifest.platforms.windows.url, /Ensync-1\.2\.3-windows-x64\.exe/)
 })
 
 test('prerelease generation writes only the beta manifest and labels its channel', async () => {
@@ -144,6 +158,23 @@ test('release generation never copies a private uncertified Store package into p
   await assert.rejects(readFile(join(output, 'Ensync-1.2.3-windows-store-x64.appx')), { code: 'ENOENT' })
   const checksums = await readFile(join(output, 'SHA256SUMS.txt'), 'utf8')
   assert.doesNotMatch(checksums, /windows-store/)
+})
+
+test('release generation refuses unsigned Windows direct artifacts', async () => {
+  const { input, output } = await fixture({ windowsSigned: false })
+  const result = generate(input, output)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /windows artifacts are unsigned/)
+})
+
+test('release generation refuses a private Store attestation as a direct Windows release', async () => {
+  const { input, output } = await fixture()
+  const path = join(input, 'attestation-windows.json')
+  const attestation = JSON.parse(await readFile(path, 'utf8'))
+  await writeFile(path, JSON.stringify({ ...attestation, distribution: 'microsoft-store' }))
+  const result = generate(input, output)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /private Store attestation/)
 })
 
 test('release generation refuses a signed but unnotarized macOS build', async () => {

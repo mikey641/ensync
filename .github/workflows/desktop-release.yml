@@ -103,6 +103,52 @@ jobs:
             desktop/release/*.zip
             desktop/release/attestation-macos.json
 
+  windows:
+    needs: preflight
+    runs-on: windows-2025
+    env:
+      CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+      ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_PUBLISHER_NAME }}
+      ENSYNC_WINDOWS_AZURE_ENDPOINT: ${{ secrets.ENSYNC_WINDOWS_AZURE_ENDPOINT }}
+      ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CERTIFICATE_PROFILE_NAME }}
+      ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME: ${{ secrets.ENSYNC_WINDOWS_AZURE_CODE_SIGNING_ACCOUNT_NAME }}
+      AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+      AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+      AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+      ENSYNC_BUILD_CHANNEL: ${{ needs.preflight.outputs.channel }}
+      ENSYNC_SOURCE_COMMIT: ${{ needs.preflight.outputs.source_commit }}
+      ENSYNC_SOURCE_DIRTY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+      - run: npm ci
+      - run: npm --prefix desktop ci
+      - name: Set package version from tag
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          npm --prefix desktop version --no-git-tag-version --allow-same-version $version
+      - run: npm run test:host
+      - run: npm run test:release-compatibility
+      - name: Build, test, sign when configured, and attest direct Windows artifacts
+        run: npm --prefix desktop run package:win
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ensync-windows-${{ github.ref_name }}
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            desktop/release/*.exe
+            desktop/release/*.zip
+            desktop/release/attestation-windows.json
+
   windows-store:
     needs: preflight
     runs-on: windows-2025
@@ -144,7 +190,7 @@ jobs:
             desktop/release/attestation-windows-store.json
 
   publish:
-    needs: [preflight, macos, windows-store]
+    needs: [preflight, macos, windows, windows-store]
     runs-on: ubuntu-24.04
     env:
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
@@ -158,6 +204,10 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: ensync-macos-${{ github.ref_name }}
+          path: release-input
+      - uses: actions/download-artifact@v4
+        with:
+          name: ensync-windows-${{ github.ref_name }}
           path: release-input
       - name: Select the isolated release channel
         shell: bash

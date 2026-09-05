@@ -100,7 +100,10 @@ test('desktop packaging exposes only the guarded Store command and AppX target',
 test('release workflow retains Store packages privately and excludes them from public release downloads', async () => {
   const workflow = await readFile(resolve(import.meta.dirname, '../../.github/workflows/desktop-release.yml'), 'utf8')
   assert.match(workflow, /package:win-store/)
+  assert.match(workflow, /npm --prefix desktop run package:win\s*$/m)
   assert.match(workflow, /desktop\/release\/\*\.appx/)
+  assert.match(workflow, /desktop\/release\/\*\.exe/)
   assert.match(workflow, /name: ensync-macos-/)
+  assert.match(workflow, /name: ensync-windows-/)
   assert.doesNotMatch(workflow, /release-assets\/\*\.appx/)
 })

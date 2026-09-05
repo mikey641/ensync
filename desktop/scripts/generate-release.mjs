@@ -45,7 +45,7 @@ async function sha256(file) {
 }
 
 const inputFiles = await walk(inputRoot)
-const artifactExtensions = new Set(['.dmg', '.zip'])
+const artifactExtensions = new Set(['.dmg', '.zip', '.exe'])
 const artifacts = inputFiles.filter((file) => artifactExtensions.has(extname(file).toLowerCase()))
 const attestations = new Map()
 
@@ -53,6 +53,9 @@ for (const file of inputFiles.filter((item) => /^attestation-(macos|windows)\.js
   const attestation = JSON.parse(await readFile(file, 'utf8'))
   if (attestation.schemaVersion !== 1 || !['macos', 'windows'].includes(attestation.platform)) {
     throw new Error(`Invalid build attestation: ${relative(inputRoot, file)}`)
+  }
+  if (attestation.platform === 'windows' && attestation.distribution === 'microsoft-store') {
+    throw new Error(`Invalid build attestation: ${relative(inputRoot, file)} is a private Store attestation, not a direct Windows release.`)
   }
   if (attestation.version !== version) {
     throw new Error(`${attestation.platform} attestation is for ${attestation.version}, expected ${version}.`)
@@ -123,9 +126,46 @@ function macosRelease() {
   }
 }
 
-if (records.length !== 2) {
-  throw new Error(`Expected two real public macOS release artifacts (DMG and ZIP), found ${records.length}.`)
+function windowsRelease() {
+  const platform = 'windows'
+  const marker = '-windows-'
+  const installerExtension = '.exe'
+  const attestation = attestations.get(platform)
+  const platformRecords = records.filter((record) => record.name.includes(marker))
+  const installer = platformRecords.filter((record) => record.name.endsWith(installerExtension))
+  const archives = platformRecords.filter((record) => record.name.endsWith('.zip'))
+  if (!attestation || installer.length !== 1 || archives.length !== 1) {
+    throw new Error(`${platform} must have one attestation, one ${installerExtension}, and one zip archive.`)
+  }
+  for (const record of platformRecords) {
+    const attested = attestation.artifacts?.find((item) => item.name === record.name)
+    if (!attested || attested.sha256 !== record.sha256 || attested.bytes !== record.bytes) {
+      throw new Error(`${record.name} does not match its build attestation.`)
+    }
+  }
+
+  if (attestation.signed !== true) {
+    throw new Error(`${platform} artifacts are unsigned; refusing to create a public release.`)
+  }
+  const primary = installer[0]
+  return {
+    status: 'available',
+    reason: null,
+    version,
+    url: `https://github.com/${repository}/releases/download/${tag}/${encodeURIComponent(primary.name)}`,
+    sha256: primary.sha256,
+    signed: true,
+    notarized: null,
+    buildId: attestation.buildId,
+    architectures: attestation.architectures ?? [],
+  }
 }
+
+if (records.length !== 4) {
+  throw new Error(`Expected four verified public release artifacts (macOS DMG and ZIP plus Windows EXE and ZIP), found ${records.length}.`)
+}
+const macosPlatform = macosRelease()
+const windowsPlatform = windowsRelease()
 
 const checksums = `${records.map((record) => `${record.sha256}  ${record.name}`).join('\n')}\n`
 await writeFile(join(outputRoot, 'SHA256SUMS.txt'), checksums, { flag: 'wx' })
@@ -141,17 +181,8 @@ const manifest = {
     notesUrl: `https://github.com/${repository}/releases/tag/${tag}`,
   },
   platforms: {
-    macos: macosRelease(),
-    windows: {
-      status: 'unavailable',
-      reason: 'Windows releases are delivered through Microsoft Store after Partner Center certification.',
-      version: null,
-      url: null,
-      sha256: null,
-      signed: false,
-      notarized: null,
-      architectures: [],
-    },
+    macos: macosPlatform,
+    windows: windowsPlatform,
   },
   history: [],
 }
