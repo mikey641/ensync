@@ -6,34 +6,38 @@ Ensync
 
 ## Description
 
-Ensync is a conversation-first workspace for coding agents. Continue one task across supported subscription-backed command-line agents while keeping the selected project, relevant conversation, durable feature decisions, agent instructions, and verified Git state together.
+Ensync keeps one coding workflow moving—uninterrupted. It is a conversation-first workspace that hands your task across the subscription-backed AI agents you already use, so you never rebuild context when the agent changes.
 
-Choose a provider or let Auto use your saved priority and verified availability. Safe fallback can continue before any mutation; timeouts or ambiguous activity stop for review instead of replaying work.
+Continue one task across Codex, Claude Code, Factory Droid, and more while keeping the selected project, relevant conversation, durable feature decisions, agent instructions, and verified Git state together. Choose a provider or let Auto follow your saved priority and verified remaining usage.
 
-Work in durable conversation tabs or resizable split panes. Sign in to an Ensync Server to receive server-owned conversations, live job updates, and portable settings on every connected computer. Projects, provider credentials, sessions, and execution remain on the selected Ensync Host.
+Safe fallback continues only before any mutation. Timeouts, malformed output, tool activity, or unknown work always stop for review instead of replaying work.
 
-Ensync uses official provider CLI logins and does not silently switch to usage-billed model APIs. Codex and Claude Code currently have tested structured execution. Other providers remain discovery-only until their execution, subscription, and safety contracts are verified.
+Work in durable conversation tabs or resizable split panes. Connect your official CLI logins once, ask once, and let Ensync run in an isolated worktree, then land, push, and report live delivery status. Sign in to an Ensync Sync service to receive server-owned conversations, live job updates, and portable settings on every connected computer. Projects, provider credentials, sessions, and execution stay on the selected Ensync Host.
+
+Ensync uses official provider logins and never silently falls through to usage-billed model APIs. Codex, Claude Code, and Factory Droid are the tested structured runners. Other providers are shown as discovery-only until their execution, subscription, and safety contracts are verified.
 
 ## What's new in this version
 
-Leave blank for the first submission.
+Public Microsoft Store availability with Store-managed Windows installation and updates.
 
 ## Product features
 
-- Live server-owned conversations and portable settings across signed-in computers
-- Continue tasks across supported Codex and Claude Code subscriptions
-- Provider-neutral Auto Context preserves conversation, project instructions, decisions, and verified Git state
-- Safe automatic fallback before mutation, with ambiguous activity stopped for review
+- One uninterrupted workflow across Codex, Claude Code, and Factory Droid subscriptions
+- Provider-neutral Auto routing by your saved priority and verified availability
+- Safe fallback only before mutation—ambiguous or post-mutation failures stop for review
 - Durable conversation tabs and resizable split panes
-- Verified project boundaries and protected Git worktrees
-- Honest provider usage and model telemetry only when reported by the installed CLI
-- Local, SSH, and optional VM execution targets
-- Review-first support diagnostics that exclude source files and secrets
-- Microsoft Store-managed installation and Windows updates
+- Verified project focus with one strict folder boundary for chats, files, memory, Git, and terminals
+- Git isolation and automatic landing: each chat gets its own worktree and branch
+- Delivery pipeline from Saved through Landing, verified Merge, Push, Build, and Production
+- Remote execution on the local Host, an SSH worker, a guided VirtualBox VM, or from your phone via Ensync Sync
+- Honest usage telemetry—plans, percentages, reset windows, and models appear only when the real CLI reports them
+- Telegram bridge for approving and running restricted work from a private chat
+- Background update checks with explicit install and publisher verification
+- Local-first help desk with redacted diagnostics and review-required repair
 
 ## Short description
 
-Continue one coding task across supported subscription-backed AI agents with live account sync, durable conversations, verified project context, and safe handoffs.
+One coding workflow, uninterrupted—continue tasks across Codex, Claude Code, and Factory Droid with shared context, safe fallback, and automatic landing.
 
 ## Keywords
 
@@ -41,9 +45,11 @@ Continue one coding task across supported subscription-backed AI agents with liv
 - developer workspace
 - Codex
 - Claude Code
+- Factory Droid
 - agent workflow
 - project context
 - AI assistant
+- remote job runner
 
 ## Copyright and trademark info
 
