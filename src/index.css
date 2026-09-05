@@ -304,6 +304,8 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .delivery-panel__body .delivery-panel__running { margin-top: 10px; background: color-mix(in srgb, #d7a85f 8%, transparent); }
 .delivery-panel__body .delivery-panel__running--primary { margin: 0 0 10px; border: 1px solid color-mix(in srgb, #d7a85f 32%, var(--line)); }
 .delivery-panel__running > span { color: #d7a85f; }
+.delivery-panel__body .delivery-panel__running--finished { border-color: var(--line-soft); background: var(--surface-control); }
+.delivery-panel__running--finished > span { color: var(--accent); }
 .delivery-panel__body a { display: inline-block; margin-top: 9px; color: var(--accent); font-size: var(--font-label); font-weight: 600; line-height: 1.35; text-decoration: none; }
 .chat-workspace-status { width: min(720px, calc(100% - 44px)); min-width: 0; flex: 0 0 auto; align-self: center; margin: 0 0 8px; padding: 7px 10px; display: flex; align-items: center; gap: 7px; border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--line)); border-radius: 7px; background: color-mix(in srgb, var(--accent) 7%, var(--surface-control)); color: var(--text-secondary); font-size: var(--font-label); }
 .chat-workspace-status > svg { flex: 0 0 auto; color: var(--accent); }

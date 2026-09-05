@@ -54,7 +54,7 @@ import { SplitWorkspace, type SplitWorkspaceLayout } from './components/SplitWor
 import { ChatContextHeader } from './components/ChatContextHeader'
 import { MessageContent } from './components/MessageContent'
 import { isLongMessageContent } from './lib/messageContent.mjs'
-import { activeDeliveryPromptContext } from './lib/deliveryStatus.mjs'
+import { deliveryPromptContext } from './lib/deliveryStatus.mjs'
 import { useChatAutoScroll } from './components/useChatAutoScroll'
 import { ResizableSidebar, readResizableSidebarPreferences } from './components/ResizableSidebar'
 import { RemoteSshSetup } from './components/RemoteSshSetup'
@@ -5220,11 +5220,17 @@ function deliveryWorkDescription(record: DeliveryRecord, messages: Chat['message
     || 'Description unavailable for work saved before prompt linking was enabled.'
 }
 
-function deliveryPromptScope(record: DeliveryRecord, hasUnsavedActivePrompt: boolean, fallback: string) {
-  if (hasUnsavedActivePrompt) {
-    return record.state === 'production' ? 'Previous delivered prompt' : 'Previous saved prompt'
-  }
-  return fallback
+function promptRunLabel(prompt: Chat['messages'][number] | null, promptIsActive: boolean) {
+  if (promptIsActive) return 'Running'
+  return ({
+    queued: 'Queued',
+    pending: 'Running',
+    completed: 'Finished',
+    failed: 'Failed',
+    cancelled: 'Stopped',
+    interrupted: 'Interrupted',
+    transferred: 'Transferred',
+  } as const)[prompt?.deliveryStatus ?? 'completed']
 }
 
 function deliveryProgressPosition(record: DeliveryRecord | null) {
@@ -5277,46 +5283,53 @@ function DeliveryPanel({
   onOpenChange: (open: boolean) => void
 }) {
   const previousProduction = delivery && productionDelivery?.id !== delivery.id ? productionDelivery : null
-  const { hasUnsavedActivePrompt, activePrompt } = activeDeliveryPromptContext(
+  const {
+    prompt,
+    promptIsActive,
+    hasUnsavedActivePrompt,
+    deliveryTracksPrompt,
+  } = deliveryPromptContext(
     delivery,
     productionDelivery,
     messages,
     activeTurnId,
   )
   const deliveryLabelText = delivery ? deliveryLabel(delivery) : 'Not saved'
-  const label = hasUnsavedActivePrompt ? 'Running' : deliveryLabelText
+  const promptLabel = promptRunLabel(prompt, promptIsActive)
+  const promptScope = promptIsActive ? 'Current prompt' : 'Latest prompt'
   const exactCommit = delivery
     ? delivery.replacementCommitSha ?? delivery.productionCommitSha ?? delivery.savedSha
     : null
   const deliveryDescription = delivery ? deliveryWorkDescription(delivery, messages) : null
   const deliveryScope = delivery
-    ? deliveryPromptScope(
-      delivery,
-      hasUnsavedActivePrompt,
-      delivery.state === 'production' ? 'Latest delivered prompt' : 'Latest saved prompt',
-    )
+    ? deliveryTracksPrompt ? 'This prompt’s delivery' : 'Earlier delivered work'
     : null
   const previousProductionDescription = previousProduction
     ? deliveryWorkDescription(previousProduction, messages)
     : null
   const previousProductionCommit = previousProduction?.productionCommitSha ?? previousProduction?.savedSha ?? null
   const deploymentLinkLabel = delivery?.state === 'production' && (delivery.deploymentDashboardUrl || delivery.deploymentUrl)
-    ? `Open ${deliveryScope?.toLowerCase() ?? 'this prompt'}’s verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
+    ? `${deliveryTracksPrompt ? 'Open this prompt’s' : 'Open earlier work’s'} verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
     : null
   const landingStepLabel = delivery?.state === 'landing' ? deliveryLabel(delivery) : 'Landing'
   const deliverySteps = ['Saved', landingStepLabel, 'Pushed', 'Building', 'Production']
-  const summary = hasUnsavedActivePrompt
-    ? 'Current prompt · not saved yet'
-    : !delivery
-      ? 'No saved delivery yet'
-      : delivery.state === 'production'
-        ? `Live · ${exactCommit?.slice(0, 12)}`
-        : `Exact saved · ${delivery.savedSha.slice(0, 12)}`
-  const activePromptDescription = concisePromptDescription(activePrompt?.content)
-    || 'Current prompt is running in this chat.'
+  const summary = !delivery
+    ? 'Delivery · not saved yet'
+    : deliveryTracksPrompt
+      ? `This prompt · ${deliveryLabelText} · ${exactCommit?.slice(0, 12)}`
+      : `Earlier delivery · ${deliveryLabelText} · ${exactCommit?.slice(0, 12)}`
+  const promptDescription = concisePromptDescription(prompt?.content)
+    || 'No prompt text is available for this conversation.'
+  const promptDetail = hasUnsavedActivePrompt
+    ? 'Not saved yet. This prompt will get its own exact commit and delivery pipeline after the agent finishes successfully.'
+    : deliveryTracksPrompt
+      ? `This prompt is linked to exact saved commit ${delivery?.savedSha.slice(0, 12)}.`
+      : delivery
+        ? 'No saved delivery is linked to this prompt. The delivery below belongs to earlier work.'
+        : 'No saved delivery is linked to this prompt yet.'
 
   return (
-    <section className={`delivery-panel delivery-panel--${hasUnsavedActivePrompt ? 'running' : delivery?.state ?? 'idle'} ${open ? 'delivery-panel--open' : ''}`} aria-label={`Production delivery for ${chatTitle}: ${label}`}>
+    <section className={`delivery-panel delivery-panel--${promptIsActive ? 'running' : delivery?.state ?? 'idle'} ${open ? 'delivery-panel--open' : ''}`} aria-label={`Production delivery for ${chatTitle}: ${promptScope} ${promptLabel}; ${summary}`}>
       <button
         className="delivery-panel__header"
         type="button"
@@ -5327,8 +5340,8 @@ function DeliveryPanel({
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <Cloud size={14} />
-        <strong>{hasUnsavedActivePrompt ? 'Current prompt delivery' : 'Production delivery'}</strong>
-        <em>This chat · {label}</em>
+        <strong>Production delivery</strong>
+        <em>{promptScope} · {promptLabel}</em>
         <small title={`${chatTitle} · ${sourceBranch} · ${summary}`}>{summary}</small>
       </button>
       {open && (
@@ -5338,10 +5351,10 @@ function DeliveryPanel({
             <span title={chatTitle}>{chatTitle}</span>
             <code title={sourceBranch}>{sourceBranch}</code>
           </div>
-          {hasUnsavedActivePrompt && <div className="delivery-panel__running delivery-panel__running--primary">
-            <span>Current prompt · running now</span>
-            <strong>{activePromptDescription}</strong>
-            <small>Not saved yet. This prompt will get its own exact commit and delivery pipeline after the agent finishes successfully.</small>
+          {prompt && <div className={`delivery-panel__running delivery-panel__running--primary ${promptIsActive ? '' : 'delivery-panel__running--finished'}`}>
+            <span>{promptScope} · {promptLabel.toLowerCase()}</span>
+            <strong>{promptDescription}</strong>
+            <small>{promptDetail}</small>
           </div>}
           {delivery && <div className="delivery-panel__work" aria-label={`${deliveryScope}: ${deliveryDescription}`}>
             <span>{deliveryScope}</span>

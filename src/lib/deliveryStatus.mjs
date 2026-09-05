@@ -42,19 +42,33 @@ export function scopeDeliveryStatusForBranch(status, sourceBranch) {
   }
 }
 
-export function activeDeliveryPromptContext(delivery, productionDelivery, messages, activeTurnId) {
+export function deliveryPromptContext(delivery, productionDelivery, messages, activeTurnId) {
   const trackedTurnIds = new Set([
     ...(Array.isArray(delivery?.turnIds) ? delivery.turnIds : []),
     ...(Array.isArray(productionDelivery?.turnIds) ? productionDelivery.turnIds : []),
   ])
-  const hasUnsavedActivePrompt = typeof activeTurnId === 'string'
-    && activeTurnId.length > 0
-    && !trackedTurnIds.has(activeTurnId)
-  if (!hasUnsavedActivePrompt) {
-    return { hasUnsavedActivePrompt: false, activePrompt: null }
-  }
-  const activePrompt = Array.isArray(messages)
+  const activePrompt = typeof activeTurnId === 'string' && Array.isArray(messages)
     ? messages.find((message) => message?.role === 'user' && message?.turnId === activeTurnId) ?? null
     : null
-  return { hasUnsavedActivePrompt: true, activePrompt }
+  const latestPrompt = Array.isArray(messages)
+    ? [...messages].reverse().find((message) => message?.role === 'user') ?? null
+    : null
+  // An active Host turn must lead over newer queued prompts. Once the turn
+  // finishes, the latest user prompt remains the durable lead for this card.
+  const prompt = activePrompt ?? latestPrompt
+  const promptIsActive = typeof activeTurnId === 'string'
+    && activeTurnId.length > 0
+    && prompt?.turnId === activeTurnId
+  const hasUnsavedActivePrompt = promptIsActive && !trackedTurnIds.has(activeTurnId)
+  const deliveryTracksPrompt = Boolean(
+    prompt?.turnId
+    && Array.isArray(delivery?.turnIds)
+    && delivery.turnIds.includes(prompt.turnId),
+  )
+  return {
+    prompt,
+    promptIsActive,
+    hasUnsavedActivePrompt,
+    deliveryTracksPrompt,
+  }
 }

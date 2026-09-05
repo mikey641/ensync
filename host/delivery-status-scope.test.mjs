@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { activeDeliveryPromptContext, scopeDeliveryStatusForBranch } from '../src/lib/deliveryStatus.mjs'
+import { deliveryPromptContext, scopeDeliveryStatusForBranch } from '../src/lib/deliveryStatus.mjs'
 
 function record(id, sourceBranch, state, updatedAt, overrides = {}) {
   return {
@@ -73,9 +73,11 @@ test('an active prompt leads the card even when another window owns the run', ()
   })
   const messages = [{ role: 'user', turnId: 'active-turn', content: 'fix the current issue' }]
 
-  assert.deepEqual(activeDeliveryPromptContext(delivered, delivered, messages, 'active-turn'), {
+  assert.deepEqual(deliveryPromptContext(delivered, delivered, messages, 'active-turn'), {
+    prompt: messages[0],
+    promptIsActive: true,
     hasUnsavedActivePrompt: true,
-    activePrompt: messages[0],
+    deliveryTracksPrompt: false,
   })
 })
 
@@ -83,9 +85,40 @@ test('a prompt already linked to the delivery is not presented as unsaved work',
   const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
     turnIds: ['delivered-turn'],
   })
+  const messages = [{ role: 'user', turnId: 'delivered-turn', content: 'ship it', deliveryStatus: 'completed' }]
 
-  assert.deepEqual(activeDeliveryPromptContext(delivered, delivered, [], 'delivered-turn'), {
+  assert.deepEqual(deliveryPromptContext(delivered, delivered, messages, 'delivered-turn'), {
+    prompt: messages[0],
+    promptIsActive: true,
     hasUnsavedActivePrompt: false,
-    activePrompt: null,
+    deliveryTracksPrompt: true,
+  })
+})
+
+test('the latest completed prompt remains visible and legacy delivery is earlier work', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    turnIds: [],
+  })
+  const messages = [{ role: 'user', turnId: 'latest-turn', content: 'compare these files', deliveryStatus: 'completed' }]
+
+  assert.deepEqual(deliveryPromptContext(delivered, delivered, messages, null), {
+    prompt: messages[0],
+    promptIsActive: false,
+    hasUnsavedActivePrompt: false,
+    deliveryTracksPrompt: false,
+  })
+})
+
+test('a completed prompt is linked only by its exact turn id', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    turnIds: ['latest-turn'],
+  })
+  const messages = [{ role: 'user', turnId: 'latest-turn', content: 'ship this fix', deliveryStatus: 'completed' }]
+
+  assert.deepEqual(deliveryPromptContext(delivered, delivered, messages, null), {
+    prompt: messages[0],
+    promptIsActive: false,
+    hasUnsavedActivePrompt: false,
+    deliveryTracksPrompt: true,
   })
 })
