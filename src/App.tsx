@@ -54,6 +54,7 @@ import { SplitWorkspace, type SplitWorkspaceLayout } from './components/SplitWor
 import { ChatContextHeader } from './components/ChatContextHeader'
 import { MessageContent } from './components/MessageContent'
 import { isLongMessageContent } from './lib/messageContent.mjs'
+import { activeDeliveryPromptContext } from './lib/deliveryStatus.mjs'
 import { useChatAutoScroll } from './components/useChatAutoScroll'
 import { ResizableSidebar, readResizableSidebarPreferences } from './components/ResizableSidebar'
 import { RemoteSshSetup } from './components/RemoteSshSetup'
@@ -5045,7 +5046,6 @@ function ConversationPane({
           chatTitle={chat.title}
           sourceBranch={deliveryBranch}
           messages={chat.messages}
-          sending={sending}
           activeTurnId={activeTurnId}
           open={deliveryPanelOpen}
           onOpenChange={onDeliveryPanelOpenChange}
@@ -5220,10 +5220,10 @@ function deliveryWorkDescription(record: DeliveryRecord, messages: Chat['message
     || 'Description unavailable for work saved before prompt linking was enabled.'
 }
 
-function deliveryPromptScope(record: DeliveryRecord, activeTurnId: string | null, sending: boolean, fallback: string) {
-  const turnId = record.turnIds?.at(-1) ?? null
-  if (sending && turnId && turnId === activeTurnId) return 'Running prompt'
-  if (sending) return 'Previous prompt'
+function deliveryPromptScope(record: DeliveryRecord, hasUnsavedActivePrompt: boolean, fallback: string) {
+  if (hasUnsavedActivePrompt) {
+    return record.state === 'production' ? 'Previous delivered prompt' : 'Previous saved prompt'
+  }
   return fallback
 }
 
@@ -5263,7 +5263,6 @@ function DeliveryPanel({
   chatTitle,
   sourceBranch,
   messages,
-  sending,
   activeTurnId,
   open,
   onOpenChange,
@@ -5273,13 +5272,19 @@ function DeliveryPanel({
   chatTitle: string
   sourceBranch: string
   messages: Chat['messages']
-  sending: boolean
   activeTurnId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
 }) {
-  const label = delivery ? deliveryLabel(delivery) : 'Not saved'
   const previousProduction = delivery && productionDelivery?.id !== delivery.id ? productionDelivery : null
+  const { hasUnsavedActivePrompt, activePrompt } = activeDeliveryPromptContext(
+    delivery,
+    productionDelivery,
+    messages,
+    activeTurnId,
+  )
+  const deliveryLabelText = delivery ? deliveryLabel(delivery) : 'Not saved'
+  const label = hasUnsavedActivePrompt ? 'Running' : deliveryLabelText
   const exactCommit = delivery
     ? delivery.replacementCommitSha ?? delivery.productionCommitSha ?? delivery.savedSha
     : null
@@ -5287,8 +5292,7 @@ function DeliveryPanel({
   const deliveryScope = delivery
     ? deliveryPromptScope(
       delivery,
-      activeTurnId,
-      sending,
+      hasUnsavedActivePrompt,
       delivery.state === 'production' ? 'Latest delivered prompt' : 'Latest saved prompt',
     )
     : null
@@ -5301,18 +5305,18 @@ function DeliveryPanel({
     : null
   const landingStepLabel = delivery?.state === 'landing' ? deliveryLabel(delivery) : 'Landing'
   const deliverySteps = ['Saved', landingStepLabel, 'Pushed', 'Building', 'Production']
-  const trackedTurnIds = new Set([...(delivery?.turnIds ?? []), ...(previousProduction?.turnIds ?? [])])
-  const runningPrompt = sending && activeTurnId && !trackedTurnIds.has(activeTurnId)
-    ? messages.find((message) => message.role === 'user' && message.turnId === activeTurnId)
-    : null
-  const summary = !delivery
-    ? 'No saved delivery yet'
-    : delivery.state === 'production'
-      ? `Live · ${exactCommit?.slice(0, 12)}`
-      : `Exact saved · ${delivery.savedSha.slice(0, 12)}`
+  const summary = hasUnsavedActivePrompt
+    ? 'Current prompt · not saved yet'
+    : !delivery
+      ? 'No saved delivery yet'
+      : delivery.state === 'production'
+        ? `Live · ${exactCommit?.slice(0, 12)}`
+        : `Exact saved · ${delivery.savedSha.slice(0, 12)}`
+  const activePromptDescription = concisePromptDescription(activePrompt?.content)
+    || 'Current prompt is running in this chat.'
 
   return (
-    <section className={`delivery-panel delivery-panel--${delivery?.state ?? 'idle'} ${open ? 'delivery-panel--open' : ''}`} aria-label={`Production delivery for ${chatTitle}: ${label}`}>
+    <section className={`delivery-panel delivery-panel--${hasUnsavedActivePrompt ? 'running' : delivery?.state ?? 'idle'} ${open ? 'delivery-panel--open' : ''}`} aria-label={`Production delivery for ${chatTitle}: ${label}`}>
       <button
         className="delivery-panel__header"
         type="button"
@@ -5323,7 +5327,7 @@ function DeliveryPanel({
       >
         {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
         <Cloud size={14} />
-        <strong>Production delivery</strong>
+        <strong>{hasUnsavedActivePrompt ? 'Current prompt delivery' : 'Production delivery'}</strong>
         <em>This chat · {label}</em>
         <small title={`${chatTitle} · ${sourceBranch} · ${summary}`}>{summary}</small>
       </button>
@@ -5334,6 +5338,11 @@ function DeliveryPanel({
             <span title={chatTitle}>{chatTitle}</span>
             <code title={sourceBranch}>{sourceBranch}</code>
           </div>
+          {hasUnsavedActivePrompt && <div className="delivery-panel__running delivery-panel__running--primary">
+            <span>Current prompt · running now</span>
+            <strong>{activePromptDescription}</strong>
+            <small>Not saved yet. This prompt will get its own exact commit and delivery pipeline after the agent finishes successfully.</small>
+          </div>}
           {delivery && <div className="delivery-panel__work" aria-label={`${deliveryScope}: ${deliveryDescription}`}>
             <span>{deliveryScope}</span>
             <strong>{deliveryDescription}</strong>
@@ -5353,11 +5362,6 @@ function DeliveryPanel({
             <strong>{previousProductionDescription}</strong>
             <small>Exact live commit {previousProductionCommit.slice(0, 12)}. This is not the current saved prompt.</small>
             {(previousProduction.deploymentDashboardUrl || previousProduction.deploymentUrl) && <a href={previousProduction.deploymentDashboardUrl ?? previousProduction.deploymentUrl ?? '#'} target="_blank" rel="noreferrer">Open earlier verified deployment · {previousProductionCommit.slice(0, 12)}</a>}
-          </div>}
-          {runningPrompt && <div className="delivery-panel__running">
-            <span>Running prompt · not in this pipeline yet</span>
-            <strong>{concisePromptDescription(runningPrompt.content)}</strong>
-            <small>It will receive its own saved commit and delivery record only after the agent finishes successfully.</small>
           </div>}
           {delivery && deploymentLinkLabel && <a href={delivery.deploymentDashboardUrl ?? delivery.deploymentUrl ?? '#'} target="_blank" rel="noreferrer">{deploymentLinkLabel}</a>}
         </div>

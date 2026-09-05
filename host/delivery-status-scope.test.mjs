@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { scopeDeliveryStatusForBranch } from '../src/lib/deliveryStatus.mjs'
+import { activeDeliveryPromptContext, scopeDeliveryStatusForBranch } from '../src/lib/deliveryStatus.mjs'
 
 function record(id, sourceBranch, state, updatedAt, overrides = {}) {
   return {
@@ -64,5 +64,28 @@ test('renderer fails closed when no returned record proves exact chat ownership'
     production: null,
     pending: null,
     records: [],
+  })
+})
+
+test('an active prompt leads the card even when another window owns the run', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    turnIds: [],
+  })
+  const messages = [{ role: 'user', turnId: 'active-turn', content: 'fix the current issue' }]
+
+  assert.deepEqual(activeDeliveryPromptContext(delivered, delivered, messages, 'active-turn'), {
+    hasUnsavedActivePrompt: true,
+    activePrompt: messages[0],
+  })
+})
+
+test('a prompt already linked to the delivery is not presented as unsaved work', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    turnIds: ['delivered-turn'],
+  })
+
+  assert.deepEqual(activeDeliveryPromptContext(delivered, delivered, [], 'delivered-turn'), {
+    hasUnsavedActivePrompt: false,
+    activePrompt: null,
   })
 })

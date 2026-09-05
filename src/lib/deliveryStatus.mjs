@@ -41,3 +41,20 @@ export function scopeDeliveryStatusForBranch(status, sourceBranch) {
     records: records.slice(0, 10),
   }
 }
+
+export function activeDeliveryPromptContext(delivery, productionDelivery, messages, activeTurnId) {
+  const trackedTurnIds = new Set([
+    ...(Array.isArray(delivery?.turnIds) ? delivery.turnIds : []),
+    ...(Array.isArray(productionDelivery?.turnIds) ? productionDelivery.turnIds : []),
+  ])
+  const hasUnsavedActivePrompt = typeof activeTurnId === 'string'
+    && activeTurnId.length > 0
+    && !trackedTurnIds.has(activeTurnId)
+  if (!hasUnsavedActivePrompt) {
+    return { hasUnsavedActivePrompt: false, activePrompt: null }
+  }
+  const activePrompt = Array.isArray(messages)
+    ? messages.find((message) => message?.role === 'user' && message?.turnId === activeTurnId) ?? null
+    : null
+  return { hasUnsavedActivePrompt: true, activePrompt }
+}
