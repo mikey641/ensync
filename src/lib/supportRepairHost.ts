@@ -1,4 +1,4 @@
-import type { ChatProviderId, ChatRunResponse } from './relayHost'
+import type { ChatProviderId, ChatRunResponse } from './ensyncHost'
 
 export type SupportRepairRequest = {
   provider: ChatProviderId

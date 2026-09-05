@@ -250,7 +250,7 @@
 - Modify: `src/lib/autoContextPrompt.mjs`
 - Modify: `src/types.ts`
 - Modify: `src/data.ts`
-- Modify: `src/lib/relayHost.ts`
+- Modify: `src/lib/ensyncHost.ts`
 - Modify: `src/App.tsx`
 - Modify: relevant renderer tests
 - Delete: project-owned legacy coordination skill directories
@@ -285,15 +285,15 @@
 ### Task 7: Update durable project documentation and shared memory
 
 **Files:**
-- Modify: `.relay/architecture.md`
-- Modify: `.relay/features/git-workflows.md`
-- Modify: `.relay/features/agent-routing.md`
-- Modify: `.relay/features/auto-context-skill.md`
-- Modify: `.relay/features/remote-runtime.md`
+- Modify: `.ensync/architecture.md`
+- Modify: `.ensync/features/git-workflows.md`
+- Modify: `.ensync/features/agent-routing.md`
+- Modify: `.ensync/features/auto-context-skill.md`
+- Modify: `.ensync/features/remote-runtime.md`
 - Modify: `README.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/git-workflows.md`
-- Create or update: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/immediate-background-landing.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/MEMORY.md`
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/git-workflows.md`
+- Create or update: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/immediate-background-landing.md`
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/MEMORY.md`
 
 **Interfaces:**
 - Durable docs describe agent-worktree ownership, completion-order landing, provider/landing state separation, automatic retry, and the migration boundary.
@@ -308,11 +308,11 @@
 
 - [ ] **Step 3: Check documentation consistency and commit repository docs**
 
-  Run: `rg -n 'workspace-write-locks|repository landing lease|auto_land_timed_out|Automatic landing settings' .relay README.md`
+  Run: `rg -n 'workspace-write-locks|repository landing lease|auto_land_timed_out|Automatic landing settings' .ensync README.md`
 
   Expected: no active claim that removed machinery still exists.
 
-  Run: `git add .relay README.md && git commit -m "docs: record background landing architecture"`
+  Run: `git add .ensync README.md && git commit -m "docs: record background landing architecture"`
 
 ### Task 8: Whole-system verification and installed-app handoff
 

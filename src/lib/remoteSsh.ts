@@ -5,7 +5,7 @@ import type {
   ChatRunUsage,
   ChatRunWorkspace,
   CliProviderId,
-} from './relayHost'
+} from './ensyncHost'
 
 export type RemoteSshConnectionInput = {
   hostname: string

@@ -128,6 +128,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
     worktreePath: '/repo/chat-1',
     into: 'main',
     expectedHead: 'a'.repeat(40),
+    commitMessage: 'Explain the integrated work',
     identity,
   })
   await client.remove({ repositoryPath: '/repo', branch: 'ensync/chat-1' })
@@ -161,6 +162,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
     storagePath: '/state/agent-worktree',
     into: 'main',
     expectedHead: 'a'.repeat(40),
+    commitMessage: 'Explain the integrated work',
   }])
   const syncCalls = calls.filter((call) => (
     call.args[0] === 'sync' && !call.args.includes('--abort')

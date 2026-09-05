@@ -73,8 +73,11 @@ import {
   type ChatRunResponse,
   type CliProviderStatus,
   type GitStatus,
+  type DeliveryRecord,
+  type DeliveryStatus,
+  type DeliveryTarget,
   type ProjectInspection,
-} from './lib/relayHost'
+} from './lib/ensyncHost'
 import { createTelegramHostClient } from './telegram-client'
 import {
   remoteSshHost,
@@ -206,6 +209,11 @@ import {
   setExecutionPanelOpenForChat,
 } from './lib/executionPanelPreferences.mjs'
 import {
+  deliveryPanelOpenForChat,
+  normalizeDeliveryPanelOpenByChat,
+  setDeliveryPanelOpenForChat,
+} from './lib/deliveryPanelPreferences.mjs'
+import {
   markChatCompletionRead,
   markCompletionRead,
   unreadCompletionTabIds,
@@ -258,7 +266,7 @@ import {
 import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
 
 const STORAGE_KEY = 'ensync-workspace-v2'
-const LEGACY_STORAGE_KEY = 'relay-workspace-v2'
+const LEGACY_STORAGE_KEY = 'ensync-workspace-v2'
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
@@ -311,17 +319,21 @@ type StoredState = {
   activeTabId: string
   chatSessions?: Record<string, { provider: ChatProviderId; sessionId: string; targetKey?: string; syncedMessageCount?: number }>
   modelTelemetry?: ModelTelemetry[]
-  projects?: RelayProject[]
+  projects?: EnsyncProject[]
   activeProjectId?: string
   placement: NewTabPlacement
   conversationLayout?: ConversationLayoutMode
   autoFallback: boolean
   autoContextSkill?: boolean
+  /** Where future successful local prompts are delivered after their exact commit is saved. */
+  deliveryTarget?: DeliveryTarget
   fallbackProviderOrder?: ProviderId[]
   /** Latest completed agent-message ID the user opened, keyed by stable chat ID. */
   readCompletionByChat?: Record<string, string>
   /** User-selected CLI execution-panel visibility, keyed by stable chat ID. */
   executionPanelOpenByChat?: Record<string, boolean>
+  /** User-selected production-delivery visibility, keyed by stable chat ID. */
+  deliveryPanelOpenByChat?: Record<string, boolean>
   /** Unsent text is isolated by stable chat ID and restored after relaunch. */
   drafts?: Record<string, string>
   /** Unsent local file references are isolated by stable chat ID and restored after relaunch. */
@@ -497,7 +509,7 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
   }
 }
 
-type RelayProject = ProjectInspection & {
+type EnsyncProject = ProjectInspection & {
   color: string
   verified: boolean
 }
@@ -605,13 +617,13 @@ function runWasInterrupted(error: unknown) {
   return error instanceof EnsyncHostError && error.code === 'execution_stream_disconnected'
 }
 
-const EMPTY_PROJECT: RelayProject = {
+const EMPTY_PROJECT: EnsyncProject = {
   id: '',
   name: 'Select project',
   path: '',
   host: 'local',
   context: {
-    relayDirectory: false,
+    ensyncDirectory: false,
     files: [],
     featureFiles: [],
     truncated: false,
@@ -623,7 +635,7 @@ const EMPTY_PROJECT: RelayProject = {
   verified: false,
 }
 
-function verifiedProject(project: ProjectInspection): RelayProject {
+function verifiedProject(project: ProjectInspection): EnsyncProject {
   return { ...project, color: projectColor(project.path || project.id), verified: true }
 }
 
@@ -758,7 +770,7 @@ function useFloatingMenuPosition(open: boolean, anchorRef: { current: HTMLElemen
     window.addEventListener('scroll', updatePosition, true)
     const resizeObserver = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(updatePosition)
     resizeObserver?.observe(anchor)
-    const pane = anchor.closest('.relay-split-pane')
+    const pane = anchor.closest('.ensync-split-pane')
     if (pane) resizeObserver?.observe(pane)
 
     return () => {
@@ -808,6 +820,9 @@ function App() {
   const [conversationLayout, setConversationLayout] = useState<ConversationLayoutMode>(hydrated?.conversationLayout === 'tabs' ? 'tabs' : 'split')
   const [autoFallback, setAutoFallback] = useState(hydrated?.autoFallback ?? true)
   const [autoContextSkill, setAutoContextSkill] = useState(hydrated?.autoContextSkill ?? false)
+  const [deliveryTarget, setDeliveryTarget] = useState<DeliveryTarget>(
+    hydrated?.deliveryTarget === 'protected_branch' ? 'protected_branch' : 'production',
+  )
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
     resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
   )
@@ -841,7 +856,7 @@ function App() {
   const [contextOpen, setContextOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
   const [gitWorkflowMode, setGitWorkflowMode] = useState<'clone' | 'manage' | null>(null)
-  const [projects, setProjects] = useState<RelayProject[]>(() =>
+  const [projects, setProjects] = useState<EnsyncProject[]>(() =>
     (hydrated?.projects ?? []).map((project) => ({
       ...project,
       color: projectColor(project.path || project.id),
@@ -892,6 +907,9 @@ function App() {
   const [executionPanelOpenByChat, setExecutionPanelOpenByChat] = useState<Record<string, boolean>>(() =>
     normalizeExecutionPanelOpenByChat(hydrated?.executionPanelOpenByChat),
   )
+  const [deliveryPanelOpenByChat, setDeliveryPanelOpenByChat] = useState<Record<string, boolean>>(() =>
+    normalizeDeliveryPanelOpenByChat(hydrated?.deliveryPanelOpenByChat),
+  )
   const [modelTelemetry, setModelTelemetry] = useState<ModelTelemetry[]>(hydrated?.modelTelemetry ?? [])
   const [splitLayout, setSplitLayout] = useState<SplitWorkspaceLayout | undefined>(hydrated?.splitLayout)
   const [conversationSidebarWidth, setConversationSidebarWidth] = useState(() =>
@@ -925,7 +943,7 @@ function App() {
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
-  const focusProjectRequestRef = useRef<(project: RelayProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
+  const focusProjectRequestRef = useRef<(project: EnsyncProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
   const openChatRef = useRef<(chatId: string) => void>(() => {})
   const pushQueuedNowRef = useRef<(chatId: string) => Promise<void>>(async () => {})
   const stopAndSendNowRef = useRef<(chatId: string) => void>(() => {})
@@ -973,8 +991,10 @@ function App() {
     conversationLayout,
     autoFallback,
     autoContextSkill,
+    deliveryTarget,
     readCompletionByChat,
     executionPanelOpenByChat,
+    deliveryPanelOpenByChat,
     drafts,
     draftAttachments,
     chatErrors,
@@ -1126,9 +1146,9 @@ function App() {
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? EMPTY_PROJECT
   const recentProjectOptions = useMemo(() => {
-    const options: RelayProject[] = []
+    const options: EnsyncProject[] = []
     const paths = new Set<string>()
-    const append = (project: RelayProject) => {
+    const append = (project: EnsyncProject) => {
       if (!project.path) return
       const normalized = project.path.replaceAll('\\', '/').replace(/\/+$/, '')
       const key = /^[a-z]:\//i.test(normalized) || normalized.startsWith('//')
@@ -1555,7 +1575,7 @@ function App() {
 
   useLayoutEffect(() => {
     commitWorkspace()
-  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, deliveryPanelOpenByChat, deliveryTarget, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
 
   useEffect(() => {
     const flush = () => commitWorkspace()
@@ -1759,7 +1779,7 @@ function App() {
     setActiveTabId('')
   }
 
-  const recoverProjectIntoCurrentWorkspace = (project: RelayProject) => {
+  const recoverProjectIntoCurrentWorkspace = (project: EnsyncProject) => {
     if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return false
     const result = recoverFocusedProjectHistory(workspaceSnapshot, window.localStorage, {
       project,
@@ -1788,6 +1808,9 @@ function App() {
     const nextReadCompletionByChat = recovered.readCompletionByChat ?? {}
     const nextExecutionPanelOpenByChat = normalizeExecutionPanelOpenByChat(
       recovered.executionPanelOpenByChat,
+    )
+    const nextDeliveryPanelOpenByChat = normalizeDeliveryPanelOpenByChat(
+      recovered.deliveryPanelOpenByChat,
     )
     const nextChatErrors = recovered.chatErrors ?? {}
     const nextChatExecutionEvents = recovered.chatExecutionEvents ?? {}
@@ -1819,6 +1842,7 @@ function App() {
     setChatSessions(nextChatSessions)
     setReadCompletionByChat(nextReadCompletionByChat)
     setExecutionPanelOpenByChat(nextExecutionPanelOpenByChat)
+    setDeliveryPanelOpenByChat(nextDeliveryPanelOpenByChat)
     setChatErrors(nextChatErrors)
     setChatExecutionEvents(nextChatExecutionEvents)
     setInFlightRuns(nextInFlightRuns)
@@ -1845,6 +1869,7 @@ function App() {
       chatSessions: nextChatSessions,
       readCompletionByChat: nextReadCompletionByChat,
       executionPanelOpenByChat: nextExecutionPanelOpenByChat,
+      deliveryPanelOpenByChat: nextDeliveryPanelOpenByChat,
       chatErrors: nextChatErrors,
       chatExecutionEvents: nextChatExecutionEvents,
       inFlightRuns: nextInFlightRuns,
@@ -1858,7 +1883,7 @@ function App() {
     return true
   }
 
-  const focusProject = async (project: RelayProject, allowNativeRoute = true) => {
+  const focusProject = async (project: EnsyncProject, allowNativeRoute = true) => {
     const workspaceHistory = {
       projects,
       chats,
@@ -2920,6 +2945,25 @@ function App() {
     const runFallbackOrder = queuedPrompt?.preferences.fallbackProviderOrder ?? fallbackProviderOrder
     const runAutoFallback = queuedPrompt?.preferences.automaticFallback ?? autoFallback
     const runAutoContext = queuedPrompt?.preferences.autoContextSkill ?? autoContextSkill
+    const runDeliveryTarget = queuedPrompt?.preferences.deliveryTarget ?? deliveryTarget
+    if (runTarget.kind === 'local' && runDeliveryTarget === 'protected_branch') {
+      try {
+        const health = await ensyncHost.health()
+        if (!health.capabilities?.deliveryTargets?.includes('protected_branch')) {
+          setChatErrors((current) => ({
+            ...current,
+            [chatId]: 'The active Ensync Host does not support Protected branch only yet. Finish active jobs, quit Ensync completely, and reopen it before sending this prompt; nothing was started.',
+          }))
+          return
+        }
+      } catch {
+        setChatErrors((current) => ({
+          ...current,
+          [chatId]: 'Ensync could not verify the delivery destination with the active Host. Nothing was started.',
+        }))
+        return
+      }
+    }
     if (!chatToSend) return
     if (!runProject?.id || chatToSend.projectId !== runProject.id) {
       setChatErrors((current) => ({ ...current, [chatId]: 'Re-open the project through Ensync Host before running this chat.' }))
@@ -2993,6 +3037,7 @@ function App() {
           executionTargetKey: targetKey(runTarget),
           projectId: runProject.id,
           projectPath: runProject.path,
+          deliveryTarget,
         },
       }
       updatePromptQueues(appendPromptToQueue(promptQueuesRef.current, chatId, entry))
@@ -3223,6 +3268,7 @@ function App() {
                 sessionId: canResume ? session.sessionId : null,
                 model: requestedModel,
                 effort: requestedEffort,
+                deliveryTarget: runDeliveryTarget,
               }
           return ensyncHost.runChatJob(jobId, runTarget.kind, jobRequest, (event) => {
             if (event.type === 'started') providerProcessStarted = true
@@ -3314,6 +3360,7 @@ function App() {
             executionTargetKey: runTargetKey,
             projectId: runProject.id,
             projectPath: runProject.path,
+            deliveryTarget: runDeliveryTarget,
           },
         })
         const converted = convertPendingTurnToOccupiedQueue({
@@ -4210,7 +4257,7 @@ function App() {
           <div className="sidebar__footer">
             <button onClick={() => setContextOpen(true)}>
               <span className="sync-icon project-context-icon" style={{ '--project-color': activeProject.color } as React.CSSProperties}><FileText size={14} /></span>
-              <span><strong>Project context</strong><small>{activeProject.verified ? `${activeProject.context.files.length} .relay files found` : 'Not verified by Ensync Host'}</small></span>
+              <span><strong>Project context</strong><small>{activeProject.verified ? `${activeProject.context.files.length} .ensync files found` : 'Not verified by Ensync Host'}</small></span>
               <ChevronRight size={14} />
             </button>
           </div>
@@ -4333,6 +4380,7 @@ function App() {
                 activeRunProviderName={activeRunProviderName}
                 pushingQueued={pushingQueuedChatIds.has(chat.id)}
                 runStartedAt={localActiveRun?.startedAt ?? occupied?.startedAt ?? null}
+                activeTurnId={localActiveRun?.turnId ?? occupied?.turnId ?? null}
                 occupiedRun={occupied ?? null}
                 queuedPrompts={promptQueues[chat.id] ?? []}
                 error={chatErrors[chat.id] ?? null}
@@ -4345,6 +4393,7 @@ function App() {
                 executionEvents={chatExecutionEvents[chat.id] ?? []}
                 owningConversation={owningConversation}
                 executionPanelOpen={executionPanelOpenForChat(executionPanelOpenByChat, chat.id)}
+                deliveryPanelOpen={deliveryPanelOpenForChat(deliveryPanelOpenByChat, chat.id)}
                 onAnswerQuestion={(answer) => handleAnswerQuestion(chat.id, answer)}
                 onDraftChange={(value) => setDrafts((current) => ({ ...current, [chat.id]: value }))}
                 onAttachmentRemove={(path) => setDraftAttachments((current) => ({
@@ -4383,6 +4432,9 @@ function App() {
                 onAutoContextSkillChange={() => setAutoContextSkillEnabled(!autoContextSkill)}
                 onExecutionPanelOpenChange={(open) => setExecutionPanelOpenByChat((current) =>
                   setExecutionPanelOpenForChat(current, chat.id, open),
+                )}
+                onDeliveryPanelOpenChange={(open) => setDeliveryPanelOpenByChat((current) =>
+                  setDeliveryPanelOpenForChat(current, chat.id, open),
                 )}
                 onOpenOwningConversation={async (target) => {
                   if (isNativeWorkspaceIdentity(nativeWorkspaceIdentity)
@@ -4436,7 +4488,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} deliveryTarget={deliveryTarget} setDeliveryTarget={setDeliveryTarget} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -4483,6 +4535,7 @@ function ConversationPane({
   activeRunProviderName,
   pushingQueued,
   runStartedAt,
+  activeTurnId,
   occupiedRun,
   queuedPrompts,
   error,
@@ -4495,6 +4548,7 @@ function ConversationPane({
   executionEvents,
   owningConversation,
   executionPanelOpen,
+  deliveryPanelOpen,
   onAnswerQuestion,
   onDraftChange,
   onAttachmentRemove,
@@ -4517,6 +4571,7 @@ function ConversationPane({
   onContext,
   onAutoContextSkillChange,
   onExecutionPanelOpenChange,
+  onDeliveryPanelOpenChange,
   onOpenOwningConversation,
   onSettings,
   onOpenFile,
@@ -4545,6 +4600,7 @@ function ConversationPane({
   activeRunProviderName: string | null
   pushingQueued: boolean
   runStartedAt: string | null
+  activeTurnId: string | null
   occupiedRun: OccupiedRuns[string] | null
   queuedPrompts: QueuedPrompt[]
   error: string | null
@@ -4557,6 +4613,7 @@ function ConversationPane({
   executionEvents: ChatExecutionEvent[]
   owningConversation: ReferencedOwningConversation | null
   executionPanelOpen: boolean
+  deliveryPanelOpen: boolean
   onAnswerQuestion: (answer: ProviderQuestionAnswerPayload | { questionId: string; cancelled: true }) => Promise<void>
   onDraftChange: (value: string) => void
   onAttachmentRemove: (path: string) => void
@@ -4579,6 +4636,7 @@ function ConversationPane({
   onContext: () => void
   onAutoContextSkillChange: () => void
   onExecutionPanelOpenChange: (open: boolean) => void
+  onDeliveryPanelOpenChange: (open: boolean) => void
   onOpenOwningConversation: (target: ReferencedOwningConversation) => Promise<boolean>
   onSettings: () => void
   onOpenFile: (path: string) => void
@@ -4595,6 +4653,29 @@ function ConversationPane({
   const modelMenuStyle = useFloatingMenuPosition(modelMenuOpen, modelButtonRef)
   const elapsedWorkingLabel = useWorkingElapsedLabel(sending, runStartedAt)
   const occupiedElapsedLabel = useWorkingElapsedLabel(Boolean(occupiedRun), occupiedRun?.startedAt ?? null)
+  const [projectDelivery, setProjectDelivery] = useState<DeliveryStatus | null>(null)
+  const deliveryBranch = chat.workspace?.branch ?? null
+  useEffect(() => {
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const refresh = async () => {
+      try {
+        const response = await ensyncHost.deliveryStatus(projectPath, deliveryBranch ?? undefined)
+        if (!disposed) setProjectDelivery(response.delivery)
+      } catch {
+        if (!disposed) setProjectDelivery(null)
+      }
+      if (!disposed) timer = setTimeout(refresh, 5_000)
+    }
+    if (projectPath && deliveryBranch) void refresh()
+    else setProjectDelivery(null)
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [deliveryBranch, projectPath])
+  const delivery = projectDelivery?.current ?? null
+  const productionDelivery = projectDelivery?.production ?? null
   // Offered only while Ensync still holds the Host's proof that this attempt
   // ran nothing, so a re-run can never duplicate half-applied project work.
   // Retrying restores the failed instruction into the composer, so it stays out
@@ -4957,6 +5038,20 @@ function ConversationPane({
         </div>
       )}
 
+      {deliveryBranch && (
+        <DeliveryPanel
+          delivery={delivery}
+          productionDelivery={productionDelivery}
+          chatTitle={chat.title}
+          sourceBranch={deliveryBranch}
+          messages={chat.messages}
+          sending={sending}
+          activeTurnId={activeTurnId}
+          open={deliveryPanelOpen}
+          onOpenChange={onDeliveryPanelOpenChange}
+        />
+      )}
+
       {(sending || executionEvents.length > 0) && (
         <ExecutionPanel
           events={executionEvents}
@@ -5014,7 +5109,7 @@ function ConversationPane({
           <div className="composer__toolbar">
             <div className="composer__context-actions">
               <button className="composer__context-button" type="button" onClick={onFilesChoose} disabled={!filePickerAvailable} title={filePickerAvailable ? 'Add files' : filePickerUnavailableMessage} aria-label={filePickerAvailable ? 'Add files' : `Add files unavailable: ${filePickerUnavailableMessage}`}><Plus size={17} /></button>
-              <button className="context-chip" onClick={onContext} title={projectContextAvailable ? 'Ensync Host found .relay context files' : 'No .relay context files verified by Ensync Host'}><FileText size={13} /><span className="context-chip__label">Project context</span>{projectContextAvailable ? <Check size={12} /> : <CircleHelp size={12} />}</button>
+              <button className="context-chip" onClick={onContext} title={projectContextAvailable ? 'Ensync Host found .ensync context files' : 'No .ensync context files verified by Ensync Host'}><FileText size={13} /><span className="context-chip__label">Project context</span>{projectContextAvailable ? <Check size={12} /> : <CircleHelp size={12} />}</button>
               <button className={`context-chip auto-context-chip ${autoContextSkill ? 'auto-context-chip--active' : ''}`} onClick={onAutoContextSkillChange} role="switch" aria-checked={autoContextSkill} title="Preserve complete project and conversation context when continuing or handing off between providers"><Bot size={13} /><span className="context-chip__label">Auto Context</span>{autoContextSkill ? <Check size={12} /> : null}</button>
             </div>
             <div className="composer__submit-actions">
@@ -5086,6 +5181,188 @@ function OwningConversationBanner({
         {opening ? 'Opening…' : 'Open owning conversation'}
       </button>
     </div>
+  )
+}
+
+function deliveryLabel(record: DeliveryRecord) {
+  if (record.deliveryTarget === 'protected_branch') return 'Saved only'
+  if (record.state === 'landing') {
+    if (record.landingState === 'integrating') return 'Merging by Ensync'
+    if (record.landingState === 'retry') return 'Merge retry scheduled'
+    if (record.landingState === 'landed') return 'Merged · awaiting push'
+    if (record.landingState === 'queued') return 'Waiting for Ensync merge'
+  }
+  return ({
+    saved: 'Saved',
+    landing: 'Landing',
+    pushed: 'Pushed',
+    building: 'Building',
+    failed: 'Deploy failed',
+    repairing: record.repairState === 'manual' ? 'Fixing in chat' : 'Auto-fixing',
+    production: 'Production',
+    unavailable: 'Status unavailable',
+  } as const)[record.state]
+}
+
+function concisePromptDescription(content: string | null | undefined) {
+  const normalized = content?.replace(/\s+/g, ' ').trim() ?? ''
+  return normalized.length > 180 ? `${normalized.slice(0, 179).trimEnd()}…` : normalized
+}
+
+function deliveryWorkDescription(record: DeliveryRecord, messages: Chat['messages']) {
+  const durable = concisePromptDescription(record.description)
+  if (durable && !/^Ensync (?:agent work|automatic landing)\b/i.test(durable)) return durable
+  const turnId = record.turnIds?.at(-1)
+  const message = turnId
+    ? messages.find((candidate) => candidate.role === 'user' && candidate.turnId === turnId)
+    : null
+  return concisePromptDescription(message?.content)
+    || 'Description unavailable for work saved before prompt linking was enabled.'
+}
+
+function deliveryPromptScope(record: DeliveryRecord, activeTurnId: string | null, sending: boolean, fallback: string) {
+  const turnId = record.turnIds?.at(-1) ?? null
+  if (sending && turnId && turnId === activeTurnId) return 'Running prompt'
+  if (sending) return 'Previous prompt'
+  return fallback
+}
+
+function deliveryProgressPosition(record: DeliveryRecord | null) {
+  if (!record) return -1
+  if (record.deliveryTarget === 'protected_branch') return 0
+  if (record.state === 'unavailable' && !record.productionCommitSha) {
+    return ['integrating', 'retry', 'landed'].includes(record.landingState ?? '') ? 1 : 0
+  }
+  return ({ saved: 0, landing: 1, pushed: 2, building: 3, failed: 3, repairing: 3, unavailable: 2, production: 4 } as const)[record.state]
+}
+
+function deliveryProgressDetail(record: DeliveryRecord, exactCommit: string | null) {
+  if (record.deliveryTarget === 'protected_branch') {
+    return `Saved at exact commit ${record.savedSha.slice(0, 12)} on this chat’s protected branch. The selected setting prevents merge, push, and deployment.`
+  }
+  if (record.state === 'production') return `Verified live at exact commit ${exactCommit?.slice(0, 12)}.`
+  if (record.state === 'landing') {
+    if (record.landingState === 'integrating') return `Ensync is merging exact saved commit ${record.savedSha.slice(0, 12)} into ${record.targetBranch}.`
+    if (record.landingState === 'retry') return `Ensync preserved exact saved commit ${record.savedSha.slice(0, 12)} and scheduled another semantic merge attempt.`
+    if (record.landingState === 'landed') return `Ensync merged exact saved commit ${record.savedSha.slice(0, 12)}; the production-branch push is next.`
+    return `Exact saved commit ${record.savedSha.slice(0, 12)} is waiting for Ensync’s merge coordinator.`
+  }
+  if (record.state === 'repairing') {
+    return record.repairState === 'manual'
+      ? 'An active chat is already fixing this deployment; Ensync will not start a duplicate repair.'
+      : `${record.repairProvider ?? 'The strongest available provider'} is repairing the deployment at max effort. Attempt ${record.repairAttempts}.`
+  }
+  if (record.state === 'failed') return `${record.failureMessage ?? 'The deployment failed.'} Ensync will retry repair automatically.`
+  if (record.state === 'unavailable') return record.failureMessage ?? 'Production status cannot currently be verified; monitoring will retry.'
+  return `Tracking exact commit ${(record.productionCommitSha ?? record.savedSha).slice(0, 12)} through ${record.deploymentProvider ?? 'the production provider'}.`
+}
+
+function DeliveryPanel({
+  delivery,
+  productionDelivery,
+  chatTitle,
+  sourceBranch,
+  messages,
+  sending,
+  activeTurnId,
+  open,
+  onOpenChange,
+}: {
+  delivery: DeliveryRecord | null
+  productionDelivery: DeliveryRecord | null
+  chatTitle: string
+  sourceBranch: string
+  messages: Chat['messages']
+  sending: boolean
+  activeTurnId: string | null
+  open: boolean
+  onOpenChange: (open: boolean) => void
+}) {
+  const label = delivery ? deliveryLabel(delivery) : 'Not saved'
+  const previousProduction = delivery && productionDelivery?.id !== delivery.id ? productionDelivery : null
+  const exactCommit = delivery
+    ? delivery.replacementCommitSha ?? delivery.productionCommitSha ?? delivery.savedSha
+    : null
+  const deliveryDescription = delivery ? deliveryWorkDescription(delivery, messages) : null
+  const deliveryScope = delivery
+    ? deliveryPromptScope(
+      delivery,
+      activeTurnId,
+      sending,
+      delivery.state === 'production' ? 'Latest delivered prompt' : 'Latest saved prompt',
+    )
+    : null
+  const previousProductionDescription = previousProduction
+    ? deliveryWorkDescription(previousProduction, messages)
+    : null
+  const previousProductionCommit = previousProduction?.productionCommitSha ?? previousProduction?.savedSha ?? null
+  const deploymentLinkLabel = delivery?.state === 'production' && (delivery.deploymentDashboardUrl || delivery.deploymentUrl)
+    ? `Open ${deliveryScope?.toLowerCase() ?? 'this prompt'}’s verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
+    : null
+  const landingStepLabel = delivery?.state === 'landing' ? deliveryLabel(delivery) : 'Landing'
+  const deliverySteps = ['Saved', landingStepLabel, 'Pushed', 'Building', 'Production']
+  const trackedTurnIds = new Set([...(delivery?.turnIds ?? []), ...(previousProduction?.turnIds ?? [])])
+  const runningPrompt = sending && activeTurnId && !trackedTurnIds.has(activeTurnId)
+    ? messages.find((message) => message.role === 'user' && message.turnId === activeTurnId)
+    : null
+  const summary = !delivery
+    ? 'No saved delivery yet'
+    : delivery.state === 'production'
+      ? `Live · ${exactCommit?.slice(0, 12)}`
+      : `Exact saved · ${delivery.savedSha.slice(0, 12)}`
+
+  return (
+    <section className={`delivery-panel delivery-panel--${delivery?.state ?? 'idle'} ${open ? 'delivery-panel--open' : ''}`} aria-label={`Production delivery for ${chatTitle}: ${label}`}>
+      <button
+        className="delivery-panel__header"
+        type="button"
+        onClick={() => onOpenChange(!open)}
+        aria-expanded={open}
+        aria-label={`${open ? 'Collapse' : 'Expand'} ${chatTitle} production delivery`}
+        title={`${open ? 'Collapse' : 'Expand'} this chat's production delivery`}
+      >
+        {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+        <Cloud size={14} />
+        <strong>Production delivery</strong>
+        <em>This chat · {label}</em>
+        <small title={`${chatTitle} · ${sourceBranch} · ${summary}`}>{summary}</small>
+      </button>
+      {open && (
+        <div className="delivery-panel__body" role="status" aria-live="polite">
+          <div className="delivery-panel__owner" aria-label="Delivery owner">
+            <strong>This chat only</strong>
+            <span title={chatTitle}>{chatTitle}</span>
+            <code title={sourceBranch}>{sourceBranch}</code>
+          </div>
+          {delivery && <div className="delivery-panel__work" aria-label={`${deliveryScope}: ${deliveryDescription}`}>
+            <span>{deliveryScope}</span>
+            <strong>{deliveryDescription}</strong>
+            <small>{delivery.deliveryTarget === 'protected_branch' ? 'Protected branch only' : delivery.state === 'production' ? 'Verified production' : 'Tracked delivery'} · {(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}</small>
+          </div>}
+          <div className="delivery-panel__steps" aria-label={deliverySteps.join(', ')}>
+            {deliverySteps.map((step, index) => {
+              const position = deliveryProgressPosition(delivery)
+              return <span key={index} className={index <= position ? 'is-complete' : ''}><i />{step}</span>
+            })}
+          </div>
+          <p>{!delivery
+            ? 'No saved delivery exists for this chat yet. It will appear here after Ensync saves the first successful run.'
+            : deliveryProgressDetail(delivery, exactCommit)}</p>
+          {previousProduction && previousProductionCommit && <div className="delivery-panel__pending delivery-panel__previous-production">
+            <span>Earlier verified production</span>
+            <strong>{previousProductionDescription}</strong>
+            <small>Exact live commit {previousProductionCommit.slice(0, 12)}. This is not the current saved prompt.</small>
+            {(previousProduction.deploymentDashboardUrl || previousProduction.deploymentUrl) && <a href={previousProduction.deploymentDashboardUrl ?? previousProduction.deploymentUrl ?? '#'} target="_blank" rel="noreferrer">Open earlier verified deployment · {previousProductionCommit.slice(0, 12)}</a>}
+          </div>}
+          {runningPrompt && <div className="delivery-panel__running">
+            <span>Running prompt · not in this pipeline yet</span>
+            <strong>{concisePromptDescription(runningPrompt.content)}</strong>
+            <small>It will receive its own saved commit and delivery record only after the agent finishes successfully.</small>
+          </div>}
+          {delivery && deploymentLinkLabel && <a href={delivery.deploymentDashboardUrl ?? delivery.deploymentUrl ?? '#'} target="_blank" rel="noreferrer">{deploymentLinkLabel}</a>}
+        </div>
+      )}
+    </section>
   )
 }
 
@@ -5394,7 +5671,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, deliveryTarget, setDeliveryTarget, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; deliveryTarget: DeliveryTarget; setDeliveryTarget: (value: DeliveryTarget) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -5439,7 +5716,12 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <UIVisibilityPreferences />
           <NativeUpdatePreferences />
           <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
-          <section className="setting-section">
+          <section className="setting-section production-delivery-setting">
+            <div className="setting-title"><div><h3>Delivery destination</h3><p>Choose what Ensync does with future successful local prompts after saving their exact commit. Work already saved keeps its original destination.</p></div></div>
+            <div className="choice-row" role="radiogroup" aria-label="Delivery destination">
+              <button type="button" role="radio" aria-checked={deliveryTarget === 'production'} className={deliveryTarget === 'production' ? 'selected' : ''} onClick={() => setDeliveryTarget('production')}><Cloud size={17} /><span><strong>Production</strong><small>Merge with Ensync, push the production branch, and verify the exact deployment</small></span>{deliveryTarget === 'production' && <Check size={15} />}</button>
+              <button type="button" role="radio" aria-checked={deliveryTarget === 'protected_branch'} className={deliveryTarget === 'protected_branch' ? 'selected' : ''} onClick={() => setDeliveryTarget('protected_branch')}><ShieldCheck size={17} /><span><strong>Protected branch only</strong><small>Save the exact commit without merging, pushing, or deploying it</small></span>{deliveryTarget === 'protected_branch' && <Check size={15} />}</button>
+            </div>
           </section>
           <section className="setting-section">
             <div className="setting-title"><div><h3>Ensync Auto Context skill</h3><p>Keep one task synchronized with Auto or a provider you pin, on this computer or the selected SSH/VM worker.</p></div><Toggle enabled={autoContextSkill} onChange={() => setAutoContextSkill(!autoContextSkill)} label="Ensync Auto Context skill" /></div>
@@ -5476,7 +5758,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
   )
 }
 
-function ProjectSwitcher({ projects, activeProject, hostError, onInspect, onOpenGit, onOpenRemote, onClose }: { projects: RelayProject[]; activeProject: RelayProject; hostError: string | null; onInspect: (path: string) => Promise<void>; onOpenGit: (mode: 'clone' | 'manage') => void; onOpenRemote: () => void; onClose: () => void }) {
+function ProjectSwitcher({ projects, activeProject, hostError, onInspect, onOpenGit, onOpenRemote, onClose }: { projects: EnsyncProject[]; activeProject: EnsyncProject; hostError: string | null; onInspect: (path: string) => Promise<void>; onOpenGit: (mode: 'clone' | 'manage') => void; onOpenRemote: () => void; onClose: () => void }) {
   const [query, setQuery] = useState('')
   const [inspecting, setInspecting] = useState(false)
   const [choosing, setChoosing] = useState(false)
@@ -5546,7 +5828,7 @@ function ProjectSwitcher({ projects, activeProject, hostError, onInspect, onOpen
               >
                 <span className="project-icon"><FolderGit2 size={18} /></span>
                 <span className="project-copy"><strong>{project.name}</strong><small>{project.path}</small></span>
-                <span className="project-meta"><em>Local folder</em><small>{project.verified ? `${project.context.files.length} .relay files inspected` : 'Recheck before focusing'}</small></span>
+                <span className="project-meta"><em>Local folder</em><small>{project.verified ? `${project.context.files.length} .ensync files inspected` : 'Recheck before focusing'}</small></span>
                 {activeProject.id === project.id && project.verified ? <span className="open-badge"><i /> FOCUSED</span> : <ChevronRight size={15} />}
               </button>
             ))}
@@ -5567,7 +5849,7 @@ function ProjectSwitcher({ projects, activeProject, hostError, onInspect, onOpen
   )
 }
 
-function ContextModal({ project, onClose }: { project: RelayProject; onClose: () => void }) {
+function ContextModal({ project, onClose }: { project: EnsyncProject; onClose: () => void }) {
   const adapters = [
     { provider: 'claude', name: 'Claude Code', file: 'CLAUDE.md', mark: 'AI', className: 'claude-color' },
     { provider: 'codex', name: 'Codex', file: 'AGENTS.md', mark: '◎', className: 'codex-color' },
@@ -5578,7 +5860,7 @@ function ContextModal({ project, onClose }: { project: RelayProject; onClose: ()
       <div className="modal context-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal__header compact"><div><span className="eyebrow">{project.name.toUpperCase()} · PROJECT CONTEXT</span><h2>Context found on disk</h2><p>Ensync reports only files observed in the currently focused folder.</p></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>
         <div className="context-map">
-          <div className="context-core"><div className="relay-file"><FileText size={20} /><strong>.relay/</strong><small>{contextVerified ? project.context.error ?? (project.context.relayDirectory ? `${project.context.files.length} files found` : 'Directory not found') : 'Not inspected by Ensync Host'}</small></div>{project.context.files.slice(0, 40).map((file) => <div className="context-file" key={file}><span />{file}<Check size={13} /></div>)}{project.context.files.length === 0 && <div className="context-file"><span />No .relay files found</div>}{project.context.files.length > 40 && <div className="context-file"><span />{project.context.files.length - 40} more files reported by host</div>}{project.context.truncated && <div className="context-file"><span />File list truncated by host safety limit</div>}</div>
+          <div className="context-core"><div className="ensync-file"><FileText size={20} /><strong>.ensync/</strong><small>{contextVerified ? project.context.error ?? (project.context.ensyncDirectory ? `${project.context.files.length} files found` : 'Directory not found') : 'Not inspected by Ensync Host'}</small></div>{project.context.files.slice(0, 40).map((file) => <div className="context-file" key={file}><span />{file}<Check size={13} /></div>)}{project.context.files.length === 0 && <div className="context-file"><span />No .ensync files found</div>}{project.context.files.length > 40 && <div className="context-file"><span />{project.context.files.length - 40} more files reported by host</div>}{project.context.truncated && <div className="context-file"><span />File list truncated by host safety limit</div>}</div>
           <ArrowRight size={18} className="context-arrow" />
           <div className="agent-outputs">{adapters.map((adapter) => {
             const detected = contextVerified && project.context.instructionAdapters.some((item) => item.provider === adapter.provider && item.file === adapter.file)
@@ -5592,7 +5874,7 @@ function ContextModal({ project, onClose }: { project: RelayProject; onClose: ()
   )
 }
 
-function RemoteRuntimeModal({ hostOnline, providers, project, chat, executionTarget, initialRuntime, fallbackProviderOrder, onExecutionTargetChange, onClose }: { hostOnline: boolean; providers: Provider[]; project: RelayProject; chat: Chat | null; executionTarget: ExecutionTarget; initialRuntime: 'local' | 'remote' | 'virtualbox'; fallbackProviderOrder: ProviderId[]; onExecutionTargetChange: (target: ExecutionTarget) => void; onClose: () => void }) {
+function RemoteRuntimeModal({ hostOnline, providers, project, chat, executionTarget, initialRuntime, fallbackProviderOrder, onExecutionTargetChange, onClose }: { hostOnline: boolean; providers: Provider[]; project: EnsyncProject; chat: Chat | null; executionTarget: ExecutionTarget; initialRuntime: 'local' | 'remote' | 'virtualbox'; fallbackProviderOrder: ProviderId[]; onExecutionTargetChange: (target: ExecutionTarget) => void; onClose: () => void }) {
   const [tab, setTab] = useState<'runtime' | 'telegram'>('runtime')
   const [runtime, setRuntime] = useState<'local' | 'remote' | 'virtualbox'>(executionTarget.kind === 'ssh' ? 'remote' : initialRuntime)
   const [botToken, setBotToken] = useState('')

@@ -12,8 +12,8 @@ function project() {
     name: 'Ensync',
     path: '/Users/test/dev/ensync',
     context: {
-      files: ['.relay/project.md', '.relay/architecture.md', '.relay/features/agent-routing.md'],
-      featureFiles: ['.relay/features/agent-routing.md'],
+      files: ['.ensync/project.md', '.ensync/architecture.md', '.ensync/features/agent-routing.md'],
+      featureFiles: ['.ensync/features/agent-routing.md'],
       instructionAdapters: [{ file: 'AGENTS.md' }, { file: 'CLAUDE.md' }],
     },
   }
@@ -53,7 +53,7 @@ test('fallback capsule preserves focused local project, transcript, relevant fil
 
   assert.match(prompt, /Focused project: Ensync at \/Users\/test\/dev\/ensync/)
   assert.match(prompt, /Execution target: Local Ensync Host \(\/Users\/test\/dev\/ensync\)/)
-  assert.match(prompt, /Relevant feature files: \.relay\/features\/agent-routing\.md/)
+  assert.match(prompt, /Relevant feature files: \.ensync\/features\/agent-routing\.md/)
   assert.match(prompt, /Verified instruction adapters: AGENTS\.md, CLAUDE\.md/)
   assert.match(prompt, /Verified Git state: feature\/fallback; 3 changed files; upstream origin\/feature\/fallback/)
   assert.match(prompt, /User: Keep the existing branch\./)

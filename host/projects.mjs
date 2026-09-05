@@ -41,23 +41,23 @@ async function collectFiles(root) {
     }
   }
 
-  let relayStat
+  let ensyncStat
   try {
-    relayStat = await stat(root)
+    ensyncStat = await stat(root)
   } catch (error) {
     if (error && typeof error === 'object' && error.code === 'ENOENT') {
       return { exists: false, files, truncated, error: null }
     }
-    return { exists: false, files, truncated, error: 'Ensync Host could not inspect the .relay path.' }
+    return { exists: false, files, truncated, error: 'Ensync Host could not inspect the .ensync path.' }
   }
-  if (!relayStat.isDirectory()) {
-    return { exists: false, files, truncated, error: '.relay exists but is not a directory.' }
+  if (!ensyncStat.isDirectory()) {
+    return { exists: false, files, truncated, error: '.ensync exists but is not a directory.' }
   }
   try {
     await visit(root)
     return { exists: true, files, truncated, error: null }
   } catch {
-    return { exists: true, files, truncated, error: 'Ensync Host could not read every .relay entry.' }
+    return { exists: true, files, truncated, error: 'Ensync Host could not read every .ensync entry.' }
   }
 }
 
@@ -69,8 +69,8 @@ export async function inspectProject(projectPath, options = {}) {
   const resolvedPath = await validateProjectPath(projectPath, {
     allowedRoots: options.allowedRoots,
   })
-  const relayRoot = join(resolvedPath, '.relay')
-  const relay = await collectFiles(relayRoot)
+  const ensyncRoot = join(resolvedPath, '.ensync')
+  const ensync = await collectFiles(ensyncRoot)
   const instructionAdapters = []
 
   for (const adapter of INSTRUCTION_FILES) {
@@ -83,11 +83,11 @@ export async function inspectProject(projectPath, options = {}) {
     path: resolvedPath,
     host: 'local',
     context: {
-      relayDirectory: relay.exists,
-      files: relay.files,
-      featureFiles: relay.files.filter((file) => file.startsWith('features/') && file.endsWith('.md')),
-      truncated: relay.truncated,
-      error: relay.error,
+      ensyncDirectory: ensync.exists,
+      files: ensync.files,
+      featureFiles: ensync.files.filter((file) => file.startsWith('features/') && file.endsWith('.md')),
+      truncated: ensync.truncated,
+      error: ensync.error,
       instructionAdapters,
     },
     inspectedAt: new Date().toISOString(),

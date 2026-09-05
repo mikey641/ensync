@@ -27,7 +27,7 @@
 - Modify: `src/App.tsx:4834-4843`
 - Modify: `src/index.css:246-249`
 - Modify: `src/theme.css:2036-2062`
-- Modify: `.relay/features/message-rendering.md`
+- Modify: `.ensync/features/message-rendering.md`
 
 **Interfaces:**
 - Consumes: `CopyTextButton({ text: string, label?: string, showLabel?: boolean })` and each stored message's exact `message.content: string`.
@@ -142,7 +142,7 @@ Run the focused test again. Expected: 3 tests pass and 0 fail.
 
 - [x] **Step 5: Record the durable message-rendering behavior**
 
-Extend the existing copy-action sentence in `.relay/features/message-rendering.md` to state that every stored user and agent message exposes the shared action, that it copies original Markdown, and that hover, focus, and touch input can reveal or reach it. Keep temporary provider notes explicitly outside the contract.
+Extend the existing copy-action sentence in `.ensync/features/message-rendering.md` to state that every stored user and agent message exposes the shared action, that it copies original Markdown, and that hover, focus, and touch input can reveal or reach it. Keep temporary provider notes explicitly outside the contract.
 
 - [x] **Step 6: Run complete verification**
 
@@ -156,7 +156,7 @@ git diff --check
 git status --short --branch
 ```
 
-Expected: every command exits 0; the status lists only the focused implementation, test, plan, and `.relay` documentation changes since the saved design commit.
+Expected: every command exits 0; the status lists only the focused implementation, test, plan, and `.ensync` documentation changes since the saved design commit.
 
 - [x] **Step 7: Review the final diff and hand it to Ensync Host**
 
@@ -164,7 +164,7 @@ Run:
 
 ```bash
 git diff --stat
-git diff -- src/App.tsx src/index.css src/theme.css host/message-copy-action.test.mjs .relay/features/message-rendering.md docs/superpowers/plans/2026-09-03-message-copy-button.md
+git diff -- src/App.tsx src/index.css src/theme.css host/message-copy-action.test.mjs .ensync/features/message-rendering.md docs/superpowers/plans/2026-09-03-message-copy-button.md
 sed -n '1,240p' host/message-copy-action.test.mjs
 sed -n '1,280p' docs/superpowers/plans/2026-09-03-message-copy-button.md
 ```

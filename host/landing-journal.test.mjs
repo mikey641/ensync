@@ -120,6 +120,7 @@ test('journal stores only bounded landing metadata, never prompts or provider ou
     'commonGitDirectory',
     'completionSequence',
     'createdAt',
+    'deliveryTarget',
     'error',
     'id',
     'projectPath',
@@ -129,10 +130,25 @@ test('journal stores only bounded landing metadata, never prompts or provider ou
     'state',
     'targetBaseSha',
     'targetBranch',
+    'turnId',
     'updatedAt',
     'workspacePath',
   ])
   assert.doesNotMatch(stored, /TOP SECRET|RAW PROVIDER|PRIVATE TOKEN/)
+})
+
+test('protected-branch delivery is durable terminal metadata and retains the exact turn identity', async (context) => {
+  const { filePath, journal } = await fixture(context)
+  const held = await journal.enqueue(landingInput({
+    deliveryTarget: 'protected_branch',
+    turnId: 'turn-current-prompt',
+  }))
+  const restored = await new LandingJournal({ filePath }).load()
+
+  assert.equal(held.state, 'landed')
+  assert.equal(restored[0].state, 'landed')
+  assert.equal(restored[0].deliveryTarget, 'protected_branch')
+  assert.equal(restored[0].turnId, 'turn-current-prompt')
 })
 
 test('compare-and-transition changes only the expected state', async (context) => {

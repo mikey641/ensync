@@ -4,6 +4,7 @@ import { runGit } from './git.mjs'
 
 const MAX_ERROR_LENGTH = 4_096
 const SAVED_SHA_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i
+const DEFAULT_LANDING_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
 
 export async function anchorLandingSnapshot(input = {}, options = {}) {
   if (!isAbsolute(input.repositoryPath ?? '') || !SAVED_SHA_PATTERN.test(input.savedSha ?? '')) {
@@ -49,7 +50,11 @@ function normalizedResult(result, train) {
     Array.isArray(result?.retryIds) ? result.retryIds.filter((id) => trainIds.has(id)) : [],
   )
   const errors = result?.errors && typeof result.errors === 'object' ? result.errors : {}
-  return { errors, landedIds, retryIds }
+  const head = SAVED_SHA_PATTERN.test(result?.head ?? '') ? result.head.toLowerCase() : null
+  const description = typeof result?.description === 'string' && result.description.trim()
+    ? result.description.trim().slice(0, 240)
+    : null
+  return { errors, head, description, landedIds, retryIds }
 }
 
 /**
@@ -75,6 +80,7 @@ export class LandingCoordinator {
     this.onEvent = typeof options.onEvent === 'function' ? options.onEvent : () => {}
     this.platform = options.platform ?? process.platform
     this.persistenceRetryDelays = options.persistenceRetryDelays ?? [100, 500, 2_000]
+    this.landingRetryDelays = options.landingRetryDelays ?? DEFAULT_LANDING_RETRY_DELAYS
     this.repositories = new Map()
     this.idleWaiters = new Set()
     this.startPromise = null
@@ -89,6 +95,11 @@ export class LandingCoordinator {
     const enqueue = async () => {
       await this.anchorSnapshot(input)
       const item = await this.journal.enqueue(input)
+      if (item.deliveryTarget === 'protected_branch') {
+        const held = { ...item, state: 'held' }
+        this.#emit('held', held)
+        return held
+      }
       const retained = await this.journal.load()
       for (const candidate of retained) {
         if (
@@ -114,7 +125,7 @@ export class LandingCoordinator {
     this.startPromise ??= (async () => {
       const items = await this.journal.load()
       for (const item of items) {
-        if (item.state === 'queued' || item.state === 'retry' || item.state === 'integrating') this.#markReady(item)
+      if (item.state === 'queued' || item.state === 'retry' || item.state === 'integrating') this.#markReady(item)
       }
     })()
     return this.startPromise
@@ -137,7 +148,10 @@ export class LandingCoordinator {
       await this.enqueueChain.catch(() => {})
       for (const state of this.repositories.values()) {
         if (state.timer) clearTimeout(state.timer)
+        if (state.retryTimer) clearTimeout(state.retryTimer)
         state.timer = null
+        state.retryTimer = null
+        state.retryDueAt = null
         state.scheduled = false
         state.paused = true
       }
@@ -168,6 +182,9 @@ export class LandingCoordinator {
         persistenceFailures: 0,
         recoveryDelayMs: 0,
         timer: null,
+        delayedRetries: new Map(),
+        retryTimer: null,
+        retryDueAt: null,
       }
       this.repositories.set(key, state)
     }
@@ -176,9 +193,57 @@ export class LandingCoordinator {
 
   #markReady(item) {
     const state = this.#stateFor(item)
+    if (state.delayedRetries.delete(item.id)) this.#scheduleRetryTimer(state)
     state.ready.set(item.id, { ...item })
     this.#emit('queued', item)
     this.#schedule(state)
+  }
+
+  #retryDelay(attempts) {
+    if (this.landingRetryDelays.length === 0) return null
+    const index = Math.min(
+      Math.max(0, Number.isSafeInteger(attempts) ? attempts - 1 : 0),
+      this.landingRetryDelays.length - 1,
+    )
+    const delay = this.landingRetryDelays[index]
+    return Number.isFinite(delay) && delay >= 0 ? delay : null
+  }
+
+  #deferRetry(state, item) {
+    const delay = this.#retryDelay(item.attempts)
+    if (delay === null || this.stopping) return
+    state.delayedRetries.set(item.id, {
+      item: { ...item },
+      dueAt: Date.now() + delay,
+    })
+    this.#scheduleRetryTimer(state)
+  }
+
+  #scheduleRetryTimer(state) {
+    if (state.retryTimer) clearTimeout(state.retryTimer)
+    state.retryTimer = null
+    state.retryDueAt = null
+    if (this.stopping || state.paused || state.delayedRetries.size === 0) return
+    const dueAt = Math.min(...[...state.delayedRetries.values()].map((entry) => entry.dueAt))
+    state.retryDueAt = dueAt
+    state.retryTimer = setTimeout(() => {
+      state.retryTimer = null
+      state.retryDueAt = null
+      if (this.stopping || state.paused) {
+        this.#notifyIdle()
+        return
+      }
+      const now = Date.now()
+      for (const [id, entry] of state.delayedRetries) {
+        if (entry.dueAt > now) continue
+        state.delayedRetries.delete(id)
+        state.ready.set(id, { ...entry.item })
+        this.#emit('queued', entry.item)
+      }
+      this.#scheduleRetryTimer(state)
+      this.#schedule(state)
+      this.#notifyIdle()
+    }, Math.max(0, dueAt - Date.now()))
   }
 
   #schedule(state) {
@@ -284,7 +349,10 @@ export class LandingCoordinator {
                 : 'The integrator returned no terminal result for this saved branch.'),
           )
           const transitioned = await this.journal.transition(item.id, 'integrating', 'retry', { error: message })
-          if (transitioned) this.#emit('retry', transitioned, message)
+          if (transitioned) {
+            this.#emit('retry', transitioned, message)
+            this.#deferRetry(state, transitioned)
+          }
         }
 
         // Auto-push the target branch after a successful train landing. The
@@ -296,8 +364,20 @@ export class LandingCoordinator {
           const repositoryPath = train[0]?.repositoryPath ?? null
           if (targetBranch && repositoryPath) {
             try {
-              await this.push({ repositoryPath, targetBranch })
-              this.#emit('pushed', null, null, repositoryPath)
+              const pushedHead = await this.push({
+                repositoryPath,
+                targetBranch,
+                productionCommitSha: result.head,
+                items: train.filter((item) => result.landedIds.has(item.id) && !result.retryIds.has(item.id)),
+              })
+              this.#emit('pushed', null, null, repositoryPath, {
+                items: train.filter((item) => result.landedIds.has(item.id) && !result.retryIds.has(item.id)),
+                productionCommitSha: SAVED_SHA_PATTERN.test(pushedHead ?? '')
+                  ? pushedHead.toLowerCase()
+                  : result.head,
+                description: result.description,
+                targetBranch,
+              })
             } catch (error) {
               this.#emit('push-failed', null, boundedError(error), repositoryPath)
             }
@@ -329,13 +409,13 @@ export class LandingCoordinator {
 
   async #recoverState(state, fallbackItems) {
     for (const item of fallbackItems) {
-      if (item.state !== 'landed') state.ready.set(item.id, { ...item })
+      if (['queued', 'retry', 'integrating'].includes(item.state)) state.ready.set(item.id, { ...item })
     }
     try {
       const durable = await this.journal.load()
       for (const item of durable) {
         if (
-          item.state !== 'landed'
+          ['queued', 'retry', 'integrating'].includes(item.state)
           && this.#repositoryKey(item) === state.key
         ) {
           state.ready.set(item.id, { ...item })
@@ -346,9 +426,9 @@ export class LandingCoordinator {
     }
   }
 
-  #emit(type, item, error = null, repositoryPath = item?.repositoryPath ?? null) {
+  #emit(type, item, error = null, repositoryPath = item?.repositoryPath ?? null, extra = {}) {
     try {
-      this.onEvent({ type, item: item ? { ...item } : null, error, repositoryPath })
+      this.onEvent({ type, item: item ? { ...item } : null, error, repositoryPath, ...extra })
     } catch {
       // Status listeners are advisory and cannot own the landing queue.
     }
@@ -356,7 +436,16 @@ export class LandingCoordinator {
 
   #isIdle() {
     return [...this.repositories.values()].every((state) => (
-      !state.running && !state.scheduled && (state.ready.size === 0 || state.paused)
+      !state.running
+      && !state.scheduled
+      && (
+        state.paused
+        || (
+          state.ready.size === 0
+          && state.delayedRetries.size === 0
+          && !state.retryTimer
+        )
+      )
     ))
   }
 

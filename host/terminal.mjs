@@ -38,9 +38,9 @@ async function launchMac(executable, args) {
 async function launchWindows(executable, args) {
   const cliCommand = `& ${powershellQuote(executable)} ${args.map(powershellQuote).join(' ')}`.trim()
   const script = [
-    '$relayArgs = @("-NoExit", "-Command",',
+    '$ensyncArgs = @("-NoExit", "-Command",',
     `${powershellQuote(cliCommand)})`,
-    'Start-Process -FilePath "powershell.exe" -ArgumentList $relayArgs',
+    'Start-Process -FilePath "powershell.exe" -ArgumentList $ensyncArgs',
   ].join(' ')
   const result = await runProcess('powershell.exe', ['-NoProfile', '-Command', script], {
     timeoutMs: 8_000,

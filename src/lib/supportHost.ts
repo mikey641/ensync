@@ -41,8 +41,8 @@ export type SupportProjectDiagnostic = {
   id: string | null
   name: string | null
   host: string
-  relayDirectory: boolean
-  relayFileCount: number | null
+  ensyncDirectory: boolean
+  ensyncFileCount: number | null
   featureFileCount: number | null
   instructionAdapters: string[]
   contextTruncated: boolean

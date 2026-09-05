@@ -146,6 +146,11 @@ test('one immutable item lands and leaves its source chat worktree untouched', a
     await git(current.repositoryPath, ['config', '--get', `branch.${source.branch}.ensyncTargetBaseSha`]),
     source.savedSha,
   )
+  const message = await git(current.repositoryPath, ['show', '-s', '--format=%B', 'main'])
+  assert.match(message, /^Update feature$/m)
+  assert.match(message, /Changed paths:\n- feature\.txt/)
+  assert.match(message, /Ensync-Landing: true/)
+  assert.doesNotMatch(message, /ensync\/landing-trains\//)
 })
 
 test('the published integration commits use the repository Git identity', async (context) => {
@@ -159,6 +164,21 @@ test('the published integration commits use the repository Git identity', async 
   assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
   assert.equal(await git(current.repositoryPath, ['show', '-s', '--format=%ae', 'main']), 'repository-owner@example.test')
   assert.notEqual(await git(current.repositoryPath, ['rev-parse', 'main']), source.savedSha)
+})
+
+test('a meaningful saved subject becomes the published landing subject', async (context) => {
+  const current = await fixture(context)
+  const source = await branchCommit(current, 'ensync/chat-readable', { 'lib/contract-address.ts': 'export const address = true\n' })
+  await git(source.workspacePath, ['commit', '--amend', '-m', 'Fix full contract address mapping'])
+  source.savedSha = await git(source.workspacePath, ['rev-parse', 'HEAD'])
+
+  const result = await integrator(current.nativeClient).integrate([item(current, source, 1)])
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  const message = await git(current.repositoryPath, ['show', '-s', '--format=%B', 'main'])
+  assert.match(message, /^Fix full contract address mapping$/m)
+  assert.match(message, /- lib\/contract-address\.ts/)
+  assert.doesNotMatch(message, /ensync\/(?:chat|landing-trains)\//)
 })
 
 test('an already-landed snapshot is a no-op and leaks no landing worktree', async (context) => {
@@ -209,6 +229,9 @@ test('a train applies snapshots in completion order and updates the target once'
   assert.equal(await readFile(join(current.repositoryPath, 'first.txt'), 'utf8'), 'first\n')
   assert.equal(await readFile(join(current.repositoryPath, 'second.txt'), 'utf8'), 'second\n')
   assert.equal(operations.filter((operation) => operation.property === 'merge').length, 1)
+  assert.match(operations.find((operation) => operation.property === 'merge').input.commitMessage, /^Update first and second$/m)
+  assert.match(operations.find((operation) => operation.property === 'merge').input.commitMessage, /- first\.txt\n- second\.txt/)
+  assert.doesNotMatch(operations.find((operation) => operation.property === 'merge').input.commitMessage, /ensync\/landing-trains\//)
   assert.deepEqual(
     operations.filter((operation) => operation.property === 'sync').map((operation) => operation.input.from),
     ['ensync/landing-items/landing-1', 'ensync/landing-items/landing-2'],
@@ -823,7 +846,7 @@ test('post-publication checks stay pinned to one SHA and observe the final targe
   assert.equal(await git(current.repositoryPath, ['rev-parse', 'main']), current.baseline)
 })
 
-test('a failed provider resolution falls back to theirs and lands the incoming version', async (context) => {
+test('a failed provider resolution keeps retrying without replacing the target side', async (context) => {
   const current = await fixture(context)
   const conflicting = await branchCommit(current, 'ensync/chat-fallback-theirs', { 'README.md': '# chat version\n' })
   await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
@@ -835,12 +858,12 @@ test('a failed provider resolution falls back to theirs and lands the incoming v
     { resolveConflict: async () => { throw new Error('provider cannot resolve') } },
   )
 
-  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
-  assert.deepEqual(result.retryIds, [])
-  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
+  assert.deepEqual(result.landedIds, [], JSON.stringify(result))
+  assert.deepEqual(result.retryIds, ['landing-1'])
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# newer baseline\n')
 })
 
-test('the theirs fallback preserves non-conflicting files from the incoming branch', async (context) => {
+test('a failed provider resolution leaves the exact saved branch available for another attempt', async (context) => {
   const current = await fixture(context)
   const conflicting = await branchCommit(current, 'ensync/chat-fallback-non-conflict', {
     'README.md': '# chat version\n',
@@ -855,12 +878,14 @@ test('the theirs fallback preserves non-conflicting files from the incoming bran
     { resolveConflict: async () => { throw new Error('provider cannot resolve') } },
   )
 
-  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
-  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
-  assert.equal(await readFile(join(current.repositoryPath, 'new-file.txt'), 'utf8'), 'new content\n')
+  assert.deepEqual(result.landedIds, [], JSON.stringify(result))
+  assert.deepEqual(result.retryIds, ['landing-1'])
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# newer baseline\n')
+  await assert.rejects(readFile(join(current.repositoryPath, 'new-file.txt'), 'utf8'), (error) => error?.code === 'ENOENT')
+  assert.equal(await git(current.repositoryPath, ['cat-file', '-e', `${conflicting.savedSha}^{commit}`]), '')
 })
 
-test('a conflict without a resolver falls back to theirs after repeated attempts', async (context) => {
+test('a conflict without a resolver never falls back to a whole Git side', async (context) => {
   const current = await fixture(context)
   const conflicting = await branchCommit(current, 'ensync/chat-no-resolver-fallback', { 'README.md': '# chat version\n' })
   await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
@@ -871,19 +896,19 @@ test('a conflict without a resolver falls back to theirs after repeated attempts
     [{ ...item(current, conflicting, 1), attempts: 3 }],
   )
 
-  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
-  assert.deepEqual(result.retryIds, [])
-  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# chat version\n')
+  assert.deepEqual(result.landedIds, [], JSON.stringify(result))
+  assert.deepEqual(result.retryIds, ['landing-1'])
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# newer baseline\n')
 })
 
-test('the theirs fallback is not attempted before the threshold is reached', async (context) => {
+test('provider failure remains retryable regardless of attempt count', async (context) => {
   const current = await fixture(context)
   const conflicting = await branchCommit(current, 'ensync/chat-fallback-threshold', { 'README.md': '# chat version\n' })
   await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
   await git(current.repositoryPath, ['add', 'README.md'])
   await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
 
-  const result = await integrator(current.nativeClient).integrate([item(current, conflicting, 1)], {
+  const result = await integrator(current.nativeClient).integrate([{ ...item(current, conflicting, 1), attempts: 99 }], {
     resolveConflict: async () => { throw new Error('provider cannot resolve') },
   })
 

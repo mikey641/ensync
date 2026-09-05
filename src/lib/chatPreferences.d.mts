@@ -1,5 +1,5 @@
 import type { Chat, ModelSizeTier } from '../types'
-import type { ChatModelEffort } from './relayHost'
+import type { ChatModelEffort } from './ensyncHost'
 
 export const MODEL_SIZE_EFFORT: Readonly<Record<ModelSizeTier, ChatModelEffort>>
 

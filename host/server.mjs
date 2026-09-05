@@ -14,7 +14,7 @@ import {
   probeAttachmentPaths,
 } from './chat-attachments.mjs'
 import { ChatImageError, ChatImageService } from './chat-images.mjs'
-import { ChatRunError, ChatRunService } from './chat.mjs'
+import { ChatRunError, ChatRunService, redactTerminalText } from './chat.mjs'
 import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
@@ -23,6 +23,9 @@ import { selectAutomaticProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './auto
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
+import { DeliveryCoordinator } from './delivery-coordinator.mjs'
+import { DeliveryJournal } from './delivery-journal.mjs'
+import { VercelDeploymentAdapter } from './deployment-adapters.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
 import { getProviderDefinition, isProviderId, ProviderStatusService } from './providers.mjs'
 import { ProjectIsolationService } from './project-isolation.mjs'
@@ -50,6 +53,24 @@ const LOOPBACK_HOST = '127.0.0.1'
 const MAX_BODY_BYTES = 128 * 1024
 const MAX_SYNC_BODY_BYTES = 9 * 1024 * 1024
 const AUTOMATIC_UPDATE_DEDUPE_MS = 5 * 60 * 1_000
+
+function selectRepairProvider(providers, priority, attempted = []) {
+  const byId = new Map(providers.map((provider) => [provider.id, provider]))
+  const used = new Set(attempted)
+  const candidates = priority.map((id) => byId.get(id)).filter((provider) => (
+    provider
+    && !used.has(provider.id)
+    && provider.installed === true
+    && provider.connectionState === 'ready'
+    && provider.routeKind === 'subscription'
+    && provider.chatExecution === 'supported'
+    && provider.authentication?.state === 'authenticated'
+  ))
+  return candidates.find((provider) => {
+    const usedPercent = provider.usage?.usedPercent
+    return typeof usedPercent === 'number' && usedPercent < 100
+  }) ?? candidates.find((provider) => typeof provider.usage?.usedPercent !== 'number') ?? null
+}
 
 function isAllowedOrigin(origin) {
   if (!origin) return true
@@ -79,9 +100,9 @@ async function autoPushToOrigin(repositoryPath, targetBranch, gitExecutable) {
   const pushArgs = ['push', '--no-verify', 'origin', targetBranch]
   const pushOpts = { cwd: repositoryPath, gitExecutable, timeoutMs: 60_000 }
   let result = await runGit(pushArgs, pushOpts)
-  if (result.exitCode === 0) return
-  const stderr = result.stderr?.trim() || ''
-  if (/(?:fetch first|non-fast-forward|rejected)/.test(stderr)) {
+  if (result.exitCode !== 0) {
+    const stderr = result.stderr?.trim() || ''
+    if (/(?:fetch first|non-fast-forward|rejected)/.test(stderr)) {
     await runGit(['fetch', 'origin', targetBranch], {
       cwd: repositoryPath, gitExecutable, timeoutMs: 60_000,
     })
@@ -94,11 +115,20 @@ async function autoPushToOrigin(repositoryPath, targetBranch, gitExecutable) {
       })
       throw new Error(`Could not auto-push: origin/${targetBranch} diverged and the merge had conflicts. ${mergeResult.stderr?.trim() || ''}`)
     }
-    result = await runGit(pushArgs, pushOpts)
+      result = await runGit(pushArgs, pushOpts)
+    }
   }
   if (result.exitCode !== 0) {
     throw new Error(result.stderr?.trim() || result.stdout?.trim() || `git push origin ${targetBranch} failed.`)
   }
+  const head = await runGit(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], {
+    cwd: repositoryPath, gitExecutable, timeoutMs: 10_000,
+  })
+  const sha = head.stdout?.trim()?.toLowerCase()
+  if (head.exitCode !== 0 || !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha ?? '')) {
+    throw new Error('The pushed production branch head could not be verified.')
+  }
+  return sha
 }
 
 function responseHeaders(origin) {
@@ -311,6 +341,7 @@ export function createEnsyncHost(options = {}) {
     filePath: options.landingJournalPath ?? join(landingStateRoot, 'landing-journal.json'),
   })
   let chats
+  let deliveryCoordinator = null
   let landingIntegratorPromise = null
   const resolveLandingIntegrator = () => {
     if (options.landingIntegrator) return Promise.resolve(options.landingIntegrator)
@@ -343,6 +374,7 @@ export function createEnsyncHost(options = {}) {
       })
     },
     onEvent: (event) => {
+      deliveryCoordinator?.handleLandingEvent?.(event)
       if (event.type === 'landed') {
         console.log(`Ensync automatically landed ${event.item.branch} (FIFO ${event.item.completionSequence}).`)
       } else if (event.type === 'retry') {
@@ -354,7 +386,7 @@ export function createEnsyncHost(options = {}) {
       }
     },
     push: async ({ repositoryPath, targetBranch }) => {
-      await autoPushToOrigin(repositoryPath, targetBranch, options.gitExecutable)
+      return autoPushToOrigin(repositoryPath, targetBranch, options.gitExecutable)
     },
   }))
 
@@ -589,6 +621,78 @@ export function createEnsyncHost(options = {}) {
     },
     journal: chatJobJournal,
   })
+  const deliveryJournal = options.deliveryJournal ?? new DeliveryJournal({
+    filePath: options.deliveryJournalPath ?? join(landingStateRoot, 'delivery-journal.json'),
+  })
+  deliveryCoordinator = options.deliveryCoordinator ?? new DeliveryCoordinator({
+    journal: deliveryJournal,
+    adapters: options.deploymentAdapters ?? [new VercelDeploymentAdapter()],
+    findActiveChat: (projectPath) => chatJobs.runningForProject?.(projectPath) ?? null,
+    isAncestor: async (repositoryPath, older, newer) => {
+      if (!older || !newer) return false
+      const result = await runGit(['merge-base', '--is-ancestor', older, newer], {
+        cwd: repositoryPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000,
+      })
+      return result.exitCode === 0
+    },
+    resolvePushedHead: async (repositoryPath, targetBranch) => {
+      const result = await runGit(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], {
+        cwd: repositoryPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000,
+      })
+      const sha = result.stdout?.trim()?.toLowerCase()
+      return result.exitCode === 0 && /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(sha ?? '') ? sha : null
+    },
+    describeCommit: async (repositoryPath, commitSha) => {
+      const result = await runGit(['show', '-s', '--format=%s', commitSha], {
+        cwd: repositoryPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000,
+      })
+      const description = result.stdout?.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
+      return result.exitCode === 0 && description ? description.slice(0, 240) : null
+    },
+    redact: (value) => redactTerminalText(value).text,
+    startRepair: async (record) => {
+      const providers = await statuses.list()
+      const preferred = [...new Set([...record.sourceProviders, ...DEFAULT_FALLBACK_PROVIDER_ORDER])]
+      let selected = selectRepairProvider(providers, preferred, record.attemptedProviders)
+      if (!selected) selected = selectRepairProvider(providers, preferred, [])
+      if (!selected) throw new Error('No authenticated subscription provider is currently available for automatic repair.')
+      const attempt = record.repairAttempts
+      const jobId = `deliveryrepair-${record.id.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 72)}-${attempt}`
+      const failure = [record.failureMessage, record.failureLog].filter(Boolean).join('\n\n').slice(0, 18_000)
+      const prompt = [
+        'Ensync detected that the exact pushed production commit failed to deploy. Repair the underlying issue completely.',
+        `Failed production commit: ${record.productionCommitSha}`,
+        `Deployment provider: ${record.deploymentProvider ?? 'unknown'}`,
+        failure ? `Verified failure output:\n${failure}` : null,
+        'Inspect the repository and its instructions, implement the deepest safe fix, run the relevant verification, and leave the repair committed for Ensync automatic landing.',
+        'Do not bypass build, schema, security, or deployment safeguards. Do not claim production success; Ensync will independently verify the exact replacement commit.',
+      ].filter(Boolean).join('\n\n')
+      const admission = await chatJobs.start({
+        jobId,
+        kind: 'local',
+        request: {
+          provider: selected.id,
+          projectPath: record.projectPath,
+          workspaceKey: `delivery-repair:${record.id}`,
+          prompt,
+          sessionId: null,
+          model: null,
+          effort: 'max',
+        },
+      })
+      let terminalError = null
+      const completion = new Promise((resolve) => {
+        chatJobs.subscribe(jobId, {
+          afterSequence: 0,
+          onEvent: (event) => {
+            if (event.type === 'error') terminalError = event.error ?? event.message ?? 'Automatic repair failed.'
+          },
+          onEnd: () => resolve({ state: chatJobs.get(jobId).state, error: terminalError }),
+        })
+      })
+      return { jobId: admission.job.id, provider: selected.id, completion }
+    },
+  })
   const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({
     accountSyncService: accountSync,
     chatJobService: chatJobs,
@@ -639,6 +743,11 @@ export function createEnsyncHost(options = {}) {
           apiVersion: 1,
           instanceId: options.instanceId ?? null,
           detachedJobs: Boolean(chatJobJournal),
+          capabilities: {
+            deliveryTargets: ['production', 'protected_branch'],
+            deliveryPromptIdentity: true,
+            deliveryLandingSubstates: true,
+          },
           now: new Date().toISOString(),
         }, origin)
       }
@@ -773,6 +882,22 @@ export function createEnsyncHost(options = {}) {
         const body = await readJsonBody(request)
         const status = await git.status(body.projectPath)
         return sendJson(response, 200, { git: status }, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/delivery/status') {
+        const body = await readJsonBody(request)
+        if (typeof body.projectPath !== 'string' || !body.projectPath) {
+          return sendJson(response, 400, { error: 'A project path is required.', code: 'invalid_project_path' }, origin)
+        }
+        if (body.sourceBranch !== undefined
+          && (typeof body.sourceBranch !== 'string'
+            || !body.sourceBranch.trim()
+            || body.sourceBranch.length > 512)) {
+          return sendJson(response, 400, { error: 'A valid source branch is required.', code: 'invalid_source_branch' }, origin)
+        }
+        return sendJson(response, 200, {
+          delivery: await deliveryCoordinator.status(body.projectPath, body.sourceBranch?.trim() ?? null),
+        }, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/git/init') {
@@ -1349,14 +1474,13 @@ export function createEnsyncHost(options = {}) {
     chatImages,
     chatJobs,
     daemonLeases,
+    deliveryCoordinator,
     landingCoordinator,
     projectIsolation,
+    syncBrokerHost,
   }
   return server
 }
-
-// Compatibility alias for clients and tests using the prototype export name.
-export const createRelayHost = createEnsyncHost
 
 export function startEnsyncHost(options = {}) {
   const host = options.host ?? LOOPBACK_HOST
@@ -1369,12 +1493,14 @@ export function startEnsyncHost(options = {}) {
     server.ensyncServices?.landingCoordinator?.start?.().catch((error) => {
       console.error('Ensync automatic-landing recovery failed:', error instanceof Error ? error.message : error)
     })
+    server.ensyncServices?.deliveryCoordinator?.start?.().catch((error) => {
+      console.error('Ensync production-delivery recovery failed:', error instanceof Error ? error.message : error)
+    })
   })
   return server
 }
 
-// Legacy environment variables and exports remain supported during the rename.
-export const startRelayHost = startEnsyncHost
+
 
 const invokedDirectly = process.argv[1]
   && import.meta.url === pathToFileURL(process.argv[1]).href

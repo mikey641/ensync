@@ -31,7 +31,7 @@ test('runtime conversation text uses automatic isolated direction without changi
   assert.match(app, /<pre className="execution-panel__output"[^>]*dir="auto">/)
   assert.match(contextHeader, /chat-context-header__message-preview" dir="auto"/)
   assert.match(contextHeader, /chat-context-message-dialog__body"[\s\S]*?dir="auto"/)
-  assert.equal(splitWorkspace.match(/className="relay-split-pane-title" dir="auto"/g)?.length, 2)
+  assert.equal(splitWorkspace.match(/className="ensync-split-pane-title" dir="auto"/g)?.length, 2)
 
   assert.match(appCss, /\.message-content p\s*\{[^}]*unicode-bidi:\s*plaintext;[^}]*text-align:\s*start;/s)
   assert.match(appCss, /\.message-table th, \.message-table td\s*\{[^}]*text-align:\s*start;[^}]*unicode-bidi:\s*plaintext;/s)

@@ -244,11 +244,11 @@ git commit -m "feat: retry automatic remote publication"
 **Files:**
 - Modify: `host/server.mjs`
 - Modify: `host/server-integrations.test.mjs`
-- Modify: `.relay/project.md`
-- Modify: `.relay/architecture.md`
-- Modify: `.relay/features/git-workflows.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/git-workflows.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/MEMORY.md`
+- Modify: `.ensync/project.md`
+- Modify: `.ensync/architecture.md`
+- Modify: `.ensync/features/git-workflows.md`
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/git-workflows.md`
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/MEMORY.md`
 
 **Interfaces:**
 - Consumes: Task 1 publisher, Task 2 integrator contract, and Task 3 retry semantics.
@@ -287,7 +287,7 @@ Expected: all commands exit 0 with no failed tests or lint errors.
 - [ ] **Step 6: Commit the completed feature**
 
 ```bash
-git add host/server.mjs host/server-integrations.test.mjs .relay/project.md .relay/architecture.md .relay/features/git-workflows.md
+git add host/server.mjs host/server-integrations.test.mjs .ensync/project.md .ensync/architecture.md .ensync/features/git-workflows.md
 git commit -m "feat: auto-push completed landing trains"
 ```
 

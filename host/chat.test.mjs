@@ -17,7 +17,7 @@ import {
   validateAttachmentPaths,
   validateProjectPath,
 } from './chat.mjs'
-import { createRelayHost } from './server.mjs'
+import { createEnsyncHost } from './server.mjs'
 
 const execFile = promisify(execFileCallback)
 
@@ -1394,7 +1394,7 @@ test('POST /api/chat/run returns only the injected host runner result', async (c
     completedAt: '2026-08-05T12:00:00.000Z',
   }
   let received
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run(request) {
         received = request
@@ -1421,7 +1421,7 @@ test('POST /api/chat/run returns only the injected host runner result', async (c
 })
 
 test('POST /api/chat/run exposes retry safety without implying every quota string is safe', async (context) => {
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run() {
         throw new ChatRunError('provider_quota', 'Verified quota failure.', 429, true)
@@ -1462,7 +1462,7 @@ test('POST /api/chat/run/stream flushes observed CLI events before completion an
     durationMs: 12,
     completedAt: '2026-08-05T12:00:00.000Z',
   }
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run(_request, options) {
         options.onEvent({
@@ -1510,7 +1510,7 @@ test('POST /api/chat/run/stream flushes observed CLI events before completion an
 })
 
 test('POST /api/chat/run/stream represents a safe pre-activity failure inside the stream', async (context) => {
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run() {
         throw new ChatRunError('provider_quota', 'Verified quota failure.', 429, true)
@@ -1576,7 +1576,7 @@ test('ChatRunService passes cancellation to the exact process and never classifi
 test('disconnecting a streaming HTTP client aborts the Host run instead of orphaning it', async (context) => {
   let hostObservedAbort
   const observedAbort = new Promise((resolve) => { hostObservedAbort = resolve })
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run(_request, options) {
         options.onEvent({
@@ -1615,7 +1615,7 @@ test('disconnecting a streaming HTTP client aborts the Host run instead of orpha
 })
 
 test('stream cancellation has a distinct non-retryable terminal event', async (context) => {
-  const server = createRelayHost({
+  const server = createEnsyncHost({
     chatService: {
       async run() {
         throw new ChatRunError('run_cancelled', 'Run stopped by user.', 499, false)
@@ -1748,6 +1748,7 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
     { provider: 'codex', projectPath, prompt: 'Continue', workspaceKey: 'workspace:chat-hung-land' },
     {
       preAcquiredWorkspaceLease: lease,
+      turnId: 'turn-delivery-description',
       onEvent: (event) => {
         observerCalls.push(event.code)
         throw new Error('renderer disconnected')
@@ -1766,6 +1767,8 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
     targetBranch: 'main',
     targetBaseSha: 'c'.repeat(40),
     provider: 'codex',
+    turnId: 'turn-delivery-description',
+    deliveryTarget: 'production',
   })
   assert.ok(observerCalls.includes('agent_work_committed'))
   assert.ok(observerCalls.includes('automatic_landing_queued'))
@@ -1892,9 +1895,11 @@ test('ChatRunService fails a successful provider run when its exact SHA cannot b
 test('background conflict resolution keeps subscription auth and temporary-worktree containment', async (context) => {
   const worktreePath = await gitProjectFixture(context)
   let processOptions = null
+  let processArguments = null
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
-    processRunner: async (_executable, _args, options) => {
+    processRunner: async (_executable, args, options) => {
+      processArguments = args
       processOptions = options
       return {
         exitCode: 0, error: null, timedOut: false, stderr: '',
@@ -1925,6 +1930,7 @@ test('background conflict resolution keeps subscription auth and temporary-workt
   assert.match(processOptions.input, /ENSYNC HOST AUTOMATIC LANDING CONFLICT/)
   assert.match(processOptions.input, new RegExp('b{40}'))
   assert.match(processOptions.input, /src\/feature\.ts/)
+  assert.ok(processArguments.includes('model_reasoning_effort="max"'))
 })
 
 test('a Claude conflict falls back to an authenticated contained Codex resolver', async (context) => {
@@ -1963,6 +1969,79 @@ test('a Claude conflict falls back to an authenticated contained Codex resolver'
   })
 
   assert.equal(runs, 1)
+})
+
+test('a connected Claude landing resolver uses maximum verified session effort', async (context) => {
+  const worktreePath = await gitProjectFixture(context)
+  let processArguments = null
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('claude')),
+    processRunner: async (_executable, args) => {
+      processArguments = args
+      return {
+        exitCode: 0, error: null, timedOut: false, stderr: '',
+        stdout: [
+          JSON.stringify({ type: 'system', subtype: 'init', session_id: '123e4567-e89b-12d3-a456-426614174000' }),
+          JSON.stringify({ type: 'result', is_error: false, result: 'resolved', session_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        ].join('\n'),
+      }
+    },
+  })
+
+  await service.resolveLandingConflict({
+    item: {
+      provider: 'claude',
+      branch: 'ensync/chat-conflict',
+      savedSha: 'f'.repeat(40),
+      repositoryPath: worktreePath,
+      attempts: 1,
+    },
+    worktreePath,
+    projectPath: worktreePath,
+    conflictFiles: ['src/conflict.ts'],
+    commonGitDirectory: join(worktreePath, '.git'),
+  })
+
+  const effortFlag = processArguments.indexOf('--effort')
+  assert.notEqual(effortFlag, -1)
+  assert.equal(processArguments[effortFlag + 1], 'max')
+})
+
+test('background conflict retries rotate across eligible providers at maximum verified effort', async (context) => {
+  const worktreePath = await gitProjectFixture(context)
+  const droidRuns = []
+  const service = new ChatRunService({
+    statusService: {
+      async get(id) { return readyProvider(id) },
+    },
+    processRunner: async () => {
+      throw new Error('the second attempt should rotate away from Codex')
+    },
+    droidExecRunner: {
+      async run(input) {
+        droidRuns.push(input)
+        return { response: 'resolved', sessionId: null, model: input.model, usage: null }
+      },
+    },
+  })
+
+  await service.resolveLandingConflict({
+    item: {
+      provider: 'codex',
+      branch: 'ensync/chat-conflict',
+      savedSha: 'e'.repeat(40),
+      repositoryPath: worktreePath,
+      attempts: 2,
+    },
+    worktreePath,
+    projectPath: worktreePath,
+    conflictFiles: ['src/conflict.ts'],
+    commonGitDirectory: join(worktreePath, '.git'),
+  })
+
+  assert.equal(droidRuns.length, 1)
+  assert.equal(droidRuns[0].model, null)
+  assert.equal(droidRuns[0].effort, 'max')
 })
 
 for (const providerId of ['cursor']) {

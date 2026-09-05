@@ -21,11 +21,11 @@ import {
   type GitPushMode,
   type GitStatus,
   type ProjectInspection,
-} from '../lib/relayHost'
+} from '../lib/ensyncHost'
 import './GitWorkflowModal.css'
 
 const PRODUCTION_BRANCH_STORAGE = 'ensync-git-production-branches-v1'
-const LEGACY_PRODUCTION_BRANCH_STORAGE = 'relay-git-production-branches-v1'
+const LEGACY_PRODUCTION_BRANCH_STORAGE = 'ensync-git-production-branches-v1'
 
 type Props = {
   mode: 'clone' | 'manage'

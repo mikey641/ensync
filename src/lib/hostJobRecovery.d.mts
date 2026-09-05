@@ -1,5 +1,5 @@
 import type { Chat, Message } from '../types'
-import type { ChatJobSnapshot, ChatProviderId } from './relayHost'
+import type { ChatJobSnapshot, ChatProviderId } from './ensyncHost'
 import type { OccupiedRun, OccupiedRuns } from './occupiedRunState.mjs'
 
 export type RunningHostJobCandidate = {

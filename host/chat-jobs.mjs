@@ -362,6 +362,20 @@ export class ChatJobService {
       || [...this.#jobs.values()].some((job) => job.state === 'running')
   }
 
+  runningForProject(projectPath) {
+    if (typeof projectPath !== 'string' || !projectPath) return null
+    const job = [...this.#jobs.values()].find((candidate) => (
+      candidate.state === 'running'
+      && candidate.kind === 'local'
+      && candidate.request?.projectPath === projectPath
+    ))
+    return job ? {
+      id: job.id,
+      provider: typeof job.request?.provider === 'string' ? job.request.provider : null,
+      startedAt: job.startedAt,
+    } : null
+  }
+
   sweep() {
     const changed = this.#trimExpiredJobs()
     if (changed) this.#flushPersist()
@@ -521,6 +535,7 @@ export class ChatJobService {
           if (job.kind === 'local') {
             result = await this.#runLocal(job.request, {
               liveTurnId: job.id,
+              turnId: job.navigationTurnId,
               signal: job.controller.signal,
               preAcquiredWorkspaceLease: job.workspaceLease,
               onEvent: (event) => {

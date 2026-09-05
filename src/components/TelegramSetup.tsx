@@ -212,16 +212,16 @@ export function TelegramSetup({
   }
 
   return (
-    <section className={`relay-telegram-setup ${className}`.trim()} aria-labelledby={`${tokenId}-title`}>
-      <header className="relay-telegram-setup__header">
-        <span className="relay-telegram-setup__logo" aria-hidden="true"><Send size={19} /></span>
+    <section className={`ensync-telegram-setup ${className}`.trim()} aria-labelledby={`${tokenId}-title`}>
+      <header className="ensync-telegram-setup__header">
+        <span className="ensync-telegram-setup__logo" aria-hidden="true"><Send size={19} /></span>
         <div>
           <h3 id={`${tokenId}-title`}>Connect Telegram</h3>
           <p>Use your own bot as a remote client for your configured Ensync Host.</p>
         </div>
       </header>
 
-      <ol className="relay-telegram-setup__steps">
+      <ol className="ensync-telegram-setup__steps">
         <li>
           <span aria-hidden="true">1</span>
           <div>
@@ -247,7 +247,7 @@ export function TelegramSetup({
       </ol>
 
       {host.status !== 'available' || !client ? (
-        <div className="relay-telegram-setup__host relay-telegram-setup__host--blocked" role="status">
+        <div className="ensync-telegram-setup__host ensync-telegram-setup__host--blocked" role="status">
           <ServerOff size={18} aria-hidden="true" />
           <div>
             <strong>Ensync Host support is not configured</strong>
@@ -258,7 +258,7 @@ export function TelegramSetup({
           )}
         </div>
       ) : (
-        <div className="relay-telegram-setup__host" role="status">
+        <div className="ensync-telegram-setup__host" role="status">
           <ShieldCheck size={18} aria-hidden="true" />
           <div>
             <strong>Ensync Host is available{host.hostLabel ? ` · ${host.hostLabel}` : ''}</strong>
@@ -272,7 +272,7 @@ export function TelegramSetup({
       )}
 
       {pairing && (
-        <div className="relay-telegram-setup__pairing" role="status">
+        <div className="ensync-telegram-setup__pairing" role="status">
           <strong>Pair @{pairing.bot.username} from a private Telegram chat</strong>
           <p>Send this exact command before {new Date(pairing.expiresAt).toLocaleTimeString()}:</p>
           <code>/pair {pairing.code}</code>
@@ -283,14 +283,14 @@ export function TelegramSetup({
       )}
 
       {error && (
-        <div className="relay-telegram-setup__notice relay-telegram-setup__notice--error" role="alert">
+        <div className="ensync-telegram-setup__notice ensync-telegram-setup__notice--error" role="alert">
           <AlertCircle size={16} aria-hidden="true" />
           <span>{error}</span>
         </div>
       )}
 
       {!confirmation && status?.state !== 'connected' && (
-      <form className="relay-telegram-setup__form" onSubmit={pair}>
+      <form className="ensync-telegram-setup__form" onSubmit={pair}>
         <label htmlFor={tokenId}>Telegram bot token</label>
         <input
           id={tokenId}
@@ -308,16 +308,16 @@ export function TelegramSetup({
           Ensync does not consider the bot paired until the host confirms it.
         </small>
 
-        <button className="relay-telegram-setup__submit" type="submit" disabled={!canPair}>
-          {isPairing && <LoaderCircle className="relay-telegram-setup__spinner" size={16} aria-hidden="true" />}
+        <button className="ensync-telegram-setup__submit" type="submit" disabled={!canPair}>
+          {isPairing && <LoaderCircle className="ensync-telegram-setup__spinner" size={16} aria-hidden="true" />}
           {isPairing ? 'Waiting for host…' : 'Pair through Ensync Host'}
         </button>
       </form>
       )}
 
       {confirmation && (
-        <div className="relay-telegram-setup__connected">
-          <div className="relay-telegram-setup__notice relay-telegram-setup__notice--success" role="status">
+        <div className="ensync-telegram-setup__connected">
+          <div className="ensync-telegram-setup__notice ensync-telegram-setup__notice--success" role="status">
             <CheckCircle2 size={16} aria-hidden="true" />
             <span>
               Pairing confirmed by {confirmationHostLabel}
@@ -325,7 +325,7 @@ export function TelegramSetup({
               {' · '}{confirmation.connectionId}.
             </span>
           </div>
-          <form className="relay-telegram-setup__delivery" onSubmit={sendDelivery}>
+          <form className="ensync-telegram-setup__delivery" onSubmit={sendDelivery}>
             <label htmlFor={`${tokenId}-delivery`}>Send a real delivery check</label>
             <input
               id={`${tokenId}-delivery`}
@@ -333,7 +333,7 @@ export function TelegramSetup({
               onChange={(event) => setDeliveryText(event.target.value)}
               disabled={isSending}
             />
-            <div className="relay-telegram-setup__actions">
+            <div className="ensync-telegram-setup__actions">
               <button type="submit" disabled={isSending || !deliveryText.trim()}>
                 <Send size={15} aria-hidden="true" />
                 {isSending ? 'Sending…' : 'Send through Telegram'}

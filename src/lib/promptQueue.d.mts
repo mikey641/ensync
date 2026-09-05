@@ -1,4 +1,5 @@
 import type { Chat, FileAttachment, Message, ModelSizeTier, ProviderId } from '../types'
+import type { DeliveryTarget } from './ensyncHost'
 
 export type QueuedPrompt = {
   id: string
@@ -19,6 +20,7 @@ export type QueuedPrompt = {
     executionTargetKey: string
     projectId: string
     projectPath: string
+    deliveryTarget?: DeliveryTarget
   }
 }
 

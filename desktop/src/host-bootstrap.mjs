@@ -128,6 +128,7 @@ async function stop(exitCode = 0) {
   const forceExit = setTimeout(() => process.exit(1), 6_000)
   forceExit.unref?.()
   await server.ensyncServices.chatJobs.shutdown()
+  await server.ensyncServices.deliveryCoordinator?.shutdown?.()
   await server.ensyncServices.landingCoordinator?.shutdown?.()
   await new Promise((resolve) => server.close(resolve))
   if (detachedMode) await removeOwnDescriptor()
@@ -138,7 +139,8 @@ async function stop(exitCode = 0) {
 function daemonBusy() {
   const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
   const landingActive = server.ensyncServices.landingCoordinator?.hasActiveWork?.() === true
-  return brokerConnected || landingActive || shouldKeepDaemonAlive(
+  const deliveryActive = server.ensyncServices.deliveryCoordinator?.hasActiveWork?.() === true
+  return brokerConnected || landingActive || deliveryActive || shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )

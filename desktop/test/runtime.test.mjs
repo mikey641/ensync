@@ -3,6 +3,7 @@ import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { EventEmitter } from 'node:events'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
@@ -285,6 +286,39 @@ test('a native shell replaces a dead detached Host in place before the next rend
   } finally {
     await controller.release()
   }
+})
+
+test('a failed detached Host launch is terminated before its launch lock is released', async (context) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-host-failed-launch-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const stateFilePath = join(directory, 'daemon.json')
+  const journalFilePath = join(directory, 'jobs.json')
+  const child = new EventEmitter()
+  child.exitCode = null
+  child.signalCode = null
+  child.unref = () => {}
+  child.kill = (signal = 'SIGTERM') => {
+    child.signalCode = signal
+    queueMicrotask(() => child.emit('exit', null, signal))
+    return true
+  }
+  const controller = new HostProcessController({
+    bootstrapPath: resolve(desktopRoot, 'src', 'host-bootstrap.mjs'),
+    hostEntryPath: resolve(repositoryRoot, 'host', 'server.mjs'),
+    cwd: repositoryRoot,
+    stateFilePath,
+    journalFilePath,
+    startupTimeoutMs: 20,
+    spawnImpl: () => child,
+  })
+
+  await assert.rejects(
+    controller.start(),
+    /Detached Ensync Host did not become ready before the startup timeout/,
+  )
+  assert.equal(child.signalCode, 'SIGTERM')
+  assert.equal(controller.child, null)
+  await assert.rejects(access(`${stateFilePath}.launch-lock`), { code: 'ENOENT' })
 })
 
 test('app protocol serves the bundle with security headers and proxies only the host API', async () => {

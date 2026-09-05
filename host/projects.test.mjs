@@ -6,14 +6,14 @@ import { join } from 'node:path'
 import test from 'node:test'
 import { ChatRunError } from './chat.mjs'
 import { inspectProject } from './projects.mjs'
-import { createRelayHost } from './server.mjs'
+import { createEnsyncHost } from './server.mjs'
 
 async function projectFixture(context) {
   const projectPath = await mkdtemp(join(tmpdir(), 'relay-project-test-'))
   context.after(() => rm(projectPath, { recursive: true, force: true }))
-  await mkdir(join(projectPath, '.relay', 'features'), { recursive: true })
-  await writeFile(join(projectPath, '.relay', 'project.md'), '# Test project\n')
-  await writeFile(join(projectPath, '.relay', 'features', 'focus.md'), '# Focus\n')
+  await mkdir(join(projectPath, '.ensync', 'features'), { recursive: true })
+  await writeFile(join(projectPath, '.ensync', 'project.md'), '# Test project\n')
+  await writeFile(join(projectPath, '.ensync', 'features', 'focus.md'), '# Focus\n')
   await writeFile(join(projectPath, 'AGENTS.md'), '# Instructions\n')
   return projectPath
 }
@@ -47,7 +47,7 @@ test('project inspection rejects relative and inaccessible folders', async () =>
 
 test('project endpoints inspect explicit paths and the host working directory', async (context) => {
   const projectPath = await projectFixture(context)
-  const server = createRelayHost({ defaultProjectPath: projectPath })
+  const server = createEnsyncHost({ defaultProjectPath: projectPath })
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   context.after(() => server.close())

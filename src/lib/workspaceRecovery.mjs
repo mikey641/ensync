@@ -158,6 +158,7 @@ export function mergeRecoveredWorkspaceState(currentState, recoveredState, optio
     'chatSessions',
     'readCompletionByChat',
     'executionPanelOpenByChat',
+    'deliveryPanelOpenByChat',
     'drafts',
     'draftAttachments',
     'chatErrors',

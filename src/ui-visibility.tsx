@@ -62,7 +62,7 @@ export const DEFAULT_UI_VISIBILITY: UIVisibilityState = {
 }
 
 export type UISectionElementProps = Pick<HTMLAttributes<HTMLElement>, 'hidden' | 'aria-hidden'> & {
-  'data-relay-ui-section': UISectionId
+  'data-ensync-ui-section': UISectionId
 }
 
 type UIVisibilityContextValue = {
@@ -172,7 +172,7 @@ export function UIVisibilityProvider({ children }: { children: ReactNode }) {
     return {
       hidden,
       'aria-hidden': hidden ? true : undefined,
-      'data-relay-ui-section': section,
+      'data-ensync-ui-section': section,
     }
   }, [visibility])
 
@@ -183,7 +183,7 @@ export function UIVisibilityProvider({ children }: { children: ReactNode }) {
       // The controls remain usable for this session when storage is unavailable.
     }
 
-    document.documentElement.dataset.relayHiddenUiCount = String(hiddenCount)
+    document.documentElement.dataset.ensyncHiddenUiCount = String(hiddenCount)
   }, [hiddenCount, scopedStorageKey, visibility])
 
   useEffect(() => {
@@ -213,7 +213,7 @@ export function UIVisibilityProvider({ children }: { children: ReactNode }) {
       window.removeEventListener('keydown', onKeyDown)
       window.removeEventListener(SHOW_ALL_UI_EVENT, showAll)
       window.removeEventListener(LEGACY_SHOW_ALL_UI_EVENT, showAll)
-      delete document.documentElement.dataset.relayHiddenUiCount
+      delete document.documentElement.dataset.ensyncHiddenUiCount
     }
   }, [identity, scopedStorageKey, showAll])
 

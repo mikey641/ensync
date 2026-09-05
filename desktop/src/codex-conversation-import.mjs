@@ -153,7 +153,7 @@ function configuredProject(projectPath, dependencies = {}) {
     path: canonicalPath,
     host: 'local',
     context: {
-      relayDirectory: false,
+      ensyncDirectory: false,
       files: [],
       featureFiles: [],
       truncated: false,

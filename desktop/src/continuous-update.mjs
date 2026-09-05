@@ -40,7 +40,7 @@ function resolveRepoRoot() {
     dir = parent
   }
   // Fall back to the common dev location
-  return join(homedir(), 'dev', 'relay')
+  return join(homedir(), 'dev', 'ensync')
 }
 
 async function pathExists(path) {

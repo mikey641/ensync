@@ -280,15 +280,23 @@ export class ProjectIsolationService {
       const statusMoved = afterEntries.join('\n') !== before.statusEntries.join('\n')
       let landed = false
       if (headMoved) {
-        const log = await this.#git(['log', '--format=%s', `${before.head}..${afterHead}`], {
+        const publishedMessage = await this.#git(['show', '-s', '--format=%B', afterHead], {
           cwd: before.repositoryPath,
           allowFailure: true,
         })
-        const subjects = log.exitCode === 0 ? log.stdout.split(/\r?\n/).filter(Boolean) : []
-        landed = subjects.length > 0 && subjects.every((subject) => (
-          subject.startsWith("Merge branch 'ensync/landing-trains/")
-          || subject.startsWith('Ensync automatic landing')
-        ))
+        landed = publishedMessage.exitCode === 0
+          && /(?:^|\n)Ensync-Landing: true(?:\n|$)/.test(publishedMessage.stdout)
+        if (!landed) {
+          const log = await this.#git(['log', '--format=%s', `${before.head}..${afterHead}`], {
+            cwd: before.repositoryPath,
+            allowFailure: true,
+          })
+          const subjects = log.exitCode === 0 ? log.stdout.split(/\r?\n/).filter(Boolean) : []
+          landed = subjects.length > 0 && subjects.every((subject) => (
+            subject.startsWith("Merge branch 'ensync/landing-trains/")
+            || subject.startsWith('Ensync automatic landing')
+          ))
+        }
       }
       const afterPaths = new Set(afterEntries.map((entry) => entry.slice(3)))
       const destructive = !headMoved && before.statusEntries.some((entry) => !afterPaths.has(entry.slice(3)))

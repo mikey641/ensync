@@ -14,7 +14,7 @@ import {
   parseCursorAuthentication,
   parseKiroAuthentication,
 } from './providers.mjs'
-import { createRelayHost } from './server.mjs'
+import { createEnsyncHost } from './server.mjs'
 
 test('subscription environment removes model API keys without removing PATH', () => {
   const env = subscriptionEnvironment({
@@ -171,7 +171,7 @@ test('Copilot account verification is separate from its discovery-only Ensync ru
 })
 
 test('host returns real provider states and never invents usage numbers', async (context) => {
-  const server = createRelayHost()
+  const server = createEnsyncHost()
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   context.after(() => server.close())
@@ -182,6 +182,7 @@ test('host returns real provider states and never invents usage numbers', async 
 
   const health = await fetch(`${baseUrl}/api/health`).then((response) => response.json())
   assert.equal(health.ok, true)
+  assert.deepEqual(health.capabilities.deliveryTargets, ['production', 'protected_branch'])
 
   const payload = await fetch(`${baseUrl}/api/providers?refresh=1`).then((response) => response.json())
   assert.deepEqual([...payload.providers.map((provider) => provider.id)].sort(), [

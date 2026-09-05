@@ -1,6 +1,6 @@
 # Ensync
 
-Ensync is a universal AI agent workspace for continuing one coding task across subscription-backed CLIs. It preserves the conversation, verified project, shared `.relay` feature memory and plan, `CLAUDE.md` and `AGENTS.md` adapters, and host-observed Git state. It is conversation-first: code stays out of the primary interface unless the user asks for it.
+Ensync is a universal AI agent workspace for continuing one coding task across subscription-backed CLIs. It preserves the conversation, verified project, shared `.ensync` feature memory and plan, `CLAUDE.md` and `AGENTS.md` adapters, and host-observed Git state. It is conversation-first: code stays out of the primary interface unless the user asks for it.
 
 The public product site is [ensync.vercel.app](https://ensync.vercel.app). The macOS download stays disabled until a signed/notarized build with a matching SHA-256 checksum is published; Windows stays disabled until the certified Microsoft Store listing URL is configured.
 
@@ -53,14 +53,22 @@ In the native app, open the project switcher and choose **Choose folder** to use
 
 The mobile client lives in `mobile/` and includes generated Capacitor iOS and Android projects. In desktop Settings, sign in to the same Ensync account, enable **Remote execution**, and create a one-time pairing code. On mobile, sign in, enter that code, choose Codex or Claude Code, enter the absolute project path on the paired Host, and start the encrypted run.
 
+The same client is also an installable web app (PWA), so you can run it full-screen from an iPhone or Android home screen without the App Store or Play Store. Build it, then host `mobile/dist` from any HTTPS static site (paired with the self-hosted Ensync Sync service) and choose **Add to Home Screen**:
+
 ```bash
 npm --prefix mobile install
+npm --prefix mobile run build
+```
+
+Include the web origin in the sync service's `ENSYNC_SYNC_ALLOWED_ORIGINS` setting so the browser client is accepted. For native packages instead:
+
+```bash
 npm --prefix mobile run sync
 npm --prefix mobile run open:ios      # Xcode on macOS
 npm --prefix mobile run open:android  # Android Studio + Android SDK
 ```
 
-The development app supports pairing, submission, encrypted event polling, cancellation, and steering. Host project discovery, attachments, secure OS credential persistence, background push wake-up, store signing, and App Store/Play Store publishing remain release work.
+The app supports pairing, submission, encrypted event polling, cancellation, and steering. Host project discovery, attachments, secure OS credential persistence, background push wake-up, store signing, and App Store/Play Store publishing remain release work.
 
 ## Usage and fallback
 
@@ -84,13 +92,13 @@ npm --prefix desktop run package:win-store # on Windows with Partner Center iden
 cd site && npm test
 ```
 
-The tag-triggered workflow is prepared for a private source repository and a separate public binary repository. It refuses release generation unless clean build provenance, Windows signing, and macOS app/DMG signing plus notarization are verified; it changes only the tag-selected beta or stable feed and preserves the other production feed. Nothing is activated until credentials and a tag are intentionally supplied. Local unsigned artifacts stay private test builds. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
+The source is MIT-licensed (see `LICENSE`) and may be published openly. Large public binaries live in a separate public release repository; the tag-triggered workflow refuses release generation unless clean build provenance, Windows signing, and macOS app/DMG signing plus notarization are verified; it changes only the tag-selected beta or stable feed and preserves the other production feed. Nothing is activated until credentials and a tag are intentionally supplied. Local unsigned artifacts stay private test builds. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
 
 ## Project memory
 
-- `.relay/project.md` contains cross-feature product rules.
-- `.relay/architecture.md` defines runtime and isolation boundaries.
-- `.relay/features/*.md` contains focused durable decisions for each feature.
+- `.ensync/project.md` contains cross-feature product rules.
+- `.ensync/architecture.md` defines runtime and isolation boundaries.
+- `.ensync/features/*.md` contains focused durable decisions for each feature.
 - Root `AGENTS.md` and `CLAUDE.md` direct supported agents to the same sources instead of maintaining competing memory.
 
 ## Verification
@@ -103,3 +111,11 @@ npm --prefix desktop test
 npm --prefix desktop run smoke
 npm --prefix site test
 ```
+
+## Contributing
+
+MIT-licensed and open to contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).

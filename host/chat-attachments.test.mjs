@@ -7,7 +7,7 @@ import test from 'node:test'
 
 import { ChatAttachmentStore, probeAttachmentPaths } from './chat-attachments.mjs'
 import { ChatRunError, validateAttachmentPaths } from './chat.mjs'
-import { createRelayHost } from './server.mjs'
+import { createEnsyncHost } from './server.mjs'
 
 async function fixtureDir(context) {
   const dir = await mkdtemp(join(tmpdir(), 'ensync-attachments-test-'))
@@ -88,7 +88,7 @@ test('the store refuses oversized, empty, or nameless uploads with honest errors
 })
 
 async function listeningHost(context, options) {
-  const server = createRelayHost(options)
+  const server = createEnsyncHost(options)
   server.listen(0, '127.0.0.1')
   await once(server, 'listening')
   context.after(() => server.close())

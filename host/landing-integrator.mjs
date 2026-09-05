@@ -8,10 +8,11 @@ import { runGit } from './git.mjs'
 const MAX_ERROR_LENGTH = 4_096
 const DEFAULT_RESOLUTION_TIMEOUT_MS = 2 * 60_000
 const DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS = 5_000
-const DEFAULT_CONFLICT_FALLBACK_THRESHOLD = 3
 const CONFLICT_MARKER_PATTERN = '^(<{7}|>{7})( |$)'
 const MAX_CONFLICT_FILES = 128
 const MAX_CONFLICT_PATH_BYTES = 32 * 1024
+const MAX_COMMIT_SUBJECT = 100
+const MAX_COMMIT_PATHS = 24
 
 function bounded(value) {
   return String(value ?? 'Automatic integration failed.').slice(0, MAX_ERROR_LENGTH)
@@ -24,6 +25,82 @@ function firstLine(value) {
 function safeRefPart(value) {
   const safe = String(value ?? '').replace(/[^A-Za-z0-9._-]/g, '-').slice(0, 96)
   return safe || randomUUID()
+}
+
+function cleanCommitText(value, maximum = MAX_COMMIT_SUBJECT) {
+  const cleaned = String(value ?? '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (cleaned.length <= maximum) return cleaned
+  return `${cleaned.slice(0, Math.max(1, maximum - 1)).trimEnd()}…`
+}
+
+function isInternalCommitSubject(subject) {
+  return !subject
+    || /^Ensync (?:agent work|automatic landing)\b/i.test(subject)
+    || /ensync\/(?:chat|landing-(?:items|trains))\b/i.test(subject)
+}
+
+function humanizeArea(value) {
+  const words = cleanCommitText(value, 80)
+    .replace(/\.(?:test|spec)$/i, '')
+    .replace(/[-_.]+/g, ' ')
+    .replace(/\bdocuseal\b/gi, 'DocuSeal')
+    .replace(/\bapi\b/gi, 'API')
+    .replace(/\bui\b/gi, 'UI')
+  return words.trim()
+}
+
+function areaForPath(path) {
+  const safePath = cleanCommitText(path, 512).replaceAll('\\', '/')
+  const segments = safePath.split('/').filter(Boolean)
+  if (segments.length === 0) return null
+  if (segments[0] === 'supabase' && segments[1] === 'migrations') return 'database migrations'
+  let stem = segments.at(-1).replace(/\.[^.]+$/, '').replace(/\.(?:test|spec)$/i, '')
+  if (['index', 'route', 'page', 'layout'].includes(stem.toLowerCase()) && segments.length > 1) {
+    const parent = segments.at(-2)
+    const grandparent = segments.at(-3)
+    stem = ['route', 'page'].includes(stem.toLowerCase()) && grandparent
+      ? `${grandparent} ${parent}`
+      : parent
+  }
+  return humanizeArea(stem)
+}
+
+function readableList(values) {
+  if (values.length < 2) return values[0] ?? ''
+  if (values.length === 2) return `${values[0]} and ${values[1]}`
+  return `${values.slice(0, -1).join(', ')}, and ${values.at(-1)}`
+}
+
+function fallbackSubject(paths) {
+  const areas = [...new Set(paths.map(areaForPath).filter(Boolean))].slice(0, 3)
+  return areas.length > 0
+    ? cleanCommitText(`Update ${readableList(areas)}`)
+    : 'Integrate completed Ensync work'
+}
+
+function publicationMessage({ subjects, paths, accepted }) {
+  const meaningful = [...new Set(subjects.map((subject) => cleanCommitText(subject)).filter((subject) => !isInternalCommitSubject(subject)))]
+  const subject = meaningful.length === 1
+    ? meaningful[0]
+    : meaningful.length > 1
+      ? cleanCommitText(`Integrate: ${meaningful.slice(0, 2).join('; ')}`)
+      : fallbackSubject(paths)
+  const body = [
+    subject,
+    '',
+    accepted.length === 1
+      ? 'Includes one completed Ensync task.'
+      : `Includes ${accepted.length} completed Ensync tasks.`,
+  ]
+  if (paths.length > 0) {
+    body.push('', 'Changed paths:', ...paths.slice(0, MAX_COMMIT_PATHS).map((path) => `- ${cleanCommitText(path, 512)}`))
+    if (paths.length > MAX_COMMIT_PATHS) body.push(`- …and ${paths.length - MAX_COMMIT_PATHS} more`)
+  }
+  body.push('', 'Ensync-Landing: true')
+  return body.join('\n')
 }
 
 function isWithinRepository(repositoryPath, projectPath) {
@@ -46,7 +123,7 @@ function conflictPathsAreBounded(paths) {
     && paths.reduce((total, path) => total + Buffer.byteLength(path, 'utf8') + 1, 0) <= MAX_CONFLICT_PATH_BYTES
 }
 
-function resultFor(train, landedIds, retryIds, errors, head = null) {
+function resultFor(train, landedIds, retryIds, errors, head = null, description = null) {
   const order = new Map(train.map((item) => [item.id, item.completionSequence]))
   const sorted = (ids) => [...ids].sort((left, right) => order.get(left) - order.get(right))
   return {
@@ -54,6 +131,7 @@ function resultFor(train, landedIds, retryIds, errors, head = null) {
     retryIds: sorted(retryIds),
     errors,
     head,
+    description,
   }
 }
 
@@ -73,8 +151,6 @@ export class LandingIntegrator {
     this.resolutionTimeoutMs = options.resolutionTimeoutMs ?? DEFAULT_RESOLUTION_TIMEOUT_MS
     this.resolutionShutdownTimeoutMs = options.resolutionShutdownTimeoutMs
       ?? DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS
-    this.conflictFallbackThreshold = options.conflictFallbackThreshold
-      ?? DEFAULT_CONFLICT_FALLBACK_THRESHOLD
     this.operationContext = new AsyncLocalStorage()
   }
 
@@ -311,6 +387,8 @@ export class LandingIntegrator {
 
       if (accepted.length === 0) return resultFor(train, landedIds, retryIds, errors)
 
+      const mergeMessage = await this.#publicationMessage(integration.path, originalHead, accepted)
+
       const sealed = await this.#git([
         '-c', 'commit.gpgsign=false',
         'commit', '--allow-empty', '--no-verify',
@@ -429,6 +507,7 @@ export class LandingIntegrator {
           expectedHead: originalHead,
           strategy: 'merge',
           skipHooks: true,
+          commitMessage: mergeMessage,
           identity,
           signal: this.#signal(),
         })
@@ -490,7 +569,7 @@ export class LandingIntegrator {
           retry(item, persisted.reason)
         }
       }
-      return resultFor(train, landedIds, retryIds, errors, publishedSha)
+      return resultFor(train, landedIds, retryIds, errors, publishedSha, firstLine(mergeMessage))
     } catch (error) {
       retryMany(
         train.filter((item) => !retryIds.has(item.id) && !landedIds.has(item.id)),
@@ -535,6 +614,16 @@ export class LandingIntegrator {
       repositoryPath,
     )
     return resolved.exitCode === 0 && firstLine(resolved.stdout) === `refs/heads/${branch}`
+  }
+
+  async #publicationMessage(worktreePath, originalHead, accepted) {
+    const [log, diff] = await Promise.all([
+      this.#git(['log', '--no-merges', '--format=%s%x00', `${originalHead}..HEAD`, '--'], worktreePath),
+      this.#git(['diff', '--name-only', '-z', `${originalHead}...HEAD`, '--'], worktreePath),
+    ])
+    const subjects = log.exitCode === 0 ? log.stdout.split('\0').map((value) => value.trim()).filter(Boolean) : []
+    const paths = diff.exitCode === 0 ? diff.stdout.split('\0').filter(Boolean) : []
+    return publicationMessage({ subjects, paths, accepted })
   }
 
   async #canonicalIndexIsOrdinary(repositoryPath) {
@@ -604,10 +693,6 @@ export class LandingIntegrator {
       }
 
       if (typeof resolveConflict !== 'function') {
-        if ((item.attempts ?? 0) >= this.conflictFallbackThreshold) {
-          const fallback = await this.#theirsFallback(integration, item, identity, conflictFiles, protectedEntries)
-          if (fallback.ok) return { ok: true, safeToContinue: true }
-        }
         const restored = await this.#abortIfNeeded(integration.path)
         return {
           ok: false,
@@ -638,7 +723,14 @@ export class LandingIntegrator {
         }
         if (resolutionFailure) throw resolutionFailure
         const finalized = await this.#finalizeResolution(integration, item, identity, conflictFiles, protectedEntries)
-        if (!finalized.ok) throw new Error(finalized.reason)
+        if (!finalized.ok) {
+          const restored = await this.#abortIfNeeded(integration.path)
+          return {
+            ok: false,
+            safeToContinue: restored,
+            reason: finalized.reason,
+          }
+        }
         return { ok: true, safeToContinue: true }
       } catch (resolutionError) {
         if (resolutionError?.unsafeWorktreeControl || resolutionError?.resolverStopped === false) {
@@ -648,11 +740,6 @@ export class LandingIntegrator {
             reason: resolutionError.message,
           }
         }
-        // Fallback: after repeated provider failures, resolve by taking the incoming (theirs) version
-        if ((item.attempts ?? 0) >= this.conflictFallbackThreshold) {
-          const fallback = await this.#theirsFallback(integration, item, identity, conflictFiles, protectedEntries)
-          if (fallback.ok) return { ok: true, safeToContinue: true }
-        }
         const restored = await this.#abortIfNeeded(integration.path)
         return {
           ok: false,
@@ -661,15 +748,6 @@ export class LandingIntegrator {
         }
       }
     }
-  }
-
-  async #theirsFallback(integration, item, identity, conflictFiles, protectedEntries) {
-    if (!(await this.#mergeInProgress(integration.path))) return { ok: false, reason: 'the merge is no longer in progress' }
-    for (const file of conflictFiles) {
-      const checkout = await this.#git(['checkout', '--theirs', '--', file], integration.path)
-      if (checkout.exitCode !== 0) return { ok: false, reason: `Git could not check out the incoming version of ${file}.` }
-    }
-    return this.#finalizeResolution(integration, item, identity, conflictFiles, protectedEntries)
   }
 
   async #finalizeResolution(integration, item, identity, conflictFiles, protectedEntries) {

@@ -22,7 +22,7 @@
 **Files:**
 - Modify: `host/chat.test.mjs`
 - Modify: `host/chat.mjs`
-- Modify: `.relay/features/agent-routing.md`
+- Modify: `.ensync/features/agent-routing.md`
 
 **Interfaces:**
 - Consumes: `ChatRunService.run(request, options)` and `ProjectIsolationService.checkSharedCheckout(workspace)`.
@@ -44,7 +44,7 @@ Guard the best-effort `checkSharedCheckout` block with `runOutcome === 'succeede
 
 - [x] **Step 4: Document the durable finalization rule**
 
-Update `.relay/features/agent-routing.md` to state that failed/cancelled/timed-out local runs save work and release ownership without awaiting shared-checkout observation, while zero-activity failures remain the only automatic replay boundary.
+Update `.ensync/features/agent-routing.md` to state that failed/cancelled/timed-out local runs save work and release ownership without awaiting shared-checkout observation, while zero-activity failures remain the only automatic replay boundary.
 
 - [x] **Step 5: Run focused verification**
 

@@ -40,3 +40,25 @@ test('discovery-only providers cannot be presented as runnable', () => {
     assert.equal(supportsProviderRunner(provider.id, 'ssh'), false)
   }
 })
+
+test('every provider has an explicit automatic-landing resolution capability', () => {
+  const catalog = getProviderCatalog()
+  const resolvers = []
+  for (const provider of catalog) {
+    assert.ok(provider.landingResolution)
+    assert.ok(['supported', 'discovery_only', 'unavailable'].includes(provider.landingResolution.state))
+    assert.equal(typeof provider.landingResolution.reason, 'string')
+    if (provider.landingResolution.state === 'supported') {
+      resolvers.push(provider.id)
+      assert.equal(provider.chatExecution, 'supported')
+      assert.equal(provider.landingResolution.modelPolicy, 'provider_default')
+      assert.equal(provider.landingResolution.model, null)
+      assert.equal(provider.landingResolution.effort, 'max')
+    } else {
+      assert.notEqual(provider.chatExecution, 'supported')
+      assert.equal(provider.landingResolution.modelPolicy, null)
+      assert.equal(provider.landingResolution.effort, null)
+    }
+  }
+  assert.deepEqual(resolvers.sort(), ['claude', 'codex', 'droid'])
+})

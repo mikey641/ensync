@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { CircleHelp, Send, ShieldQuestion, X } from 'lucide-react'
-import type { PendingProviderQuestion, ProviderQuestion } from '../lib/relayHost'
+import type { PendingProviderQuestion, ProviderQuestion } from '../lib/ensyncHost'
 import {
   initialQuestionSelection,
   isPermissionQuestion,

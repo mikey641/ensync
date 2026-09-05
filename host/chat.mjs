@@ -14,11 +14,19 @@ import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionCha
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
+import { getProviderCatalog } from './providers.mjs'
 
 const execFile = promisify(execFileCallback)
 
 const SUPPORTED_CHAT_PROVIDERS = new Set(['codex', 'claude', 'droid'])
-const CONTAINED_LANDING_RESOLVERS = new Set(['codex', 'claude', 'droid'])
+const LANDING_RESOLUTION_PROFILES = new Map(
+  getProviderCatalog().map((provider) => [provider.id, provider.landingResolution]),
+)
+const CONTAINED_LANDING_RESOLVERS = new Set(
+  [...LANDING_RESOLUTION_PROFILES]
+    .filter(([, profile]) => profile?.state === 'supported')
+    .map(([providerId]) => providerId),
+)
 // Providers whose Ensync Host runner is implemented and containment-recorded but
 // whose catalog entry is still `discovery_only`. They are refused at validation
 // with their exact outstanding requirement instead of a generic message, so the
@@ -800,6 +808,13 @@ function validateRequest(request) {
   }
   if (request.effort != null && !MODEL_EFFORTS.has(request.effort)) {
     throw new ChatRunError('invalid_effort', 'The requested model effort must be low, medium, high, or max.')
+  }
+  if (request.deliveryTarget != null && !['production', 'protected_branch'].includes(request.deliveryTarget)) {
+    throw new ChatRunError(
+      'invalid_delivery_target',
+      'The delivery target must be production or protected branch only.',
+      422,
+    )
   }
   if (request.attachments != null && !Array.isArray(request.attachments)) {
     throw new ChatRunError('invalid_attachments', 'Attached files must be provided as a list.')
@@ -1743,11 +1758,15 @@ export class ChatRunService {
                 targetBranch: workspace.base.branch,
                 targetBaseSha: workspace.base.canonicalSha,
                 provider: request.provider,
+                turnId: typeof options.turnId === 'string' ? options.turnId : null,
+                deliveryTarget: request.deliveryTarget ?? 'production',
               })
               emitAdvisory(options.onEvent, {
                 type: 'notice',
-                code: 'automatic_landing_queued',
-                message: `Queued ${workspace.branch} at ${savedHead.slice(0, 12)} for immediate automatic landing (FIFO ${landing.completionSequence ?? 'pending'}).`,
+                code: landing.state === 'held' ? 'delivery_saved_only' : 'automatic_landing_queued',
+                message: landing.state === 'held'
+                  ? `Saved ${workspace.branch} at ${savedHead.slice(0, 12)}. The delivery setting keeps this prompt on its protected branch without merging, pushing, or deploying it.`
+                  : `Queued ${workspace.branch} at ${savedHead.slice(0, 12)} for immediate automatic landing (FIFO ${landing.completionSequence ?? 'pending'}).`,
                 at: new Date().toISOString(),
               })
             } catch (error) {
@@ -1856,7 +1875,7 @@ export class ChatRunService {
       ...(CONTAINED_LANDING_RESOLVERS.has(originatingProviderId) ? [originatingProviderId] : []),
       ...[...CONTAINED_LANDING_RESOLVERS].filter((candidate) => candidate !== originatingProviderId),
     ]
-    let provider = null
+    const eligibleProviders = []
     for (const candidate of providerCandidates) {
       try {
         const status = await this.#statusService.get(candidate, { refresh: true })
@@ -1867,14 +1886,13 @@ export class ChatRunService {
           && status.authentication?.state === 'authenticated'
           && subscriptionAuthenticationAllowed(status)
         ) {
-          provider = status
-          break
+          eligibleProviders.push(status)
         }
       } catch {
         // Continue to the next OS-contained subscription runner.
       }
     }
-    if (!provider) {
+    if (eligibleProviders.length === 0) {
       throw new ChatRunError(
         'conflict_resolution_provider_unavailable',
         `Automatic landing needs a connected subscription runner to resolve this ${providerLabel(originatingProviderId)} conflict inside the temporary worktree. The saved snapshot will retry automatically.`,
@@ -1882,8 +1900,29 @@ export class ChatRunService {
         true,
       )
     }
+    // Each failed attempt is discarded with its integration worktree. The next
+    // durable attempt rotates to another eligible subscription provider, so a
+    // single resolver cannot own an item forever. Once every provider has been
+    // tried, rotation continues until one produces a verified resolution.
+    const attempt = Number.isSafeInteger(details?.item?.attempts)
+      ? Math.max(1, details.item.attempts)
+      : 1
+    const provider = eligibleProviders[(attempt - 1) % eligibleProviders.length]
     const providerId = provider.id
-    const request = { provider: providerId, model: null, effort: null }
+    const resolutionProfile = LANDING_RESOLUTION_PROFILES.get(providerId)
+    if (resolutionProfile?.state !== 'supported') {
+      throw new ChatRunError(
+        'conflict_resolution_provider_unavailable',
+        `${providerLabel(providerId)} is not verified for automatic landing conflict resolution. The saved snapshot will retry automatically.`,
+        409,
+        true,
+      )
+    }
+    const request = {
+      provider: providerId,
+      model: resolutionProfile.model ?? null,
+      effort: resolutionProfile.effort ?? null,
+    }
     const workspace = { repositoryPath: projectPath }
     const containment = {
       worktreePath,
@@ -1898,8 +1937,8 @@ export class ChatRunService {
           projectPath: workspace.repositoryPath,
           prompt: conflictResolutionPrompt(safeDetails),
           sessionId: null,
-          model: null,
-          effort: null,
+          model: request.model,
+          effort: request.effort,
           env: subscriptionEnvironment(this.#environment),
         }, {
           signal: details.signal ?? runtime.signal,

@@ -234,11 +234,12 @@ test('native workspace snapshots isolate new windows without migrating or changi
   assert.notEqual(firstKeys.primary, secondKeys.primary)
 })
 
-test('workspace snapshots preserve explicit per-chat execution-panel choices', () => {
+test('workspace snapshots preserve explicit per-chat disclosure choices', () => {
   const storage = createStorage()
   const state = {
     chats: [{ id: 'chat-a' }, { id: 'chat-b' }],
     executionPanelOpenByChat: { 'chat-a': true, 'chat-b': false },
+    deliveryPanelOpenByChat: { 'chat-a': false, 'chat-b': true },
   }
 
   commitWorkspaceSnapshot(storage, state, { now: () => '2026-08-06T10:00:00.000Z' })
@@ -246,6 +247,10 @@ test('workspace snapshots preserve explicit per-chat execution-panel choices', (
   assert.deepEqual(readWorkspaceSnapshot(storage)?.state.executionPanelOpenByChat, {
     'chat-a': true,
     'chat-b': false,
+  })
+  assert.deepEqual(readWorkspaceSnapshot(storage)?.state.deliveryPanelOpenByChat, {
+    'chat-a': false,
+    'chat-b': true,
   })
 })
 

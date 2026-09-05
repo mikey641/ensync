@@ -75,6 +75,33 @@ function processExited(child) {
   return child.exitCode !== null || child.signalCode !== null
 }
 
+async function stopFailedLaunch(child, timeoutMs = 2_000) {
+  if (!child || processExited(child)) return
+
+  const waitForExit = () => new Promise((resolveExit) => {
+    let settled = false
+    let timer = null
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      child.off?.('exit', finish)
+      resolveExit()
+    }
+    child.once?.('exit', finish)
+    timer = setTimeout(finish, timeoutMs)
+  })
+
+  const gracefulExit = waitForExit()
+  child.kill?.()
+  await gracefulExit
+  if (processExited(child)) return
+
+  const forcedExit = waitForExit()
+  child.kill?.('SIGKILL')
+  await forcedExit
+}
+
 export class HostProcessController {
   constructor(options) {
     if (!options || !isAbsolute(options.bootstrapPath) || !isAbsolute(options.hostEntryPath)) {
@@ -363,6 +390,8 @@ export class HostProcessController {
     if (existing) return this.#claimDescriptor(existing, true)
 
     const releaseLaunchLock = await this.#acquireLaunchLock(stateFilePath, startupTimeoutMs)
+    let launchedChild = null
+    let launchConnected = false
     try {
       if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
       // A different native shell may have started the daemon while this one
@@ -389,6 +418,7 @@ export class HostProcessController {
         stdio: 'ignore',
         windowsHide: true,
       })
+      launchedChild = child
       this.child = child
       let spawnError = null
       child.once('error', (error) => { spawnError = error })
@@ -399,12 +429,19 @@ export class HostProcessController {
         if (this.releasing) throw new Error('The native shell is releasing its Ensync Host lease.')
         if (spawnError) throw spawnError
         const descriptor = await this.#readHealthyDescriptor(stateFilePath)
-        if (descriptor) return this.#claimDescriptor(descriptor, false)
+        if (descriptor) {
+          const connection = await this.#claimDescriptor(descriptor, false)
+          launchConnected = true
+          return connection
+        }
         await new Promise((resolveWait) => setTimeout(resolveWait, 100))
       }
-      this.child = null
       throw new Error('Detached Ensync Host did not become ready before the startup timeout.')
     } finally {
+      if (launchedChild && !launchConnected) {
+        await stopFailedLaunch(launchedChild)
+        if (this.child === launchedChild) this.child = null
+      }
       await releaseLaunchLock()
     }
   }

@@ -8,6 +8,7 @@ import {
   InvalidJsonResponseError,
   readJsonResponse,
 } from './jsonResponse.mjs'
+import { scopeDeliveryStatusForBranch } from './deliveryStatus.mjs'
 
 export type CliProviderId =
   | 'claude'
@@ -107,6 +108,73 @@ export type ProviderStatusesResponse = {
   checkedAt: string
 }
 
+export type DeliveryState =
+  | 'saved'
+  | 'landing'
+  | 'pushed'
+  | 'building'
+  | 'failed'
+  | 'repairing'
+  | 'production'
+  | 'unavailable'
+
+export type DeliveryTarget = 'production' | 'protected_branch'
+export type DeliveryLandingState = 'held' | 'queued' | 'integrating' | 'retry' | 'landed'
+
+export type DeliveryRecord = {
+  id: string
+  projectPath: string
+  targetBranch: string
+  savedSha: string
+  sourceBranches: string[]
+  landingIds: string[]
+  sourceProviders: string[]
+  turnIds: string[]
+  landingState: DeliveryLandingState | null
+  deliveryTarget: DeliveryTarget
+  description: string | null
+  productionCommitSha: string | null
+  replacementCommitSha: string | null
+  state: DeliveryState
+  deploymentProvider: string | null
+  deploymentId: string | null
+  deploymentUrl: string | null
+  deploymentDashboardUrl: string | null
+  failureCode: string | null
+  failureMessage: string | null
+  failureLogAvailable: boolean
+  repairState: 'idle' | 'manual' | 'running' | 'waiting' | 'unavailable'
+  repairJobId: string | null
+  repairProvider: string | null
+  repairAttempts: number
+  nextActionAt: string | null
+  lastRepairError: string | null
+  productionAt: string | null
+  createdAt: string
+  updatedAt: string
+}
+
+export type DeliveryStatus = {
+  current: DeliveryRecord | null
+  production: DeliveryRecord | null
+  pending: DeliveryRecord | null
+  records: DeliveryRecord[]
+}
+
+export type EnsyncHostHealth = {
+  ok: true
+  service: 'ensync-host'
+  apiVersion: number
+  instanceId: string | null
+  detachedJobs: boolean
+  capabilities?: {
+    deliveryTargets?: DeliveryTarget[]
+    deliveryPromptIdentity?: boolean
+    deliveryLandingSubstates?: boolean
+  }
+  now: string
+}
+
 /** What the Host reports back after mirroring the Automatic ranking. */
 export type ConnectorRoutingPreferences = {
   apiVersion: number
@@ -156,7 +224,7 @@ export type ProjectInspection = {
   path: string
   host: 'local'
   context: {
-    relayDirectory: boolean
+    ensyncDirectory: boolean
     files: string[]
     featureFiles: string[]
     truncated: boolean
@@ -268,6 +336,8 @@ export type ChatRunRequest = {
   sessionId?: string | null
   model?: string | null
   effort?: ChatModelEffort | null
+  /** Production lands and publishes; protected_branch saves without merging or pushing. */
+  deliveryTarget?: DeliveryTarget
   timeoutMs?: number
 }
 
@@ -595,6 +665,10 @@ export class EnsyncHostClient {
     return payload as T
   }
 
+  health() {
+    return this.request<EnsyncHostHealth>('/health')
+  }
+
   providers(refresh = false) {
     return this.request<ProviderStatusesResponse>(`/providers${refresh ? '?refresh=1' : ''}`)
   }
@@ -667,6 +741,16 @@ export class EnsyncHostClient {
       method: 'POST',
       body: JSON.stringify({ projectPath }),
     })
+  }
+
+  async deliveryStatus(projectPath: string, sourceBranch?: string) {
+    const response = await this.request<{ delivery: DeliveryStatus }>('/delivery/status', {
+      method: 'POST',
+      body: JSON.stringify({ projectPath, ...(sourceBranch ? { sourceBranch } : {}) }),
+    })
+    return sourceBranch
+      ? { ...response, delivery: scopeDeliveryStatusForBranch(response.delivery, sourceBranch) }
+      : response
   }
 
   /** Creates the repository (and its first commit) a project needs before an agent can run. */
@@ -1056,7 +1140,4 @@ export class EnsyncHostClient {
 
 export const ensyncHost = new EnsyncHostClient()
 
-// Compatibility aliases keep integrations built against the prototype name working.
-export const RelayHostError = EnsyncHostError
-export const RelayHostClient = EnsyncHostClient
-export const relayHost = ensyncHost
+

@@ -2,7 +2,7 @@ export const ACCOUNT_WORKSPACE_FORMAT = 'ensync-account-conversations'
 export const ACCOUNT_WORKSPACE_VERSION = 1
 
 const EMPTY_PROJECT_CONTEXT = Object.freeze({
-  relayDirectory: false,
+  ensyncDirectory: false,
   files: [],
   featureFiles: [],
   truncated: false,

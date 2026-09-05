@@ -11,7 +11,7 @@ Keep the task identity above the provider session. A provider may change; the fo
 
 1. Confirm the focused canonical project directory and current execution target (`local` or the selected SSH/VM worker). Never change targets merely because the provider changes.
 2. Read applicable repository instructions, including root `AGENTS.md` and `CLAUDE.md` when present.
-3. Read `.relay/project.md`, `.relay/architecture.md`, and only the relevant `.relay/features/*.md` files. If the repository uses Claude Code project memory, treat its canonical memory store as shared project knowledge and do not create a competing copy.
+3. Read `.ensync/project.md`, `.ensync/architecture.md`, and only the relevant `.ensync/features/*.md` files. If the repository uses Claude Code project memory, treat its canonical memory store as shared project knowledge and do not create a competing copy.
 4. Inspect current Git branch and worktree status before editing. Preserve the branch and unrelated user changes.
 5. Honor the chat's independent provider choice: use Auto when selected, or keep a fixed Codex/Claude preference when pinned. Leave the vendor model unset so the chosen CLI uses its own current default model. Preserve the selected provider-neutral Model size effort (Provider default, Small, Medium, Large, or XL). Never send one vendor's model name to another vendor.
 
@@ -22,7 +22,7 @@ Keep these fields together as the provider-neutral context capsule:
 - canonical project path and execution target;
 - task objective and acceptance criteria established before the current turn;
 - applicable repository instructions;
-- relevant `.relay` feature and architecture decisions;
+- relevant `.ensync` feature and architecture decisions;
 - conversation transcript and prior provider responses;
 - verified Git branch, worktree state, files changed, and checks already run;
 - unresolved errors, user corrections, safety constraints, prior attempt evidence, and the next intended action.
@@ -34,7 +34,7 @@ Do not invent context, usage, model, plan, authentication, Git, VM, or test stat
 - Resume the existing session only when the selected provider, project, execution target, and synchronized conversation cursor still match. Send exactly one current request because the CLI session already owns the earlier transcript.
 - When there is no matching session, Auto selects a different provider, or an enabled safe fallback changes providers, start a provider-specific session and send one combined input containing the complete context capsule followed by exactly one current request.
 - Use only the provider's official subscription/account login. Keep model API keys and alternate usage-billed credentials out of the process environment.
-- Keep durable feature decisions in the existing focused `.relay/features/<feature>.md` file. Do not store verbose transcripts or transient progress logs there.
+- Keep durable feature decisions in the existing focused `.ensync/features/<feature>.md` file. Do not store verbose transcripts or transient progress logs there.
 
 ## Fall back safely
 

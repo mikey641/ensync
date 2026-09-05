@@ -390,10 +390,48 @@ const providerCatalog = {
   },
 }
 
+// Conflict resolution is a separate provider capability from ordinary chat.
+// Every catalog entry receives an explicit state so adding a provider cannot
+// silently make it eligible for background Git mutation. Supported resolvers
+// keep the account/provider-selected model (model catalogs and entitlements
+// differ by account) and use the deepest reasoning level verified across each
+// runner's current CLI contract.
+const landingResolutionProfiles = new Map([
+  ['codex', {
+    state: 'supported',
+    modelPolicy: 'provider_default',
+    model: null,
+    effort: 'max',
+    reason: 'Codex has a contained subscription runner and a verified maximum reasoning-effort flag.',
+  }],
+  ['claude', {
+    state: 'supported',
+    modelPolicy: 'provider_default',
+    model: null,
+    effort: 'max',
+    reason: 'Claude Code has a contained subscription runner and a verified maximum session effort.',
+  }],
+  ['droid', {
+    state: 'supported',
+    modelPolicy: 'provider_default',
+    model: null,
+    effort: 'max',
+    reason: 'Factory Droid has a contained subscription runner and a verified maximum reasoning-effort setting.',
+  }],
+])
+
 const providerIds = new Set(providerDefinitions.map((provider) => provider.id))
 
 function providerCatalogEntry(id) {
-  return { ...providerCatalog[id] }
+  const catalog = providerCatalog[id]
+  const landingResolution = landingResolutionProfiles.get(id) ?? {
+    state: catalog.chatExecution === 'discovery_only' ? 'discovery_only' : 'unavailable',
+    modelPolicy: null,
+    model: null,
+    effort: null,
+    reason: catalog.catalogReason,
+  }
+  return { ...catalog, landingResolution: { ...landingResolution } }
 }
 
 function now() {

@@ -303,6 +303,7 @@ test('turn navigation stays live-only and is returned only for an occupied job r
   assert.equal(crossHost.owner.predecessorTranscriptFingerprint, null)
   assert.deepEqual(providerRequest, input.request)
   assert.equal('navigation' in providerOptions, false)
+  assert.equal(providerOptions.turnId, 'turn-owner-a')
   assert.equal(JSON.stringify(journalWrites).includes('turn-owner-a'), false)
   assert.equal(JSON.stringify(journalWrites).includes(PREDECESSOR_FINGERPRINT), false)
 
@@ -310,17 +311,17 @@ test('turn navigation stays live-only and is returned only for an occupied job r
   await waitFor(() => service.get(JOB_A).state === 'completed')
 })
 
-async function loadRelayHostModule() {
+async function loadEnsyncHostModule() {
   const typescript = await import('typescript')
-  const relayHostPath = new URL('../src/lib/relayHost.ts', import.meta.url)
-  const source = await readFile(relayHostPath, 'utf8')
+  const ensyncHostPath = new URL('../src/lib/ensyncHost.ts', import.meta.url)
+  const source = await readFile(ensyncHostPath, 'utf8')
   let javascript = typescript.transpileModule(source, {
     compilerOptions: {
       module: typescript.ModuleKind.ESNext,
       target: typescript.ScriptTarget.ES2022,
     },
   }).outputText
-  for (const dependency of ['ndjsonStream.mjs', 'chatJobReconnect.mjs', 'jsonResponse.mjs']) {
+  for (const dependency of ['ndjsonStream.mjs', 'chatJobReconnect.mjs', 'jsonResponse.mjs', 'deliveryStatus.mjs']) {
     javascript = javascript.replace(
       `./${dependency}`,
       new URL(dependency, new URL('../src/lib/', import.meta.url)).href,
@@ -330,7 +331,7 @@ async function loadRelayHostModule() {
 }
 
 test('runChatJob serializes its optional navigation beside the provider request', async () => {
-  const relayHost = await loadRelayHostModule()
+  const ensyncHost = await loadEnsyncHostModule()
   const originalFetch = globalThis.fetch
   let submitted
   globalThis.fetch = async (_url, init) => {
@@ -358,10 +359,10 @@ test('runChatJob serializes its optional navigation beside the provider request'
       turnId: 'turn-owner-a',
       predecessorTranscriptFingerprint: PREDECESSOR_FINGERPRINT,
     }
-    const client = new relayHost.EnsyncHostClient('http://host.test/api')
+    const client = new ensyncHost.EnsyncHostClient('http://host.test/api')
     await assert.rejects(
       client.runChatJob(JOB_A, 'local', { prompt: 'provider-only' }, () => {}, undefined, navigation),
-      relayHost.ChatJobOccupiedError,
+      ensyncHost.ChatJobOccupiedError,
     )
     assert.deepEqual(submitted, {
       jobId: JOB_A,
@@ -375,7 +376,7 @@ test('runChatJob serializes its optional navigation beside the provider request'
 })
 
 test('a verified quota failure ends the turn instead of reattaching the finished job forever', async () => {
-  const relayHost = await loadRelayHostModule()
+  const ensyncHost = await loadEnsyncHostModule()
   const originalFetch = globalThis.fetch
   const failure = {
     type: 'error',
@@ -411,11 +412,11 @@ test('a verified quota failure ends the turn instead of reattaching the finished
     )
   }
   try {
-    const client = new relayHost.EnsyncHostClient('http://host.test/api')
+    const client = new ensyncHost.EnsyncHostClient('http://host.test/api')
     const events = []
     await assert.rejects(
       client.runChatJob(JOB_A, 'local', { provider: 'claude', prompt: 'continue' }, (event) => events.push(event)),
-      (error) => error instanceof relayHost.EnsyncHostError
+      (error) => error instanceof ensyncHost.EnsyncHostError
         && error.code === 'provider_quota'
         && error.safeToRetry === true
         && error.terminal === true,

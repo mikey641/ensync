@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Check, Copy, ExternalLink, FileText, X } from 'lucide-react'
-import { ensyncHost, EnsyncHostError, type LocalFileDisplay } from '../lib/relayHost'
+import { ensyncHost, EnsyncHostError, type LocalFileDisplay } from '../lib/ensyncHost'
 import './FileViewerModal.css'
 
 function readableSize(bytes: number) {

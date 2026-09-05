@@ -40,7 +40,7 @@ function recoverableProject(project) {
     path: project.path,
     host: 'local',
     context: {
-      relayDirectory: false,
+      ensyncDirectory: false,
       files: [],
       featureFiles: [],
       truncated: false,

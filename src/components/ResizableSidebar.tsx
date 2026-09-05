@@ -66,7 +66,7 @@ type DragState = {
 }
 
 type SidebarStyle = CSSProperties & {
-  '--relay-sidebar-width': string
+  '--ensync-sidebar-width': string
 }
 
 function clamp(value: number, min: number, max: number) {
@@ -142,7 +142,7 @@ export const ResizableSidebar = forwardRef<ResizableSidebarHandle, ResizableSide
       readResizableSidebarPreferences(storageKey, defaults, safeMinWidth, safeMaxWidth),
     )
     const [dragState, setDragState] = useState<DragState | null>(null)
-    const sidebarId = `relay-sidebar-${useId().replace(/:/g, '')}`
+    const sidebarId = `ensync-sidebar-${useId().replace(/:/g, '')}`
     const restoreButtonRef = useRef<HTMLButtonElement>(null)
     const hideButtonRef = useRef<HTMLButtonElement>(null)
     const focusAfterVisibilityChange = useRef<'hide' | 'show' | null>(null)
@@ -246,12 +246,12 @@ export const ResizableSidebar = forwardRef<ResizableSidebarHandle, ResizableSide
         if (event.pointerId === dragState.pointerId) setDragState(null)
       }
 
-      document.documentElement.classList.add('relay-sidebar-is-resizing')
+      document.documentElement.classList.add('ensync-sidebar-is-resizing')
       window.addEventListener('pointermove', onPointerMove)
       window.addEventListener('pointerup', finishResize)
       window.addEventListener('pointercancel', finishResize)
       return () => {
-        document.documentElement.classList.remove('relay-sidebar-is-resizing')
+        document.documentElement.classList.remove('ensync-sidebar-is-resizing')
         window.removeEventListener('pointermove', onPointerMove)
         window.removeEventListener('pointerup', finishResize)
         window.removeEventListener('pointercancel', finishResize)
@@ -283,28 +283,28 @@ export const ResizableSidebar = forwardRef<ResizableSidebarHandle, ResizableSide
     }
 
     const style: SidebarStyle = {
-      '--relay-sidebar-width': `${currentWidth}px`,
+      '--ensync-sidebar-width': `${currentWidth}px`,
     }
 
     return (
       <div
-        className={`relay-resizable-sidebar ${isVisible ? '' : 'relay-resizable-sidebar--hidden'} ${showRestoreControl ? '' : 'relay-resizable-sidebar--without-restore'} ${dragState ? 'relay-resizable-sidebar--resizing' : ''}`.trim()}
+        className={`ensync-resizable-sidebar ${isVisible ? '' : 'ensync-resizable-sidebar--hidden'} ${showRestoreControl ? '' : 'ensync-resizable-sidebar--without-restore'} ${dragState ? 'ensync-resizable-sidebar--resizing' : ''}`.trim()}
         style={style}
         data-visible={isVisible}
       >
         <aside
           id={sidebarId}
-          className={`relay-resizable-sidebar__panel ${className}`.trim()}
+          className={`ensync-resizable-sidebar__panel ${className}`.trim()}
           aria-label={ariaLabel}
           hidden={!isVisible}
         >
-          <div className="relay-resizable-sidebar__heading">
+          <div className="ensync-resizable-sidebar__heading">
             <span>{title}</span>
-            <div className="relay-resizable-sidebar__heading-actions">
+            <div className="ensync-resizable-sidebar__heading-actions">
               {headerActions}
               <button
                 ref={hideButtonRef}
-                className="relay-resizable-sidebar__visibility-button"
+                className="ensync-resizable-sidebar__visibility-button"
                 type="button"
                 aria-controls={sidebarId}
                 aria-expanded="true"
@@ -316,11 +316,11 @@ export const ResizableSidebar = forwardRef<ResizableSidebarHandle, ResizableSide
               </button>
             </div>
           </div>
-          <div className={`relay-resizable-sidebar__body ${bodyClassName}`.trim()}>{children}</div>
+          <div className={`ensync-resizable-sidebar__body ${bodyClassName}`.trim()}>{children}</div>
         </aside>
         {isVisible ? (
           <div
-            className="relay-resizable-sidebar__separator"
+            className="ensync-resizable-sidebar__separator"
             role="separator"
             tabIndex={0}
             aria-label={`Resize ${ariaLabel.toLowerCase()}`}
@@ -340,7 +340,7 @@ export const ResizableSidebar = forwardRef<ResizableSidebarHandle, ResizableSide
         ) : showRestoreControl ? (
           <button
             ref={restoreButtonRef}
-            className="relay-resizable-sidebar__restore"
+            className="ensync-resizable-sidebar__restore"
             type="button"
             aria-controls={sidebarId}
             aria-expanded="false"

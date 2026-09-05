@@ -34,7 +34,7 @@ function project(id, name, path) {
     path,
     host: 'local',
     context: {
-      relayDirectory: true,
+      ensyncDirectory: true,
       files: ['private-old-file.md'],
       featureFiles: ['features/private-old-file.md'],
       truncated: false,

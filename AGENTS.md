@@ -1,6 +1,6 @@
 # Ensync agent instructions
 
-Read `.relay/project.md` and `.relay/architecture.md` before project work. Then read only the files in `.relay/features/` relevant to the requested feature.
+Read `.ensync/project.md` and `.ensync/architecture.md` before project work. Then read only the files in `.ensync/features/` relevant to the requested feature.
 
 Treat the selected Ensync project as a strict context boundary. Keep durable feature decisions in the existing focused feature file; do not create competing memory documents.
 

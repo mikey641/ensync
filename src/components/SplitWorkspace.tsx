@@ -113,7 +113,7 @@ function CompletionStatus({
 }) {
   return (
     <span
-      className={indicator === 'dot' ? 'relay-split-completed-dot' : 'relay-split-completed-status'}
+      className={indicator === 'dot' ? 'ensync-split-completed-dot' : 'ensync-split-completed-status'}
       role="status"
       aria-label={`${title} finished working`}
       title="Finished working"
@@ -694,8 +694,8 @@ export function SplitWorkspace({
   }
 
   const rootStyle = {
-    '--relay-split-min-pane': `${minPaneWidth}px`,
-    '--relay-split-min-total': `${Math.max(
+    '--ensync-split-min-pane': `${minPaneWidth}px`,
+    '--ensync-split-min-total': `${Math.max(
       minPaneWidth,
       renderedTabs.length * minPaneWidth + Math.max(0, renderedTabs.length - 1) * 8,
     )}px`,
@@ -703,17 +703,17 @@ export function SplitWorkspace({
 
   return (
     <section
-      className={`relay-split-workspace relay-split-workspace--${viewMode} ${resizeDragState ? 'relay-split-workspace--resizing' : ''} ${tabDragState ? 'relay-split-workspace--reordering' : ''} ${className}`.trim()}
+      className={`ensync-split-workspace ensync-split-workspace--${viewMode} ${resizeDragState ? 'ensync-split-workspace--resizing' : ''} ${tabDragState ? 'ensync-split-workspace--reordering' : ''} ${className}`.trim()}
       style={rootStyle}
       data-completion-indicator={completionIndicator}
       aria-label={viewMode === 'split' ? 'Conversation split workspace' : 'Conversation tab workspace'}
     >
-      <span className="relay-split-announcement" role="status" aria-live="polite">
+      <span className="ensync-split-announcement" role="status" aria-live="polite">
         {reorderAnnouncement}
       </span>
       {viewMode === 'tabs' && showTabHeaders && (
-        <div className="relay-tabs-mode-bar" role="tablist" aria-label="Open conversations">
-          <div className="relay-tabs-mode-list">
+        <div className="ensync-tabs-mode-bar" role="tablist" aria-label="Open conversations">
+          <div className="ensync-tabs-mode-list">
             {workspaceTabs.map((tab) => {
               const chat = chatById.get(tab.chatId)
               if (!chat) return null
@@ -722,11 +722,11 @@ export function SplitWorkspace({
               return (
                 <div
                   key={tab.id}
-                  className={`relay-tabs-mode-tab ${isActive ? 'relay-tabs-mode-tab--active' : ''} ${isCompleted ? 'relay-tabs-mode-tab--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-tabs-mode-tab--dragging' : ''} ${fileDragTabId === tab.id ? 'relay-tabs-mode-tab--file-drag' : ''} ${tabDragState?.overTabId === tab.id && tabDragState.position ? `relay-tabs-mode-tab--drop-${tabDragState.position}` : ''}`}
+                  className={`ensync-tabs-mode-tab ${isActive ? 'ensync-tabs-mode-tab--active' : ''} ${isCompleted ? 'ensync-tabs-mode-tab--completed' : ''} ${tabDragState?.tabId === tab.id ? 'ensync-tabs-mode-tab--dragging' : ''} ${fileDragTabId === tab.id ? 'ensync-tabs-mode-tab--file-drag' : ''} ${tabDragState?.overTabId === tab.id && tabDragState.position ? `ensync-tabs-mode-tab--drop-${tabDragState.position}` : ''}`}
                   draggable={Boolean(onTabReorder && workspaceTabs.length > 1)}
                   onPointerDownCapture={(event) => {
                     blockTabDragRef.current = Boolean(
-                      (event.target as Element).closest('.relay-tabs-mode-tab-actions'),
+                      (event.target as Element).closest('.ensync-tabs-mode-tab-actions'),
                     )
                   }}
                   onPointerUp={() => { blockTabDragRef.current = false }}
@@ -738,7 +738,7 @@ export function SplitWorkspace({
                   onDragEnd={finishTabDrag}
                 >
                   <button
-                    className="relay-tabs-mode-activate"
+                    className="ensync-tabs-mode-activate"
                     type="button"
                     role="tab"
                     aria-selected={isActive}
@@ -747,11 +747,11 @@ export function SplitWorkspace({
                     aria-keyshortcuts={onTabReorder ? 'Alt+Shift+ArrowLeft Alt+Shift+ArrowRight' : undefined}
                     title={onTabReorder && workspaceTabs.length > 1 ? `${chat.title}. Drag to reorder.` : chat.title}
                   >
-                    <span className="relay-split-pane-title" dir="auto">{chat.title}</span>
+                    <span className="ensync-split-pane-title" dir="auto">{chat.title}</span>
                     {isCompleted && <CompletionStatus title={chat.title} indicator={completionIndicator} />}
                   </button>
                   {(onNewTab || onCloseTab) && (
-                    <span className="relay-tabs-mode-tab-actions" draggable={false}>
+                    <span className="ensync-tabs-mode-tab-actions" draggable={false}>
                       {onNewTab && (
                         <button
                           type="button"
@@ -777,16 +777,16 @@ export function SplitWorkspace({
         </div>
       )}
       {viewMode === 'split' && hiddenTabs.length > 0 && (
-        <div className="relay-split-hidden-bar" role="toolbar" aria-label="Hidden conversation panes">
+        <div className="ensync-split-hidden-bar" role="toolbar" aria-label="Hidden conversation panes">
           <span><EyeOff size={15} /> Hidden</span>
-          <div className="relay-split-hidden-list">
+          <div className="ensync-split-hidden-list">
             {hiddenTabs.map((tab) => {
               const chat = chatById.get(tab.chatId)
               const isCompleted = completedIdSet.has(tab.id)
               return (
                 <button
                   key={tab.id}
-                  className={isCompleted ? 'relay-split-hidden-tab--completed' : undefined}
+                  className={isCompleted ? 'ensync-split-hidden-tab--completed' : undefined}
                   type="button"
                   onClick={() => {
                     showPane(tab.id)
@@ -808,7 +808,7 @@ export function SplitWorkspace({
             })}
           </div>
           {hiddenTabs.length > 1 && (
-            <button className="relay-split-show-all" type="button" onClick={showAllPanes}>
+            <button className="ensync-split-show-all" type="button" onClick={showAllPanes}>
               Show all
             </button>
           )}
@@ -816,7 +816,7 @@ export function SplitWorkspace({
       )}
 
       {renderedTabs.length === 0 ? (
-        <div className="relay-split-empty">
+        <div className="ensync-split-empty">
           {emptyState ?? (
             <>
               <p>No conversation panes are visible.</p>
@@ -825,8 +825,8 @@ export function SplitWorkspace({
           )}
         </div>
       ) : (
-        <div className="relay-split-viewport" ref={viewportRef}>
-          <div className={`relay-split-panes ${viewMode === 'tabs' ? 'relay-split-panes--tabs' : ''}`}>
+        <div className="ensync-split-viewport" ref={viewportRef}>
+          <div className={`ensync-split-panes ${viewMode === 'tabs' ? 'ensync-split-panes--tabs' : ''}`}>
             {renderedTabs.map((tab, index) => {
               const chat = chatById.get(tab.chatId)
               if (!chat) return null
@@ -836,7 +836,7 @@ export function SplitWorkspace({
               const isCompleted = completedIdSet.has(tab.id)
               const nextTab = renderedTabs[index + 1]
               const paneStyle = {
-                '--relay-split-pane-weight': (
+                '--ensync-split-pane-weight': (
                   renderedPaneWeights[tab.id] ?? DEFAULT_PANE_WEIGHT
                 ) * renderedWeightScale,
               } as CSSProperties
@@ -844,7 +844,7 @@ export function SplitWorkspace({
               return (
                 <Fragment key={tab.id}>
                   <article
-                    className={`relay-split-pane ${viewMode === 'tabs' ? 'relay-split-pane--tabs' : ''} ${isMaximized ? 'relay-split-pane--largest' : ''} ${isActive ? 'relay-split-pane--active' : ''} ${isCompleted ? 'relay-split-pane--completed' : ''} ${tabDragState?.tabId === tab.id ? 'relay-split-pane--dragging' : ''} ${fileDragTabId === tab.id ? 'relay-split-pane--file-drag' : ''}`}
+                    className={`ensync-split-pane ${viewMode === 'tabs' ? 'ensync-split-pane--tabs' : ''} ${isMaximized ? 'ensync-split-pane--largest' : ''} ${isActive ? 'ensync-split-pane--active' : ''} ${isCompleted ? 'ensync-split-pane--completed' : ''} ${tabDragState?.tabId === tab.id ? 'ensync-split-pane--dragging' : ''} ${fileDragTabId === tab.id ? 'ensync-split-pane--file-drag' : ''}`}
                     style={paneStyle}
                     data-tab-id={tab.id}
                     aria-label={`${chat.title} conversation pane`}
@@ -854,21 +854,21 @@ export function SplitWorkspace({
                     onDropCapture={(event) => { dropFiles(event, tab.id, chat.id) }}
                   >
                     {fileDragTabId === tab.id && (
-                      <div className="relay-split-file-drop-overlay" aria-hidden="true">
+                      <div className="ensync-split-file-drop-overlay" aria-hidden="true">
                         <Paperclip size={24} />
                         <strong>{fileDropAvailable ? 'Drop files to attach' : fileDropUnavailableMessage}</strong>
                       </div>
                     )}
                     {viewMode === 'split' && showTabHeaders && (
                       <div
-                        className={`relay-split-pane-tab ${tabDragState?.overTabId === tab.id && tabDragState.position ? `relay-split-pane-tab--drop-${tabDragState.position}` : ''}`}
+                        className={`ensync-split-pane-tab ${tabDragState?.overTabId === tab.id && tabDragState.position ? `ensync-split-pane-tab--drop-${tabDragState.position}` : ''}`}
                         title={onTabReorder && tabs.length > 1
                           ? `${isMaximized ? 'Double-click to restore pane sizes' : 'Double-click to make pane largest'}. Drag to reorder.`
                           : isMaximized ? 'Double-click to restore pane sizes' : 'Double-click to make pane largest'}
                         draggable={Boolean(onTabReorder && tabs.length > 1)}
                         onPointerDownCapture={(event) => {
                           blockTabDragRef.current = Boolean(
-                            (event.target as Element).closest('.relay-split-pane-actions'),
+                            (event.target as Element).closest('.ensync-split-pane-actions'),
                           )
                         }}
                         onPointerUp={() => { blockTabDragRef.current = false }}
@@ -880,28 +880,28 @@ export function SplitWorkspace({
                           finishTabDrag()
                         }}
                         onDoubleClick={(event) => {
-                          if ((event.target as Element).closest('.relay-split-pane-actions')) return
+                          if ((event.target as Element).closest('.ensync-split-pane-actions')) return
                           if (tabDragState || suppressMaximizeAfterDragRef.current) return
                           toggleLargestPane(tab.id)
                         }}
                       >
                         <button
-                          className="relay-split-pane-activate"
+                          className="ensync-split-pane-activate"
                           type="button"
                           aria-pressed={isActive}
                           onClick={() => activateTab(tab.id)}
                           onKeyDown={(event) => keyboardReorder(event, tab.id)}
                           aria-keyshortcuts={onTabReorder ? 'Alt+Shift+ArrowLeft Alt+Shift+ArrowRight' : undefined}
                         >
-                          <span className="relay-split-pane-title-group">
-                            <span className="relay-split-pane-title" dir="auto">{chat.title}</span>
+                          <span className="ensync-split-pane-title-group">
+                            <span className="ensync-split-pane-title" dir="auto">{chat.title}</span>
                             {isCompleted && (
                               <CompletionStatus title={chat.title} indicator={completionIndicator} />
                             )}
                           </span>
                         </button>
                         <span
-                          className="relay-split-pane-actions"
+                          className="ensync-split-pane-actions"
                           draggable={false}
                           onDoubleClick={(event) => event.stopPropagation()}
                         >
@@ -957,7 +957,7 @@ export function SplitWorkspace({
                       </div>
                     )}
                     <div
-                      className="relay-split-pane-content"
+                      className="ensync-split-pane-content"
                       onPointerDownCapture={() => {
                         if (!isActive) activateTab(tab.id)
                       }}
@@ -980,7 +980,7 @@ export function SplitWorkspace({
 
                   {viewMode === 'split' && nextTab && (
                     <div
-                      className="relay-split-divider"
+                      className="ensync-split-divider"
                       role="separator"
                       aria-orientation="vertical"
                       aria-label={`Resize ${chat.title} and ${chatById.get(nextTab.chatId)?.title ?? 'next conversation'}`}

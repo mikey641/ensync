@@ -15,6 +15,7 @@ const JOURNAL_VERSION = 1
 const MAX_TERMINAL_ITEMS = 200
 const MAX_ERROR_LENGTH = 4_096
 const STATES = new Set(['queued', 'integrating', 'retry', 'landed'])
+const DELIVERY_TARGETS = new Set(['production', 'protected_branch'])
 
 function checksum(payload) {
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
@@ -42,6 +43,10 @@ function normalizeItem(value) {
   const targetBranch = boundedString(value.targetBranch, 512)
   const targetBaseSha = boundedString(value.targetBaseSha, 64)?.toLowerCase()
   const provider = boundedString(value.provider, 128)
+  const turnId = boundedString(value.turnId, 256)
+  const deliveryTarget = DELIVERY_TARGETS.has(value.deliveryTarget)
+    ? value.deliveryTarget
+    : 'production'
   const createdAt = validDate(value.createdAt)
   const updatedAt = validDate(value.updatedAt)
   if (
@@ -76,6 +81,8 @@ function normalizeItem(value) {
     targetBranch,
     targetBaseSha: targetBaseSha ?? null,
     provider,
+    turnId,
+    deliveryTarget,
     completionSequence: value.completionSequence,
     state: value.state,
     attempts: value.attempts,
@@ -174,7 +181,11 @@ export class LandingJournal {
         targetBaseSha: input.targetBaseSha,
         provider: input.provider,
         completionSequence: this.nextSequence,
-        state: 'queued',
+        turnId: input.turnId,
+        deliveryTarget: input.deliveryTarget,
+        // Reuse the established terminal state on disk so an older Host can
+        // safely ignore this new optional mode instead of rejecting the journal.
+        state: input.deliveryTarget === 'protected_branch' ? 'landed' : 'queued',
         attempts: 0,
         createdAt: now,
         updatedAt: now,

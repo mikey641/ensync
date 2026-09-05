@@ -1,4 +1,4 @@
-import type { ChatExecutionEvent, PendingProviderQuestion, ProviderQuestion } from './relayHost'
+import type { ChatExecutionEvent, PendingProviderQuestion, ProviderQuestion } from './ensyncHost'
 
 export type QuestionSelection = Record<number, { options: string[]; text: string }>
 

@@ -10,6 +10,7 @@ import { promisify } from 'node:util'
 const execFile = promisify(execFileCallback)
 const MAX_OUTPUT_BYTES = 512 * 1024
 const MAX_ERROR_TEXT = 4_096
+const MAX_COMMIT_MESSAGE = 16_384
 const COMMAND_TIMEOUT_MS = 2 * 60_000
 const TERMINATION_GRACE_MS = 1_000
 const PINNED_VERSION = 'wt 0.13.6'
@@ -44,6 +45,12 @@ do
     printf '%s %s %s\\n' "$actual" "$new" "$ref" > "$ENSYNC_GUARD_RESULT" || exit 1
   fi
 done
+exit 0
+`
+const PREPARE_COMMIT_MESSAGE_HOOK = `#!/bin/sh
+if test "$2" = "merge" && test -n "$ENSYNC_COMMIT_MESSAGE_FILE"; then
+  cat "$ENSYNC_COMMIT_MESSAGE_FILE" > "$1" || exit 1
+fi
 exit 0
 `
 
@@ -347,12 +354,23 @@ function requiredCommit(value, label) {
   return value.toLowerCase()
 }
 
+function optionalCommitMessage(value) {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string' || !value.trim() || value.includes('\0')) {
+    throw new TypeError('merge commit message must be non-empty text without NUL bytes.')
+  }
+  return value.replace(/\r\n?/g, '\n').trim().slice(0, MAX_COMMIT_MESSAGE)
+}
+
 async function withPublicationGuard(details, invoke) {
   const expectedHead = requiredCommit(details.expectedHead, 'expected target head')
   const targetRef = `refs/heads/${requiredName(details.into, 'target branch')}`
+  const commitMessage = optionalCommitMessage(details.commitMessage)
   const guardsPath = join(details.storagePath, 'publication-guards')
   const guardPath = join(guardsPath, randomUUID())
   const hookPath = join(guardPath, 'reference-transaction')
+  const messageHookPath = join(guardPath, 'prepare-commit-msg')
+  const messagePath = join(guardPath, 'merge-message')
   const resultPath = join(guardPath, 'result')
   await mkdir(guardsPath, { recursive: true, mode: 0o700 })
   await mkdir(guardPath, { mode: 0o700 })
@@ -363,11 +381,26 @@ async function withPublicationGuard(details, invoke) {
       flag: 'wx',
     })
     try { await chmod(hookPath, 0o700) } catch { /* Git for Windows executes hooks through its shell. */ }
+    if (commitMessage) {
+      await writeFile(messagePath, `${commitMessage}\n`, {
+        encoding: 'utf8',
+        mode: 0o600,
+        flag: 'wx',
+      })
+      await writeFile(messageHookPath, PREPARE_COMMIT_MESSAGE_HOOK, {
+        encoding: 'utf8',
+        mode: 0o700,
+        flag: 'wx',
+      })
+      try { await chmod(messagePath, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
+      try { await chmod(messageHookPath, 0o700) } catch { /* Git for Windows executes hooks through its shell. */ }
+    }
     const result = await invoke({
       GIT_CONFIG_VALUE_0: guardPath,
       ENSYNC_EXPECTED_REF: targetRef,
       ENSYNC_EXPECTED_OLD: expectedHead,
       ENSYNC_GUARD_RESULT: resultPath,
+      ...(commitMessage ? { ENSYNC_COMMIT_MESSAGE_FILE: messagePath } : {}),
     })
     let record = ''
     try {
@@ -515,6 +548,7 @@ export class AgentWorktreeClient {
       storagePath: this.storagePath,
       into,
       expectedHead: requiredCommit(input.expectedHead, 'expected target head'),
+      commitMessage: optionalCommitMessage(input.commitMessage),
     }, (environment) => this.#invoke(
       'merge',
       args,

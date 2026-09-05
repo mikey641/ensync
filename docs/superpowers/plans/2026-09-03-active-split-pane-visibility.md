@@ -14,7 +14,7 @@
 - Do not force all panes to fit; horizontal scrolling remains supported.
 - Do not move the viewport when the selected pane is already fully visible.
 - Keep behavior identical on macOS and Windows.
-- Keep durable behavior in `.relay/features/workspace-tabs.md`.
+- Keep durable behavior in `.ensync/features/workspace-tabs.md`.
 - Ensync Host owns the final commit; do not commit or push manually.
 
 ---
@@ -26,7 +26,7 @@
 - Modify: `src/lib/splitLayoutPersistence.mjs`
 - Modify: `src/lib/splitLayoutPersistence.d.mts`
 - Modify: `src/components/SplitWorkspace.tsx`
-- Modify: `.relay/features/workspace-tabs.md`
+- Modify: `.ensync/features/workspace-tabs.md`
 
 **Interfaces:**
 - Consumes: `largestPaneScrollLeft({ scrollLeft, paneLeft, paneWidth, viewportWidth, scrollWidth }): number`
@@ -93,7 +93,7 @@ Expected: all matching tests pass and the TypeScript/Vite build exits zero.
 - Modify: `src/components/SplitWorkspace.tsx`
 
 **Interfaces:**
-- Consumes: the rendered pane offsets relative to `.relay-split-panes`
+- Consumes: the rendered pane offsets relative to `.ensync-split-panes`
 - Produces: `largestPaneScrollLeft({ ..., snapPoints?: readonly number[] }): number`
 
 - [x] **Step 1: Write and run the failing snap-point regression**
@@ -116,7 +116,7 @@ Run the focused alignment tests and `npm run build`. In the local browser reprod
 
 - [x] **Step 5: Record the durable rule and run full verification**
 
-Update `.relay/features/workspace-tabs.md` to state that activating a partly visible ordinary split pane minimally scrolls it fully into view while preserving manual scroll when it already fits. Then run:
+Update `.ensync/features/workspace-tabs.md` to state that activating a partly visible ordinary split pane minimally scrolls it fully into view while preserving manual scroll when it already fits. Then run:
 
 ```sh
 npm run lint

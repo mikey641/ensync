@@ -78,7 +78,7 @@ Verified instruction adapters: ${instructionFiles}
 Verified Git state: ${gitState}
 Prior host-recorded continuation: ${priorContinuation}
 
-Before editing, read the applicable repository instructions and relevant .relay project, architecture, and feature Markdown files from the verified execution directory. Inspect Git branch and worktree state. Preserve unrelated user changes. Do not change execution targets during this turn. Do not invent plan, usage, model, authentication, VM, Git, test, or deployment state.`
+Before editing, read the applicable repository instructions and relevant .ensync project, architecture, and feature Markdown files from the verified execution directory. Inspect Git branch and worktree state. Preserve unrelated user changes. Do not change execution targets during this turn. Do not invent plan, usage, model, authentication, VM, Git, test, or deployment state.`
   const continuation = `End the response with a concise Markdown heading named "Ensync continuation" followed by: outcome and remaining work; decisions/user corrections to preserve; files changed; verification actually completed; and one next action or "none". This is private provider-handoff metadata: Ensync removes it from the user-visible answer and stores it separately. Never claim unverified work. Ensync attaches verified provider, reported model, target, session, fallback, and Git metadata separately.`
   const transcriptLabel = transcript ? '\n\nConversation before this request:\n' : ''
   const requestBlock = `\n\nCurrent user request:\n${prompt}\n\n${continuation}`

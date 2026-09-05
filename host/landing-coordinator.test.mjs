@@ -23,7 +23,7 @@ function deferred() {
   return { promise, reject, resolve }
 }
 
-function input(branch, repositoryPath = '/repo', savedSha = SHA_A) {
+function input(branch, repositoryPath = '/repo', savedSha = SHA_A, overrides = {}) {
   return {
     repositoryPath,
     commonGitDirectory: `${repositoryPath}/.git`,
@@ -34,6 +34,7 @@ function input(branch, repositoryPath = '/repo', savedSha = SHA_A) {
     targetBranch: 'main',
     targetBaseSha: SHA_A,
     provider: 'codex',
+    ...overrides,
   }
 }
 
@@ -57,7 +58,7 @@ class MemoryJournal {
       ...value,
       id: `landing-${sequence}`,
       completionSequence: sequence,
-      state: 'queued',
+      state: value.deliveryTarget === 'protected_branch' ? 'landed' : 'queued',
       attempts: 0,
       createdAt: `2026-09-03T00:00:0${sequence}.000Z`,
       updatedAt: `2026-09-03T00:00:0${sequence}.000Z`,
@@ -78,6 +79,30 @@ class MemoryJournal {
     return { ...item }
   }
 }
+
+test('protected-branch-only delivery saves durably without integration or push', async () => {
+  const journal = new MemoryJournal()
+  const events = []
+  let integrations = 0
+  let pushes = 0
+  const coordinator = new LandingCoordinator({
+    journal,
+    integrate: async () => { integrations += 1; return { landedIds: [], retryIds: [] } },
+    push: async () => { pushes += 1 },
+    onEvent: (event) => events.push(event.type),
+  })
+
+  const held = await coordinator.enqueue(input('ensync/held', '/repo', SHA_A, {
+    deliveryTarget: 'protected_branch',
+  }))
+  await coordinator.whenIdle()
+
+  assert.equal(held.state, 'held')
+  assert.equal(integrations, 0)
+  assert.equal(pushes, 0)
+  assert.deepEqual(events, ['held'])
+  assert.equal(coordinator.hasActiveWork(), false)
+})
 
 test('enqueue resolves and an idle repository starts integration on a microtask', async () => {
   const started = deferred()
@@ -387,6 +412,7 @@ test('one rejected item enters retry without blocking compatible items', async (
   const journal = new MemoryJournal()
   const coordinator = new LandingCoordinator({
     journal,
+    landingRetryDelays: [],
     integrate: async (train) => ({
       landedIds: [train[1].id],
       retryIds: [train[0].id],
@@ -405,10 +431,38 @@ test('one rejected item enters retry without blocking compatible items', async (
   assert.equal(journal.items.find((item) => item.id === compatible.id).state, 'landed')
 })
 
+test('a rejected landing retries on backoff until the saved item lands', async () => {
+  const journal = new MemoryJournal()
+  let calls = 0
+  const coordinator = new LandingCoordinator({
+    journal,
+    landingRetryDelays: [1, 1],
+    integrate: async (train) => {
+      calls += 1
+      if (calls < 3) {
+        return {
+          landedIds: [],
+          retryIds: train.map((item) => item.id),
+          errors: Object.fromEntries(train.map((item) => [item.id, `conflict attempt ${calls}`])),
+        }
+      }
+      return { landedIds: train.map((item) => item.id), retryIds: [] }
+    },
+  })
+
+  const item = await coordinator.enqueue(input('ensync/retry-until-landed'))
+  await coordinator.whenIdle()
+
+  assert.equal(calls, 3)
+  assert.equal(journal.items.find((candidate) => candidate.id === item.id).attempts, 3)
+  assert.equal(journal.items.find((candidate) => candidate.id === item.id).state, 'landed')
+})
+
 test('integration rejection becomes retry state without an unhandled background rejection', async () => {
   const journal = new MemoryJournal()
   const coordinator = new LandingCoordinator({
     journal,
+    landingRetryDelays: [],
     integrate: async () => { throw new Error(`failure ${'x'.repeat(10_000)}`) },
   })
 
@@ -426,6 +480,7 @@ test('a new completion automatically retrains older retry items without blocking
   const calls = []
   const coordinator = new LandingCoordinator({
     journal,
+    landingRetryDelays: [],
     integrate: async (train) => {
       calls.push(train.map((item) => item.branch))
       if (calls.length === 1) {
@@ -551,14 +606,16 @@ test('a successful landing auto-pushes the target branch to origin', async () =>
   const pushed = []
   const coordinator = new LandingCoordinator({
     journal,
+    landingRetryDelays: [],
     integrate: async (train) => ({
       landedIds: train.map((item) => item.id),
       retryIds: [],
       errors: {},
       head: SHA_B,
     }),
-    push: async ({ repositoryPath, targetBranch }) => {
-      pushed.push({ repositoryPath, targetBranch })
+    push: async ({ repositoryPath, targetBranch, productionCommitSha, items }) => {
+      pushed.push({ repositoryPath, targetBranch, productionCommitSha, items })
+      return SHA_B
     },
   })
 
@@ -568,6 +625,8 @@ test('a successful landing auto-pushes the target branch to origin', async () =>
   assert.equal(pushed.length, 1)
   assert.equal(pushed[0].targetBranch, 'main')
   assert.equal(pushed[0].repositoryPath, '/repo')
+  assert.equal(pushed[0].productionCommitSha, SHA_B)
+  assert.equal(pushed[0].items[0].branch, 'ensync/chat-auto-push')
 })
 
 test('a failed landing does not auto-push', async () => {
@@ -575,6 +634,7 @@ test('a failed landing does not auto-push', async () => {
   const pushed = []
   const coordinator = new LandingCoordinator({
     journal,
+    landingRetryDelays: [],
     integrate: async (train) => ({
       landedIds: [],
       retryIds: train.map((item) => item.id),

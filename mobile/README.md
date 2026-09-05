@@ -13,6 +13,17 @@ Use the account panel in Ensync Desktop to enable remote execution and create a 
 
 The Sync service must be reachable at an HTTPS URL. Native Capacitor loopback origins are accepted by the bundled service; additional browser origins must be listed in the service's comma-separated `ENSYNC_SYNC_ALLOWED_ORIGINS` setting. Account passwords, the derived payload key, bearer session, and device token remain in app memory. Only the stable device ID and selected Sync URL are persisted locally in this development build.
 
+## Web app (PWA)
+
+The same client is an installable web app. It works full-screen on iOS and Android home screens without the App Store or Play Store, so it can be self-hosted alongside Ensync Sync and published openly.
+
+```bash
+npm install
+npm run build
+```
+
+Serve the generated `dist/` directory from any HTTPS static host, add the web origin to `ENSYNC_SYNC_ALLOWED_ORIGINS`, then choose **Add to Home Screen** from the browser. The bundled service worker (`public/sw.js`) caches only the app shell so the PWA opens offline while every Sync request stays network-first for live job state; encrypted job and event payloads are never cached. The manifest and `apple-touch-icon` let iOS and Android install it in standalone mode.
+
 ## Native projects
 
 ```bash

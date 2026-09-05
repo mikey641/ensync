@@ -926,13 +926,13 @@ git commit -m "feat: add local Update now control"
 
 **Files:**
 - Create: `host/job-worker-restart.e2e.test.mjs`
-- Modify: `.relay/architecture.md`
-- Modify: `.relay/features/distribution.md`
-- Modify: `.relay/features/workspace-tabs.md`
+- Modify: `.ensync/architecture.md`
+- Modify: `.ensync/features/distribution.md`
+- Modify: `.ensync/features/workspace-tabs.md`
 - Modify: `desktop/README.md`
 - Modify: `docs/release-runbook.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/relay-architecture.md`
-- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-relay/memory/MEMORY.md` only if its existing architecture link/description needs a concise update.
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/ensync-architecture.md`
+- Modify: `/Users/mikeyhasson/.claude/projects/-Users-mikeyhasson-dev-ensync/memory/MEMORY.md` only if its existing architecture link/description needs a concise update.
 
 **Interfaces:**
 - Consumes: all earlier tasks.
@@ -995,7 +995,7 @@ Record these exact facts in the existing focused files:
 - Public beta/stable and Microsoft Store behavior is unchanged.
 ```
 
-Update the existing shared `relay-architecture.md` memory topic rather than creating another memory file. Keep test logs and task status out of memory.
+Update the existing shared `ensync-architecture.md` memory topic rather than creating another memory file. Keep test logs and task status out of memory.
 
 - [ ] **Step 5: Run the full fresh verification gate**
 
@@ -1018,7 +1018,7 @@ Expected: every command exits 0, no tests fail, TypeScript reports no errors, an
 - [ ] **Step 6: Commit the completed integration and documentation**
 
 ```bash
-git add host/job-worker-restart.e2e.test.mjs .relay/architecture.md .relay/features/distribution.md .relay/features/workspace-tabs.md desktop/README.md docs/release-runbook.md
+git add host/job-worker-restart.e2e.test.mjs .ensync/architecture.md .ensync/features/distribution.md .ensync/features/workspace-tabs.md desktop/README.md docs/release-runbook.md
 git commit -m "docs: record restart-surviving local updates"
 ```
 

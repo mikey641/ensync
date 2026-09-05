@@ -27,11 +27,16 @@ async function withHost(context, options) {
 
 test('Host startup resumes the automatic landing queue without polling', async (context) => {
   let starts = 0
+  let deliveryStarts = 0
   const server = startEnsyncHost({
     host: '127.0.0.1',
     port: 0,
     landingCoordinator: {
       async start() { starts += 1 },
+      hasActiveWork() { return false },
+    },
+    deliveryCoordinator: {
+      async start() { deliveryStarts += 1 },
       hasActiveWork() { return false },
     },
     statusService: { list: async () => [], get: async () => null },
@@ -46,7 +51,48 @@ test('Host startup resumes the automatic landing queue without polling', async (
   await Promise.resolve()
 
   assert.equal(starts, 1)
+  assert.equal(deliveryStarts, 1)
   assert.equal(server.ensyncServices.landingCoordinator.hasActiveWork(), false)
+})
+
+test('delivery status route returns Host-owned exact-commit state', async (context) => {
+  const calls = []
+  const delivery = {
+    current: { id: 'delivery-1', state: 'building', productionCommitSha: 'a'.repeat(40) },
+    production: null,
+    pending: { id: 'delivery-1', state: 'building', productionCommitSha: 'a'.repeat(40) },
+    records: [],
+  }
+  const baseUrl = await withHost(context, {
+    deliveryCoordinator: {
+      async status(projectPath, sourceBranch) { calls.push({ projectPath, sourceBranch }); return delivery },
+      hasActiveWork() { return false },
+    },
+  })
+  const response = await fetch(`${baseUrl}/api/delivery/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: '/project', sourceBranch: 'ensync/chat-one' }),
+  })
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { delivery })
+  assert.deepEqual(calls, [{ projectPath: '/project', sourceBranch: 'ensync/chat-one' }])
+})
+
+test('delivery status route rejects an invalid per-chat source branch', async (context) => {
+  const baseUrl = await withHost(context, {
+    deliveryCoordinator: {
+      async status() { throw new Error('must not inspect delivery') },
+      hasActiveWork() { return false },
+    },
+  })
+  const response = await fetch(`${baseUrl}/api/delivery/status`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ projectPath: '/project', sourceBranch: '' }),
+  })
+  assert.equal(response.status, 400)
+  assert.equal((await response.json()).code, 'invalid_source_branch')
 })
 
 function assertNoForbiddenJobData(value) {

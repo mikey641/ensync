@@ -16,6 +16,7 @@ const CHAT_SCOPED_KEYS = [
   'chatSessions',
   'readCompletionByChat',
   'executionPanelOpenByChat',
+  'deliveryPanelOpenByChat',
   'drafts',
   'draftAttachments',
   'chatErrors',
