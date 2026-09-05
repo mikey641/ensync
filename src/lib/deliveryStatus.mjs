@@ -42,7 +42,17 @@ export function scopeDeliveryStatusForBranch(status, sourceBranch) {
   }
 }
 
-export function deliveryPromptContext(delivery, productionDelivery, messages, activeTurnId) {
+function completedRunSavedPrefix(events) {
+  if (!Array.isArray(events)) return null
+  const notice = [...events].reverse().find((event) => (
+    event?.type === 'notice'
+    && ['automatic_landing_queued', 'delivery_saved_only'].includes(event.code)
+  ))
+  const match = notice?.message?.match(/\bat ([a-f0-9]{12,64})(?:\b|$)/i)
+  return match?.[1]?.toLowerCase() ?? null
+}
+
+export function deliveryPromptContext(delivery, productionDelivery, messages, activeTurnId, events) {
   const trackedTurnIds = new Set([
     ...(Array.isArray(delivery?.turnIds) ? delivery.turnIds : []),
     ...(Array.isArray(productionDelivery?.turnIds) ? productionDelivery.turnIds : []),
@@ -60,15 +70,38 @@ export function deliveryPromptContext(delivery, productionDelivery, messages, ac
     && activeTurnId.length > 0
     && prompt?.turnId === activeTurnId
   const hasUnsavedActivePrompt = promptIsActive && !trackedTurnIds.has(activeTurnId)
-  const deliveryTracksPrompt = Boolean(
+  const journalTracksPrompt = Boolean(
     prompt?.turnId
     && Array.isArray(delivery?.turnIds)
     && delivery.turnIds.includes(prompt.turnId),
   )
+  const latestAgent = Array.isArray(messages)
+    ? [...messages].reverse().find((message) => message?.role === 'agent') ?? null
+    : null
+  const savedPrefix = completedRunSavedPrefix(events)
+  // Rolling updates may leave an older detached Host without the turn ID even
+  // though its chat-scoped completion stream and immutable commit agree. This
+  // bridge uses only that exact local evidence; the upgraded Host persists the
+  // same identity from the commit metadata on its next status read.
+  const completedRunTracksPrompt = Boolean(
+    !journalTracksPrompt
+    && prompt?.turnId
+    && prompt.deliveryStatus === 'completed'
+    && latestAgent?.turnId === prompt.turnId
+    && savedPrefix
+    && typeof delivery?.savedSha === 'string'
+    && delivery.savedSha.startsWith(savedPrefix),
+  )
+  const deliveryLinkProof = journalTracksPrompt
+    ? 'journal'
+    : completedRunTracksPrompt
+      ? 'completed_run'
+      : null
   return {
     prompt,
     promptIsActive,
     hasUnsavedActivePrompt,
-    deliveryTracksPrompt,
+    deliveryTracksPrompt: deliveryLinkProof !== null,
+    deliveryLinkProof,
   }
 }

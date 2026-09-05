@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { DeliveryCoordinator } from './delivery-coordinator.mjs'
+import { DeliveryCoordinator, deliveryTurnIdFromCommitMessage } from './delivery-coordinator.mjs'
 
 const SHA = 'a'.repeat(40)
 const item = { id: 'landing-1', repositoryPath: '/repo', projectPath: '/repo/app', targetBranch: 'main', savedSha: 'b'.repeat(40), branch: 'ensync/chat-1', provider: 'codex' }
@@ -31,6 +31,44 @@ class MemoryJournal {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+test('commit metadata recovers explicit and legacy Host-authored turn identities', () => {
+  assert.equal(deliveryTurnIdFromCommitMessage([
+    'Ensync agent work (succeeded)',
+    '',
+    'Provider: codex',
+    'Job: job-turn-1788609131718-x3osi7-codex-1',
+    'Turn-ID: turn-explicit',
+  ].join('\n')), 'turn-explicit')
+  assert.equal(deliveryTurnIdFromCommitMessage([
+    'Ensync agent work (succeeded)',
+    '',
+    'Provider: codex',
+    'Job: job-turn-1788609131718-x3osi7-codex-1',
+  ].join('\n')), 'turn-1788609131718-x3osi7')
+  assert.equal(deliveryTurnIdFromCommitMessage('Provider: codex\nJob: unrelated-job'), null)
+})
+
+test('status durably repairs a legacy delivery record from immutable commit identity', async () => {
+  const journal = new MemoryJournal()
+  const legacy = await journal.upsertLanding({ ...item, turnId: null }, 'saved')
+  await journal.update(legacy.id, { state: 'production', productionCommitSha: SHA })
+  let recoveries = 0
+  const coordinator = new DeliveryCoordinator({
+    journal,
+    resolveTurnId: async (record) => {
+      recoveries += 1
+      assert.equal(record.savedSha, item.savedSha)
+      return 'turn-recovered'
+    },
+  })
+
+  const status = await coordinator.status('/repo/app', 'ensync/chat-1')
+  assert.deepEqual(status.current.turnIds, ['turn-recovered'])
+  assert.deepEqual(journal.records[0].turnIds, ['turn-recovered'])
+  await coordinator.status('/repo/app', 'ensync/chat-1')
+  assert.equal(recoveries, 1)
+})
 
 test('delivery follows an exact pushed SHA through build to production', async () => {
   const journal = new MemoryJournal()

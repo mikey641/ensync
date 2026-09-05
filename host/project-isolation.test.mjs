@@ -249,11 +249,13 @@ test('run-end snapshotting returns an exact commit with the repository identity'
     outcome: 'succeeded',
     provider: 'codex',
     jobId: 'job_1111111111111111',
+    turnId: 'turn-project-isolation',
   })
 
   assert.equal(result.committed, true)
   assert.match(result.head, /^[a-f0-9]{40}$/)
   assert.equal(await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%an <%ae>']), 'Ensync Test <ensync-test@example.invalid>')
+  assert.match(await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%B']), /^Turn-ID: turn-project-isolation$/m)
   assert.equal(await git(lease.workspace.repositoryPath, ['status', '--porcelain']), '')
   await lease.release()
 })

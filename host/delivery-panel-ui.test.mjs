@@ -36,6 +36,8 @@ test('every mounted protected chat owns a collapsed branch-scoped production dis
   assert.match(app, /Earlier delivered work/)
   assert.match(app, /No saved delivery is linked to this prompt/)
   assert.match(app, /deliveryPromptContext\([\s\S]*?activeTurnId/)
+  assert.match(app, /executionEvents=\{executionEvents\}/)
+  assert.match(app, /recovered the missing legacy link from immutable run evidence/)
   assert.match(app, /sending \? 'Live CLI execution' : 'Previous CLI execution'/)
   assert.match(app, /sending \? 'Latest note' : 'Last run note'/)
   assert.match(app, /deliveryWorkDescription\(delivery, messages\)/)

@@ -5046,6 +5046,7 @@ function ConversationPane({
           chatTitle={chat.title}
           sourceBranch={deliveryBranch}
           messages={chat.messages}
+          executionEvents={executionEvents}
           activeTurnId={activeTurnId}
           open={deliveryPanelOpen}
           onOpenChange={onDeliveryPanelOpenChange}
@@ -5269,6 +5270,7 @@ function DeliveryPanel({
   chatTitle,
   sourceBranch,
   messages,
+  executionEvents,
   activeTurnId,
   open,
   onOpenChange,
@@ -5278,6 +5280,7 @@ function DeliveryPanel({
   chatTitle: string
   sourceBranch: string
   messages: Chat['messages']
+  executionEvents: ChatExecutionEvent[]
   activeTurnId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -5288,11 +5291,13 @@ function DeliveryPanel({
     promptIsActive,
     hasUnsavedActivePrompt,
     deliveryTracksPrompt,
+    deliveryLinkProof,
   } = deliveryPromptContext(
     delivery,
     productionDelivery,
     messages,
     activeTurnId,
+    executionEvents,
   )
   const deliveryLabelText = delivery ? deliveryLabel(delivery) : 'Not saved'
   const promptLabel = promptRunLabel(prompt, promptIsActive)
@@ -5323,7 +5328,9 @@ function DeliveryPanel({
   const promptDetail = hasUnsavedActivePrompt
     ? 'Not saved yet. This prompt will get its own exact commit and delivery pipeline after the agent finishes successfully.'
     : deliveryTracksPrompt
-      ? `This prompt is linked to exact saved commit ${delivery?.savedSha.slice(0, 12)}.`
+      ? deliveryLinkProof === 'completed_run'
+        ? `This prompt’s completed CLI run saved exact commit ${delivery?.savedSha.slice(0, 12)}; Ensync recovered the missing legacy link from immutable run evidence.`
+        : `This prompt is linked to exact saved commit ${delivery?.savedSha.slice(0, 12)}.`
       : delivery
         ? 'No saved delivery is linked to this prompt. The delivery below belongs to earlier work.'
         : 'No saved delivery is linked to this prompt yet.'

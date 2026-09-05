@@ -23,6 +23,12 @@ function agentCommitMessage(details, branch) {
   const lines = [`Ensync agent work (${details.outcome})`, '']
   if (details.provider) lines.push(`Provider: ${details.provider}`)
   if (details.jobId) lines.push(`Job: ${details.jobId}`)
+  if (typeof details.turnId === 'string'
+    && details.turnId.length <= 256
+    && details.turnId.trim() === details.turnId
+    && !/[\u0000-\u001f\u007f]/.test(details.turnId)) {
+    lines.push(`Turn-ID: ${details.turnId}`)
+  }
   lines.push(`Workspace-Branch: ${branch}`)
   return lines.join('\n')
 }

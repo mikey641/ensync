@@ -1,5 +1,31 @@
 const DEFAULT_POLL_MS = 10_000
 const DEFAULT_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
+const MAX_TURN_ID_CHARACTERS = 256
+
+function validTurnId(value) {
+  return typeof value === 'string'
+    && value.length > 0
+    && value.length <= MAX_TURN_ID_CHARACTERS
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value)
+}
+
+export function deliveryTurnIdFromCommitMessage(message) {
+  if (typeof message !== 'string') return null
+  const explicit = message.match(/^Turn-ID:\s*([^\r\n]+)\s*$/im)?.[1]?.trim()
+  if (validTurnId(explicit)) return explicit
+
+  // Older Ensync snapshots encoded the turn only inside
+  // Job: job-<turn-id>-<provider>-<attempt>. Both lines were Host-authored.
+  const provider = message.match(/^Provider:\s*([a-z0-9._-]+)\s*$/im)?.[1]?.toLowerCase()
+  const jobId = message.match(/^Job:\s*(job-[A-Za-z0-9_-]{15,127})\s*$/im)?.[1]
+  if (!provider || !jobId) return null
+  const providerSuffix = `-${provider}-`
+  const providerIndex = jobId.lastIndexOf(providerSuffix)
+  if (providerIndex <= 4 || !/^\d+$/.test(jobId.slice(providerIndex + providerSuffix.length))) return null
+  const recovered = jobId.slice(4, providerIndex)
+  return validTurnId(recovered) ? recovered : null
+}
 
 function timestampAfter(delay) {
   return new Date(Date.now() + delay).toISOString()
@@ -21,6 +47,7 @@ export class DeliveryCoordinator {
     this.isAncestor = options.isAncestor ?? (async () => false)
     this.resolvePushedHead = options.resolvePushedHead ?? null
     this.describeCommit = options.describeCommit ?? null
+    this.resolveTurnId = options.resolveTurnId ?? null
     this.redact = options.redact ?? ((value) => value)
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
     this.retryDelays = options.retryDelays ?? DEFAULT_RETRY_DELAYS
@@ -59,6 +86,18 @@ export class DeliveryCoordinator {
     }
     if (typeof sourceBranch === 'string' && sourceBranch) {
       records = records.filter((record) => record.sourceBranches.includes(sourceBranch))
+    }
+    if (this.resolveTurnId) {
+      records = await Promise.all(records.map(async (record) => {
+        if (record.turnIds.length > 0) return record
+        try {
+          const turnId = await this.resolveTurnId(record)
+          if (!validTurnId(turnId)) return record
+          return await this.journal.update(record.id, { turnIds: [turnId] }) ?? record
+        } catch {
+          return record
+        }
+      }))
     }
     if (this.describeCommit) {
       records = await Promise.all(records.map(async (record) => {

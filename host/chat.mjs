@@ -1689,6 +1689,7 @@ export class ChatRunService {
             outcome: runOutcome,
             provider: request.provider,
             jobId: typeof options.jobId === 'string' ? options.jobId : (typeof options.liveTurnId === 'string' ? options.liveTurnId : null),
+            turnId: typeof options.turnId === 'string' ? options.turnId : null,
           })
           savedHead = typeof workCommit.head === 'string' ? workCommit.head : null
           if (workCommit.committed) {

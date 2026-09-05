@@ -78,6 +78,7 @@ test('an active prompt leads the card even when another window owns the run', ()
     promptIsActive: true,
     hasUnsavedActivePrompt: true,
     deliveryTracksPrompt: false,
+    deliveryLinkProof: null,
   })
 })
 
@@ -92,6 +93,7 @@ test('a prompt already linked to the delivery is not presented as unsaved work',
     promptIsActive: true,
     hasUnsavedActivePrompt: false,
     deliveryTracksPrompt: true,
+    deliveryLinkProof: 'journal',
   })
 })
 
@@ -106,6 +108,7 @@ test('the latest completed prompt remains visible and legacy delivery is earlier
     promptIsActive: false,
     hasUnsavedActivePrompt: false,
     deliveryTracksPrompt: false,
+    deliveryLinkProof: null,
   })
 })
 
@@ -120,5 +123,50 @@ test('a completed prompt is linked only by its exact turn id', () => {
     promptIsActive: false,
     hasUnsavedActivePrompt: false,
     deliveryTracksPrompt: true,
+    deliveryLinkProof: 'journal',
   })
+})
+
+test('a completed chat run repairs an older Host record missing its turn identity', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    savedSha: '3215687820e0750b81c3dd33c40fe62300771f51',
+    turnIds: [],
+  })
+  const messages = [
+    { role: 'user', turnId: 'turn-current', content: 'fix the pdf', deliveryStatus: 'completed' },
+    { role: 'agent', turnId: 'turn-current', content: 'fixed' },
+  ]
+  const events = [{
+    type: 'notice',
+    code: 'automatic_landing_queued',
+    message: 'Queued ensync/chat-one at 3215687820e0 for immediate automatic landing.',
+  }]
+
+  assert.deepEqual(deliveryPromptContext(delivered, delivered, messages, null, events), {
+    prompt: messages[0],
+    promptIsActive: false,
+    hasUnsavedActivePrompt: false,
+    deliveryTracksPrompt: true,
+    deliveryLinkProof: 'completed_run',
+  })
+})
+
+test('legacy evidence cannot link a different saved commit or unfinished turn', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    savedSha: 'f'.repeat(40),
+    turnIds: [],
+  })
+  const messages = [
+    { role: 'user', turnId: 'turn-current', content: 'fix the pdf', deliveryStatus: 'pending' },
+    { role: 'agent', turnId: 'turn-current', content: 'partial' },
+  ]
+  const events = [{
+    type: 'notice',
+    code: 'automatic_landing_queued',
+    message: 'Queued ensync/chat-one at 3215687820e0 for immediate automatic landing.',
+  }]
+
+  const context = deliveryPromptContext(delivered, delivered, messages, null, events)
+  assert.equal(context.deliveryTracksPrompt, false)
+  assert.equal(context.deliveryLinkProof, null)
 })

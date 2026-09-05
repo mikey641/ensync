@@ -23,7 +23,7 @@ import { selectAutomaticProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './auto
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
-import { DeliveryCoordinator } from './delivery-coordinator.mjs'
+import { DeliveryCoordinator, deliveryTurnIdFromCommitMessage } from './delivery-coordinator.mjs'
 import { DeliveryJournal } from './delivery-journal.mjs'
 import { VercelDeploymentAdapter } from './deployment-adapters.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
@@ -648,6 +648,12 @@ export function createEnsyncHost(options = {}) {
       })
       const description = result.stdout?.replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim()
       return result.exitCode === 0 && description ? description.slice(0, 240) : null
+    },
+    resolveTurnId: async (record) => {
+      const result = await runGit(['show', '-s', '--format=%B', record.savedSha], {
+        cwd: record.repositoryPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000,
+      })
+      return result.exitCode === 0 ? deliveryTurnIdFromCommitMessage(result.stdout) : null
     },
     redact: (value) => redactTerminalText(value).text,
     startRepair: async (record) => {

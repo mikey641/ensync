@@ -1721,10 +1721,14 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
   const observerCalls = []
   const landingNeverFinishes = new Promise(() => {})
   let enqueued = null
+  let commitDetails = null
   const service = new ChatRunService({
     statusService: statusService(readyProvider('codex')),
     projectIsolation: {
-      async commitAgentWork() { return { committed: true, changedFiles: 1, head: savedSha } },
+      async commitAgentWork(_workspace, details) {
+        commitDetails = details
+        return { committed: true, changedFiles: 1, head: savedSha }
+      },
       async checkSharedCheckout() { return { available: false } },
     },
     landingCoordinator: {
@@ -1757,6 +1761,7 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
   )
 
   assert.equal(result.response, 'done')
+  assert.equal(commitDetails.turnId, 'turn-delivery-description')
   assert.deepEqual(enqueued, {
     repositoryPath: projectPath,
     commonGitDirectory: join(projectPath, '.git'),
