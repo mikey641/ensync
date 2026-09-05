@@ -6,7 +6,7 @@
 
 const SHELL_CACHE = 'ensync-mobile-shell-v1'
 const STATIC_CACHE = 'ensync-mobile-static-v1'
-const SHELL_PATHS = ['./', './index.html', './manifest.webmanifest']
+const SHELL_PATHS = ['./', './index.html', './manifest.json']
 
 self.addEventListener('install', (event) => {
   event.waitUntil(

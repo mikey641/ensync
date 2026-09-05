@@ -15,14 +15,18 @@ The Sync service must be reachable at an HTTPS URL. Native Capacitor loopback or
 
 ## Web app (PWA)
 
-The same client is an installable web app. It works full-screen on iOS and Android home screens without the App Store or Play Store, so it can be self-hosted alongside Ensync Sync and published openly.
+The same client is an installable web app. It works full-screen on iOS and Android home screens without the App Store or Play Store.
+
+The production site publishes this client at <https://ensync.vercel.app/mobile/>. Open that URL on your phone, then choose **Add to Home Screen** (iOS) or accept the browser install prompt (Android).
+
+To host it yourself:
 
 ```bash
 npm install
 npm run build
 ```
 
-Serve the generated `dist/` directory from any HTTPS static host, add the web origin to `ENSYNC_SYNC_ALLOWED_ORIGINS`, then choose **Add to Home Screen** from the browser. The bundled service worker (`public/sw.js`) caches only the app shell so the PWA opens offline while every Sync request stays network-first for live job state; encrypted job and event payloads are never cached. The manifest and `apple-touch-icon` let iOS and Android install it in standalone mode.
+`vite.config.mjs` builds with relative asset URLs (`base: './'`) so the `dist/` directory works under any HTTPS path, not just the domain root. Serve `dist/` from any HTTPS static host, add the web origin to `ENSYNC_SYNC_ALLOWED_ORIGINS`, then choose **Add to Home Screen** from the browser. The bundled service worker (`public/sw.js`) caches only the app shell so the PWA opens offline while every Sync request stays network-first for live job state; encrypted job and event payloads are never cached. The manifest and `apple-touch-icon` let iOS and Android install it in standalone mode.
 
 ## Native projects
 

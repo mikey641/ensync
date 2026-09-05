@@ -20,6 +20,14 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Build the mobile PWA
+        run: |
+          npm --prefix mobile ci
+          npm --prefix mobile run build
+          rm -rf site/public/mobile
+          mkdir -p site/public/mobile
+          cp -R mobile/dist/. site/public/mobile/
+
       - name: Validate the site
         run: npm --prefix site test
 
