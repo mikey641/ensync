@@ -1684,6 +1684,7 @@ export class ChatRunService {
       if (workspace && this.#projectIsolation && !workspaceLease?.signal.aborted) {
         let agentWorkSaved = true
         let savedHead = null
+        let savedSourceChanged = false
         try {
           const workCommit = await this.#projectIsolation.commitAgentWork(workspace, {
             outcome: runOutcome,
@@ -1692,11 +1693,20 @@ export class ChatRunService {
             turnId: typeof options.turnId === 'string' ? options.turnId : null,
           })
           savedHead = typeof workCommit.head === 'string' ? workCommit.head : null
+          savedSourceChanged = workCommit.sourceChanged === true
           if (workCommit.committed) {
             emitAdvisory(options.onEvent, {
               type: 'notice',
               code: 'agent_work_committed',
               message: `Saved ${workCommit.changedFiles} changed file${workCommit.changedFiles === 1 ? '' : 's'} to ${workspace.branch} (run ${runOutcome}).`,
+              at: new Date().toISOString(),
+            })
+          }
+          if (runOutcome === 'succeeded' && !savedSourceChanged) {
+            emitAdvisory(options.onEvent, {
+              type: 'notice',
+              code: 'no_delivery_changes',
+              message: 'This run made no source changes, so Ensync kept production delivery linked to the earlier work that created the saved commit.',
               at: new Date().toISOString(),
             })
           }
@@ -1737,7 +1747,7 @@ export class ChatRunService {
             // Shared-checkout detection is best-effort; never let it mask the run's own outcome or skip ownership release.
           }
         }
-        if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved) {
+        if (runOutcome === 'succeeded' && this.#landingCoordinator && agentWorkSaved && savedSourceChanged) {
           let landingError = null
           if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(savedHead ?? '')) {
             landingError = new Error('the protected branch did not return an exact saved commit')

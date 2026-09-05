@@ -253,11 +253,35 @@ test('run-end snapshotting returns an exact commit with the repository identity'
   })
 
   assert.equal(result.committed, true)
+  assert.equal(result.sourceChanged, true)
   assert.match(result.head, /^[a-f0-9]{40}$/)
   assert.equal(await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%an <%ae>']), 'Ensync Test <ensync-test@example.invalid>')
   assert.match(await git(lease.workspace.repositoryPath, ['log', '-1', '--format=%B']), /^Turn-ID: turn-project-isolation$/m)
   assert.equal(await git(lease.workspace.repositoryPath, ['status', '--porcelain']), '')
   await lease.release()
+})
+
+test('run-end snapshotting distinguishes a no-op run from a provider-authored source commit', async (context) => {
+  const current = await fixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: current.workspaceRoot })
+  const noOpLease = await isolation.acquire(current.repository, 'chat:no-op')
+
+  const noOp = await isolation.commitAgentWork(noOpLease.workspace, { outcome: 'succeeded' })
+
+  assert.equal(noOp.committed, false)
+  assert.equal(noOp.sourceChanged, false)
+  await noOpLease.release()
+
+  const changedLease = await isolation.acquire(current.repository, 'chat:provider-commit')
+  await writeFile(join(changedLease.workspace.projectPath, 'provider.txt'), 'provider commit\n')
+  await git(changedLease.workspace.repositoryPath, ['add', 'provider.txt'])
+  await git(changedLease.workspace.repositoryPath, ['commit', '-m', 'provider-authored change'])
+
+  const providerCommit = await isolation.commitAgentWork(changedLease.workspace, { outcome: 'succeeded' })
+
+  assert.equal(providerCommit.committed, false)
+  assert.equal(providerCommit.sourceChanged, true)
+  await changedLease.release()
 })
 
 test('run-end snapshotting refuses a provider-switched branch', async (context) => {

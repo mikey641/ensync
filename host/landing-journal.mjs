@@ -121,6 +121,10 @@ function cloneItem(item) {
   return { ...item }
 }
 
+function deliveryIdentityKey(item) {
+  return [item.repositoryPath, item.targetBranch, item.savedSha, item.deliveryTarget].join('\0')
+}
+
 async function exists(path) {
   try {
     await access(path, constants.F_OK)
@@ -199,6 +203,13 @@ export class LandingJournal {
       })
       if (!item || !item.commonGitDirectory || !item.targetBranch || !item.targetBaseSha) {
         throw new TypeError('Landing metadata is incomplete or invalid.')
+      }
+      const existing = this.items.find((candidate) => deliveryIdentityKey(candidate) === deliveryIdentityKey(item))
+      if (existing) {
+        const conflict = existing.turnId && item.turnId && existing.turnId !== item.turnId
+        throw new Error(conflict
+          ? 'The saved landing commit already belongs to a different turn.'
+          : 'The saved landing commit is already queued or delivered.')
       }
       await this.#save([...this.items, item], this.nextSequence + 1)
       return cloneItem(item)
@@ -296,7 +307,7 @@ export class LandingJournal {
       return
     }
 
-    const recoveredItems = selected.payload.items
+    const normalizedItems = selected.payload.items
       .map((item) => item.state === 'integrating'
         ? {
             ...item,
@@ -306,16 +317,22 @@ export class LandingJournal {
           }
         : item)
       .sort((left, right) => left.completionSequence - right.completionSequence)
+    const retainedIdentityKeys = new Set()
+    const recoveredItems = normalizedItems.filter((item) => {
+      const key = deliveryIdentityKey(item)
+      if (retainedIdentityKeys.has(key)) return false
+      retainedIdentityKeys.add(key)
+      return true
+    })
     const sequenceFloor = recoveredItems.reduce(
       (maximum, item) => Math.max(maximum, item.completionSequence + 1),
       1,
     )
     const recoveredNextSequence = Math.max(selected.payload.nextSequence, sequenceFloor)
 
-    const recoveredIntegration = recoveredItems.some((item, index) => (
-      selected.payload.items[index]?.state === 'integrating' && item.state === 'queued'
-    ))
-    if (selected.path !== this.filePath || recoveredIntegration) {
+    const recoveredIntegration = selected.payload.items.some((item) => item.state === 'integrating')
+    const recoveredDuplicate = recoveredItems.length !== normalizedItems.length
+    if (selected.path !== this.filePath || recoveredIntegration || recoveredDuplicate) {
       await this.#save(recoveredItems, recoveredNextSequence, selected.payload.revision)
     } else {
       this.items = recoveredItems

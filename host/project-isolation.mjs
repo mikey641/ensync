@@ -266,10 +266,35 @@ export class ProjectIsolationService {
   }
 
   async commitAgentWork(workspace, details = {}) {
-    return this.#commitWorktree(workspace.repositoryPath, workspace.branch, workspace.commonGitDirectory, {
+    const initialHead = workspace?.gitBefore?.head
+    if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i.test(initialHead ?? '')) {
+      throw new ProjectIsolationError(
+        'agent_work_snapshot_incomplete',
+        'The protected worktree did not retain its exact run-start commit, so Ensync did not queue an ambiguous delivery.',
+      )
+    }
+    const snapshot = await this.#commitWorktree(workspace.repositoryPath, workspace.branch, workspace.commonGitDirectory, {
       ...details,
       outcome: details.outcome ?? 'failed',
     })
+    const sourceDiff = await this.#git([
+      'diff',
+      '--quiet',
+      `${initialHead}^{commit}`,
+      `${snapshot.head}^{commit}`,
+      '--',
+      '.',
+    ], {
+      cwd: workspace.repositoryPath,
+      allowFailure: true,
+    })
+    if (![0, 1].includes(sourceDiff.exitCode)) {
+      throw new ProjectIsolationError(
+        'agent_work_snapshot_incomplete',
+        'Ensync could not prove whether this run changed the protected source tree, so automatic landing did not start.',
+      )
+    }
+    return { ...snapshot, sourceChanged: sourceDiff.exitCode === 1 }
   }
 
   async checkSharedCheckout(workspace) {

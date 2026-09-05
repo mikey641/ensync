@@ -75,7 +75,10 @@ function normalize(value) {
     sourceBranches: stringList(value.sourceBranches),
     landingIds: stringList(value.landingIds),
     sourceProviders: stringList(value.sourceProviders),
-    turnIds: stringList(value.turnIds),
+    // A saved source commit has exactly one originating run. Older Hosts could
+    // append a later no-op run that merely reused the same HEAD; retain only
+    // the original identity so presentation can never claim both prompts.
+    turnIds: stringList(value.turnIds, 1),
     turnIdentityProof: TURN_IDENTITY_PROOFS.has(value.turnIdentityProof)
       ? value.turnIdentityProof
       : null,
@@ -118,6 +121,7 @@ function decode(raw) {
     return {
       revision: Number.isSafeInteger(envelope.payload.revision) ? envelope.payload.revision : 0,
       records,
+      needsRewrite: envelope.payload.records.some((record) => stringList(record?.turnIds).length > 1),
     }
   } catch {
     return null
@@ -171,6 +175,11 @@ export class DeliveryJournal {
       ))
       const now = this.clock().toISOString()
       const current = this.records[index]
+      const currentTurnId = current?.turnIds?.[0] ?? null
+      const incomingTurnId = stringList([item.turnId], 1)[0] ?? null
+      if (currentTurnId && incomingTurnId && currentTurnId !== incomingTurnId) {
+        throw new Error('The saved delivery commit already belongs to a different turn.')
+      }
       const stateOrder = ['saved', 'landing', 'pushed', 'building', 'failed', 'repairing', 'production']
       const requestedState = STATES.has(state) ? state : 'saved'
       const nextState = current && stateOrder.indexOf(current.state) > stateOrder.indexOf(requestedState)
@@ -244,7 +253,9 @@ export class DeliveryJournal {
     this.records = selected?.decoded.records ?? []
     this.revision = selected?.decoded.revision ?? 0
     this.loaded = true
-    if (selected && selected.path !== this.filePath) await this.#save(this.records)
+    if (selected && (selected.path !== this.filePath || selected.decoded.needsRewrite)) {
+      await this.#save(this.records)
+    }
   }
 
   async #save(records) {

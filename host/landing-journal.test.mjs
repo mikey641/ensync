@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -8,6 +9,7 @@ import { LandingJournal } from './landing-journal.mjs'
 
 const SHA_A = 'a'.repeat(40)
 const SHA_B = 'b'.repeat(40)
+const SHA_C = 'c'.repeat(40)
 
 function landingInput(overrides = {}) {
   return {
@@ -29,6 +31,11 @@ async function fixture(context) {
   context.after(() => rm(directory, { recursive: true, force: true }))
   const filePath = join(directory, 'landing-journal.json')
   return { directory, filePath, journal: new LandingJournal({ filePath }) }
+}
+
+function rechecksum(envelope) {
+  envelope.checksum = createHash('sha256').update(JSON.stringify(envelope.payload)).digest('hex')
+  return JSON.stringify(envelope)
 }
 
 test('journal fails closed on a corrupt checksum instead of dropping queued state', async (context) => {
@@ -97,12 +104,44 @@ test('completion sequence remains monotonic across concurrent writes and restart
     journal.enqueue(landingInput({ branch: 'ensync/chat-two', savedSha: SHA_B })),
   ])
   const restarted = new LandingJournal({ filePath })
-  const third = await restarted.enqueue(landingInput({ branch: 'ensync/chat-three' }))
+  const third = await restarted.enqueue(landingInput({ branch: 'ensync/chat-three', savedSha: SHA_C }))
 
   assert.deepEqual(
     [first.completionSequence, second.completionSequence, third.completionSequence],
     [1, 2, 3],
   )
+})
+
+test('the same saved commit cannot be queued for a different turn', async (context) => {
+  const { journal } = await fixture(context)
+  await journal.enqueue(landingInput({ turnId: 'turn-one' }))
+
+  await assert.rejects(
+    journal.enqueue(landingInput({ turnId: 'turn-two' })),
+    /different turn/i,
+  )
+  assert.deepEqual((await journal.load()).map((item) => item.turnId), ['turn-one'])
+})
+
+test('restart removes duplicate saved-commit entries written by an older Host', async (context) => {
+  const { filePath, journal } = await fixture(context)
+  await journal.enqueue(landingInput({ turnId: 'turn-one' }))
+  const envelope = JSON.parse(await readFile(filePath, 'utf8'))
+  envelope.payload.items.push({
+    ...envelope.payload.items[0],
+    id: 'landing-duplicate',
+    completionSequence: 2,
+    turnId: 'turn-two',
+  })
+  envelope.payload.nextSequence = 3
+  await writeFile(filePath, rechecksum(envelope), 'utf8')
+
+  const restored = await new LandingJournal({ filePath }).load()
+  const persisted = JSON.parse(await readFile(filePath, 'utf8'))
+
+  assert.deepEqual(restored.map((item) => item.turnId), ['turn-one'])
+  assert.deepEqual(persisted.payload.items.map((item) => item.turnId), ['turn-one'])
+  assert.ok(persisted.payload.revision > envelope.payload.revision)
 })
 
 test('journal stores only bounded landing metadata, never prompts or provider output', async (context) => {

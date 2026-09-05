@@ -1727,7 +1727,7 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
     projectIsolation: {
       async commitAgentWork(_workspace, details) {
         commitDetails = details
-        return { committed: true, changedFiles: 1, head: savedSha }
+        return { committed: true, changedFiles: 1, head: savedSha, sourceChanged: true }
       },
       async checkSharedCheckout() { return { available: false } },
     },
@@ -1777,6 +1777,66 @@ test('ChatRunService completes after exact-SHA enqueue without awaiting backgrou
   })
   assert.ok(observerCalls.includes('agent_work_committed'))
   assert.ok(observerCalls.includes('automatic_landing_queued'))
+})
+
+test('ChatRunService does not attach a no-change follow-up to an earlier saved commit', async (context) => {
+  const projectPath = await projectFixture(context)
+  const savedSha = 'a'.repeat(40)
+  const notices = []
+  let enqueueCalls = 0
+  const lease = {
+    workspace: {
+      canonicalProjectPath: projectPath,
+      projectPath,
+      repositoryPath: projectPath,
+      commonGitDirectory: join(projectPath, '.git'),
+      branch: 'ensync/chat-no-op-delivery',
+      base: { branch: 'main', canonicalSha: 'c'.repeat(40) },
+      integration: null,
+      gitBefore: { dirty: false, changedFiles: 0, head: savedSha },
+      shared: { repositoryPath: projectPath },
+    },
+    signal: new AbortController().signal,
+    assertHeld() {},
+    async release() { return { removed: true, reason: null } },
+  }
+  const service = new ChatRunService({
+    statusService: statusService(readyProvider('codex')),
+    projectIsolation: {
+      async commitAgentWork() {
+        return { committed: false, changedFiles: 0, head: savedSha, sourceChanged: false }
+      },
+      async checkSharedCheckout() { return { available: false } },
+    },
+    landingCoordinator: {
+      async enqueue() {
+        enqueueCalls += 1
+        return { state: 'queued' }
+      },
+    },
+    processRunner: async () => ({
+      exitCode: 0, error: null, timedOut: false, stderr: '',
+      stdout: [
+        JSON.stringify({ type: 'thread.started', thread_id: '123e4567-e89b-12d3-a456-426614174000' }),
+        JSON.stringify({ type: 'item.completed', item: { type: 'agent_message', text: 'already landed' } }),
+        JSON.stringify({ type: 'turn.completed', usage: { input_tokens: 1, output_tokens: 1 } }),
+      ].join('\n'),
+    }),
+  })
+
+  const result = await service.run(
+    { provider: 'codex', projectPath, prompt: 'Is it live?', workspaceKey: 'workspace:chat-no-op-delivery' },
+    {
+      preAcquiredWorkspaceLease: lease,
+      turnId: 'turn-informational-follow-up',
+      onEvent: (event) => { if (event.type === 'notice') notices.push(event) },
+    },
+  )
+
+  assert.equal(result.response, 'already landed')
+  assert.equal(enqueueCalls, 0)
+  assert.ok(notices.some((notice) => notice.code === 'no_delivery_changes'))
+  assert.equal(notices.some((notice) => notice.code === 'automatic_landing_queued'), false)
 })
 
 test('ChatRunService fails a successful provider run when its exact work snapshot cannot be saved', async (context) => {
@@ -1867,7 +1927,7 @@ test('ChatRunService fails a successful provider run when its exact SHA cannot b
     statusService: statusService(readyProvider('codex')),
     projectIsolation: {
       async acquire() { return lease },
-      async commitAgentWork() { return { committed: true, changedFiles: 1, head: savedSha } },
+      async commitAgentWork() { return { committed: true, changedFiles: 1, head: savedSha, sourceChanged: true } },
       async checkSharedCheckout() { return { available: false } },
     },
     landingCoordinator: {
