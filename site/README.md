@@ -2,7 +2,7 @@
 
 This is the standalone, static Ensync product, documentation, help, privacy, and download site. It is intentionally separate from the desktop prototype and can be deployed with Vercel using `site/` as the project root.
 
-The current public production deployment is [https://site-silk-beta-91.vercel.app](https://site-silk-beta-91.vercel.app) in the Vercel project `ensync`. The site is public; macOS remains disabled until its signed artifact satisfies the manifest gate, and Windows remains disabled until either the certified Microsoft Store listing is configured or a signed direct installer satisfies the stable manifest.
+The current public production deployment is [https://ensync.vercel.app](https://ensync.vercel.app) in the Vercel project `ensync`. The site is public; macOS remains disabled until its signed artifact satisfies the manifest gate, and Windows remains disabled until either the certified Microsoft Store listing is configured or a signed direct installer satisfies the stable manifest.
 
 ## Local validation and preview
 

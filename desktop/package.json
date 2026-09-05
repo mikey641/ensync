@@ -9,8 +9,8 @@
   "main": "src/main.mjs",
   "ensync": {
     "updateManifestUrls": {
-      "stable": "https://site-silk-beta-91.vercel.app/releases.json",
-      "beta": "https://site-silk-beta-91.vercel.app/releases-beta.json"
+      "stable": "https://ensync.vercel.app/releases.json",
+      "beta": "https://ensync.vercel.app/releases-beta.json"
     }
   },
   "engines": {

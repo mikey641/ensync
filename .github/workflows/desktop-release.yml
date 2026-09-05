@@ -233,7 +233,7 @@ jobs:
         run: |
           mkdir -p current-feeds
           for feed in releases.json releases-beta.json; do
-            status="$(curl --silent --show-error --location --output "current-feeds/$feed" --write-out '%{http_code}' "https://site-silk-beta-91.vercel.app/$feed")"
+            status="$(curl --silent --show-error --location --output "current-feeds/$feed" --write-out '%{http_code}' "https://ensync.vercel.app/$feed")"
             if [[ "$status" == "404" ]]; then
               cp "site/public/$feed" "current-feeds/$feed"
             elif [[ "$status" != "200" ]]; then
@@ -280,3 +280,10 @@ jobs:
           test -n "$VERCEL_PROJECT_ID"
           npm --prefix site test
           npx --yes vercel@58.7.1 --cwd site --prod --yes --token "$VERCEL_TOKEN"
+          NEW_URL=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=1" \
+            | jq -r '.deployments[0].url')
+          curl -sS -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"alias":"ensync.vercel.app"}' \
+            "https://api.vercel.com/v2/deployments/$NEW_URL/aliases?teamId=$VERCEL_ORG_ID"

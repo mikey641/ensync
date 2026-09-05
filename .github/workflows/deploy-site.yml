@@ -33,3 +33,10 @@ jobs:
           test -n "$VERCEL_ORG_ID"
           test -n "$VERCEL_PROJECT_ID"
           npx --yes vercel@58.7.1 --cwd site --prod --yes --token "$VERCEL_TOKEN"
+          NEW_URL=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=1" \
+            | jq -r '.deployments[0].url')
+          curl -sS -X POST -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"alias":"ensync.vercel.app"}' \
+            "https://api.vercel.com/v2/deployments/$NEW_URL/aliases?teamId=$VERCEL_ORG_ID"

@@ -24,7 +24,7 @@ const developmentUpdates = createNativeUpdateManager({
   platform: process.platform,
   isPackaged: false,
   executablePath: process.execPath,
-  manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+  manifestUrl: 'https://ensync.vercel.app/releases.json',
   tempRoot: process.cwd(),
   fetchImpl: async () => { throw new Error('Development update smoke check must not use the network.') },
   openInstaller: async () => '',

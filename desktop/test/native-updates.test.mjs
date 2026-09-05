@@ -88,7 +88,7 @@ test('development and unsigned packaged builds fail closed without checking the 
     installedVersion: '1.0.0',
     platform: 'darwin',
     executablePath: '/Applications/Ensync.app/Contents/MacOS/Ensync',
-    manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
     tempRoot: tmpdir(),
     fetchImpl: async () => { fetched += 1 },
     openInstaller: async () => '',
@@ -116,7 +116,7 @@ test('Microsoft Store installations delegate updates without checking Ensync fee
     storeManaged: true,
     isPackaged: true,
     executablePath: 'C:\\Program Files\\WindowsApps\\Ensync.exe',
-    manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
     tempRoot: tmpdir(),
     fetchImpl: async () => { fetched += 1 },
     verifyInstalledBuild: async () => { signatureChecks += 1; return { verified: true, signerIdentity: 'CN=Store' } },
@@ -189,7 +189,7 @@ test('manual check, download, checksum, same-signer verification, and installer 
     platform: 'darwin',
     isPackaged: true,
     executablePath: '/Applications/Ensync.app/Contents/MacOS/Ensync',
-    manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
     tempRoot,
     now: () => { timestamp += 200; return timestamp },
     fetchImpl: async () => {
@@ -275,7 +275,7 @@ test('same-signer verification failure removes the installer and never enables o
     platform: 'darwin',
     isPackaged: true,
     executablePath: '/Applications/Ensync.app/Contents/MacOS/Ensync',
-    manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
     tempRoot: await mkdtemp(join(tmpdir(), 'ensync-update-test-')),
     fetchImpl: async () => {
       fetchCount += 1
@@ -307,7 +307,7 @@ test('checksum mismatch fails before installer signature verification', async ()
     platform: 'win32',
     isPackaged: true,
     executablePath: 'C:\\Program Files\\Ensync\\Ensync.exe',
-    manifestUrl: 'https://site-silk-beta-91.vercel.app/releases.json',
+    manifestUrl: 'https://ensync.vercel.app/releases.json',
     tempRoot: await mkdtemp(join(tmpdir(), 'ensync-update-test-')),
     fetchImpl: async () => {
       fetchCount += 1
@@ -345,8 +345,8 @@ test('desktop package includes the updater and production HTTPS manifest feeds',
   const manifest = JSON.parse(await readFile(resolve(import.meta.dirname, '../package.json'), 'utf8'))
   assert.ok(manifest.build.files.includes('src/native-updates.mjs'))
   assert.deepEqual(manifest.ensync.updateManifestUrls, {
-    stable: 'https://site-silk-beta-91.vercel.app/releases.json',
-    beta: 'https://site-silk-beta-91.vercel.app/releases-beta.json',
+    stable: 'https://ensync.vercel.app/releases.json',
+    beta: 'https://ensync.vercel.app/releases-beta.json',
   })
   assert.equal(manifest.build.dmg.sign, true)
   assert.equal(manifest.build.afterAllArtifactBuild, 'scripts/notarize-artifacts.cjs')
