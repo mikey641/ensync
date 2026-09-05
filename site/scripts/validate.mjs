@@ -21,7 +21,6 @@ const requiredFiles = [
   'privacy/index.html',
 ];
 const requiredBinaryFiles = ['og.png'];
-const requiredApiFiles = ['api/windows-store.js'];
 
 const errors = [];
 const fileContents = new Map();
@@ -36,10 +35,6 @@ for (const file of requiredFiles) {
 
 for (const file of requiredBinaryFiles) {
   if (!existsSync(resolve(publicRoot, file))) errors.push(`Missing required public file: ${file}`);
-}
-
-for (const file of requiredApiFiles) {
-  if (!existsSync(resolve(siteRoot, file))) errors.push(`Missing required API endpoint: ${file}`);
 }
 
 for (const [file, contents] of fileContents) {

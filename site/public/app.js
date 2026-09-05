@@ -198,21 +198,28 @@ function unverifiedStoreListing(listing, reason) {
 // Confirm the listing is published, not just configured. The Store page and
 // catalog return 404/NotFound while a submission is still in certification, so
 // the configured URL alone is not enough to prove a customer can install it.
+// The public Store catalog allows a same-origin CORS read, so the check runs
+// directly from the browser and fails closed on any lookup problem.
 async function verifyStoreListing(listing) {
   const productId = windowsStoreProductId(listing);
-  if (!productId) {
+  if (!productId || !/^[0-9A-Z]{12,14}$/i.test(productId)) {
     return unverifiedStoreListing(listing, 'The Microsoft Store listing URL is invalid.');
   }
 
-  const url = `/api/windows-store?productId=${encodeURIComponent(productId)}`;
+  const url = `https://displaycatalog.mp.microsoft.com/v7.0/products/${productId}?market=US&languages=en-us`;
   try {
     const response = await fetch(url, { cache: 'no-store' });
-    if (!response.ok) {
+    if (!response.ok && response.status !== 404) {
       return unverifiedStoreListing(listing, 'Could not verify the Microsoft Store listing.');
     }
-    const check = await response.json();
-    if (check.available) return listing;
-    return unverifiedStoreListing(listing, check.reason || 'The Microsoft Store listing is not published yet.');
+    const body = await response.json().catch(() => null);
+    const published = Boolean(
+      body?.Product?.ProductId &&
+      Array.isArray(body?.Product?.LocalizedProperties) &&
+      body.Product.LocalizedProperties.length > 0,
+    );
+    if (published) return listing;
+    return unverifiedStoreListing(listing, 'The Microsoft Store listing is not published yet.');
   } catch {
     return unverifiedStoreListing(listing, 'Could not verify the Microsoft Store listing.');
   }
