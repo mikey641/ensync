@@ -95,7 +95,7 @@ export function releaseLabel(download) {
 export function resolveWindowsStoreListing(config) {
   const value = config?.downloads?.windowsStoreUrl;
   if (value === null || value === undefined || value === '') {
-    return unavailable('The Microsoft Store listing is not published yet.');
+    return unavailable('The Windows Store package is in a private-audience beta and has no public listing URL yet.');
   }
   if (typeof value !== 'string') {
     return unavailable('The Microsoft Store listing URL is invalid.');
