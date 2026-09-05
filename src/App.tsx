@@ -5406,11 +5406,11 @@ function ExecutionPanel({
         >
           {open ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
           <TerminalSquare size={14} />
-          <strong>{sending ? 'Live CLI execution' : 'CLI execution'}</strong>
+          <strong>{sending ? 'Live CLI execution' : 'Previous CLI execution'}</strong>
           {sending && <span className="execution-panel__live"><i /> running</span>}
           <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
             {latestProviderNote?.type === 'note'
-              ? `Latest note: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
+              ? `${sending ? 'Latest note' : 'Last run note'}: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>
         </button>
