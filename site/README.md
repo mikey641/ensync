@@ -2,7 +2,7 @@
 
 This is the standalone, static Ensync product, documentation, help, privacy, and download site. It is intentionally separate from the desktop prototype and can be deployed with Vercel using `site/` as the project root.
 
-The current public production deployment is [https://site-silk-beta-91.vercel.app](https://site-silk-beta-91.vercel.app) in the Vercel project `ensync`. The site is public; macOS remains disabled until its signed artifact satisfies the manifest gate, and Windows remains disabled until the certified Microsoft Store listing is configured.
+The current public production deployment is [https://site-silk-beta-91.vercel.app](https://site-silk-beta-91.vercel.app) in the Vercel project `ensync`. The site is public; macOS remains disabled until its signed artifact satisfies the manifest gate, and Windows remains disabled until either the certified Microsoft Store listing is configured or a signed direct installer satisfies the stable manifest.
 
 ## Local validation and preview
 
@@ -16,9 +16,13 @@ npm run preview
 
 Open `http://127.0.0.1:4174`. Set `ENSYNC_SITE_PORT` to use a different local port.
 
+## Content and fonts
+
+The landing page is a conventional marketing layout with a standard top navigation, centered hero, and clean content sections. The product font is Inter, self-hosted as WOFF2 files in `public/fonts/` and loaded through local `@font-face` rules in `public/styles.css`. Keep the local preview server's `.woff2` MIME entry in `scripts/preview.mjs` in sync with any new font assets.
+
 ## Truthful downloads
 
-The macOS and Windows website buttons read the stable `public/releases.json`. Opt-in desktop beta checks use the separate `public/releases-beta.json`; the website never silently switches to beta. A platform download stays disabled unless all of these are true:
+The macOS button reads the stable `public/releases.json`. The Windows button first checks `public/site-config.json` for a certified Microsoft Store listing and otherwise resolves the same stable manifest. Opt-in desktop beta checks use the separate `public/releases-beta.json`; the website never silently switches to beta. A platform download stays disabled unless all of these are true:
 
 - `latest.version` is set;
 - the platform status is `available`;
@@ -70,4 +74,4 @@ npx vercel --cwd site --prod
 
 The included `vercel.json` runs validation, serves `public/`, disables stale caching for the release manifest, and adds basic security headers. Do not deploy from the repository root unless the Vercel project's Root Directory is configured as `site`.
 
-The signed desktop tag workflow performs the production deployment automatically only after the macOS attestation and release generation pass. Its Windows Store package remains a private Actions artifact pending Partner Center certification. The workflow requires `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`; missing credentials fail deployment and leave the previously deployed manifest unchanged.
+The signed desktop tag workflow performs the production deployment automatically only after the macOS and Windows attestations and release generation pass. Its Windows Store package remains a private Actions artifact pending Partner Center certification, while the direct Windows NSIS installer requires verified signing to enter the public manifest. The workflow requires `VERCEL_TOKEN`, `VERCEL_ORG_ID`, and `VERCEL_PROJECT_ID`; missing credentials fail deployment and leave the previously deployed manifest unchanged.

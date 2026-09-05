@@ -7,28 +7,28 @@
     <meta name="color-scheme" content="light dark" />
     <meta
       name="description"
-      content="Ensync keeps one coding workflow moving across subscription-backed AI agents—with shared context, safe fallback, and conversation tabs."
+      content="Ensync keeps one coding workflow moving across the subscription-backed AI agents you already use—with shared context, safe fallback, and automatic landing."
     />
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Ensync — Your workflow, uninterrupted" />
+    <meta property="og:title" content="Ensync — One coding workflow, uninterrupted" />
     <meta
       property="og:description"
-      content="One conversation-first workspace for the coding agents you already subscribe to."
+      content="A conversation-first workspace that hands your task across Codex, Claude Code, Factory Droid, and more."
     />
     <meta property="og:url" content="https://site-silk-beta-91.vercel.app/" />
     <meta property="og:image" content="https://site-silk-beta-91.vercel.app/og.png" />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content="Ensync — Your workflow, uninterrupted." />
+    <meta property="og:image:alt" content="Ensync — One coding workflow, uninterrupted" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Ensync — Your workflow, uninterrupted" />
+    <meta name="twitter:title" content="Ensync — One coding workflow, uninterrupted" />
     <meta
       name="twitter:description"
       content="Keep the task, context, project, and conversation when the agent changes."
     />
     <meta name="twitter:image" content="https://site-silk-beta-91.vercel.app/og.png" />
     <link rel="canonical" href="https://site-silk-beta-91.vercel.app/" />
-    <title>Ensync — Your workflow, uninterrupted</title>
+    <title>Ensync — One coding workflow, uninterrupted</title>
     <script>
       try {
         const saved = localStorage.getItem('ensync-site-theme');
@@ -40,355 +40,356 @@
   <body class="landing-page">
     <a class="skip-link" href="#main">Skip to content</a>
 
-    <div class="chat-site-shell">
-      <aside id="site-navigation" class="chat-sidebar" data-navigation aria-label="Main navigation">
-        <div class="sidebar-topline">
-          <a class="brand" href="/" aria-label="Ensync home">
-            <span class="brand-mark" aria-hidden="true"><span></span><span></span></span>
-            <span>ensync</span>
-          </a>
-          <button class="sidebar-close" type="button" data-menu-close aria-label="Close navigation">×</button>
-        </div>
-
-        <a class="new-workflow-button" href="#try">
-          <span aria-hidden="true">＋</span>
-          <span>New workflow</span>
+    <header class="site-header">
+      <div class="container nav-shell">
+        <a class="brand" href="/" aria-label="Ensync home">
+          <span class="brand-mark" aria-hidden="true"><span></span><span></span></span>
+          <span>ensync</span>
         </a>
-
-        <nav class="sidebar-links" aria-label="Product">
-          <a href="#continuity"><span aria-hidden="true">↗</span> How handoff works</a>
-          <a href="#tabs"><span aria-hidden="true">▣</span> Conversation tabs</a>
-          <a href="#providers"><span aria-hidden="true">⌘</span> Your providers</a>
-          <a href="/docs/"><span aria-hidden="true">?</span> Documentation</a>
-        </nav>
-
-        <div class="sidebar-history">
-          <p>What Ensync fixes</p>
-          <a href="#routing">Stop logging in and out</a>
-          <a href="#continuity">Never rebuild context</a>
-          <a href="#tabs">Work in tabs, not files</a>
-          <a href="#truth">No surprise API bill</a>
-        </div>
-
-        <div class="sidebar-footer">
+        <button
+          class="icon-button menu-button"
+          type="button"
+          data-menu-toggle
+          aria-expanded="false"
+          aria-controls="site-navigation"
+        >
+          <span class="sr-only">Toggle navigation</span>
+          <span class="menu-lines" aria-hidden="true"></span>
+        </button>
+        <nav id="site-navigation" class="site-nav" data-navigation aria-label="Main navigation">
+          <a href="#features">Features</a>
+          <a href="#how">How it works</a>
+          <a href="#providers">Providers</a>
+          <a href="#mobile">Mobile</a>
+          <a href="/docs/">Docs</a>
           <a href="/support/">Help desk</a>
-          <a href="/privacy/">Privacy &amp; billing</a>
-          <button class="theme-button sidebar-theme" type="button" data-theme-toggle aria-pressed="false">
+          <button class="theme-button" type="button" data-theme-toggle aria-pressed="false">
             <span class="theme-dot" aria-hidden="true"></span>
             <span data-theme-label>Dark</span>
           </button>
-        </div>
-      </aside>
+          <a class="nav-cta" href="#download">Get Ensync</a>
+        </nav>
+      </div>
+    </header>
 
-      <div class="chat-main-stage">
-        <header class="chat-topbar">
-          <button
-            class="icon-button menu-button chat-menu-button"
-            type="button"
-            data-menu-toggle
-            aria-expanded="false"
-            aria-controls="site-navigation"
-          >
-            <span class="sr-only">Toggle navigation</span>
-            <span class="menu-lines" aria-hidden="true"></span>
-          </button>
-          <a class="mobile-brand" href="/" aria-label="Ensync home">ensync</a>
-          <div class="model-label" role="group" aria-label="Current routing mode">
-            <span>Ensync</span>
-            <b>Auto</b>
-            <span aria-hidden="true">⌄</span>
+    <main id="main">
+      <section class="hero">
+        <div class="container">
+          <div class="hero-shell">
+            <p class="eyebrow">Ensync · AI agent workspace</p>
+            <h1 class="hero-heading">One coding workflow,<br />uninterrupted.</h1>
+            <p class="hero-lede">
+              Keep a single task moving across the AI agents you already subscribe to—Codex, Claude Code,
+              Factory Droid, and more. Ensync preserves the conversation, project, feature memory, and
+              verified Git state, so you never rebuild context or babysit a provider.
+            </p>
+            <div class="hero-ctas">
+              <a class="button button-primary" href="#download">Get Ensync</a>
+              <a class="button button-secondary" href="https://github.com/mikey641/ensync">View source</a>
+              <a class="button button-secondary" href="/docs/">Read the docs</a>
+            </div>
+            <p class="hero-truth">No silent API fallback. No invented quota. No replay after ambiguous activity.</p>
           </div>
-          <nav class="topbar-actions" aria-label="Quick links">
-            <a href="/docs/">Docs</a>
-            <a class="topbar-cta" href="#download">Get Ensync</a>
-          </nav>
-        </header>
+        </div>
+      </section>
 
-        <main id="main">
-          <section id="try" class="chat-hero">
-            <div class="hero-center">
-              <p class="availability-pill"><span></span> Subscription-powered. Provider-neutral.</p>
-              <h1>Your workflow,<br /><span>uninterrupted.</span></h1>
-              <p class="chat-hero-lede">
-                Keep one coding task moving across the AI agents you already pay for—without rebuilding context,
-                changing projects, or living in an editor.
-              </p>
+      <section id="features" class="section section--tint">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">Everything the workspace does</p>
+            <h2>A full desk for coding agents,<br />not another editor.</h2>
+            <p class="lead">
+              The desktop app drives a local Ensync Host that runs the providers you already pay for in an
+              isolated worktree, then lands, pushes, and deploys the result automatically.
+            </p>
+          </div>
 
-              <div class="demo-shell" role="region" aria-label="Interactive Ensync product preview">
-                <form class="prompt-box" data-demo-form>
-                  <label class="sr-only" for="demo-prompt">Preview a workflow request</label>
-                  <textarea id="demo-prompt" rows="2" data-demo-input>Keep this task moving, even if my preferred agent is unavailable.</textarea>
-                  <div class="prompt-toolbar">
-                    <div class="prompt-modes" role="group" aria-label="Preview settings">
-                      <span><i class="auto-spark" aria-hidden="true">✦</i> Auto</span>
-                      <span>Provider default</span>
-                    </div>
-                    <button class="prompt-send" type="submit" aria-label="Run product preview">↑</button>
-                  </div>
-                </form>
-                <p class="demo-note">Interactive product preview — no agent will run here.</p>
-                <div class="demo-response" data-demo-response role="status" aria-live="polite">
-                  <span class="response-mark" aria-hidden="true">e</span>
-                  <p><strong>Ready.</strong> Ensync will keep the project, conversation, and task context together before choosing an eligible connected runner.</p>
-                </div>
-              </div>
+          <div class="feature-grid">
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">▤</span>
+              <h3>Conversation tabs &amp; split panes</h3>
+              <p>Durable, searchable tabs. Open several tasks side by side, each with its own draft, provider, model size, and execution state.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">⌂</span>
+              <h3>Verified project focus</h3>
+              <p>A native Finder or Windows folder picker sets one hard boundary for chats, files, memory, Git, and terminals. Nothing leaks across projects.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">⌘</span>
+              <h3>Provider &amp; model selectors</h3>
+              <p>Pick Auto or a fixed runner in every header, and choose Provider default, Small, Medium, Large, or XL effort.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">✦</span>
+              <h3>Automatic routing</h3>
+              <p>Auto follows your saved priority and picks the first connected, tested runner with verified remaining subscription usage.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">↗</span>
+              <h3>Safe fallback</h3>
+              <p>Continues a run only when the Host proves no tool, command, file, or unknown activity happened. Ambiguous or post-mutation failures stop for review.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">⇄</span>
+              <h3>Git isolation &amp; auto-landing</h3>
+              <p>Each chat gets its own durable worktree and branch. Finished turns land in FIFO trains and merge on their own—no manual merge-review state.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">→</span>
+              <h3>Delivery pipeline</h3>
+              <p>Saved → Landing → Pushed → Building → Production, or Protected branch only when you want the commit anchored without a merge or deploy.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">⌁</span>
+              <h3>Remote execution</h3>
+              <p>Run on the local Host, an SSH worker, a guided VirtualBox VM, or control it from your phone through Ensync Sync.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">%</span>
+              <h3>Honest usage telemetry</h3>
+              <p>Quota percentages, plans, reset windows, and models appear only when the real CLI reports them. Unknowns stay unknown.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">⇢</span>
+              <h3>Telegram bridge</h3>
+              <p>Approve and run restricted work from a private chat. Risky actions still require explicit approval.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">↻</span>
+              <h3>Native updates</h3>
+              <p>Background check and download, then an explicit install step. SHA-256 and publisher verification keep the channel honest.</p>
+            </article>
+            <article class="feature-card">
+              <span class="feature-icon" aria-hidden="true">✚</span>
+              <h3>Local-first help desk</h3>
+              <p>Redacted diagnostics and an opt-in, review-required repair through your own subscription. Never auto-fixed behind your back.</p>
+            </article>
+          </div>
+        </div>
+      </section>
 
-              <div class="prompt-suggestions" role="group" aria-label="Try a product scenario">
-                <button type="button" data-demo-prompt="login"><span aria-hidden="true">↻</span> I’m tired of login/logout</button>
-                <button type="button" data-demo-prompt="model"><span aria-hidden="true">⌘</span> Just use an available agent</button>
-                <button type="button" data-demo-prompt="flow"><span aria-hidden="true">→</span> Never stop my workflow</button>
-                <button type="button" data-demo-prompt="tabs"><span aria-hidden="true">▣</span> Give me Codex-style tabs</button>
-              </div>
-              <p class="hero-truth">No silent API fallback. No invented quota. No replay after ambiguous activity.</p>
-            </div>
-          </section>
-
-          <section id="continuity" class="conversation-story story-section">
-            <div class="story-thread">
-              <article class="story-user reveal">
-                <p>I’m tired of logging out, opening another CLI, and explaining the whole task again.</p>
-              </article>
-              <article class="story-assistant reveal">
-                <div class="story-avatar" aria-hidden="true">e</div>
-                <div>
-                  <p class="story-kicker">That handoff is the product.</p>
-                  <h2>Change the agent.<br />Keep the work.</h2>
-                  <p>
-                    Ensync gives every supported runner the same provider-neutral task identity: the conversation,
-                    selected project, durable feature decisions, applicable instructions, and verified Git state.
-                  </p>
-                </div>
-              </article>
-            </div>
-
-            <div class="handoff-demo reveal" role="region" aria-label="Safe provider handoff example">
-              <div class="handoff-topbar">
-                <span>Auto Context</span>
-                <span class="safe-badge"><i></i> Safe handoff</span>
-              </div>
-              <div class="handoff-timeline">
-                <article>
-                  <span class="agent-logo claude-logo">C</span>
-                  <div><small>1 · Preferred runner</small><h3>Claude Code</h3><p>Reports a verified capacity limit before any mutation.</p></div>
-                  <b class="timeline-status limit">Limit reached</b>
-                </article>
-                <div class="timeline-connector"><span></span><b>Context compiled</b><span></span></div>
-                <article>
-                  <span class="agent-logo codex-logo">O</span>
-                  <div><small>2 · Next eligible runner</small><h3>Codex</h3><p>Continues the same request on the same project and target.</p></div>
-                  <b class="timeline-status running">Continuing</b>
-                </article>
-              </div>
-              <div class="context-receipt">
-                <span>✓ Relevant conversation</span>
-                <span>✓ Project instructions</span>
-                <span>✓ Feature memory</span>
-                <span>✓ Verified Git state</span>
-              </div>
-            </div>
-          </section>
-
-          <section id="routing" class="benefit-section">
-            <div class="section-intro reveal">
-              <p class="section-label">Less provider management</p>
-              <h2>Ask once. Let Ensync handle the handoff.</h2>
+      <section id="how" class="section">
+        <div class="container">
+          <div class="split">
+            <div class="split-copy">
+              <p class="eyebrow">How it works</p>
+              <h3>Change the agent. Keep the work.</h3>
               <p>
-                Auto follows your saved priority across connected, tested subscription runners. A fixed provider stays
-                fixed unless a safe one-turn fallback is explicitly enabled.
+                A coding task lives above any one provider. Ensync keeps its identity—project, transcript,
+                feature memory, instructions, and verified Git state—together and hands it across the CLIs
+                you already log into.
               </p>
+              <div class="continuity-note">
+                <p><strong>Safe handoff by default</strong> Fallback continues only before any mutation. Timeouts, malformed output, tool activity, or unknown work always stop for review.</p>
+              </div>
             </div>
-            <div class="benefit-grid">
-              <article class="benefit-card reveal">
-                <span class="benefit-icon" aria-hidden="true">↻</span>
-                <p class="benefit-question">“Do I have to keep signing in and out?”</p>
-                <h3>Connect once through official CLIs.</h3>
-                <p>Each vendor keeps its own account and subscription. Ensync discovers the signed-in tools on your computer.</p>
-              </article>
-              <article class="benefit-card reveal">
-                <span class="benefit-icon" aria-hidden="true">✦</span>
-                <p class="benefit-question">“Can it just choose what’s available?”</p>
-                <h3>Auto respects your ranking.</h3>
-                <p>Known remaining subscription capacity wins. Unknown telemetry is kept honest and considered only after verified options.</p>
-              </article>
-              <article class="benefit-card reveal">
-                <span class="benefit-icon" aria-hidden="true">→</span>
-                <p class="benefit-question">“Will my workflow stop?”</p>
-                <h3>Not for a safe provider limit.</h3>
-                <p>Fallback can continue before mutation. Timeouts, malformed output, and observed tool activity stop for review.</p>
-              </article>
-            </div>
-          </section>
+            <ol class="steps">
+              <li>
+                <h3>Connect your CLIs once</h3>
+                <p>Ensync discovers the signed-in official tools on your computer. Each vendor keeps its own account and subscription.</p>
+              </li>
+              <li>
+                <h3>Ask once</h3>
+                <p>Auto picks an eligible runner and runs in an isolated worktree branched from your clean checkout.</p>
+              </li>
+              <li>
+                <h3>It lands and delivers</h3>
+                <p>Compatible commits merge in order, push to origin, and report live status to Production—or just hold the exact commit.</p>
+              </li>
+            </ol>
+          </div>
+        </div>
+      </section>
 
-          <section id="tabs" class="tabs-section">
-            <div class="tabs-copy reveal">
-              <p class="section-label">Conversation-first workspace</p>
-              <h2>Like Codex tabs?<br />Leave the editor behind.</h2>
+      <section id="providers" class="section section--tint">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">Your subscriptions stay yours</p>
+            <h2>One workspace. Separate provider accounts.</h2>
+            <p class="lead">
+              Codex, Claude Code, and Factory Droid are the tested chat runners. The rest of the catalog is
+              shown honestly as discovery-only until each runner, quota contract, adapter, and paid-overage
+              guard is verified.
+            </p>
+          </div>
+
+          <div class="provider-grid">
+            <article class="provider-card">
+              <div class="provider-top">
+                <span class="provider-mark codex" aria-hidden="true">O</span>
+                <span class="status-tag available">Ready</span>
+              </div>
+              <h3>Codex</h3>
+              <p>Tested structured runner using your official ChatGPT subscription login.</p>
+            </article>
+            <article class="provider-card">
+              <div class="provider-top">
+                <span class="provider-mark claude" aria-hidden="true">C</span>
+                <span class="status-tag available">Ready</span>
+              </div>
+              <h3>Claude Code</h3>
+              <p>Tested structured runner using your official Claude subscription login.</p>
+            </article>
+            <article class="provider-card">
+              <div class="provider-top">
+                <span class="provider-mark droid" aria-hidden="true">D</span>
+                <span class="status-tag available">Ready</span>
+              </div>
+              <h3>Factory Droid</h3>
+              <p>Tested structured runner using your official Factory subscription login.</p>
+            </article>
+          </div>
+
+          <div class="catalog-wrap">
+            <div class="catalog-heading">
+              <span>Provider catalog</span>
+              <span>Discovery status is shown honestly</span>
+            </div>
+            <div class="provider-cloud" role="group" aria-label="Supported provider catalog">
+              <span>GitHub Copilot CLI</span><span>Cursor Agent</span><span>Google Antigravity</span><span>Google Jules</span>
+              <span>Kimi Code</span><span>Kiro CLI</span><span>Junie CLI</span><span>GitLab Duo CLI</span>
+              <span>Warp Oz</span><span>Amp</span><span>Augment Auggie</span><span>Qoder CLI</span>
+              <span>CodeBuddy Code</span><span>Ollama (local)</span>
+            </div>
+            <a class="catalog-link" href="/docs/#providers">See provider setup and exact readiness <span aria-hidden="true">→</span></a>
+          </div>
+        </div>
+      </section>
+
+      <section id="mobile" class="section">
+        <div class="container">
+          <div class="split mobile-grid">
+            <div class="split-copy">
+              <p class="eyebrow">Remote control</p>
+              <h3>Run jobs from your phone.</h3>
               <p>
-                Ensync is built around conversations, not a file tree. Open work as normal tabs or split several tasks
-                side by side. Every chat keeps its own draft, provider, execution state, and project context.
+                The iOS and Android client—or the same app installed as a web PWA—signs into your
+                self-hosted Ensync Sync service and controls a paired computer. Start, follow, stop, and
+                steer Codex or Claude Code jobs while the Host keeps owning the run.
               </p>
-              <ul class="feature-checks">
-                <li><span>✓</span> Durable conversation tabs and history</li>
-                <li><span>✓</span> Side-by-side resizable panes</li>
-                <li><span>✓</span> Independent concurrent workflows</li>
-                <li><span>✓</span> Clean native windows on macOS and Windows</li>
+            </div>
+            <div>
+              <ul class="check-list">
+                <li>Claim a one-time pairing code from desktop Settings</li>
+                <li>List paired hosts and submit a job with a project path the Host re-verifies</li>
+                <li>Poll and decrypt progress events live, then stop or steer the turn</li>
+                <li>Everything is end-to-end encrypted (AES-256-GCM); Sync never sees plaintext</li>
+                <li>Installable from the phone home screen with no App Store required</li>
+              </ul>
+              <ul class="check-list unavailable-list">
+                <li>Project discovery, attachments, approvals, background push, and OS keychain still planned</li>
+                <li>App Store and Play Store signing not yet published</li>
               </ul>
             </div>
-
-            <div class="workspace-window reveal" role="img" aria-label="Ensync conversation tabs product preview">
-              <div class="window-chrome">
-                <div class="traffic-lights" aria-hidden="true"><span></span><span></span><span></span></div>
-                <div class="window-project"><span aria-hidden="true">⌂</span> ensync</div>
-                <span>Local Ensync Host</span>
-              </div>
-              <div class="window-body">
-                <div class="window-rail" aria-hidden="true"><b>e</b><span>＋</span><span>⌕</span><span>▣</span><i></i><span>⚙</span></div>
-                <div class="window-workspace">
-                  <div class="window-tabs">
-                    <div class="active"><i></i> Agent routing <span>×</span></div>
-                    <div><i></i> Release site <span>×</span></div>
-                    <div><i></i> Windows signing <span>×</span></div>
-                    <button type="button" tabindex="-1" aria-hidden="true">＋</button>
-                  </div>
-                  <div class="window-panes">
-                    <article>
-                      <header><b>Agent routing</b><span>Auto · Large</span></header>
-                      <div class="mini-context">ensync · Keep fallback safe before mutation</div>
-                      <div class="mini-user">Make routing continue on the next eligible subscription.</div>
-                      <div class="mini-agent"><span class="response-mark">e</span><p>The host now preserves the exact project, target, size, and transcript on a safe handoff.</p></div>
-                      <div class="mini-composer">Ask anything <b>↑</b></div>
-                    </article>
-                    <article>
-                      <header><b>Release site</b><span>Codex · Default</span></header>
-                      <div class="mini-context">ensync · Publishing experience</div>
-                      <div class="mini-user">Make the product site feel like the app.</div>
-                      <div class="mini-agent"><span class="response-mark">e</span><p>Building a conversation-first landing page with truthful release gates.</p></div>
-                      <div class="mini-composer">Continue this task <b>↑</b></div>
-                    </article>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          <section id="providers" class="provider-section">
-            <div class="section-intro reveal">
-              <p class="section-label">Your subscriptions stay yours</p>
-              <h2>One workspace.<br />Separate provider accounts.</h2>
-              <p>
-                Codex and Claude Code are the currently tested chat runners. The broader catalog stays visible as
-                discovery-only until each runner, quota contract, session adapter, and paid-overage guard is verified.
-              </p>
-            </div>
-
-            <div class="runner-row reveal">
-              <article>
-                <span class="agent-logo codex-logo">O</span>
-                <div><small>Tested runner</small><h3>Codex</h3><p>Uses your official ChatGPT subscription login.</p></div>
-                <span class="runner-ready">Ready</span>
-              </article>
-              <article>
-                <span class="agent-logo claude-logo">C</span>
-                <div><small>Tested runner</small><h3>Claude Code</h3><p>Uses your official Claude subscription login.</p></div>
-                <span class="runner-ready">Ready</span>
-              </article>
-            </div>
-
-            <div class="catalog-card reveal">
-              <div class="catalog-heading"><span>Provider catalog</span><span>Discovery status is shown honestly</span></div>
-              <div class="provider-cloud" role="group" aria-label="Supported provider catalog">
-                <span>GitHub Copilot CLI</span><span>Cursor Agent</span><span>Google Antigravity</span><span>Google Jules</span>
-                <span>Kimi Code</span><span>Kiro CLI</span><span>Junie CLI</span><span>GitLab Duo CLI</span>
-                <span>Warp Oz</span><span>Factory Droid</span><span>Amp</span><span>Augment Auggie</span>
-                <span>Qoder CLI</span><span>CodeBuddy Code</span><span>Ollama (local)</span>
-              </div>
-              <a href="/docs/#providers">See provider setup and exact readiness <span aria-hidden="true">→</span></a>
-            </div>
-          </section>
-
-          <section id="truth" class="truth-section">
-            <div class="truth-heading reveal">
-              <span class="story-avatar" aria-hidden="true">e</span>
-              <div><p class="section-label">Built to tell the truth</p><h2>Automation with a seatbelt.</h2></div>
-            </div>
-            <div class="truth-grid">
-              <article class="reveal"><span>01</span><h3>No silent API billing</h3><p>Subscription jobs never fall through to a per-token API key behind your back.</p></article>
-              <article class="reveal"><span>02</span><h3>Safe fallback only</h3><p>Observed or unknown mutation blocks replay and marks the task for reconciliation.</p></article>
-              <article class="reveal"><span>03</span><h3>Exact usage or unknown</h3><p>Plans, percentages, reset windows, and models appear only when the real CLI reports them.</p></article>
-              <article class="reveal"><span>04</span><h3>One strict project boundary</h3><p>Chats, memory, files, Git, and runtime stay scoped to the selected verified folder.</p></article>
-            </div>
-          </section>
-
-          <section id="download" class="download-section chat-download-section">
-            <div class="download-conversation reveal">
-              <article class="story-user"><p>Ready. Where do I download it?</p></article>
-              <article class="story-assistant">
-                <div class="story-avatar" aria-hidden="true">e</div>
-                <div>
-                  <p class="story-kicker">Desktop release</p>
-                  <h2>macOS and Windows.<br />Only through verified release channels.</h2>
-                  <p>macOS unlocks only after signing, notarization, and checksum verification. Windows unlocks only through the certified Microsoft Store listing.</p>
-                  <span class="manifest-status" data-manifest-status>Checking release manifest…</span>
-                </div>
-              </article>
-            </div>
-
-            <div class="download-grid">
-              <article class="download-card" data-download-platform="macos" data-available="false">
-                <div class="platform-icon apple" aria-hidden="true">●</div>
-                <span class="status-tag" data-download-status>Checking build…</span>
-                <h3>Ensync for macOS</h3>
-                <p data-download-detail>Checking the certified Microsoft Store listing.</p>
-                <a class="button button-primary download-button" data-download-button aria-disabled="true" tabindex="-1">Checking…</a>
-                <p class="checksum" data-download-checksum hidden>SHA-256 <code data-checksum-value></code></p>
-              </article>
-              <article class="download-card" data-download-platform="windows" data-available="false">
-                <div class="platform-icon windows" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
-                <span class="status-tag" data-download-status>Checking build…</span>
-                <h3>Ensync for Windows</h3>
-                <p data-download-detail>Verifying the latest release manifest.</p>
-                <a class="button button-primary download-button" data-download-button aria-disabled="true" tabindex="-1">Checking…</a>
-                <p class="checksum" data-download-checksum hidden>SHA-256 <code data-checksum-value></code></p>
-              </article>
-            </div>
-
-            <h3 class="source-heading">No installer yet? Run it from source.</h3>
-            <div class="download-grid">
-              <article class="download-card">
-                <div class="platform-icon apple" aria-hidden="true">⌘</div>
-                <span class="status-tag">Source · computer</span>
-                <h3>Desktop app (macOS / Windows)</h3>
-                <p>Clone the MIT-licensed repository and start the native shell with Node.js 20 or newer. Signing and the Store listing are separate, verified steps.</p>
-                <a class="button button-primary download-button" href="https://github.com/mikey641/ensync">View source repository</a>
-              </article>
-              <article class="download-card">
-                <div class="platform-icon windows" aria-hidden="true">⌁</div>
-                <span class="status-tag">Web app · phone</span>
-                <h3>Ensync Mobile (PWA)</h3>
-                <p>Installable from iOS and Android home screens with no app store. Build <code>mobile/dist</code>, self-host it on HTTPS, and pair it with your Ensync Host.</p>
-                <a class="button button-primary download-button" href="https://github.com/mikey641/ensync/tree/main/mobile">Mobile client &amp; setup</a>
-              </article>
-            </div>
-            <p class="release-truth" data-release-truth>There is currently no public desktop release. The site will not offer placeholder installers, uncertified Store packages, or unverified artifacts.</p>
-          </section>
-        </main>
-
-        <footer class="chat-footer">
-          <div>
-            <a class="brand" href="/" aria-label="Ensync home"><span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>ensync</span></a>
-            <p>The conversation-first workspace for coding agents.</p>
           </div>
-          <nav aria-label="Footer">
-            <a href="/docs/">Documentation</a>
-            <a href="/support/">Help desk</a>
-            <a href="/privacy/">Privacy &amp; billing</a>
-            <a data-config-link="sourceRepository" class="is-disabled" aria-disabled="true">View source repository</a>
-            <a data-config-link="statusPage" class="is-disabled" aria-disabled="true">Status page not configured</a>
-          </nav>
-          <div class="footer-meta"><span>© <span data-copy-year></span> Ensync</span><span>Subscription-first · Local-first</span></div>
-        </footer>
+        </div>
+      </section>
+
+      <section id="truth" class="section section--tint">
+        <div class="container">
+          <div class="truth-shell">
+            <p class="eyebrow">Built to tell the truth</p>
+            <h2>Automation with a seatbelt.</h2>
+            <div class="truth-grid">
+              <article><span>01</span><h3>No silent API billing</h3><p>Subscription jobs never fall through to a per-token API key behind your back.</p></article>
+              <article><span>02</span><h3>Safe fallback only</h3><p>Observed or unknown mutation blocks replay and marks the task for reconciliation.</p></article>
+              <article><span>03</span><h3>Exact usage or unknown</h3><p>Plans, percentages, reset windows, and models appear only when the real CLI reports them.</p></article>
+              <article><span>04</span><h3>One strict project boundary</h3><p>Chats, memory, files, Git, and runtime stay scoped to the selected verified folder.</p></article>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="download" class="section download-section">
+        <div class="container">
+          <div class="section-head">
+            <p class="eyebrow">Get Ensync</p>
+            <h2>macOS and Windows,<br />only through verified channels.</h2>
+            <p class="lead">
+              Desktop installers unlock only after signing and checksum verification. Windows is available
+              through the certified Microsoft Store listing or as a signed direct installer—never an
+              uncertified or placeholder build.
+            </p>
+          </div>
+
+          <p class="manifest-status" data-manifest-status>Checking release manifest…</p>
+
+          <div class="download-grid">
+            <article class="download-card" data-download-platform="macos" data-available="false">
+              <div class="platform-icon apple" aria-hidden="true">●</div>
+              <span class="status-tag" data-download-status>Checking build…</span>
+              <h3>Ensync for macOS</h3>
+              <p data-download-detail>Checking for a signed, notarized release.</p>
+              <a class="button button-primary download-button" data-download-button aria-disabled="true" tabindex="-1">Checking…</a>
+              <p class="checksum" data-download-checksum hidden>SHA-256 <code data-checksum-value></code></p>
+            </article>
+            <article class="download-card" data-download-platform="windows" data-available="false">
+              <div class="platform-icon windows" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+              <span class="status-tag" data-download-status>Checking build…</span>
+              <h3>Ensync for Windows</h3>
+              <p data-download-detail>Checking the certified Store listing or a signed installer.</p>
+              <a class="button button-primary download-button" data-download-button aria-disabled="true" tabindex="-1">Checking…</a>
+              <p class="checksum" data-download-checksum hidden>SHA-256 <code data-checksum-value></code></p>
+            </article>
+          </div>
+
+          <h3 class="source-heading">No installer yet? Run it from source.</h3>
+          <div class="download-grid">
+            <article class="download-card">
+              <div class="platform-icon apple" aria-hidden="true">⌘</div>
+              <span class="status-tag">Source · computer</span>
+              <h3>Desktop app (macOS / Windows)</h3>
+              <p>Clone the MIT-licensed repository and start the native shell with Node.js 20 or newer. Signing and the Store listing are separate, verified steps.</p>
+              <a class="button button-primary download-button" href="https://github.com/mikey641/ensync">View source repository</a>
+            </article>
+            <article class="download-card">
+              <div class="platform-icon windows" aria-hidden="true">⌁</div>
+              <span class="status-tag">Web app · phone</span>
+              <h3>Ensync Mobile (PWA)</h3>
+              <p>Installable from iOS and Android home screens with no app store. Build <code>mobile/dist</code>, self-host it on HTTPS, and pair it with your Ensync Host.</p>
+              <a class="button button-primary download-button" href="https://github.com/mikey641/ensync/tree/main/mobile">Mobile client &amp; setup</a>
+            </article>
+          </div>
+          <p class="release-truth" data-release-truth>There is currently no signed public desktop release. The site will not offer placeholder installers, uncertified Store packages, or unverified artifacts.</p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <div class="container footer-grid">
+        <div>
+          <a class="brand footer-brand" href="/" aria-label="Ensync home">
+            <span class="brand-mark" aria-hidden="true"><span></span><span></span></span><span>ensync</span>
+          </a>
+          <p>The conversation-first workspace for coding agents.</p>
+        </div>
+        <div>
+          <h3>Product</h3>
+          <a href="#features">Features</a>
+          <a href="#how">How it works</a>
+          <a href="#providers">Providers</a>
+          <a href="#mobile">Mobile</a>
+        </div>
+        <div>
+          <h3>Resources</h3>
+          <a href="/docs/">Documentation</a>
+          <a href="https://github.com/mikey641/ensync/blob/main/USER-MANUAL.md">User manual</a>
+          <a href="/support/">Help desk</a>
+          <a href="/privacy/">Privacy &amp; billing</a>
+        </div>
+        <div>
+          <h3>Community</h3>
+          <a data-config-link="sourceRepository" class="is-disabled" aria-disabled="true">View source repository</a>
+          <a data-config-link="issueTracker" class="is-disabled" aria-disabled="true">Open issue tracker</a>
+          <a data-support-email class="is-disabled" aria-disabled="true">Support email</a>
+        </div>
       </div>
-    </div>
+      <div class="container footer-bottom">
+        <span>© <span data-copy-year></span> Ensync</span>
+        <span>Subscription-first · Local-first</span>
+      </div>
+    </footer>
 
     <script type="module" src="/app.js"></script>
   </body>
