@@ -215,13 +215,28 @@ export class DeliveryCoordinator {
       deploymentDashboardUrl: observed.deploymentDashboardUrl ?? null,
     }
     if (observed.state === 'missing' || observed.state === 'building') {
-      await this.journal.update(id, { ...deployment, state: observed.state === 'building' ? 'building' : 'pushed' })
+      await this.journal.update(id, {
+        ...deployment,
+        state: observed.state === 'building' ? 'building' : 'pushed',
+        failureCode: null,
+        failureMessage: null,
+        failureLog: null,
+      })
       this.#schedule(id)
       return
     }
     if (observed.state === 'ready') {
       const productionAt = new Date().toISOString()
-      await this.journal.update(id, { ...deployment, state: 'production', repairState: 'idle', productionAt, nextActionAt: null })
+      await this.journal.update(id, {
+        ...deployment,
+        state: 'production',
+        repairState: 'idle',
+        failureCode: null,
+        failureMessage: null,
+        failureLog: null,
+        productionAt,
+        nextActionAt: null,
+      })
       for (const candidate of await this.journal.list()) {
         if (candidate.replacementCommitSha === record.productionCommitSha && candidate.state !== 'production') {
           await this.journal.update(candidate.id, { state: 'production', repairState: 'idle', productionAt, nextActionAt: null })

@@ -52,6 +52,36 @@ test('delivery follows an exact pushed SHA through build to production', async (
   await coordinator.shutdown()
 })
 
+test('a successful authenticated retry clears an earlier lookup failure', async () => {
+  const journal = new MemoryJournal()
+  const coordinator = new DeliveryCoordinator({
+    journal,
+    pollMs: 5,
+    adapters: [{ inspect: async () => ({
+      available: true,
+      provider: 'vercel',
+      state: 'ready',
+      deploymentId: 'exact-deployment',
+    }) }],
+  })
+  coordinator.handleLandingEvent({ type: 'queued', item })
+  await settle()
+  await journal.update(journal.records[0].id, {
+    state: 'unavailable',
+    failureCode: 'forbidden',
+    failureMessage: 'Vercel deployment lookup returned HTTP 403.',
+    failureLog: 'stale lookup failure',
+  })
+  coordinator.handleLandingEvent({ type: 'pushed', items: [item], repositoryPath: '/repo', productionCommitSha: SHA, targetBranch: 'main' })
+  await settle()
+  const status = await coordinator.status('/repo/app')
+  assert.equal(status.current.state, 'production')
+  assert.equal(status.current.failureCode, null)
+  assert.equal(status.current.failureMessage, null)
+  assert.equal(status.current.failureLogAvailable, false)
+  await coordinator.shutdown()
+})
+
 test('landing status exposes exact merge activity, prompt identity, and merge description', async () => {
   const journal = new MemoryJournal()
   const coordinator = new DeliveryCoordinator({

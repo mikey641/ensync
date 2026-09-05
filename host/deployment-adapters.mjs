@@ -1,9 +1,12 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 const VERCEL_API = 'https://api.vercel.com'
+const VERCEL_ISSUER = 'https://vercel.com'
+const VERCEL_CLI_CLIENT_ID = 'cl_HYyOPBNtFMfHhaUn9L4QPfTZz6TP47bp'
 const MAX_FAILURE_LOG = 16_384
+const AUTH_EXPIRY_SKEW_SECONDS = 30
 
 function bounded(value, maximum = 4_096) {
   return typeof value === 'string' && value.trim() ? value.trim().slice(0, maximum) : null
@@ -49,10 +52,14 @@ export class VercelDeploymentAdapter {
   constructor(options = {}) {
     this.fetch = options.fetch ?? globalThis.fetch
     this.readFile = options.readFile ?? readFile
+    this.writeFile = options.writeFile ?? writeFile
     this.home = options.home ?? homedir()
     this.platform = options.platform ?? process.platform
     this.env = options.env ?? process.env
     this.apiBase = options.apiBase ?? VERCEL_API
+    this.issuer = options.issuer ?? VERCEL_ISSUER
+    this.now = options.now ?? Date.now
+    this.authRefreshes = new Map()
   }
 
   async inspect(record) {
@@ -60,8 +67,8 @@ export class VercelDeploymentAdapter {
     if (!bounded(config?.projectId, 256)) {
       return { available: false, provider: 'vercel', reason: 'No linked Vercel project was found for this repository.' }
     }
-    const auth = await this.#auth()
-    if (!auth) {
+    const credentials = await this.#credentials()
+    if (!credentials.length) {
       return { available: false, provider: 'vercel', reason: 'Vercel CLI authentication is unavailable on this Host.' }
     }
     if (typeof this.fetch !== 'function') {
@@ -70,10 +77,12 @@ export class VercelDeploymentAdapter {
     const query = new URLSearchParams({ projectId: config.projectId, limit: '20' })
     if (config.orgId) query.set('teamId', config.orgId)
     let payload
+    let auth
     try {
-      const response = await this.fetch(`${this.apiBase}/v6/deployments?${query}`, {
-        headers: { Authorization: `Bearer ${auth}` },
-      })
+      const authorized = await this.#authorizedFetch(`${this.apiBase}/v6/deployments?${query}`, credentials)
+      const { response } = authorized
+      auth = authorized.token
+      if (!response) throw new Error('Vercel CLI authentication was rejected after automatic refresh.')
       if (!response.ok) throw new Error(`Vercel deployment lookup returned HTTP ${response.status}.`)
       payload = await response.json()
     } catch (error) {
@@ -105,13 +114,96 @@ export class VercelDeploymentAdapter {
     return result
   }
 
-  async #auth() {
-    if (bounded(this.env.VERCEL_TOKEN, 8_192)) return this.env.VERCEL_TOKEN.trim()
+  async #credentials() {
+    const credentials = []
+    if (bounded(this.env.VERCEL_TOKEN, 8_192)) {
+      credentials.push({ token: this.env.VERCEL_TOKEN.trim(), path: null, payload: null })
+    }
     for (const path of authCandidates(this.platform, this.home, this.env)) {
       const payload = await readJson(path, this.readFile)
-      if (bounded(payload?.token, 8_192)) return payload.token.trim()
+      if (bounded(payload?.token, 8_192)) credentials.push({ token: payload.token.trim(), path, payload })
     }
-    return null
+    return credentials
+  }
+
+  async #authorizedFetch(url, credentials) {
+    let lastResponse = null
+    for (const original of credentials) {
+      let credential = original
+      let refreshed = false
+      if (this.#expired(credential.payload) && bounded(credential.payload?.refreshToken, 8_192)) {
+        credential = await this.#refresh(credential) ?? credential
+        refreshed = credential !== original
+      }
+      let response = await this.fetch(url, {
+        headers: { Authorization: `Bearer ${credential.token}` },
+      })
+      if ([401, 403].includes(response.status) && !refreshed && bounded(credential.payload?.refreshToken, 8_192)) {
+        const replacement = await this.#refresh(credential)
+        if (replacement) {
+          credential = replacement
+          response = await this.fetch(url, {
+            headers: { Authorization: `Bearer ${credential.token}` },
+          })
+        }
+      }
+      if (![401, 403].includes(response.status)) return { response, token: credential.token }
+      lastResponse = response
+    }
+    return { response: lastResponse, token: null }
+  }
+
+  #expired(payload) {
+    return typeof payload?.expiresAt === 'number'
+      && payload.expiresAt < Math.floor(this.now() / 1_000) + AUTH_EXPIRY_SKEW_SECONDS
+  }
+
+  async #refresh(credential) {
+    if (!credential.path || !bounded(credential.payload?.refreshToken, 8_192)) return null
+    const active = this.authRefreshes.get(credential.path)
+    if (active) return active
+    const refresh = this.#performRefresh(credential)
+    this.authRefreshes.set(credential.path, refresh)
+    try {
+      return await refresh
+    } finally {
+      if (this.authRefreshes.get(credential.path) === refresh) this.authRefreshes.delete(credential.path)
+    }
+  }
+
+  async #performRefresh(credential) {
+    try {
+      const discovery = await this.fetch(`${this.issuer}/.well-known/openid-configuration`, {
+        headers: { 'Content-Type': 'application/json' },
+      })
+      if (!discovery.ok) return null
+      const metadata = await discovery.json()
+      if (!bounded(metadata?.token_endpoint, 2_048)) return null
+      const response = await this.fetch(metadata.token_endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          client_id: VERCEL_CLI_CLIENT_ID,
+          grant_type: 'refresh_token',
+          refresh_token: credential.payload.refreshToken,
+        }),
+      })
+      if (!response.ok) return null
+      const tokens = await response.json()
+      if (!bounded(tokens?.access_token, 8_192) || typeof tokens?.expires_in !== 'number') return null
+      const payload = {
+        ...credential.payload,
+        token: tokens.access_token.trim(),
+        expiresAt: Math.floor(this.now() / 1_000) + tokens.expires_in,
+        refreshToken: bounded(tokens.refresh_token, 8_192)
+          ? tokens.refresh_token.trim()
+          : credential.payload.refreshToken,
+      }
+      await this.writeFile(credential.path, `${JSON.stringify(payload, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 })
+      return { token: payload.token, path: credential.path, payload }
+    } catch {
+      return null
+    }
   }
 
   async #failureLog(deploymentId, orgId, token) {
