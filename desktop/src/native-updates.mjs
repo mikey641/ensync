@@ -388,7 +388,7 @@ export function createNativeUpdateManager({
     updatesAllowed = true
     return publish({
       phase: 'idle',
-      message: `${channel === 'beta' ? 'Beta' : 'Stable'} updates have not been checked. Ensync checks only when you ask.`,
+      message: `${channel === 'beta' ? 'Beta' : 'Stable'} updates will be checked and downloaded automatically in the background.`,
       canCheck: true,
       canChangeChannel: true,
     })
@@ -643,7 +643,7 @@ export function createNativeUpdateManager({
         channel,
         phase: updatesAllowed && configured ? 'idle' : 'unavailable',
         message: updatesAllowed && configured
-          ? `${channel === 'beta' ? 'Beta' : 'Stable'} updates have not been checked. Ensync checks only when you ask.`
+          ? `${channel === 'beta' ? 'Beta' : 'Stable'} updates will be checked and downloaded automatically in the background.`
           : `This build cannot use the configured ${channel} update feed.`,
         availableVersion: null,
         checkedAt: null,
@@ -668,6 +668,33 @@ export function createNativeUpdateManager({
     openDownloadedInstaller,
     setChannel,
   })
+}
+
+const BACKGROUND_UPDATE_SKIP_PHASES = new Set([
+  'checking',
+  'downloading',
+  'downloaded',
+  'installer_opened',
+])
+
+// Background-update entry point: check the signed feed and, when a newer
+// verified release appears, download it automatically. The installer is still
+// only opened by an explicit user action, and a download already in progress or
+// already verified is never disturbed by the periodic auto-check.
+export async function checkAndDownloadIfAvailable(manager) {
+  if (
+    !manager
+    || typeof manager.getState !== 'function'
+    || typeof manager.check !== 'function'
+    || typeof manager.download !== 'function'
+  ) {
+    throw new TypeError('An initialized update manager is required.')
+  }
+  const current = manager.getState()
+  if (BACKGROUND_UPDATE_SKIP_PHASES.has(current.phase)) return current
+  const checked = await manager.check()
+  if (checked?.phase !== 'available') return checked
+  return manager.download()
 }
 
 export function unauthorizedUpdateState() {

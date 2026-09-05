@@ -37,7 +37,7 @@ You (desktop or phone) ──┐
 - **Remote execution**: local Host, SSL-free **SSH worker** (public-key only), a guided **VirtualBox** Ubuntu VM, and **Ensync Sync**-brokered mobile/web clients.
 - **Telegram bridge**: approval-gated operation through a private chat.
 - **Local-first help desk** with redacted diagnostics and an opt-in one-run repair through your subscription (always review-required, never "auto-fixed").
-- **Native updates**: manual Check → Download → Open with stable/beta channels, SHA-256 plus publisher verification; Microsoft Store builds are "Managed by Store".
+- **Native updates**: checks and downloads run automatically in the background (startup + hourly), then an explicit open-installer step completes it, with stable/beta channels and SHA-256 plus publisher verification; Microsoft Store builds are "Managed by Store".
 
 ### Runnable providers today
 
@@ -84,7 +84,7 @@ All settings are in the Settings modal (**Preferences — Make Ensync yours**, g
 | Agent updates | Remind weekly / Automatic weekly / Manual only | Remind weekly |
 | Agent alerts | Off / Ringtone / Spoken text (+ "answer needed" alerts, words, voice) | Off |
 | Interface sections | Activity rail, Title bar, Tab strip, Sidebar, Header, Composer — each toggleable | all on |
-| Ensync updates | Stable / Beta channel; manual check/download/open | Stable |
+| Ensync updates | Stable / Beta channel; auto-check + auto-download, then explicit open | Stable |
 | Account & chat sync | username (3–32) + password (12–256); create / sign in / sync | — |
 
 ## Run it yourself

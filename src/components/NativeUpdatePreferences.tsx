@@ -149,7 +149,7 @@ export function NativeUpdatePreferences({ className = '' }: { className?: string
       <p className="native-update-trust">
         <ShieldCheck size={14} /> {state.phase === 'managed'
           ? 'Microsoft Store verifies, installs, and updates this Windows package.'
-          : 'Checks are manual. Download and installer opening are separate actions; Ensync never silently installs, quits, or restarts.'}
+          : 'Checks and downloads happen automatically in the background. Only opening the verified installer is manual; Ensync never silently installs, quits, or restarts.'}
       </p>
     </section>
   )

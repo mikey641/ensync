@@ -163,7 +163,7 @@ Open **Settings → Preferences**. Changes save automatically.
 
 ### Updates
 - **Agent updates** — Remind weekly / Automatic weekly / Manual only (for the installed provider CLIs).
-- **Ensync updates** — Stable / Beta channel; only manual Check → Download → Open. Microsoft Store builds report "Managed by Store".
+- **Ensync updates** — Stable / Beta channel; checks and downloads happen automatically in the background, then you open the verified installer. Microsoft Store builds report "Managed by Store".
 
 ### Notifications
 - **Agent alerts** — Off / Ringtone / Spoken text, with "answer needed" alerts, custom words, and a voice.
@@ -283,7 +283,7 @@ The token is kept in Host memory only and forgotten on disconnect or restart.
 
 ## 14. Updates
 
-- **Ensync itself** — manual three-stage updates (Check → Download → Open) with SHA-256 and publisher verification. Nothing installs, quits, or restarts silently.
+- **Ensync itself** — checks in the background at startup and hourly, downloads a verified release automatically, then waits for you to open the installer. SHA-256 and publisher verification run before anything is offered. Nothing installs, quits, or restarts silently.
 - **Provider CLIs** — a device-wide maintenance policy (weekly reminder, automatic weekly, or manual only). Update launches are refused while agent jobs are active.
 
 ---

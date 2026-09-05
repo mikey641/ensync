@@ -91,6 +91,7 @@ import {
   resolveWindowPlacement,
 } from './window-state.mjs'
 import {
+  checkAndDownloadIfAvailable,
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
   UPDATE_CANCEL_CHANNEL,
@@ -734,12 +735,14 @@ if (!singleInstance) {
     nativeWorkspaceStore.ensureRestorable()
     return updateManager.initialize()
   }).then(() => {
-    // Auto-check for updates shortly after startup, then every hour,
-    // like VS Code's background update checker. Non-blocking — if the
-    // build is unsigned or no feed is configured, canCheck is false and
-    // these calls are no-ops.
-    setTimeout(() => { updateManager.check().catch(() => {}) }, 5_000)
-    setInterval(() => { updateManager.check().catch(() => {}) }, 3_600_000)
+    // Auto-check for updates shortly after startup, then every hour, and
+    // auto-download a verified release when one appears, like VS Code's
+    // background update checker. Non-blocking — if the build is unsigned or no
+    // feed is configured, canCheck is false and these calls are no-ops. The
+    // installer is still opened only by an explicit user action.
+    const pollForUpdates = () => { checkAndDownloadIfAvailable(updateManager).catch(() => {}) }
+    setTimeout(pollForUpdates, 5_000)
+    setInterval(pollForUpdates, 3_600_000)
     const retainedIdentities = nativeWorkspaceStore.list()
     const startupFocusIdentity = retainedIdentities.at(-1)
     const identities = nativeWorkspaceRestorationOrder(retainedIdentities)

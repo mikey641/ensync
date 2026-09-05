@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import test from 'node:test'
 
 import {
+  checkAndDownloadIfAvailable,
   compareVersions,
   createAuthorizedUpdateHandler,
   createNativeUpdateManager,
@@ -227,6 +228,40 @@ test('manual check, download, checksum, same-signer verification, and installer 
   assert.equal(opened.length, 1)
   assert.match(manager.getState().message, /will not quit or restart/)
   assert.equal(states.some((state) => state.phase === 'downloading'), true)
+})
+
+test('auto-update helper downloads after a fresh available check and skips active states', async () => {
+  let phase = 'idle'
+  const calls = []
+  const manager = {
+    getState: () => ({ phase }),
+    check: async () => { calls.push('check'); phase = 'available'; return { phase: 'available' } },
+    download: async () => { calls.push('download'); phase = 'downloaded'; return { phase: 'downloaded' } },
+  }
+
+  const result = await checkAndDownloadIfAvailable(manager)
+  assert.equal(result.phase, 'downloaded')
+  assert.deepEqual(calls, ['check', 'download'])
+
+  for (const phase of ['checking', 'downloading', 'downloaded', 'installer_opened']) {
+    calls.length = 0
+    const managerWithPhase = { ...manager, getState: () => ({ phase }) }
+    const skipped = await checkAndDownloadIfAvailable(managerWithPhase)
+    assert.equal(skipped.phase, phase)
+    assert.deepEqual(calls, [])
+  }
+})
+
+test('auto-update helper does not download when the check finds nothing newer', async () => {
+  const calls = []
+  const manager = {
+    getState: () => ({ phase: 'idle' }),
+    check: async () => { calls.push('check'); return { phase: 'up_to_date' } },
+    download: async () => { calls.push('download'); return { phase: 'downloaded' } },
+  }
+  const result = await checkAndDownloadIfAvailable(manager)
+  assert.equal(result.phase, 'up_to_date')
+  assert.deepEqual(calls, ['check'])
 })
 
 test('same-signer verification failure removes the installer and never enables opening', async () => {
