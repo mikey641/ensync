@@ -351,6 +351,24 @@
                 <p class="checksum" data-download-checksum hidden>SHA-256 <code data-checksum-value></code></p>
               </article>
             </div>
+
+            <h3 class="source-heading">No installer yet? Run it from source.</h3>
+            <div class="download-grid">
+              <article class="download-card">
+                <div class="platform-icon apple" aria-hidden="true">⌘</div>
+                <span class="status-tag">Source · computer</span>
+                <h3>Desktop app (macOS / Windows)</h3>
+                <p>Clone the MIT-licensed repository and start the native shell with Node.js 20 or newer. Signing and the Store listing are separate, verified steps.</p>
+                <a class="button button-primary download-button" href="https://github.com/mikey641/ensync">View source repository</a>
+              </article>
+              <article class="download-card">
+                <div class="platform-icon windows" aria-hidden="true">⌁</div>
+                <span class="status-tag">Web app · phone</span>
+                <h3>Ensync Mobile (PWA)</h3>
+                <p>Installable from iOS and Android home screens with no app store. Build <code>mobile/dist</code>, self-host it on HTTPS, and pair it with your Ensync Host.</p>
+                <a class="button button-primary download-button" href="https://github.com/mikey641/ensync/tree/main/mobile">Mobile client &amp; setup</a>
+              </article>
+            </div>
             <p class="release-truth" data-release-truth>There is currently no public desktop release. The site will not offer placeholder installers, uncertified Store packages, or unverified artifacts.</p>
           </section>
         </main>
@@ -364,6 +382,7 @@
             <a href="/docs/">Documentation</a>
             <a href="/support/">Help desk</a>
             <a href="/privacy/">Privacy &amp; billing</a>
+            <a data-config-link="sourceRepository" class="is-disabled" aria-disabled="true">View source repository</a>
             <a data-config-link="statusPage" class="is-disabled" aria-disabled="true">Status page not configured</a>
           </nav>
           <div class="footer-meta"><span>© <span data-copy-year></span> Ensync</span><span>Subscription-first · Local-first</span></div>

@@ -1,105 +1,164 @@
 # Ensync
 
-Ensync is a universal AI agent workspace for continuing one coding task across subscription-backed CLIs. It preserves the conversation, verified project, shared `.ensync` feature memory and plan, `CLAUDE.md` and `AGENTS.md` adapters, and host-observed Git state. It is conversation-first: code stays out of the primary interface unless the user asks for it.
+Ensync is a universal AI agent workspace for continuing one coding task across subscription-backed CLIs. It preserves the conversation, verified project, shared `.ensync` feature memory and plan, `CLAUDE.md` and `AGENTS.md` adapters, and host-observed Git state. It is conversation-first: code stays out of the primary interface unless you ask to see it.
 
-The public product site is [ensync.vercel.app](https://ensync.vercel.app). The macOS download stays disabled until a signed/notarized build with a matching SHA-256 checksum is published; Windows stays disabled until the certified Microsoft Store listing URL is configured.
+The desktop app (macOS/Windows) drives a local **Ensync Host** that runs the coding agents you already subscribe to, inside an isolated Git worktree, and can automatically merge (land) and deploy (deliver) the results. The **mobile app** (iOS/Android, or the same client installed as a web PWA) signs into your self-hosted **Ensync Sync** service and remotely starts, follows, stops, and steers those same jobs on your paired computer.
 
-## What works
+- Public site: [ensync.vercel.app](https://ensync.vercel.app)
+- Source: [github.com/mikey641/ensync](https://github.com/mikey641/ensync) (MIT-licensed)
+- Full user guide: [USER-MANUAL.md](USER-MANUAL.md)
+- Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
 
-- Durable conversations, adjacent-or-end new-tab placement, resizable split panes, double-click maximize/restore, and hideable history and chrome.
-- Username/password account sync for encrypted cross-computer conversation history. Stable chat/message IDs merge concurrent additions; CLI credentials, provider sessions, queued or active work, terminal output, and local attachments never enter the account document.
-- Light, dark, and system themes with large default typography.
-- Verified local project focus with a native macOS Finder/Windows folder chooser in the desktop app, browser-safe absolute-path entry, plus Git clone/import, status, remote verification, guarded branch push, and explicitly confirmed production push.
-- Tested Codex and Claude Code subscription chat runners with provider-neutral selection. Cursor and Droid adapters remain discovery-only until each CLI can prove paid overage is disabled for a run.
-- Host-enforced Git isolation for every coding run: the pinned open-source `agent-worktree` runtime gives each conversation a durable protected worktree and branch, so different chats in the same repository run concurrently. The singleton Host rejects a duplicate run for the same conversation immediately instead of creating filesystem leases or polling. A dirty canonical checkout fails closed and remains byte-for-byte unchanged; no hidden transport commit or private-index snapshot is created.
-- Immediate automatic landing: each completed turn durably queues its exact commit and releases the chat, while per-repository FIFO trains merge compatible completions in the background through `agent-worktree`. Arrivals during one train form the next batch. There is no merge-review state or polling delay; conflicts use a bounded OS-contained subscription resolver (Codex, Claude Code, or Factory Droid) and otherwise remain preserved for automatic retry.
-- Separate provider and Model size selectors in every conversation header. Provider default sends no effort override; Small, Medium, Large, and XL apply the verified low, medium, high, and max effort levels to the provider's own default model across local and SSH runs.
-- Opt-in Ensync Auto Context skill: preserves an Auto or fixed provider choice, provider-neutral Model size over each CLI's native default model, synchronized session resume, full project/conversation handoff on provider switches, same-target local/SSH execution, and verified continuation metadata.
-- Discovery, provider-specific account setup, exact installed versions, and official install links ordered as a mainstream-recognition navigation heuristic: Codex, Claude Code, GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Factory Droid, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code, and the separate local Ollama fallback. This order is not a measured market-share ranking.
-- Guarded update maintenance for every installed catalog provider. Ensync can launch fixed native updaters for Codex, Claude Code, Copilot, Cursor, Kimi, Qoder, CodeBuddy, Droid, Auggie, and Amp; it recognizes Antigravity, Kiro, and Junie's provider-managed background updates; and it keeps Jules, GitLab Duo, Warp Oz, and Ollama in the weekly review with official guides because their update paths depend on installation method or platform. The policy defaults to a weekly reminder, with Manual only and opt-in Automatic weekly alternatives. Automatic cycles wait until the Host is idle, deduplicate native windows, ignore caller-supplied command data, and never claim unobserved completion.
-- Typed, non-fabricated usage telemetry: subscription quota for Codex and Claude when reported; session-only data for Copilot and Junie; local model inventory/load state for Ollama; explicit unavailable state for Cursor and Kiro account quota.
-- Verified SSH workers, guarded Oracle VirtualBox provisioning, and approval-gated Telegram operation through Ensync Host.
-- Local-first help desk with reviewable redacted diagnostics and an opt-in one-run bug repair through the connected Codex or Claude subscription. Results always require user review and never claim the bug is fixed automatically.
-- Electron packaging for universal macOS DMG/ZIP and Windows x64 NSIS/ZIP, with embedded build/source identity, native CI, signature/notarization attestations, checksums, separate beta/stable feeds, retained rollback metadata, and fail-closed public release generation.
-- Manual native updates in Settings: the signed desktop app shows its exact build identity and selected stable/beta channel, checks only that channel on request, downloads with real byte progress, verifies SHA-256 plus the installed publisher identity, and opens the verified DMG/installer only after a separate click. Development, unsigned, unconfigured, and unverifiable builds remain explicitly unavailable; Ensync never silently installs, quits, or restarts.
+---
 
-Codex, Claude Code, and Factory Droid are the enabled structured subscription runners. Cursor has an implemented adapter but stays discovery-only because account login and quota telemetry do not prove paid Additional Usage is disabled. Ollama remains a separate local runtime and never enters the subscription pool.
+## What Ensync does
 
-GitHub Copilot CLI account status is verified automatically through its official SDK-compatible `auth.getStatus` method. Ensync starts the installed CLI only in bounded headless stdio mode, negotiates protocol v2 or v3, creates no session, sends no prompt, and accepts only a stored `user` login with an explicit account name. Token environment variables and generic GitHub CLI authentication are excluded from this proof. Account quota remains unknown, and Copilot task execution plus automatic fallback remain disabled until structured events, subscription entitlement, AI-credit overage protection, sessions, and safe retry are tested end to end. See GitHub's official [SDK compatibility](https://docs.github.com/en/copilot/how-tos/copilot-sdk/troubleshooting/compatibility), [local CLI setup](https://docs.github.com/en/copilot/how-tos/copilot-sdk/setup/local-cli), and [Copilot CLI overview](https://docs.github.com/en/copilot/concepts/agents/copilot-cli/about-copilot-cli).
+A coding task lives **above** any one provider. You write one conversation; Ensync keeps its identity (project, transcript, feature memory, instructions, verified Git state) together and hands it across providers. Agents run through the official CLIs you already log into, never through a per-token API key behind your back.
 
-## Run locally
+```
+You (desktop or phone) ──┐
+                          ├─ Ensync Host (your computer) ── Codex / Claude Code / Factory Droid
+   Ensync Sync (optional) ┘      └─ isolated worktree → auto-land → auto-push → deploy-verify
+```
+
+## Desktop features (computer)
+
+- **Durable conversation tabs** with searchable history, adjacent-or-end new-tab placement, and `Cmd/Ctrl+T`, `Cmd/Ctrl+K`, `Cmd/Ctrl+W`.
+- **Split panes**: open several tasks side by side, each with its own draft, provider, model size, and execution state, resizable and hideable with a hidden-pane shelf.
+- **Verified project focus**: native Finder/Windows folder picker, or manual absolute-path entry, re-inspected and canonicalized by the Host before any run. Recent-workspaces history.
+- **Git workflows**: import/clone, real status (branch, upstream, ahead/behind, dirty), remote verification, guarded branch push, and an explicitly-confirmed "Direct to production" push.
+- **Provider + Model size selectors** in every conversation header. Provider `Auto` (default) or a fixed runner; model size `Provider default`, `Small`, `Medium`, `Large`, or `XL` (maps to the provider's verified low/medium/high/max effort, local or SSH).
+- **Automatic routing** picks the first connected, tested runner in your saved priority with verified remaining usage.
+- **Safe automatic fallback** (separate toggle) continues a run only when the Host proves the failure is safe to retry with **no** tool, command, file, or unknown activity. Ambiguous or post-mutation failures are never replayed.
+- **Host-enforced Git isolation**: each conversation gets a durable protected worktree/branch via the pinned open-source `agent-worktree` runtime, so different chats in one repo run concurrently. A dirty canonical checkout fails closed and stays unchanged.
+- **Immediate automatic landing**: each completed turn queues its exact commit and releases the chat; per-repository FIFO trains merge compatible completions in the background. There is no manual merge-review state. Conflicts use a subscription resolver (Codex, Claude Code, or Factory Droid) and otherwise remain preserved for automatic retry.
+- **Delivery pipeline**: `Saved → Landing → Pushed → Building → Production`, with a per-project destination of **Production** (merge, push, deploy-verify) or **Protected branch only** (anchor the exact commit, never merge/push/deploy).
+- **Typed, non-fabricated usage telemetry**: quota percentages, plans, resets, and models appear only when the real CLI reports them.
+- **Remote execution**: local Host, SSL-free **SSH worker** (public-key only), a guided **VirtualBox** Ubuntu VM, and **Ensync Sync**-brokered mobile/web clients.
+- **Telegram bridge**: approval-gated operation through a private chat.
+- **Local-first help desk** with redacted diagnostics and an opt-in one-run repair through your subscription (always review-required, never "auto-fixed").
+- **Native updates**: manual Check → Download → Open with stable/beta channels, SHA-256 plus publisher verification; Microsoft Store builds are "Managed by Store".
+
+### Runnable providers today
+
+| Provider | Status | Billing |
+| --- | --- | --- |
+| **Codex** | Tested structured runner | ChatGPT subscription |
+| **Claude Code** | Tested structured runner | Claude subscription |
+| **Factory Droid** | Tested structured runner | Factory subscription |
+
+Everything else in the catalog is shown honestly as **discovery-only** until its runner, quota contract, session adapter, and paid-overage guard are verified: GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code. **Ollama** is a separate local runtime, not a subscription runner.
+
+> Cursor has an implemented adapter but stays discovery-only because account login and quota telemetry do not prove paid Additional Usage is disabled. GitHub Copilot CLI account status is verified via the official `auth.getStatus`, but its task runner and fallback remain disabled.
+
+## Mobile features (phone)
+
+The `mobile/` client (Capacitor iOS/Android, or the **same app installed as a web PWA**) signs into Ensync Sync and controls a paired Host:
+
+- Create an account / sign in with the same Ensync account.
+- Register the device, then claim a one-time pairing code shown in desktop Settings.
+- List paired hosts.
+- Submit a **Codex or Claude Code** job with a manually entered project path (re-verified by the Host).
+- Poll and decrypt progress events live; **stop** and **steer** the running turn.
+
+All commands, events, and results are end-to-end encrypted (AES-256-GCM) through Sync; the service never sees plaintext prompts, paths, results, or credentials. Closing the phone does not cancel the job — the Host owns it durably.
+
+**Not yet available on mobile** (not implied): host project discovery, attachments, approval UI, background push wake-up, OS-backed keychain storage, and App Store / Play Store signing.
+
+---
+
+## Settings reference
+
+All settings are in the Settings modal (**Preferences — Make Ensync yours**, gear icon or `Cmd/Ctrl+,`) and save automatically.
+
+| Setting | Options | Default |
+| --- | --- | --- |
+| Theme | System / Light / Dark | System |
+| Text size | Comfortable / Large | Large |
+| Task-finished indicator | Small dot / Green header / Whole tab | Small dot |
+| New conversation view | Open as tab / Open in split pane | Split pane |
+| New split pane position | Beside current pane / At the end | Beside |
+| Delivery destination | Production / Protected branch only | Production |
+| Ensync Auto Context skill | on / off | off |
+| Automatic fallback | on / off + saved provider ranking | on (Codex, Claude Code, Factory Droid) |
+| Agent updates | Remind weekly / Automatic weekly / Manual only | Remind weekly |
+| Agent alerts | Off / Ringtone / Spoken text (+ "answer needed" alerts, words, voice) | Off |
+| Interface sections | Activity rail, Title bar, Tab strip, Sidebar, Header, Composer — each toggleable | all on |
+| Ensync updates | Stable / Beta channel; manual check/download/open | Stable |
+| Account & chat sync | username (3–32) + password (12–256); create / sign in / sync | — |
+
+## Run it yourself
 
 Requires Node.js 20 or newer.
 
 ```bash
 npm install
-npm run dev
+npm run dev            # Vite UI + Ensync Host + dev-only account-sync service
 ```
 
-This starts the Vite interface, the Node Ensync Host, and a development-only account-sync service on loopback. The Host launches only fixed provider commands, validates project paths, removes model API-key billing environment variables, passes prompts over stdin, and accepts only structured CLI results. Development sync data is stored in the ignored `.ensync-sync-data.json` file.
-
-For two computers, deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`, then set the same `ENSYNC_SYNC_SERVICE_URL` for Ensync Host on both devices. Plain HTTP is accepted only for an exact loopback address. The bundled service hashes account passwords with scrypt and stores only AES-256-GCM encrypted conversation documents. Host login state is currently memory-only, so restarting Ensync Host requires signing in again; uploaded conversations remain available.
-
-Run the native desktop shell:
+For the native desktop shell:
 
 ```bash
 npm --prefix desktop install
 npm --prefix desktop start
 ```
 
-In the native app, open the project switcher and choose **Choose folder** to use Finder on macOS or the system folder chooser on Windows. The selected absolute path is still inspected and canonicalized by Ensync Host before it becomes the focused project. Cancelling changes nothing. The browser build keeps manual absolute-path entry because websites cannot receive this narrow desktop bridge.
-
-## iPhone and Android
-
-The mobile client lives in `mobile/` and includes generated Capacitor iOS and Android projects. In desktop Settings, sign in to the same Ensync account, enable **Remote execution**, and create a one-time pairing code. On mobile, sign in, enter that code, choose Codex or Claude Code, enter the absolute project path on the paired Host, and start the encrypted run.
-
-The same client is also an installable web app (PWA), so you can run it full-screen from an iPhone or Android home screen without the App Store or Play Store. Build it, then host `mobile/dist` from any HTTPS static site (paired with the self-hosted Ensync Sync service) and choose **Add to Home Screen**:
+Build the mobile web app (PWA) to `mobile/dist`:
 
 ```bash
 npm --prefix mobile install
 npm --prefix mobile run build
 ```
 
-Include the web origin in the sync service's `ENSYNC_SYNC_ALLOWED_ORIGINS` setting so the browser client is accepted. For native packages instead:
+For native mobile builds:
 
 ```bash
 npm --prefix mobile run sync
-npm --prefix mobile run open:ios      # Xcode on macOS
+npm --prefix mobile run open:ios      # macOS + Xcode
 npm --prefix mobile run open:android  # Android Studio + Android SDK
 ```
 
-The app supports pairing, submission, encrypted event polling, cancellation, and steering. Host project discovery, attachments, secure OS credential persistence, background push wake-up, store signing, and App Store/Play Store publishing remain release work.
+### Self-host Ensync Sync (for two devices / remote mobile)
 
-## Usage and fallback
+1. Deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`.
+2. Set the same `ENSYNC_SYNC_SERVICE_URL` on Ensync Host for both computers/devices.
+3. Add the browser origin of a hosted phone PWA to `ENSYNC_SYNC_ALLOWED_ORIGINS`.
 
-Every new conversation defaults to provider mode `Auto`. Settings keeps a persistent top-to-bottom Automatic fallback priority, separate from provider popularity order. Auto chooses the first connected, tested runner in that priority with verified usage below 100%; priority wins over the size of remaining capacity. Providers with unreported quota remain explicitly unknown and are considered only when no provider has verified remaining usage.
+Plain HTTP is accepted only for an exact loopback address. The service hashes account passwords with scrypt and stores only AES-256-GCM encrypted conversation documents. Host login state is memory-only, so restarting the Host requires signing in again; uploads remain available.
 
-Model size is independent from provider routing, Auto Context, and Automatic fallback. A selected size persists as a friendly tier, applies to a fixed Codex/Claude choice or whichever supported provider Auto runs, follows a safe fallback, and is re-applied when that provider session resumes. Ensync keeps the vendor `model` null: Codex receives only a strict `model_reasoning_effort` override and Claude receives only `--effort`.
+### Configuration knobs (`ENSYNC_*`)
 
-Automatic fallback is independent from Auto Context. When enabled, it is allowed before a run when quota is provably exhausted. After a run starts, it advances through the same saved priority without repeating an attempted provider, and only if the provider's structured event stream proves a terminal availability/quota failure with no tool, command, file, or unknown activity. A one-turn fallback preserves a fixed provider preference and the selected Model size. Ambiguous failures, timeouts, and post-mutation failures are never replayed.
+- `ENSYNC_SYNC_SERVICE_URL` — HTTPS Sync URL for account sync / brokered execution.
+- `ENSYNC_SYNC_ALLOWED_ORIGINS` — comma-separated extra browser origins (native `capacitor:` is always accepted).
+- `ENSYNC_AUTO_INIT_GIT=0` — disable automatic `git init` for non-Git projects.
+- `ENSYNC_GITHUB_ISSUES_URL` — exact `github.com/<owner>/<repo>/issues/new` URL for the issue-draft button.
+- `ENSYNC_ALLOW_VIRTUALBOX_MUTATION=0` — disable all VirtualBox mutations.
+- `ENSYNC_CHAT_HARD_TIMEOUT_MS` — pin the absolute run ceiling (≥1000 ms).
+- `ENSYNC_HOST_PORT` — loopback Host port (default 43121).
+- `VERCEL_TOKEN` — Vercel API token for the deploy adapter.
+- `ENSYNC_WORKSPACE_RECOVERY_FILE` — operator-supplied crash-recovery envelope.
+- `ENSYNC_CODEX_IMPORT_*` — one-shot Codex JSONL transcript import (see `desktop/README.md`).
 
-## Support repair
+## Setup overview (end to end)
 
-The in-app help desk stores tickets locally and creates a report for review. Automatic diagnostics exclude transcript text, secrets, file contents, absolute paths, environment variables, and command output. `Fix with my subscription` requires separate report-review, subscription-use, and project-edit consent; re-verifies the exact local project; runs Codex or Claude once without API-key billing or automatic fallback; and opens the real response in a review-required tab. No staffed support queue or SLA is claimed unless configured.
+1. Install the agent CLIs you subscribe to and log into them (Codex, Claude Code, or Factory Droid).
+2. Launch Ensync and focus a project (folder or absolute path).
+3. Pick `Auto` (or a fixed provider) and a model size, write a prompt, and send.
+4. (Optional) For remote control from your phone: run Sync over HTTPS, sign into the same account in desktop Settings → **Remote execution**, and pair the phone with the one-time code.
+5. Watch landing/delivery status per chat; merge/push/deploy according to the chosen destination.
 
-## Distribution
+The full walkthrough, including SSH workers, VirtualBox, Telegram, and mobile step-by-step, is in [USER-MANUAL.md](USER-MANUAL.md). Every provider's official install link is listed in the app and on the [documentation site](https://ensync.vercel.app/docs/).
 
-```bash
-npm --prefix desktop test
-npm --prefix desktop run smoke
-npm --prefix desktop run package:mac # on macOS
-npm --prefix desktop run package:win-store # on Windows with Partner Center identity variables
-cd site && npm test
-```
+## Understanding the pieces
 
-The source is MIT-licensed (see `LICENSE`) and may be published openly. Large public binaries live in a separate public release repository; the tag-triggered workflow refuses release generation unless clean build provenance, Windows signing, and macOS app/DMG signing plus notarization are verified; it changes only the tag-selected beta or stable feed and preserves the other production feed. Nothing is activated until credentials and a tag are intentionally supplied. Local unsigned artifacts stay private test builds. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
-
-## Project memory
-
-- `.ensync/project.md` contains cross-feature product rules.
-- `.ensync/architecture.md` defines runtime and isolation boundaries.
-- `.ensync/features/*.md` contains focused durable decisions for each feature.
-- Root `AGENTS.md` and `CLAUDE.md` direct supported agents to the same sources instead of maintaining competing memory.
+| Piece | Where | What it owns |
+| --- | --- | --- |
+| **UI** | `src/` (React/Vite) | Conversations, tabs, panes, settings, git UI, support, delivery panels |
+| **Desktop shell** | `desktop/` (Electron) | Native windows, folder picker, downloads/updates, launching the daemon |
+| **Host** | `host/` | Provider discovery, worktree isolation, runs, landing, delivery, journals, recovery |
+| **Sync service** | `sync-service/` | Encrypted account sync + encrypted job/command broker |
+| **Mobile** | `mobile/` | Capacitor iOS/Android + PWA remote client |
+| **Site** | `site/` | Public docs, privacy, and manifest-gated downloads |
 
 ## Verification
 
@@ -112,9 +171,16 @@ npm --prefix desktop run smoke
 npm --prefix site test
 ```
 
-## Contributing
+## Distribution
 
-MIT-licensed and open to contributions. See [CONTRIBUTING.md](CONTRIBUTING.md).
+There is currently **no signed public installer**. macOS unlocks only after signing, notarization, and checksum verification; Windows unlocks only through the certified Microsoft Store listing. Development and unsigned builds are local test artifacts and fail closed for updates. The tag-triggered release workflow refuses generation unless macOS and Windows signing plus notarization are verified. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
+
+## Project memory
+
+- `.ensync/project.md` — cross-feature product rules.
+- `.ensync/architecture.md` — runtime and isolation boundaries.
+- `.ensync/features/*.md` — focused durable decisions per feature.
+- Root `AGENTS.md` / `CLAUDE.md` — thin adapters directing agents at the same sources.
 
 ## License
 

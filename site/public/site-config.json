@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "support": {
     "email": "mikey641@gmail.com",
-    "issueTrackerUrl": null,
+    "issueTrackerUrl": "https://github.com/mikey641/ensync/issues",
     "statusPageUrl": null
   },
   "downloads": {
     "windowsStoreUrl": null
   },
-  "sourceRepositoryUrl": null
+  "sourceRepositoryUrl": "https://github.com/mikey641/ensync"
 }

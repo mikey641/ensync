@@ -25,12 +25,40 @@
         <div class="container"><div><p class="eyebrow">Documentation</p><h1>How Ensync works.</h1></div><p class="page-lede">The current product contract, provider support, and setup requirements—without presenting roadmap work as shipped.</p></div>
       </header>
       <div class="container docs-layout">
-        <aside class="docs-sidebar" aria-label="Documentation sections"><a href="#status">Current status</a><a href="#concepts">Core concepts</a><a href="#providers">Providers</a><a href="#usage">Usage data</a><a href="#downloads">Desktop releases</a><a href="#security">Security model</a></aside>
+        <aside class="docs-sidebar" aria-label="Documentation sections"><a href="#status">Current status</a><a href="#install">Install &amp; set up</a><a href="#phone">Phone (mobile)</a><a href="#concepts">Core concepts</a><a href="#providers">Providers</a><a href="#usage">Usage data</a><a href="#downloads">Desktop releases</a><a href="#security">Security model</a></aside>
         <div class="docs-content">
           <section id="status">
             <p class="eyebrow">Start here</p><h2>Current product status</h2>
-            <div class="callout"><strong>No public desktop release yet</strong><p>The repository contains a local prototype. This site keeps macOS disabled until a signed/notarized artifact is published and Windows disabled until the certified Microsoft Store listing is configured.</p></div>
-            <p>In the current prototype, Ensync Host can discover provider CLIs and run verified chats through authenticated Claude Code and Codex subscriptions. The broader catalog is visible for discovery, but it is not yet eligible for automatic chat routing.</p>
+            <div class="callout"><strong>No signed installer yet — run from source</strong><p>The repository is public and MIT-licensed. The desktop app and the phone client both run from source today. Signed macOS/Windows installers and the Microsoft Store listing remain disabled until their attestations pass.</p></div>
+            <p>Ensync Host discovers provider CLIs and runs verified chats through authenticated Codex, Claude Code, and Factory Droid subscriptions. The broader catalog is visible for discovery, but it is not yet eligible for automatic chat routing. The same mobile client runs on iOS/Android and as a self-hosted installable web app.</p>
+          </section>
+          <section id="install">
+            <p class="eyebrow">Get started</p><h2>Install and set up</h2>
+            <p>Everything runs from source for now. You need Node.js 20 or newer and at least one logged-in agent CLI (Codex, Claude Code, or Factory Droid).</p>
+            <h3>Desktop (macOS / Windows)</h3>
+            <pre class="code-block"><code>git clone https://github.com/mikey641/ensync
+cd ensync
+npm ci
+npm --prefix desktop ci
+npm --prefix desktop start</code></pre>
+            <p>Signing, notarization, the Microsoft Store listing, and the release manifest are separate verified steps and are not bundled with the source.</p>
+            <h3>Self-host Ensync Sync (for phone control)</h3>
+            <pre class="code-block"><code>npm run sync-service</code></pre>
+            <p>Deploy it behind HTTPS with a persistent <code>ENSYNC_SYNC_DATA_FILE</code>, then set the same <code>ENSYNC_SYNC_SERVICE_URL</code> on the Host. Passwords are stored as scrypt hashes and workspace documents as AES-256-GCM envelopes; Sync never receives plaintext prompts, paths, results, or credentials.</p>
+            <a class="text-link" href="https://github.com/mikey641/ensync/blob/main/USER-MANUAL.md">Full user manual <span>→</span></a>
+          </section>
+          <section id="phone">
+            <p class="eyebrow">Remote control</p><h2>Phone (iOS &amp; Android)</h2>
+            <p>The mobile client signs into Ensync Sync, claims a one-time pairing code from desktop Settings, and starts, follows, stops, and steers Codex or Claude Code jobs on the paired Host. Commands, events, and results are end-to-end encrypted.</p>
+            <h3>Install as a web app (PWA)</h3>
+            <pre class="code-block"><code>npm --prefix mobile ci
+npm --prefix mobile run build</code></pre>
+            <p>Host <code>mobile/dist</code> on any HTTPS site, add that origin to <code>ENSYNC_SYNC_ALLOWED_ORIGINS</code>, then open it on the phone and choose <strong>Add to Home Screen</strong>. No App Store or Play Store is required.</p>
+            <h3>Native development build</h3>
+            <pre class="code-block"><code>npm --prefix mobile run sync
+npm --prefix mobile run open:ios      # macOS + Xcode
+npm --prefix mobile run open:android  # Android Studio + Android SDK</code></pre>
+            <p>Mobile host-project discovery, attachments, approval UI, background push, OS-backed credential storage, and store signing are not yet implemented.</p>
           </section>
           <section id="concepts">
             <p class="eyebrow">Core concepts</p><h2>One task above every provider</h2>

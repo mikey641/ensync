@@ -1414,3 +1414,25 @@ h2 { font-size: clamp(42px, 5vw, 68px); }
   background: #45d483;
   color: #082514;
 }
+
+.source-heading {
+  width: min(100%, 860px);
+  margin: 64px auto 0;
+  text-align: center;
+  font-size: 22px;
+  letter-spacing: -0.02em;
+}
+
+.code-block {
+  margin: 16px 0 22px;
+  padding: 16px 18px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  overflow-x: auto;
+}
+
+.code-block code {
+  font: 12px/1.6 var(--mono);
+  color: var(--text);
+}
