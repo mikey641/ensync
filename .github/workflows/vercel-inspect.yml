@@ -14,19 +14,23 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
     steps:
-      - name: List projects in team
+      - name: List projects
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v9/projects?teamId=$VERCEL_ORG_ID&limit=100"
-      - name: List custom domains in team
+            "https://api.vercel.com/v9/projects?teamId=$VERCEL_ORG_ID&limit=100" \
+          | jq -r '.projects[] | [.id, .name, (.link.repo // .link // "")] | @tsv'
+      - name: Deployments aliased to ensync.vercel.app
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/domains?teamId=$VERCEL_ORG_ID&limit=100"
-      - name: Inspect current project
+            "https://api.vercel.com/v6/deployments?url=ensync.vercel.app&teamId=$VERCEL_ORG_ID&limit=20" \
+          | jq -r '.deployments[] | [.projectId, .name, .target, .state, .created, .url] | @tsv'
+      - name: Deployments aliased to site-silk-beta-91.vercel.app
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v9/projects/$VERCEL_PROJECT_ID?teamId=$VERCEL_ORG_ID"
-      - name: Resolve ensync.vercel.app deployment
+            "https://api.vercel.com/v6/deployments?url=site-silk-beta-91.vercel.app&teamId=$VERCEL_ORG_ID&limit=20" \
+          | jq -r '.deployments[] | [.projectId, .name, .target, .state, .created, .url] | @tsv'
+      - name: Current project deployment aliases
         run: |
           curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
-            "https://api.vercel.com/v6/deployments?url=ensync.vercel.app&teamId=$VERCEL_ORG_ID&limit=5"
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&limit=20" \
+          | jq -r '.deployments[] | [.uid, .target, .state, .created, .url, ((.alias // []) | join("|"))] | @tsv'
