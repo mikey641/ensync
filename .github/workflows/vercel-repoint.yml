@@ -20,11 +20,15 @@ jobs:
             "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=1" \
             | jq -r '.deployments[0].url')
           echo "new_url=$NEW_URL"
-          npx --yes vercel@58.7.1 alias set "$NEW_URL" ensync.vercel.app \
-            --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID" --yes
+          curl -sS -X POST \
+            -H "Authorization: Bearer $VERCEL_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data '{"alias":"ensync.vercel.app"}' \
+            "https://api.vercel.com/v2/deployments/$NEW_URL/aliases?teamId=$VERCEL_ORG_ID"
+          echo
       - name: Verify the canonical domain serves the redesigned site
         run: |
-          sleep 6
+          sleep 8
           title=$(curl -s https://ensync.vercel.app/ | grep -o '<title>[^<]*</title>' | head -1)
           echo "title=$title"
           echo "$title" | grep -q 'One coding workflow' && echo 'OK: canonical domain now serves the redesigned site.'
