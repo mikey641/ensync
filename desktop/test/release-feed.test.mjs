@@ -55,6 +55,45 @@ function empty(channel) {
   }
 }
 
+function macosOnlyManifest(version, sourceRevision, channel = 'stable') {
+  const tag = `v${version}`
+  return {
+    schemaVersion: 1,
+    channel,
+    sourceRevision,
+    feedUpdatedAt: '2026-08-07T10:00:00.000Z',
+    latest: {
+      version,
+      publishedAt: '2026-08-07T10:00:00.000Z',
+      notesUrl: `https://github.com/ensync/downloads/releases/tag/${tag}`,
+    },
+    platforms: {
+      macos: {
+        status: 'available',
+        reason: null,
+        version,
+        url: `https://github.com/ensync/downloads/releases/download/${tag}/Ensync-${version}-mac-universal.dmg`,
+        sha256: 'a'.repeat(64),
+        signed: true,
+        notarized: true,
+        buildId: 'a'.repeat(16),
+        architectures: ['universal'],
+      },
+      windows: {
+        status: 'unavailable',
+        reason: 'Windows is distributed through the certified Microsoft Store listing.',
+        version: null,
+        url: null,
+        sha256: null,
+        signed: false,
+        notarized: null,
+        architectures: [],
+      },
+    },
+    history: [],
+  }
+}
+
 test('stable and beta feeds have separate names and version rules', () => {
   assert.equal(manifestFilename('stable'), 'releases.json')
   assert.equal(manifestFilename('beta'), 'releases-beta.json')
@@ -113,4 +152,30 @@ test('rollback repoints only the feed to retained immutable metadata', () => {
     channel: 'stable',
     version: '1.2.2',
   }), /not retained/)
+})
+
+test('macOS-only feeds validate while keeping Windows unavailable through promotion and rollback', () => {
+  const first = macosOnlyManifest('0.1.0-beta.1', sourceCommits.one, 'beta')
+  const second = macosOnlyManifest('0.1.0-beta.2', sourceCommits.two, 'beta')
+
+  const staged = prepareChannelRelease({
+    current: first,
+    candidate: second,
+    channel: 'beta',
+    updatedAt: '2026-08-07T12:00:00.000Z',
+  })
+  assert.equal(staged.latest.version, '0.1.0-beta.2')
+  assert.equal(staged.platforms.macos.status, 'available')
+  assert.equal(staged.platforms.windows.status, 'unavailable')
+  assert.equal(staged.history[0].platforms.windows.status, 'unavailable')
+
+  const rolledBack = prepareChannelRollback({
+    current: staged,
+    channel: 'beta',
+    version: '0.1.0-beta.1',
+    updatedAt: '2026-08-07T14:00:00.000Z',
+  })
+  assert.equal(rolledBack.latest.version, '0.1.0-beta.1')
+  assert.deepEqual(rolledBack.platforms, first.platforms)
+  assert.equal(rolledBack.platforms.windows.status, 'unavailable')
 })

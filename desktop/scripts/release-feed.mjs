@@ -75,6 +75,24 @@ function deduplicateSnapshots(values) {
   })
 }
 
+function assertAvailablePlatform(platform, release, version, label) {
+  if (!release || release.status !== 'available') {
+    throw new Error(`${label} is missing a ${platform} release.`)
+  }
+  assertPlatform(platform, release, version)
+}
+
+function assertSnapshotPlatforms(value, label) {
+  // macOS is the direct download feed and is always required. Windows is the
+  // direct-installer fallback: a macOS-only release records it as unavailable
+  // because Windows is served through the certified Microsoft Store listing.
+  assertAvailablePlatform('macos', value.platforms?.macos, value.version, label)
+  const windows = value.platforms?.windows
+  if (windows === undefined || windows === null) return
+  if (windows.status === 'unavailable') return
+  assertPlatform('windows', windows, value.version)
+}
+
 function validateSnapshot(value, channel, label) {
   if (!value || typeof value !== 'object') throw new Error(`${label} is invalid.`)
   assertChannelVersion(channel, value.version)
@@ -83,8 +101,7 @@ function validateSnapshot(value, channel, label) {
   }
   if (value.notesUrl !== null && value.notesUrl !== undefined) assertHttps(value.notesUrl, `${label} notes`)
   if (!SOURCE_COMMIT_PATTERN.test(value.sourceRevision ?? '')) throw new Error(`${label} has an invalid source revision.`)
-  assertPlatform('macos', value.platforms?.macos, value.version)
-  assertPlatform('windows', value.platforms?.windows, value.version)
+  assertSnapshotPlatforms(value, label)
 }
 
 export function validateChannelManifest(manifest, expectedChannel, { allowEmpty = false } = {}) {

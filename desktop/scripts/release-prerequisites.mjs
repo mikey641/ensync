@@ -38,9 +38,17 @@ const DISTRIBUTION_NAMES = [
 ]
 
 const GITHUB_REPOSITORY_PATTERN = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/
+const SEMANTIC_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/
 
 function hasValue(environment, name) {
   return typeof environment[name] === 'string' && environment[name].trim().length > 0
+}
+
+export function resolveReleaseMode(environment = process.env) {
+  const value = String(environment.ENSYNC_RELEASE_MODE ?? 'full').trim()
+  if (value === 'full') return 'full'
+  if (value === 'macos-only') return 'macos-only'
+  throw new Error(`ENSYNC_RELEASE_MODE must be full or macos-only, received ${value || '(empty)'}.`)
 }
 
 function inspectGroup(environment, names) {
@@ -94,16 +102,22 @@ export function resolveWindowsSigning(environment = process.env, { required = fa
 }
 
 export function validateReleasePrerequisites(environment = process.env) {
+  const mode = resolveReleaseMode(environment)
   const errors = []
   const mac = inspectGroup(environment, MAC_SIGNING_NAMES)
   const vercel = inspectGroup(environment, VERCEL_NAMES)
   const distribution = inspectGroup(environment, DISTRIBUTION_NAMES)
 
   if (!mac.complete) errors.push(incompleteMessage('macOS signing and notarization', mac))
-  const store = inspectGroup(environment, WINDOWS_STORE_INPUT_NAMES)
-  if (!store.complete) errors.push(incompleteMessage('Windows Store package identity', store))
   if (!vercel.complete) errors.push(incompleteMessage('Vercel production deployment', vercel))
   if (!distribution.complete) errors.push(incompleteMessage('Public binary distribution', distribution))
+
+  const store = mode === 'full'
+    ? inspectGroup(environment, WINDOWS_STORE_INPUT_NAMES)
+    : { any: false, complete: false, missing: [] }
+  if (mode === 'full' && !store.complete) {
+    errors.push(incompleteMessage('Windows Store package identity', store))
+  }
 
   const releaseRepository = environment.ENSYNC_RELEASE_REPOSITORY?.trim()
   if (releaseRepository && !GITHUB_REPOSITORY_PATTERN.test(releaseRepository)) {
@@ -114,15 +128,27 @@ export function validateReleasePrerequisites(environment = process.env) {
     errors.push('The public binary repository must be separate from the private source repository.')
   }
 
-  const tag = environment.GITHUB_REF_NAME
-  if (tag && !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
-    errors.push(`Release tag ${tag} is not a supported semantic version tag.`)
-  }
-  if (store.complete && tag && /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
-    try {
-      resolveWindowsStorePackageConfig(environment, { productVersion: tag.slice(1) })
-    } catch (error) {
-      errors.push(error instanceof Error ? error.message : String(error))
+  if (mode === 'macos-only') {
+    const version = environment.ENSYNC_RELEASE_VERSION?.trim()
+    const channel = environment.ENSYNC_RELEASE_CHANNEL?.trim()
+    if (!version || !SEMANTIC_VERSION_PATTERN.test(version)) {
+      errors.push('macOS-only release requires ENSYNC_RELEASE_VERSION as a semantic version such as 0.1.0 or 0.1.0-beta.1.')
+    } else if (channel === 'stable' && version.includes('-')) {
+      errors.push('A stable macOS-only release cannot use a prerelease version.')
+    } else if (channel === 'beta' && !version.includes('-')) {
+      errors.push('A beta macOS-only release requires an explicit prerelease version.')
+    }
+  } else {
+    const tag = environment.GITHUB_REF_NAME
+    if (tag && !/^v\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.test(tag)) {
+      errors.push(`Release tag ${tag} is not a supported semantic version tag.`)
+    }
+    if (store.complete && tag && /^v\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
+      try {
+        resolveWindowsStorePackageConfig(environment, { productVersion: tag.slice(1) })
+      } catch (error) {
+        errors.push(error instanceof Error ? error.message : String(error))
+      }
     }
   }
   const visibility = environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY

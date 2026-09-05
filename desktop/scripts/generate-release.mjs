@@ -13,6 +13,7 @@ const tag = option('--tag')
 const repository = option('--repository')
 const channel = option('--channel')
 const sourceCommit = option('--source-commit')
+const macosOnly = process.argv.includes('--macos-only')
 if (!tag || !/^v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(tag)) {
   throw new Error('--tag must be a semantic release tag such as v1.2.3.')
 }
@@ -45,6 +46,9 @@ async function sha256(file) {
 }
 
 const inputFiles = await walk(inputRoot)
+if (macosOnly && inputFiles.some((file) => ['.exe', '.appx'].includes(extname(file).toLowerCase()))) {
+  throw new Error('A macOS-only release must not include Windows artifacts.')
+}
 const artifactExtensions = new Set(['.dmg', '.zip', '.exe'])
 const artifacts = inputFiles.filter((file) => artifactExtensions.has(extname(file).toLowerCase()))
 const attestations = new Map()
@@ -70,6 +74,10 @@ for (const file of inputFiles.filter((item) => /^attestation-(macos|windows)\.js
   }
   if (attestations.has(attestation.platform)) throw new Error(`Duplicate ${attestation.platform} attestation.`)
   attestations.set(attestation.platform, attestation)
+}
+
+if (macosOnly && attestations.has('windows')) {
+  throw new Error('A macOS-only release must not include a direct Windows attestation.')
 }
 
 await rm(outputRoot, { recursive: true, force: true })
@@ -161,11 +169,34 @@ function windowsRelease() {
   }
 }
 
-if (records.length !== 4) {
-  throw new Error(`Expected four verified public release artifacts (macOS DMG and ZIP plus Windows EXE and ZIP), found ${records.length}.`)
+function unavailableWindows(reason) {
+  return {
+    status: 'unavailable',
+    reason,
+    version: null,
+    url: null,
+    sha256: null,
+    signed: false,
+    notarized: null,
+    architectures: [],
+  }
 }
+
 const macosPlatform = macosRelease()
-const windowsPlatform = windowsRelease()
+let windowsPlatform
+if (macosOnly) {
+  if (records.length !== 2) {
+    throw new Error(`Expected two verified macOS public release artifacts (DMG and ZIP), found ${records.length}.`)
+  }
+  windowsPlatform = unavailableWindows(
+    'Windows is distributed through the certified Microsoft Store listing; this manifest gates only the direct macOS release.',
+  )
+} else {
+  if (records.length !== 4) {
+    throw new Error(`Expected four verified public release artifacts (macOS DMG and ZIP plus Windows EXE and ZIP), found ${records.length}.`)
+  }
+  windowsPlatform = windowsRelease()
+}
 
 const checksums = `${records.map((record) => `${record.sha256}  ${record.name}`).join('\n')}\n`
 await writeFile(join(outputRoot, 'SHA256SUMS.txt'), checksums, { flag: 'wx' })

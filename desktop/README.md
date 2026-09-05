@@ -90,7 +90,7 @@ Unsigned local builds work for testing, but their generated site manifest remain
 | `VERCEL_TOKEN` | release publish job | Deploy the verified release manifest to the public site/update feed |
 | `VERCEL_ORG_ID` | release publish job | Exact Vercel team/account containing the Ensync project |
 | `VERCEL_PROJECT_ID` | release publish job | Exact Vercel `ensync` project identifier |
-| `ENSYNC_RELEASE_GITHUB_TOKEN` | release publish job | Least-privilege release access to the separate public binary repository |
+| `ENSYNC_RELEASE_TOKEN` | release publish job | Least-privilege release access to the separate public binary repository |
 
 Set the non-secret GitHub repository variable `ENSYNC_RELEASE_REPOSITORY` to the public binary repository in `owner/repository` form. It must differ from the private source repository.
 
@@ -109,7 +109,7 @@ The Windows Store package wrapper disables certificate auto-discovery, injects o
 
 ## Release workflow
 
-Pushing a stable tag such as `v0.1.0` or a beta tag such as `v0.2.0-beta.1` starts `.github/workflows/desktop-release.yml` only after release infrastructure is intentionally configured. A preflight job confirms that the separate binary repository is public and different from the private source repository, macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The remaining jobs:
+Pushing a stable tag such as `v0.1.0` or a beta tag such as `v0.2.0-beta.1` starts `.github/workflows/desktop-release.yml` as a full desktop release only after release infrastructure is intentionally configured. A preflight job confirms that the separate binary repository is public and different from the private source repository, macOS signing/notarization is complete, one Windows signing mode is complete, and Vercel deployment credentials exist without printing their values. The remaining jobs:
 
 1. build and test on native macOS and Windows runners;
 2. upload only the signed/notarized DMG, signed NSIS EXE, ZIP archives, and verification attestations produced by those jobs;
@@ -121,5 +121,7 @@ Pushing a stable tag such as `v0.1.0` or a beta tag such as `v0.2.0-beta.1` star
 8. validate both exact feeds and deploy the production Vercel site using the explicit Vercel release secrets.
 
 If macOS signing or notarization cannot be verified, the publish job fails before creating a GitHub release. The AppX is never copied into public release assets. Upload it to Partner Center and use Private audience for the first beta submission; package flights are available for later beta updates after the initial submission is published. Publish a separately certified listing for stable. Only after Microsoft provides the real `https://apps.microsoft.com/detail/...` product URL may `site/public/site-config.json` enable the Windows button. If Vercel deployment fails, installed apps and the site continue to see the previous production configuration.
+
+A manual **macOS-only** release runs the same workflow from the Actions tab with a channel and semantic version. It skips the Windows and Store jobs, generates the manifest with `--macos-only`, and records `platforms.windows` as `unavailable` because Windows is distributed through the certified Microsoft Store listing. The macOS-only preflight requires only Apple signing/notarization, Vercel, and the public binary repository; it enforces the same channel rules (beta requires a prerelease version such as `0.1.0-beta.1`, stable rejects prereleases).
 
 The full inactive-to-beta-to-stable process and review-only rollback command are in `docs/release-runbook.md`. The manual flow follows Electron's requirement that macOS updates use signed apps and electron-builder's signed macOS/NSIS artifact guidance, while deliberately avoiding background `autoUpdater` behavior: [Electron updates](https://www.electronjs.org/docs/latest/tutorial/updates) and [electron-builder auto update](https://www.electron.build/docs/features/auto-update/).

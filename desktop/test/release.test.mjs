@@ -101,6 +101,59 @@ function generate(input, output, { tag = 'v1.2.3', channel = 'stable' } = {}) {
   ], { encoding: 'utf8' })
 }
 
+async function macosOnlyFixture({ macSigned = true, macNotarized = true, version = '0.1.0-beta.1' } = {}) {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-release-mac-'))
+  const input = join(root, 'input')
+  const output = join(root, 'output')
+  await mkdir(input)
+
+  const names = [
+    `Ensync-${version}-mac-universal.dmg`,
+    `Ensync-${version}-mac-universal.zip`,
+  ]
+  const records = []
+  for (const [index, name] of names.entries()) {
+    const contents = Buffer.alloc(1_000_001, index + 1)
+    await writeFile(join(input, name), contents)
+    records.push({
+      name,
+      bytes: contents.byteLength,
+      sha256: createHash('sha256').update(contents).digest('hex'),
+    })
+  }
+
+  const channel = version.includes('-') ? 'beta' : 'stable'
+  const attestation = {
+    schemaVersion: 1,
+    platform: 'macos',
+    version,
+    buildId: 'a'.repeat(16),
+    channel,
+    sourceCommit,
+    sourceDirty: false,
+    builtAt: '2026-08-07T10:00:00.000Z',
+    signed: macSigned,
+    notarized: macNotarized,
+    architectures: ['universal'],
+    artifacts: records,
+  }
+  await writeFile(join(input, 'attestation-macos.json'), `${JSON.stringify(attestation)}\n`)
+  return { input, output }
+}
+
+function generateMacosOnly(input, output, { tag = 'v0.1.0-beta.1', channel = 'beta' } = {}) {
+  return spawnSync(process.execPath, [
+    generator,
+    '--input', input,
+    '--output', output,
+    '--tag', tag,
+    '--repository', 'ensync/ensync-downloads',
+    '--channel', channel,
+    '--source-commit', sourceCommit,
+    '--macos-only',
+  ], { encoding: 'utf8' })
+}
+
 test('release generation publishes signed macOS and Windows direct artifacts', async () => {
   const { input, output } = await fixture()
   const result = generate(input, output)
@@ -205,4 +258,68 @@ test('release generation refuses dirty or channel-mismatched attestations', asyn
   ], { encoding: 'utf8' })
   assert.notEqual(betaResult.status, 0)
   assert.match(betaResult.stderr, /prerelease tag/)
+})
+
+test('macOS-only generation publishes a signed notarized DMG and keeps Windows unavailable', async () => {
+  const { input, output } = await macosOnlyFixture()
+  const result = generateMacosOnly(input, output)
+  assert.equal(result.status, 0, result.stderr)
+
+  const manifest = JSON.parse(await readFile(join(output, 'releases-beta.json'), 'utf8'))
+  assert.equal(manifest.channel, 'beta')
+  assert.equal(manifest.platforms.macos.status, 'available')
+  assert.equal(manifest.platforms.macos.signed, true)
+  assert.equal(manifest.platforms.macos.notarized, true)
+  assert.match(manifest.platforms.macos.url, /Ensync-0\.1\.0-beta\.1-mac-universal\.dmg/)
+
+  assert.equal(manifest.platforms.windows.status, 'unavailable')
+  assert.equal(manifest.platforms.windows.signed, false)
+  assert.equal(manifest.platforms.windows.notarized, null)
+  assert.equal(manifest.platforms.windows.url, null)
+
+  const checksums = await readFile(join(output, 'SHA256SUMS.txt'), 'utf8')
+  assert.match(checksums, /mac-universal\.dmg/)
+  assert.doesNotMatch(checksums, /windows|\.exe/)
+})
+
+test('macOS-only generation refuses unsigned or unnotarized macOS artifacts', async () => {
+  const unsigned = await macosOnlyFixture({ macSigned: false })
+  const unsignedResult = generateMacosOnly(unsigned.input, unsigned.output)
+  assert.notEqual(unsignedResult.status, 0)
+  assert.match(unsignedResult.stderr, /artifacts are unsigned/)
+
+  const unnotarized = await macosOnlyFixture({ macNotarized: false })
+  const unnotarizedResult = generateMacosOnly(unnotarized.input, unnotarized.output)
+  assert.notEqual(unnotarizedResult.status, 0)
+  assert.match(unnotarizedResult.stderr, /not notarized/)
+})
+
+test('macOS-only generation rejects a stray direct Windows artifact', async () => {
+  const { input, output } = await macosOnlyFixture()
+  await writeFile(join(input, 'Ensync-0.1.0-beta.1-windows-x64.exe'), Buffer.alloc(1_000_001, 9))
+  const result = generateMacosOnly(input, output)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /must not include Windows artifacts/)
+})
+
+test('macOS-only generation rejects a direct Windows attestation', async () => {
+  const { input, output } = await macosOnlyFixture()
+  await writeFile(join(input, 'attestation-windows.json'), JSON.stringify({
+    schemaVersion: 1,
+    platform: 'windows',
+    version: '0.1.0-beta.1',
+    buildId: 'b'.repeat(16),
+    channel: 'beta',
+    sourceCommit,
+    sourceDirty: false,
+    builtAt: '2026-08-07T10:00:00.000Z',
+    signed: true,
+    notarized: null,
+    architectures: ['x64'],
+    distribution: 'direct',
+    artifacts: [],
+  }))
+  const result = generateMacosOnly(input, output)
+  assert.notEqual(result.status, 0)
+  assert.match(result.stderr, /must not include a direct Windows attestation/)
 })

@@ -7,7 +7,7 @@ This runbook prepares the path from local development to beta and stable desktop
 - Source remains private and under active development.
 - `site/public/releases.json` and `site/public/releases-beta.json` are separate, fail-closed feeds with no available build.
 - Local packages are development artifacts. Without explicit platform credentials they remain unsigned, and native updates stay disabled.
-- The public binary repository, signing identities, release credential, and Vercel credentials are intentionally unconfigured.
+- The public binary repository and Vercel credentials are configured; Apple signing/notarization and direct Windows signing are not yet fully configured, so no macOS build is signed and no direct Windows installer is published. Windows public distribution goes through the certified Microsoft Store listing.
 
 ## Development fix loop
 
@@ -23,8 +23,8 @@ This runbook prepares the path from local development to beta and stable desktop
 
 1. Keep the source repository private.
 2. Create a separate public GitHub repository containing release binaries only. Set repository variable `ENSYNC_RELEASE_REPOSITORY` to `owner/repository`.
-3. Create a least-privilege fine-grained token that can manage releases only in that public repository and store it as `ENSYNC_RELEASE_GITHUB_TOKEN`.
-4. Configure Apple Developer ID signing/notarization and exactly one Windows signing path: PFX or Microsoft Trusted Signing.
+3. Create a least-privilege fine-grained token that can manage releases only in that public repository and store it as `ENSYNC_RELEASE_TOKEN`.
+4. Configure Apple Developer ID signing/notarization. Exactly one Windows signing path (PFX or Microsoft Trusted Signing) is required only for a full desktop release; a manual macOS-only release publishes without it.
 5. Configure the exact Vercel `ensync` project credentials.
 6. Run the release preflight in CI. It verifies that the binary repository is public and different from the private source repository before either native build starts.
 
@@ -32,15 +32,17 @@ This runbook prepares the path from local development to beta and stable desktop
 
 1. Choose a prerelease version such as `1.2.0-beta.1`; beta always requires an explicit prerelease suffix.
 2. Run the full verification and the explicit storage compatibility gate: `npm run test:release-compatibility`.
-3. Review the source revision and require a clean source attestation on both native runners.
-4. Only after authorization, tag the private source revision. The workflow derives the `beta` channel from the tag, builds on native macOS and Windows runners, and publishes assets only to the separate public binary repository.
+3. Review the source revision and require a clean source attestation on every native runner the release uses.
+4. Publish the macOS installable app to the store of your choice:
+   - **macOS-only (manual):** from the Actions tab run `Desktop release` with channel `beta` and a prerelease version. It skips Windows/Store, signs and notarizes the DMG, records `platforms.windows` as unavailable, and updates only `releases-beta.json`.
+   - **Full desktop (tag):** after both Windows and macOS signing are configured, tag the private source revision. The workflow derives the `beta` channel from the tag, builds on native macOS and Windows runners, and publishes assets only to the separate public binary repository.
 5. The workflow fetches both current production feeds, replaces only `releases-beta.json`, retains prior beta metadata for rollback, and preserves `releases.json` byte-for-byte.
 6. Install the beta manually, confirm the build identity in Settings, and test state migration plus a normal quit/reopen before considering stable.
 
 ## Stable
 
 1. Use a plain semantic version such as `1.2.0`; stable rejects prerelease versions.
-2. Repeat native builds, signing, notarization, attestations, checksums, and compatibility verification. Stable is a separately verified release, not a relabelled beta artifact.
+2. Repeat the native builds, signing, notarization, attestations, checksums, and compatibility verification that apply to the channel. Full stable repeats both platforms; a manual macOS-only stable repeats only the macOS build and keeps Windows `unavailable` (Store-distributed). Stable is a separately verified release, not a relabelled beta artifact.
 3. The workflow replaces only `releases.json` and preserves the production beta feed.
 4. Confirm both the website download and the in-app Check → Download → Open path. Ensync never silently installs, quits, or restarts.
 

@@ -1,6 +1,20 @@
 name: Desktop release
 
 on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: 'Release channel (macOS-only manual releases)'
+        required: true
+        type: choice
+        default: beta
+        options:
+          - beta
+          - stable
+      version:
+        description: 'Semantic version for the macOS release (for example 0.1.0-beta.1)'
+        required: true
+        type: string
   push:
     tags:
       - 'v[0-9]+.[0-9]+.[0-9]+'
@@ -10,15 +24,18 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  group: desktop-release-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: false
 
 jobs:
   preflight:
     runs-on: ubuntu-24.04
     outputs:
-      channel: ${{ steps.channel.outputs.value }}
-      source_commit: ${{ steps.source.outputs.value }}
+      channel: ${{ steps.resolve.outputs.channel }}
+      source_commit: ${{ steps.resolve.outputs.source_commit }}
+      mode: ${{ steps.resolve.outputs.mode }}
+      version: ${{ steps.resolve.outputs.version }}
+      tag: ${{ steps.resolve.outputs.tag }}
     env:
       MACOS_CSC_LINK: ${{ secrets.MACOS_CSC_LINK }}
       MACOS_CSC_KEY_PASSWORD: ${{ secrets.MACOS_CSC_KEY_PASSWORD }}
@@ -33,26 +50,40 @@ jobs:
       VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
       VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
-      ENSYNC_RELEASE_GITHUB_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+      ENSYNC_RELEASE_GITHUB_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
       ENSYNC_SOURCE_REPOSITORY: ${{ github.repository }}
     steps:
       - uses: actions/checkout@v4
-      - name: Resolve the exact source commit
-        id: source
-        shell: bash
-        run: echo "value=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - name: Resolve release channel from the source tag
-        id: channel
+      - name: Resolve release identity
+        id: resolve
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            echo "value=beta" >> "$GITHUB_OUTPUT"
+          echo "source_commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            mode="macos-only"
+            channel="${{ inputs.channel }}"
+            version="${{ inputs.version }}"
+            tag="v${version}"
           else
-            echo "value=stable" >> "$GITHUB_OUTPUT"
+            mode="full"
+            if [[ "$GITHUB_REF_NAME" == *-* ]]; then
+              channel="beta"
+            else
+              channel="stable"
+            fi
+            version="${GITHUB_REF_NAME#v}"
+            tag="$GITHUB_REF_NAME"
           fi
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          echo "channel=$channel" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "ENSYNC_RELEASE_MODE=$mode" >> "$GITHUB_ENV"
+          echo "ENSYNC_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+          echo "ENSYNC_RELEASE_CHANNEL=$channel" >> "$GITHUB_ENV"
       - name: Verify the separate binary repository is public
         env:
-          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
         shell: bash
         run: |
           test -n "$ENSYNC_RELEASE_REPOSITORY"
@@ -86,16 +117,16 @@ jobs:
             desktop/package-lock.json
       - run: npm ci
       - run: npm --prefix desktop ci
-      - name: Set package version from tag
+      - name: Set package version
         shell: bash
-        run: npm --prefix desktop version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+        run: npm --prefix desktop version --no-git-tag-version --allow-same-version "${{ needs.preflight.outputs.version }}"
       - run: npm run test:host
       - run: npm run test:release-compatibility
       - name: Build, test, sign when configured, and attest macOS artifacts
         run: npm --prefix desktop run package:mac
       - uses: actions/upload-artifact@v4
         with:
-          name: ensync-macos-${{ github.ref_name }}
+          name: ensync-macos-${{ needs.preflight.outputs.tag }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -105,6 +136,7 @@ jobs:
 
   windows:
     needs: preflight
+    if: needs.preflight.outputs.mode == 'full'
     runs-on: windows-2025
     env:
       CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
@@ -130,10 +162,10 @@ jobs:
             desktop/package-lock.json
       - run: npm ci
       - run: npm --prefix desktop ci
-      - name: Set package version from tag
+      - name: Set package version
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $version = "${{ needs.preflight.outputs.version }}"
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
       - run: npm run test:release-compatibility
@@ -141,7 +173,7 @@ jobs:
         run: npm --prefix desktop run package:win
       - uses: actions/upload-artifact@v4
         with:
-          name: ensync-windows-${{ github.ref_name }}
+          name: ensync-windows-${{ needs.preflight.outputs.tag }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -151,6 +183,7 @@ jobs:
 
   windows-store:
     needs: preflight
+    if: needs.preflight.outputs.mode == 'full'
     runs-on: windows-2025
     env:
       ENSYNC_WINDOWS_STORE_IDENTITY_NAME: ${{ vars.ENSYNC_WINDOWS_STORE_IDENTITY_NAME }}
@@ -171,10 +204,10 @@ jobs:
             desktop/package-lock.json
       - run: npm ci
       - run: npm --prefix desktop ci
-      - name: Set package version from tag
+      - name: Set package version
         shell: pwsh
         run: |
-          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $version = "${{ needs.preflight.outputs.version }}"
           npm --prefix desktop version --no-git-tag-version --allow-same-version $version
       - run: npm run test:host
       - run: npm run test:release-compatibility
@@ -182,7 +215,7 @@ jobs:
         run: npm --prefix desktop run package:win-store
       - uses: actions/upload-artifact@v4
         with:
-          name: ensync-windows-store-${{ github.ref_name }}
+          name: ensync-windows-store-${{ needs.preflight.outputs.tag }}
           if-no-files-found: error
           retention-days: 14
           path: |
@@ -191,6 +224,7 @@ jobs:
 
   publish:
     needs: [preflight, macos, windows, windows-store]
+    if: always() && needs.preflight.result == 'success' && needs.macos.result == 'success'
     runs-on: ubuntu-24.04
     env:
       ENSYNC_RELEASE_REPOSITORY: ${{ vars.ENSYNC_RELEASE_REPOSITORY }}
@@ -201,22 +235,23 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - uses: actions/download-artifact@v4
+      - name: Download macOS release artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: ensync-macos-${{ github.ref_name }}
+          name: ensync-macos-${{ needs.preflight.outputs.tag }}
           path: release-input
-      - uses: actions/download-artifact@v4
+      - name: Download direct Windows release artifacts
+        if: needs.preflight.outputs.mode == 'full'
+        uses: actions/download-artifact@v4
         with:
-          name: ensync-windows-${{ github.ref_name }}
+          name: ensync-windows-${{ needs.preflight.outputs.tag }}
           path: release-input
-      - name: Select the isolated release channel
+      - name: Resolve the isolated release channel
         shell: bash
         run: |
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then
-            echo "ENSYNC_RELEASE_CHANNEL=beta" >> "$GITHUB_ENV"
+          if [[ "${{ needs.preflight.outputs.channel }}" == "beta" ]]; then
             echo "ENSYNC_RELEASE_MANIFEST=releases-beta.json" >> "$GITHUB_ENV"
           else
-            echo "ENSYNC_RELEASE_CHANNEL=stable" >> "$GITHUB_ENV"
             echo "ENSYNC_RELEASE_MANIFEST=releases.json" >> "$GITHUB_ENV"
           fi
       - name: Verify artifacts and generate checksums and site manifest
@@ -224,10 +259,11 @@ jobs:
           node desktop/scripts/generate-release.mjs
           --input release-input
           --output release-assets
-          --tag "${GITHUB_REF_NAME}"
+          --tag "${{ needs.preflight.outputs.tag }}"
           --repository "${ENSYNC_RELEASE_REPOSITORY}"
           --channel "${ENSYNC_RELEASE_CHANNEL}"
           --source-commit "${ENSYNC_SOURCE_COMMIT}"
+          ${{ needs.preflight.outputs.mode == 'macos-only' && '--macos-only' || '' }}
       - name: Preserve the other channel and retain rollback metadata
         shell: bash
         run: |
@@ -258,16 +294,21 @@ jobs:
           npm --prefix site test
       - name: Create or repair the verified GitHub release
         env:
-          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.ENSYNC_RELEASE_TOKEN }}
         shell: bash
         run: |
-          release_title="Ensync ${GITHUB_REF_NAME} (${ENSYNC_RELEASE_CHANNEL})"
-          release_notes="Verified ${ENSYNC_RELEASE_CHANNEL} desktop binaries for private source revision ${ENSYNC_SOURCE_COMMIT}."
-          if gh release view "${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "${GITHUB_REF_NAME}" release-assets/* --clobber --repo "$ENSYNC_RELEASE_REPOSITORY"
-            gh release edit "${GITHUB_REF_NAME}" --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
+          release_tag="${{ needs.preflight.outputs.tag }}"
+          release_title="Ensync ${release_tag} (${ENSYNC_RELEASE_CHANNEL})"
+          if [[ "${{ needs.preflight.outputs.mode }}" == "macos-only" ]]; then
+            release_notes="Verified ${ENSYNC_RELEASE_CHANNEL} macOS binaries for private source revision ${ENSYNC_SOURCE_COMMIT}."
           else
-            gh release create "${GITHUB_REF_NAME}" release-assets/* --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
+            release_notes="Verified ${ENSYNC_RELEASE_CHANNEL} desktop binaries for private source revision ${ENSYNC_SOURCE_COMMIT}."
+          fi
+          if gh release view "$release_tag" --repo "$ENSYNC_RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$release_tag" release-assets/* --clobber --repo "$ENSYNC_RELEASE_REPOSITORY"
+            gh release edit "$release_tag" --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
+          else
+            gh release create "$release_tag" release-assets/* --repo "$ENSYNC_RELEASE_REPOSITORY" --title "$release_title" --notes "$release_notes"
           fi
       - name: Publish the verified manifest to the production download and update feed
         env:

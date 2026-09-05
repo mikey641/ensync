@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   RELEASE_SECRET_NAMES,
+  resolveReleaseMode,
   resolveWindowsSigning,
   validateReleasePrerequisites,
 } from '../scripts/release-prerequisites.mjs'
@@ -65,4 +66,42 @@ test('release preflight rejects partial, competing, or missing signing configura
   assert.equal(errors.some((error) => error.includes('binary distribution')), true)
   assert.equal(errors.some((error) => error.includes('must be public')), true)
   assert.equal(errors.some((error) => error.includes('semantic version')), true)
+})
+
+function macosOnlyEnvironment() {
+  const environment = {}
+  for (const name of RELEASE_SECRET_NAMES.macos) environment[name] = `value-${name}`
+  for (const name of RELEASE_SECRET_NAMES.vercel) environment[name] = `value-${name}`
+  for (const name of RELEASE_SECRET_NAMES.distribution) environment[name] = `value-${name}`
+  environment.ENSYNC_RELEASE_REPOSITORY = 'ensync/ensync-downloads'
+  environment.ENSYNC_SOURCE_REPOSITORY = 'ensync/ensync-private'
+  environment.ENSYNC_RELEASE_REPOSITORY_VISIBILITY = 'public'
+  environment.ENSYNC_RELEASE_MODE = 'macos-only'
+  environment.ENSYNC_RELEASE_VERSION = '0.1.0-beta.1'
+  environment.ENSYNC_RELEASE_CHANNEL = 'beta'
+  return environment
+}
+
+test('resolveReleaseMode defaults to full and rejects unknown values', () => {
+  assert.equal(resolveReleaseMode({}), 'full')
+  assert.equal(resolveReleaseMode({ ENSYNC_RELEASE_MODE: 'macos-only' }), 'macos-only')
+  assert.throws(() => resolveReleaseMode({ ENSYNC_RELEASE_MODE: 'windows-only' }), /ENSYNC_RELEASE_MODE/)
+})
+
+test('macOS-only preflight accepts Apple, Vercel, and distribution without Windows identity', () => {
+  assert.deepEqual(validateReleasePrerequisites(macosOnlyEnvironment()), [])
+})
+
+test('macOS-only preflight enforces semantic version and channel rules', () => {
+  const missingVersion = macosOnlyEnvironment()
+  delete missingVersion.ENSYNC_RELEASE_VERSION
+  assert.match(validateReleasePrerequisites(missingVersion)[0], /ENSYNC_RELEASE_VERSION/)
+
+  const stablePrerelease = macosOnlyEnvironment()
+  stablePrerelease.ENSYNC_RELEASE_CHANNEL = 'stable'
+  assert.match(validateReleasePrerequisites(stablePrerelease).join(' '), /stable .*prerelease/)
+
+  const betaPlainVersion = macosOnlyEnvironment()
+  betaPlainVersion.ENSYNC_RELEASE_VERSION = '0.1.0'
+  assert.match(validateReleasePrerequisites(betaPlainVersion).join(' '), /beta .*prerelease/)
 })
