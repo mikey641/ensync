@@ -1,0 +1,30 @@
+name: Vercel repoint canonical alias
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  repoint:
+    runs-on: ubuntu-latest
+    env:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - name: Point ensync.vercel.app at the latest production deployment
+        run: |
+          NEW_URL=$(curl -sS -H "Authorization: Bearer $VERCEL_TOKEN" \
+            "https://api.vercel.com/v6/deployments?projectId=$VERCEL_PROJECT_ID&teamId=$VERCEL_ORG_ID&target=production&limit=1" \
+            | jq -r '.deployments[0].url')
+          echo "new_url=$NEW_URL"
+          npx --yes vercel@58.7.1 alias set "$NEW_URL" ensync.vercel.app \
+            --token "$VERCEL_TOKEN" --scope "$VERCEL_ORG_ID" --yes
+      - name: Verify the canonical domain serves the redesigned site
+        run: |
+          sleep 6
+          title=$(curl -s https://ensync.vercel.app/ | grep -o '<title>[^<]*</title>' | head -1)
+          echo "title=$title"
+          echo "$title" | grep -q 'One coding workflow' && echo 'OK: canonical domain now serves the redesigned site.'
