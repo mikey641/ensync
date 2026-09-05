@@ -5046,7 +5046,6 @@ function ConversationPane({
           chatTitle={chat.title}
           sourceBranch={deliveryBranch}
           messages={chat.messages}
-          executionEvents={executionEvents}
           activeTurnId={activeTurnId}
           open={deliveryPanelOpen}
           onOpenChange={onDeliveryPanelOpenChange}
@@ -5270,7 +5269,6 @@ function DeliveryPanel({
   chatTitle,
   sourceBranch,
   messages,
-  executionEvents,
   activeTurnId,
   open,
   onOpenChange,
@@ -5280,7 +5278,6 @@ function DeliveryPanel({
   chatTitle: string
   sourceBranch: string
   messages: Chat['messages']
-  executionEvents: ChatExecutionEvent[]
   activeTurnId: string | null
   open: boolean
   onOpenChange: (open: boolean) => void
@@ -5291,14 +5288,17 @@ function DeliveryPanel({
     promptIsActive,
     hasUnsavedActivePrompt,
     deliveryTracksPrompt,
-    deliveryLinkProof,
   } = deliveryPromptContext(
     delivery,
     productionDelivery,
     messages,
     activeTurnId,
-    executionEvents,
   )
+  const promptsInRun = prompt?.turnId
+    ? messages.filter((message) => message.role === 'user' && message.turnId === prompt.turnId).length
+    : 0
+  const deliverySubject = promptsInRun > 1 ? 'This run' : 'This prompt'
+  const combinedPromptDetail = promptsInRun > 1 ? `${promptsInRun} prompts were handled in this one run. ` : ''
   const deliveryLabelText = delivery ? deliveryLabel(delivery) : 'Not saved'
   const promptLabel = promptRunLabel(prompt, promptIsActive)
   const promptScope = promptIsActive ? 'Current prompt' : 'Latest prompt'
@@ -5307,30 +5307,30 @@ function DeliveryPanel({
     : null
   const deliveryDescription = delivery ? deliveryWorkDescription(delivery, messages) : null
   const deliveryScope = delivery
-    ? deliveryTracksPrompt ? 'This prompt’s delivery' : 'Earlier delivered work'
+    ? deliveryTracksPrompt ? `${deliverySubject}’s delivery` : 'Earlier delivered work'
     : null
   const previousProductionDescription = previousProduction
     ? deliveryWorkDescription(previousProduction, messages)
     : null
   const previousProductionCommit = previousProduction?.productionCommitSha ?? previousProduction?.savedSha ?? null
   const deploymentLinkLabel = delivery?.state === 'production' && (delivery.deploymentDashboardUrl || delivery.deploymentUrl)
-    ? `${deliveryTracksPrompt ? 'Open this prompt’s' : 'Open earlier work’s'} verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
+    ? `${deliveryTracksPrompt ? `Open ${deliverySubject.toLowerCase()}’s` : 'Open earlier work’s'} verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
     : null
   const landingStepLabel = delivery?.state === 'landing' ? deliveryLabel(delivery) : 'Landing'
   const deliverySteps = ['Saved', landingStepLabel, 'Pushed', 'Building', 'Production']
   const summary = !delivery
     ? 'Delivery · not saved yet'
     : deliveryTracksPrompt
-      ? `This prompt · ${deliveryLabelText} · ${exactCommit?.slice(0, 12)}`
+      ? `${deliverySubject} · ${deliveryLabelText} · ${exactCommit?.slice(0, 12)}`
       : `Earlier delivery · ${deliveryLabelText} · ${exactCommit?.slice(0, 12)}`
   const promptDescription = concisePromptDescription(prompt?.content)
     || 'No prompt text is available for this conversation.'
   const promptDetail = hasUnsavedActivePrompt
     ? 'Not saved yet. This prompt will get its own exact commit and delivery pipeline after the agent finishes successfully.'
     : deliveryTracksPrompt
-      ? deliveryLinkProof === 'completed_run'
-        ? `This prompt’s completed CLI run saved exact commit ${delivery?.savedSha.slice(0, 12)}; Ensync recovered the missing legacy link from immutable run evidence.`
-        : `This prompt is linked to exact saved commit ${delivery?.savedSha.slice(0, 12)}.`
+      ? delivery?.state === 'production'
+        ? `${combinedPromptDetail}Host-verified chain: turn ${delivery.turnIds.at(-1)} → saved ${delivery.savedSha.slice(0, 12)} → production ${(delivery.replacementCommitSha ?? delivery.productionCommitSha ?? '').slice(0, 12)}. Git ancestry was verified by Ensync Host.`
+        : `${combinedPromptDetail}Host-verified chain: turn ${delivery?.turnIds.at(-1)} → saved ${delivery?.savedSha.slice(0, 12)}. The identity is persisted in Ensync’s delivery journal.`
       : delivery
         ? 'No saved delivery is linked to this prompt. The delivery below belongs to earlier work.'
         : 'No saved delivery is linked to this prompt yet.'

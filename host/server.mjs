@@ -23,7 +23,7 @@ import { selectAutomaticProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './auto
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
-import { DeliveryCoordinator, deliveryTurnIdFromCommitMessage } from './delivery-coordinator.mjs'
+import { DeliveryCoordinator, deliveryTurnIdentityFromCommitMessage } from './delivery-coordinator.mjs'
 import { DeliveryJournal } from './delivery-journal.mjs'
 import { VercelDeploymentAdapter } from './deployment-adapters.mjs'
 import { readLocalFileForDisplay } from './local-file.mjs'
@@ -650,10 +650,39 @@ export function createEnsyncHost(options = {}) {
       return result.exitCode === 0 && description ? description.slice(0, 240) : null
     },
     resolveTurnId: async (record) => {
+      const landingItems = await landingJournal.load()
+      const landingItem = landingItems.find((item) => (
+        record.landingIds.includes(item.id)
+        && item.savedSha === record.savedSha
+        && record.sourceBranches.includes(item.branch)
+      ))
+      if (!landingItem) return null
+      if (landingItem.turnId) {
+        const proof = landingItem.turnIdentityProof ?? 'captured'
+        const repaired = await landingJournal.setTurnIdentity(
+          landingItem.id,
+          landingItem.savedSha,
+          landingItem.turnId,
+          proof,
+        )
+        return repaired ? { turnId: repaired.turnId, proof: repaired.turnIdentityProof } : null
+      }
       const result = await runGit(['show', '-s', '--format=%B', record.savedSha], {
         cwd: record.repositoryPath, gitExecutable: options.gitExecutable, timeoutMs: 10_000,
       })
-      return result.exitCode === 0 ? deliveryTurnIdFromCommitMessage(result.stdout) : null
+      if (result.exitCode !== 0) return null
+      const identity = deliveryTurnIdentityFromCommitMessage(result.stdout, {
+        provider: landingItem.provider,
+        branch: landingItem.branch,
+      })
+      if (!identity) return null
+      const repaired = await landingJournal.setTurnIdentity(
+        landingItem.id,
+        landingItem.savedSha,
+        identity.turnId,
+        identity.proof,
+      )
+      return repaired ? { turnId: repaired.turnId, proof: repaired.turnIdentityProof } : null
     },
     redact: (value) => redactTerminalText(value).text,
     startRepair: async (record) => {

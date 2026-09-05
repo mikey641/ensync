@@ -130,6 +130,8 @@ export type DeliveryRecord = {
   landingIds: string[]
   sourceProviders: string[]
   turnIds: string[]
+  turnIdentityProof: 'captured' | 'commit_trailer' | 'legacy_job' | null
+  productionAncestryVerified: boolean
   landingState: DeliveryLandingState | null
   deliveryTarget: DeliveryTarget
   description: string | null
@@ -1139,5 +1141,4 @@ export class EnsyncHostClient {
 }
 
 export const ensyncHost = new EnsyncHostClient()
-
 

@@ -16,6 +16,7 @@ const MAX_TERMINAL_ITEMS = 200
 const MAX_ERROR_LENGTH = 4_096
 const STATES = new Set(['queued', 'integrating', 'retry', 'landed'])
 const DELIVERY_TARGETS = new Set(['production', 'protected_branch'])
+const TURN_IDENTITY_PROOFS = new Set(['captured', 'commit_trailer', 'legacy_job'])
 
 function checksum(payload) {
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
@@ -44,6 +45,9 @@ function normalizeItem(value) {
   const targetBaseSha = boundedString(value.targetBaseSha, 64)?.toLowerCase()
   const provider = boundedString(value.provider, 128)
   const turnId = boundedString(value.turnId, 256)
+  const turnIdentityProof = TURN_IDENTITY_PROOFS.has(value.turnIdentityProof)
+    ? value.turnIdentityProof
+    : null
   const deliveryTarget = DELIVERY_TARGETS.has(value.deliveryTarget)
     ? value.deliveryTarget
     : 'production'
@@ -82,6 +86,7 @@ function normalizeItem(value) {
     targetBaseSha: targetBaseSha ?? null,
     provider,
     turnId,
+    turnIdentityProof: turnId ? turnIdentityProof : null,
     deliveryTarget,
     completionSequence: value.completionSequence,
     state: value.state,
@@ -182,6 +187,7 @@ export class LandingJournal {
         provider: input.provider,
         completionSequence: this.nextSequence,
         turnId: input.turnId,
+        turnIdentityProof: input.turnId ? 'captured' : null,
         deliveryTarget: input.deliveryTarget,
         // Reuse the established terminal state on disk so an older Host can
         // safely ignore this new optional mode instead of rejecting the journal.
@@ -222,6 +228,35 @@ export class LandingJournal {
         updatedAt: this.clock().toISOString(),
       })
       if (!updated) throw new TypeError('Landing transition is invalid.')
+      const nextItems = [...this.items]
+      nextItems[index] = updated
+      await this.#save(nextItems, this.nextSequence)
+      return cloneItem(updated)
+    })
+  }
+
+  setTurnIdentity(id, savedSha, turnId, turnIdentityProof) {
+    return this.#serialize(async () => {
+      if (!this.loaded) await this.#loadFromDisk()
+      if (!boundedString(turnId, 256) || !TURN_IDENTITY_PROOFS.has(turnIdentityProof)) {
+        throw new TypeError('Landing turn identity proof is invalid.')
+      }
+      const index = this.items.findIndex((item) => item.id === id)
+      const current = this.items[index]
+      if (!current || current.savedSha !== String(savedSha ?? '').toLowerCase()) return null
+      if (current.turnId && current.turnId !== turnId) {
+        throw new Error('The saved landing item already belongs to a different turn.')
+      }
+      if (current.turnId === turnId && current.turnIdentityProof === turnIdentityProof) {
+        return cloneItem(current)
+      }
+      const updated = normalizeItem({
+        ...current,
+        turnId,
+        turnIdentityProof,
+        updatedAt: this.clock().toISOString(),
+      })
+      if (!updated) throw new TypeError('Landing turn identity repair is invalid.')
       const nextItems = [...this.items]
       nextItems[index] = updated
       await this.#save(nextItems, this.nextSequence)

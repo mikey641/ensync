@@ -7,11 +7,10 @@ export function deliveryPromptContext(
   productionDelivery: DeliveryRecord | null | undefined,
   messages: Message[] | null | undefined,
   activeTurnId: string | null | undefined,
-  events?: Array<{ type?: string; code?: string | null; message?: string | null }> | null,
 ): {
   prompt: Message | null
   promptIsActive: boolean
   hasUnsavedActivePrompt: boolean
   deliveryTracksPrompt: boolean
-  deliveryLinkProof: 'journal' | 'completed_run' | null
+  deliveryLinkProof: 'host' | null
 }

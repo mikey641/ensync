@@ -21,6 +21,8 @@ test('delivery journal durably deduplicates a landing SHA', async () => {
     assert.equal(restored[0].state, 'landing')
     assert.deepEqual(restored[0].landingIds, ['landing-1', 'landing-2'])
     assert.deepEqual(restored[0].turnIds, ['turn-one'])
+    assert.equal(restored[0].turnIdentityProof, 'captured')
+    assert.equal(restored[0].productionAncestryVerified, false)
     assert.equal(restored[0].landingState, 'queued')
     assert.equal(restored[0].deliveryTarget, 'production')
     assert.equal((await readFile(path, 'utf8')).includes(SHA), true)

@@ -131,6 +131,7 @@ test('journal stores only bounded landing metadata, never prompts or provider ou
     'targetBaseSha',
     'targetBranch',
     'turnId',
+    'turnIdentityProof',
     'updatedAt',
     'workspacePath',
   ])
@@ -149,6 +150,25 @@ test('protected-branch delivery is durable terminal metadata and retains the exa
   assert.equal(restored[0].state, 'landed')
   assert.equal(restored[0].deliveryTarget, 'protected_branch')
   assert.equal(restored[0].turnId, 'turn-current-prompt')
+  assert.equal(restored[0].turnIdentityProof, 'captured')
+})
+
+test('legacy turn repair is persisted only against the exact saved item', async (context) => {
+  const { filePath, journal } = await fixture(context)
+  const queued = await journal.enqueue(landingInput())
+
+  assert.equal(await journal.setTurnIdentity(queued.id, SHA_B, 'turn-wrong', 'legacy_job'), null)
+  const repaired = await journal.setTurnIdentity(queued.id, SHA_A, 'turn-recovered', 'legacy_job')
+  const restored = await new LandingJournal({ filePath }).load()
+
+  assert.equal(repaired.turnId, 'turn-recovered')
+  assert.equal(repaired.turnIdentityProof, 'legacy_job')
+  assert.equal(restored[0].turnId, 'turn-recovered')
+  assert.equal(restored[0].turnIdentityProof, 'legacy_job')
+  await assert.rejects(
+    journal.setTurnIdentity(queued.id, SHA_A, 'turn-different', 'legacy_job'),
+    /different turn/i,
+  )
 })
 
 test('compare-and-transition changes only the expected state', async (context) => {

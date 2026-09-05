@@ -10,6 +10,8 @@ function record(id, sourceBranch, state, updatedAt, overrides = {}) {
     updatedAt,
     productionAt: state === 'production' ? updatedAt : null,
     replacementCommitSha: null,
+    turnIdentityProof: null,
+    productionAncestryVerified: false,
     ...overrides,
   }
 }
@@ -85,6 +87,8 @@ test('an active prompt leads the card even when another window owns the run', ()
 test('a prompt already linked to the delivery is not presented as unsaved work', () => {
   const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
     turnIds: ['delivered-turn'],
+    turnIdentityProof: 'captured',
+    productionAncestryVerified: true,
   })
   const messages = [{ role: 'user', turnId: 'delivered-turn', content: 'ship it', deliveryStatus: 'completed' }]
 
@@ -93,7 +97,7 @@ test('a prompt already linked to the delivery is not presented as unsaved work',
     promptIsActive: true,
     hasUnsavedActivePrompt: false,
     deliveryTracksPrompt: true,
-    deliveryLinkProof: 'journal',
+    deliveryLinkProof: 'host',
   })
 })
 
@@ -115,6 +119,8 @@ test('the latest completed prompt remains visible and legacy delivery is earlier
 test('a completed prompt is linked only by its exact turn id', () => {
   const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
     turnIds: ['latest-turn'],
+    turnIdentityProof: 'commit_trailer',
+    productionAncestryVerified: true,
   })
   const messages = [{ role: 'user', turnId: 'latest-turn', content: 'ship this fix', deliveryStatus: 'completed' }]
 
@@ -123,11 +129,11 @@ test('a completed prompt is linked only by its exact turn id', () => {
     promptIsActive: false,
     hasUnsavedActivePrompt: false,
     deliveryTracksPrompt: true,
-    deliveryLinkProof: 'journal',
+    deliveryLinkProof: 'host',
   })
 })
 
-test('a completed chat run repairs an older Host record missing its turn identity', () => {
+test('renderer evidence never guesses a missing Host turn identity', () => {
   const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
     savedSha: '3215687820e0750b81c3dd33c40fe62300771f51',
     turnIds: [],
@@ -146,9 +152,22 @@ test('a completed chat run repairs an older Host record missing its turn identit
     prompt: messages[0],
     promptIsActive: false,
     hasUnsavedActivePrompt: false,
-    deliveryTracksPrompt: true,
-    deliveryLinkProof: 'completed_run',
+    deliveryTracksPrompt: false,
+    deliveryLinkProof: null,
   })
+})
+
+test('a turn id without Host proof or production ancestry is not linked by the renderer', () => {
+  const delivered = record('production', 'ensync/chat-one', 'production', '2026-09-05T03:00:00.000Z', {
+    turnIds: ['turn-current'],
+  })
+  const messages = [{ role: 'user', turnId: 'turn-current', content: 'ship this', deliveryStatus: 'completed' }]
+
+  assert.equal(deliveryPromptContext(delivered, delivered, messages, null).deliveryTracksPrompt, false)
+  delivered.turnIdentityProof = 'legacy_job'
+  assert.equal(deliveryPromptContext(delivered, delivered, messages, null).deliveryTracksPrompt, false)
+  delivered.productionAncestryVerified = true
+  assert.equal(deliveryPromptContext(delivered, delivered, messages, null).deliveryTracksPrompt, true)
 })
 
 test('legacy evidence cannot link a different saved commit or unfinished turn', () => {

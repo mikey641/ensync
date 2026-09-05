@@ -1,6 +1,7 @@
 const DEFAULT_POLL_MS = 10_000
 const DEFAULT_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
 const MAX_TURN_ID_CHARACTERS = 256
+const TURN_IDENTITY_PROOFS = new Set(['captured', 'commit_trailer', 'legacy_job'])
 
 function validTurnId(value) {
   return typeof value === 'string'
@@ -10,21 +11,29 @@ function validTurnId(value) {
     && !/[\u0000-\u001f\u007f]/.test(value)
 }
 
-export function deliveryTurnIdFromCommitMessage(message) {
+export function deliveryTurnIdentityFromCommitMessage(message, expected = {}) {
   if (typeof message !== 'string') return null
+  const provider = message.match(/^Provider:\s*([a-z0-9._-]+)\s*$/im)?.[1]?.toLowerCase() ?? null
+  const branch = message.match(/^Workspace-Branch:\s*([^\r\n]+)\s*$/im)?.[1]?.trim() ?? null
+  if (expected.provider && provider !== String(expected.provider).toLowerCase()) return null
+  if (expected.branch && branch !== expected.branch) return null
+
   const explicit = message.match(/^Turn-ID:\s*([^\r\n]+)\s*$/im)?.[1]?.trim()
-  if (validTurnId(explicit)) return explicit
+  if (validTurnId(explicit)) return { turnId: explicit, proof: 'commit_trailer' }
 
   // Older Ensync snapshots encoded the turn only inside
   // Job: job-<turn-id>-<provider>-<attempt>. Both lines were Host-authored.
-  const provider = message.match(/^Provider:\s*([a-z0-9._-]+)\s*$/im)?.[1]?.toLowerCase()
   const jobId = message.match(/^Job:\s*(job-[A-Za-z0-9_-]{15,127})\s*$/im)?.[1]
   if (!provider || !jobId) return null
   const providerSuffix = `-${provider}-`
   const providerIndex = jobId.lastIndexOf(providerSuffix)
   if (providerIndex <= 4 || !/^\d+$/.test(jobId.slice(providerIndex + providerSuffix.length))) return null
   const recovered = jobId.slice(4, providerIndex)
-  return validTurnId(recovered) ? recovered : null
+  return validTurnId(recovered) ? { turnId: recovered, proof: 'legacy_job' } : null
+}
+
+export function deliveryTurnIdFromCommitMessage(message) {
+  return deliveryTurnIdentityFromCommitMessage(message)?.turnId ?? null
 }
 
 function timestampAfter(delay) {
@@ -89,16 +98,35 @@ export class DeliveryCoordinator {
     }
     if (this.resolveTurnId) {
       records = await Promise.all(records.map(async (record) => {
-        if (record.turnIds.length > 0) return record
+        if (record.turnIds.length > 0 && TURN_IDENTITY_PROOFS.has(record.turnIdentityProof)) return record
         try {
-          const turnId = await this.resolveTurnId(record)
-          if (!validTurnId(turnId)) return record
-          return await this.journal.update(record.id, { turnIds: [turnId] }) ?? record
+          const identity = await this.resolveTurnId(record)
+          if (!validTurnId(identity?.turnId) || !TURN_IDENTITY_PROOFS.has(identity?.proof)) return record
+          if (record.turnIds.length > 0 && !record.turnIds.includes(identity.turnId)) return record
+          return await this.journal.update(record.id, {
+            turnIds: [identity.turnId],
+            turnIdentityProof: identity.proof,
+            productionAncestryVerified: false,
+          }) ?? record
         } catch {
           return record
         }
       }))
     }
+    records = await Promise.all(records.map(async (record) => {
+      if (record.state !== 'production'
+        || !record.productionCommitSha
+        || !TURN_IDENTITY_PROOFS.has(record.turnIdentityProof)
+        || record.turnIds.length < 1
+        || record.productionAncestryVerified === true) return record
+      try {
+        const productionSha = record.replacementCommitSha ?? record.productionCommitSha
+        if (!await this.isAncestor(record.repositoryPath, record.savedSha, productionSha)) return record
+        return await this.journal.update(record.id, { productionAncestryVerified: true }) ?? record
+      } catch {
+        return record
+      }
+    }))
     if (this.describeCommit) {
       records = await Promise.all(records.map(async (record) => {
         if (record.description) return record
@@ -150,6 +178,7 @@ export class DeliveryCoordinator {
       await this.journal.update(record.id, {
         state: 'pushed',
         productionCommitSha: event.productionCommitSha,
+        productionAncestryVerified: false,
         description: event.description ?? record.description,
         repairState: 'idle',
         nextActionAt: null,
@@ -166,6 +195,7 @@ export class DeliveryCoordinator {
           state: 'repairing',
           repairState: 'waiting',
           replacementCommitSha: event.productionCommitSha,
+          productionAncestryVerified: false,
           nextActionAt: null,
         })
       }
@@ -202,6 +232,7 @@ export class DeliveryCoordinator {
     const updated = await this.journal.update(recovered.id, {
       state: 'pushed',
       productionCommitSha: normalizedSha,
+      productionAncestryVerified: false,
       repairState: 'idle',
       nextActionAt: null,
     })

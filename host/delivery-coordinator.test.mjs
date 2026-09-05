@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { DeliveryCoordinator, deliveryTurnIdFromCommitMessage } from './delivery-coordinator.mjs'
+import {
+  DeliveryCoordinator,
+  deliveryTurnIdFromCommitMessage,
+  deliveryTurnIdentityFromCommitMessage,
+} from './delivery-coordinator.mjs'
 
 const SHA = 'a'.repeat(40)
 const item = { id: 'landing-1', repositoryPath: '/repo', projectPath: '/repo/app', targetBranch: 'main', savedSha: 'b'.repeat(40), branch: 'ensync/chat-1', provider: 'codex' }
@@ -13,13 +17,14 @@ class MemoryJournal {
     let record = this.records.find((candidate) => candidate.savedSha === input.savedSha)
     if (!record) {
       const now = new Date().toISOString()
-      record = { ...input, id: `delivery-${this.records.length + 1}`, state, productionCommitSha: null, replacementCommitSha: null, sourceBranches: [input.branch], sourceProviders: [input.provider], turnIds: [input.turnId].filter(Boolean), landingState: input.state ?? null, deliveryTarget: input.deliveryTarget ?? 'production', attemptedProviders: [], repairAttempts: 0, repairState: 'idle', createdAt: now, updatedAt: now }
+      record = { ...input, id: `delivery-${this.records.length + 1}`, state, productionCommitSha: null, replacementCommitSha: null, sourceBranches: [input.branch], sourceProviders: [input.provider], turnIds: [input.turnId].filter(Boolean), turnIdentityProof: input.turnIdentityProof ?? (input.turnId ? 'captured' : null), productionAncestryVerified: false, landingState: input.state ?? null, deliveryTarget: input.deliveryTarget ?? 'production', attemptedProviders: [], repairAttempts: 0, repairState: 'idle', createdAt: now, updatedAt: now }
       this.records.push(record)
     } else Object.assign(record, {
       state,
       landingState: input.state ?? record.landingState,
       deliveryTarget: input.deliveryTarget ?? record.deliveryTarget,
       turnIds: [...new Set([...record.turnIds, input.turnId].filter(Boolean))],
+      turnIdentityProof: record.turnIdentityProof ?? input.turnIdentityProof ?? (input.turnId ? 'captured' : null),
     })
     return structuredClone(record)
   }
@@ -47,6 +52,19 @@ test('commit metadata recovers explicit and legacy Host-authored turn identities
     'Job: job-turn-1788609131718-x3osi7-codex-1',
   ].join('\n')), 'turn-1788609131718-x3osi7')
   assert.equal(deliveryTurnIdFromCommitMessage('Provider: codex\nJob: unrelated-job'), null)
+  assert.deepEqual(deliveryTurnIdentityFromCommitMessage([
+    'Provider: codex',
+    'Job: job-turn-1788609131718-x3osi7-codex-1',
+    'Workspace-Branch: ensync/chat-one',
+  ].join('\n'), { provider: 'codex', branch: 'ensync/chat-one' }), {
+    turnId: 'turn-1788609131718-x3osi7',
+    proof: 'legacy_job',
+  })
+  assert.equal(deliveryTurnIdentityFromCommitMessage([
+    'Provider: codex',
+    'Job: job-turn-1788609131718-x3osi7-codex-1',
+    'Workspace-Branch: ensync/chat-other',
+  ].join('\n'), { provider: 'codex', branch: 'ensync/chat-one' }), null)
 })
 
 test('status durably repairs a legacy delivery record from immutable commit identity', async () => {
@@ -59,15 +77,35 @@ test('status durably repairs a legacy delivery record from immutable commit iden
     resolveTurnId: async (record) => {
       recoveries += 1
       assert.equal(record.savedSha, item.savedSha)
-      return 'turn-recovered'
+      return { turnId: 'turn-recovered', proof: 'legacy_job' }
+    },
+    isAncestor: async (repositoryPath, savedSha, productionSha) => {
+      assert.equal(repositoryPath, '/repo')
+      assert.equal(savedSha, item.savedSha)
+      assert.equal(productionSha, SHA)
+      return true
     },
   })
 
   const status = await coordinator.status('/repo/app', 'ensync/chat-1')
   assert.deepEqual(status.current.turnIds, ['turn-recovered'])
+  assert.equal(status.current.turnIdentityProof, 'legacy_job')
+  assert.equal(status.current.productionAncestryVerified, true)
   assert.deepEqual(journal.records[0].turnIds, ['turn-recovered'])
   await coordinator.status('/repo/app', 'ensync/chat-1')
   assert.equal(recoveries, 1)
+})
+
+test('status refuses to certify prompt production when Git ancestry is absent', async () => {
+  const journal = new MemoryJournal()
+  const tracked = await journal.upsertLanding({ ...item, turnId: 'turn-current' }, 'saved')
+  await journal.update(tracked.id, { state: 'production', productionCommitSha: SHA })
+  const coordinator = new DeliveryCoordinator({ journal, isAncestor: async () => false })
+
+  const status = await coordinator.status('/repo/app', 'ensync/chat-1')
+
+  assert.equal(status.current.turnIdentityProof, 'captured')
+  assert.equal(status.current.productionAncestryVerified, false)
 })
 
 test('delivery follows an exact pushed SHA through build to production', async () => {

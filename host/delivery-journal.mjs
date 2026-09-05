@@ -18,6 +18,7 @@ const STATES = new Set([
 ])
 const LANDING_STATES = new Set(['held', 'queued', 'integrating', 'retry', 'landed'])
 const DELIVERY_TARGETS = new Set(['production', 'protected_branch'])
+const TURN_IDENTITY_PROOFS = new Set(['captured', 'commit_trailer', 'legacy_job'])
 
 function checksum(payload) {
   return createHash('sha256').update(JSON.stringify(payload)).digest('hex')
@@ -75,6 +76,10 @@ function normalize(value) {
     landingIds: stringList(value.landingIds),
     sourceProviders: stringList(value.sourceProviders),
     turnIds: stringList(value.turnIds),
+    turnIdentityProof: TURN_IDENTITY_PROOFS.has(value.turnIdentityProof)
+      ? value.turnIdentityProof
+      : null,
+    productionAncestryVerified: value.productionAncestryVerified === true,
     landingState: LANDING_STATES.has(value.landingState) ? value.landingState : null,
     deliveryTarget: DELIVERY_TARGETS.has(value.deliveryTarget) ? value.deliveryTarget : 'production',
     description: text(value.description, 240),
@@ -182,6 +187,10 @@ export class DeliveryJournal {
         landingIds: [...(current?.landingIds ?? []), item.id].filter(Boolean),
         sourceProviders: [...(current?.sourceProviders ?? []), item.provider].filter(Boolean),
         turnIds: [...(current?.turnIds ?? []), item.turnId].filter(Boolean),
+        turnIdentityProof: current?.turnIdentityProof
+          ?? item.turnIdentityProof
+          ?? (item.turnId ? 'captured' : null),
+        productionAncestryVerified: current?.productionAncestryVerified === true,
         landingState: item.state,
         deliveryTarget: item.deliveryTarget,
         state: nextState,
