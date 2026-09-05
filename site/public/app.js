@@ -1,4 +1,9 @@
-import { releaseLabel, resolveDownload, resolveWindowsStoreListing } from '/release-manifest.mjs';
+import {
+  releaseLabel,
+  resolveDownload,
+  resolveWindowsStoreListing,
+  windowsStoreProductId,
+} from '/release-manifest.mjs';
 
 const root = document.documentElement;
 const themeButton = document.querySelector('[data-theme-toggle]');
@@ -186,6 +191,33 @@ async function fetchJson(path) {
   return response.json();
 }
 
+function unverifiedStoreListing(listing, reason) {
+  return { ...listing, available: false, reason };
+}
+
+// Confirm the listing is published, not just configured. The Store page and
+// catalog return 404/NotFound while a submission is still in certification, so
+// the configured URL alone is not enough to prove a customer can install it.
+async function verifyStoreListing(listing) {
+  const productId = windowsStoreProductId(listing);
+  if (!productId) {
+    return unverifiedStoreListing(listing, 'The Microsoft Store listing URL is invalid.');
+  }
+
+  const url = `/api/windows-store?productId=${encodeURIComponent(productId)}`;
+  try {
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      return unverifiedStoreListing(listing, 'Could not verify the Microsoft Store listing.');
+    }
+    const check = await response.json();
+    if (check.available) return listing;
+    return unverifiedStoreListing(listing, check.reason || 'The Microsoft Store listing is not published yet.');
+  } catch {
+    return unverifiedStoreListing(listing, 'Could not verify the Microsoft Store listing.');
+  }
+}
+
 async function hydrateDownloads() {
   const cards = [...document.querySelectorAll('[data-download-platform]')];
   if (!cards.length) return;
@@ -195,9 +227,12 @@ async function hydrateDownloads() {
     fetchJson('/site-config.json'),
   ]);
   const manifest = manifestResult.status === 'fulfilled' ? manifestResult.value : null;
-  const storeListing = configResult.status === 'fulfilled'
+  const configuredListing = configResult.status === 'fulfilled'
     ? resolveWindowsStoreListing(configResult.value)
     : resolveWindowsStoreListing(null);
+  const storeListing = configuredListing.available
+    ? await verifyStoreListing(configuredListing)
+    : configuredListing;
 
   let availableCount = 0;
   for (const card of cards) {

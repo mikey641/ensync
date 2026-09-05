@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { releaseLabel, resolveDownload, resolveWindowsStoreListing } from '../public/release-manifest.mjs';
+import {
+  releaseLabel,
+  resolveDownload,
+  resolveWindowsStoreListing,
+  windowsStoreProductId,
+} from '../public/release-manifest.mjs';
 
 function manifest(overrides = {}) {
   return {
@@ -67,4 +72,17 @@ test('keeps stable and beta manifests isolated', () => {
   beta.latest.version = '1.2.4-beta.1';
   assert.equal(resolveDownload(beta, 'macos', 'beta').available, true);
   assert.match(resolveDownload({ ...manifest(), channel: 'beta' }, 'macos', 'beta').reason, /prerelease/);
+});
+
+test('extracts the Store product id from a resolved listing', () => {
+  const config = { downloads: { windowsStoreUrl: 'https://apps.microsoft.com/detail/9NFJ07JPNL9Q?hl=en-us&gl=US' } };
+  const listing = resolveWindowsStoreListing(config);
+  assert.equal(listing.available, true);
+  assert.equal(windowsStoreProductId(listing), '9NFJ07JPNL9Q');
+});
+
+test('returns no Store product id for an unavailable or malformed listing', () => {
+  assert.equal(windowsStoreProductId(resolveWindowsStoreListing(null)), null);
+  assert.equal(windowsStoreProductId({ available: false, url: null }), null);
+  assert.equal(windowsStoreProductId({ available: true, url: 'https://example.com/detail/9NFJ07JPNL9Q' }), null);
 });

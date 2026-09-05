@@ -92,6 +92,18 @@ export function releaseLabel(download) {
   return architectures ? `Version ${download.version} · ${architectures}` : `Version ${download.version}`;
 }
 
+export function windowsStoreProductId(listing) {
+  if (!listing?.url) return null;
+  try {
+    const url = new URL(listing.url);
+    if (url.origin !== 'https://apps.microsoft.com' || url.username || url.password) return null;
+    const match = url.pathname.match(/^\/detail\/([^/]+)/i);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
 export function resolveWindowsStoreListing(config) {
   const value = config?.downloads?.windowsStoreUrl;
   if (value === null || value === undefined || value === '') {
