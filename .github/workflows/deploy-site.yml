@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'site/**'
+      - 'mobile/**'
 
 permissions:
   contents: read

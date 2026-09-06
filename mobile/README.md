@@ -19,6 +19,8 @@ The same client is an installable web app. It works full-screen on iOS and Andro
 
 The production site publishes this client at <https://ensync.vercel.app/mobile/>. Open that URL on your phone, then choose **Add to Home Screen** (iOS) or accept the browser install prompt (Android).
 
+Open the app with `?sync=<Sync URL>` (or use the **Connect your phone** link in desktop account settings) and the Sync URL field fills itself, leaving only your account name (handle or email) and password to enter.
+
 To host it yourself:
 
 ```bash
