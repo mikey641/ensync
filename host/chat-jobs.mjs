@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { redactTerminalText } from './chat.mjs'
+import { safeFallbackProof } from './safe-fallback.mjs'
 
 const DEFAULT_MAX_JOBS = 128
 const DEFAULT_MAX_EVENTS = 1_000
@@ -148,6 +149,12 @@ export class ChatJobError extends Error {
  * stream subscriber may disappear and reconnect without cancelling the job;
  * only cancel() aborts the exact provider/OpenSSH process.
  */
+export const DELIVERY_REPAIR_WORKSPACE_PREFIX = 'delivery-repair:'
+
+export function isDeliveryRepairWorkspaceKey(workspaceKey) {
+  return typeof workspaceKey === 'string' && workspaceKey.startsWith(DELIVERY_REPAIR_WORKSPACE_PREFIX)
+}
+
 export class ChatJobService {
   #jobs = new Map()
   #pendingStarts = new Map()
@@ -362,12 +369,19 @@ export class ChatJobService {
       || [...this.#jobs.values()].some((job) => job.state === 'running')
   }
 
+  /**
+   * The running chat that owns a project, if any. Automatic delivery repairs run
+   * as local jobs in the same project, so they are excluded here: the delivery
+   * coordinator asks this question to avoid starting a duplicate repair beside
+   * a user's chat, and its own repair job must never answer "yes" to it.
+   */
   runningForProject(projectPath) {
     if (typeof projectPath !== 'string' || !projectPath) return null
     const job = [...this.#jobs.values()].find((candidate) => (
       candidate.state === 'running'
       && candidate.kind === 'local'
       && candidate.request?.projectPath === projectPath
+      && !isDeliveryRepairWorkspaceKey(candidate.request?.workspaceKey)
     ))
     return job ? {
       id: job.id,
@@ -569,12 +583,15 @@ export class ChatJobService {
             && this.#checkWorktreeClean
             && await this.#checkWorktreeClean(job.request)
 
-          // Provider quota exhaustion: switch to the next provider if the
-          // worktree is clean (no partial work would be lost).
+          // A Host-proven safe failure (quota exhaustion, or a provider that
+          // rejected the turn before any activity) switches to the next
+          // provider if the worktree is clean (no partial work would be lost).
+          // The proof is the same one the renderer and connector require, so
+          // the switch also happens for runs no window is attached to.
+          const proof = safeFallbackProof(runPayload)
           if (
             attempt < MAX_AUTO_CONTINUATIONS
-            && runPayload.code === 'provider_quota'
-            && runPayload.safeToRetry === true
+            && proof
             && isClean
             && this.#selectFallbackProvider
           ) {
@@ -584,7 +601,9 @@ export class ChatJobService {
               attemptedProviders.push(nextProvider)
               this.#record(job, {
                 type: 'notice',
-                message: `Provider ${job.request?.provider} exhausted its quota. The worktree is clean, so Ensync is continuing with ${nextProvider}.`,
+                message: proof.kind === 'quota'
+                  ? `Provider ${job.request?.provider} exhausted its quota. The worktree is clean, so Ensync is continuing with ${nextProvider}.`
+                  : `Provider ${job.request?.provider} rejected the turn before any activity. The worktree is clean, so Ensync is continuing with ${nextProvider}.`,
                 code: 'auto_continuation',
                 at: this.#now(),
               })

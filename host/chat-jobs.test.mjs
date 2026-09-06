@@ -1199,3 +1199,87 @@ test('a live writer that saved during this process lifetime still fences the jou
   assert.throws(() => competing.load(), ChatJobJournalInUseError)
   assert.throws(() => competing.save([]), ChatJobJournalInUseError)
 })
+
+test('runningForProject ignores delivery repair jobs so a repair never masquerades as an active chat', async () => {
+  const releases = []
+  const service = new ChatJobService({
+    runLocal: async (_request, options) => {
+      options.onEvent({ type: 'started', provider: 'codex', cwd: '/project', command: 'codex exec -', at: '2026-09-06T10:36:52.000Z' })
+      await new Promise((resolve) => { releases.push(resolve) })
+      return { provider: 'codex', response: 'done', completedAt: '2026-09-06T10:40:00.000Z' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+  })
+
+  await service.start({
+    jobId: 'deliveryrepair-incident-1',
+    kind: 'local',
+    request: { provider: 'codex', projectPath: '/project', workspaceKey: 'delivery-repair:incident-1', prompt: 'repair' },
+  })
+  await waitFor(() => service.get('deliveryrepair-incident-1').state === 'running')
+  assert.equal(service.runningForProject('/project'), null)
+
+  await service.start({
+    jobId: JOB_B,
+    kind: 'local',
+    request: { provider: 'claude', projectPath: '/project', workspaceKey: 'conversation:chat-1', prompt: 'continue' },
+  })
+  await waitFor(() => service.get(JOB_B).state === 'running')
+  assert.deepEqual(
+    { id: service.runningForProject('/project')?.id, provider: service.runningForProject('/project')?.provider },
+    { id: JOB_B, provider: 'claude' },
+  )
+
+  for (const release of releases) release()
+  await waitFor(() => service.get(JOB_B).state === 'completed')
+  await waitFor(() => service.get('deliveryrepair-incident-1').state === 'completed')
+})
+
+test('a provider that rejects the turn before any activity auto-continues on the next provider when the worktree is clean', async () => {
+  const attempts = []
+  const service = new ChatJobService({
+    runLocal: async (request, options) => {
+      attempts.push(request.provider)
+      options.onEvent({ type: 'started', provider: request.provider, cwd: '/project', command: `${request.provider} app-server`, at: '2026-09-06T12:18:49.000Z' })
+      if (request.provider === 'codex') {
+        throw new ChatJobError('provider_startup_failed', "Codex rejected the turn before any assistant or tool activity. The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.", 502, true)
+      }
+      return { provider: request.provider, response: 'ok', completedAt: '2026-09-06T12:19:30.000Z' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => true,
+    selectFallbackProvider: async (attempted) => (attempted.includes('claude') ? null : 'claude'),
+  })
+
+  await service.start({ jobId: JOB_A, kind: 'local', request: { provider: 'codex', prompt: 'Is it sending?', sessionId: 'thread-1', projectPath: '/project', workspaceKey: 'conversation:chat-1' } })
+  await waitFor(() => ['completed', 'failed'].includes(service.get(JOB_A).state))
+
+  assert.deepEqual(attempts, ['codex', 'claude'])
+  assert.equal(service.get(JOB_A).state, 'completed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  const continuation = events.find((event) => event.type === 'notice' && event.code === 'auto_continuation')
+  assert.ok(continuation, 'expected an auto_continuation notice')
+  assert.match(continuation.message, /claude/)
+  assert.equal(events.at(-1).type, 'completed')
+  assert.equal(events.at(-1).result.provider, 'claude')
+})
+
+test('an unproven CLI failure never auto-continues on another provider even when the worktree is clean', async () => {
+  const attempts = []
+  const service = new ChatJobService({
+    runLocal: async (request) => {
+      attempts.push(request.provider)
+      throw new ChatJobError('cli_failed', 'Codex ended the active turn with status failed.', 502, false)
+    },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => true,
+    selectFallbackProvider: async () => 'claude',
+  })
+
+  await service.start({ jobId: JOB_B, kind: 'local', request: { provider: 'codex', prompt: 'work', projectPath: '/project', workspaceKey: 'conversation:chat-2' } })
+  await waitFor(() => ['completed', 'failed'].includes(service.get(JOB_B).state))
+
+  assert.deepEqual(attempts, ['codex'])
+  assert.equal(service.get(JOB_B).state, 'failed')
+})

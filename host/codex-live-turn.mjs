@@ -20,6 +20,21 @@ export class CodexLiveTurnError extends Error {
   }
 }
 
+/**
+ * Provider text that identifies a quota, rate-limit, or capacity failure.
+ * Shared with the spawned-CLI parser in chat.mjs so both Codex paths agree.
+ */
+export const PROVIDER_QUOTA_PATTERN = /(?:usage|spending|rate|session)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
+
+/**
+ * App-server items that are only text: the echo of the user's own prompt
+ * (app-server v2 emits a userMessage item at the start of every turn), model
+ * text, reasoning, and the error report itself. Every other item kind (command
+ * execution, file change, tool call, web search, anything new) is work that
+ * may have mutated the project, so its presence forbids an automatic replay.
+ */
+const NON_WORK_ITEM_TYPES = new Set(['userMessage', 'user_message', 'agentMessage', 'agent_message', 'reasoning', 'error'])
+
 function asProtocolError(error, fallbackCode, fallbackMessage, safeToRetry = false) {
   if (error instanceof CodexLiveTurnError) return error
   return new CodexLiveTurnError(fallbackCode, fallbackMessage, 502, safeToRetry)
@@ -80,6 +95,7 @@ class CodexLiveSession {
   #readySettled = false
   #agentMessages = []
   #agentMessagePhases = new Map()
+  #workObserved = false
   #model = null
   #usage = null
   #stderr = ''
@@ -246,10 +262,31 @@ class CodexLiveSession {
       this.#resolveReadyIfActive()
       const completedTurn = await this.#done
       if (completedTurn?.status !== 'completed') {
+        const interrupted = completedTurn?.status === 'interrupted'
+        const detail = completedTurn?.error?.message || `Codex ended the active turn with status ${completedTurn?.status ?? 'unknown'}.`
+        if (!interrupted && this.#failedBeforeWork()) {
+          // A structured failure with zero work items on an unrepaired stream is
+          // the same Host proof the spawned-CLI path requires: nothing ran, so
+          // the next connected provider may take the very same request.
+          if (PROVIDER_QUOTA_PATTERN.test(detail)) {
+            throw new CodexLiveTurnError(
+              'provider_quota',
+              `Codex reported a quota, rate-limit, or capacity failure before any tool activity. ${detail}`,
+              429,
+              true,
+            )
+          }
+          throw new CodexLiveTurnError(
+            'provider_startup_failed',
+            `Codex rejected the turn before any assistant or tool activity, so Ensync can continue safely with the next connected provider. ${detail}`,
+            502,
+            true,
+          )
+        }
         throw new CodexLiveTurnError(
-          completedTurn?.status === 'interrupted' ? 'run_cancelled' : 'cli_failed',
-          completedTurn?.error?.message || `Codex ended the active turn with status ${completedTurn?.status ?? 'unknown'}.`,
-          completedTurn?.status === 'interrupted' ? 499 : 502,
+          interrupted ? 'run_cancelled' : 'cli_failed',
+          detail,
+          interrupted ? 499 : 502,
           false,
         )
       }
@@ -424,6 +461,9 @@ class CodexLiveSession {
     }
 
     if (message.id != null && message.method) {
+      // Codex only asks for approvals, tool calls, or user input once it is
+      // doing work, so any server request forbids a replay elsewhere.
+      this.#workObserved = true
       const rejection = serverRequestRejection(message)
       if (rejection) this.#child.stdin.write(`${JSON.stringify({ id: message.id, result: rejection })}\n`)
       else this.#child.stdin.write(`${JSON.stringify({ id: message.id, error: { code: -32601, message: 'Unsupported Ensync client request.' } })}\n`)
@@ -436,6 +476,12 @@ class CodexLiveSession {
     }
 
     const params = message.params
+    if (message.method === 'item/started' || message.method === 'item/updated' || message.method === 'item/completed') {
+      const itemType = params?.item?.type
+      if (typeof itemType !== 'string' || !NON_WORK_ITEM_TYPES.has(itemType)) this.#workObserved = true
+    } else if (message.method === 'item/commandExecution/outputDelta') {
+      this.#workObserved = true
+    }
     if (message.method === 'turn/started'
       && params?.threadId === this.#threadId
       && params?.turn?.id) {
@@ -495,6 +541,10 @@ class CodexLiveSession {
         })
       }
     }
+  }
+
+  #failedBeforeWork() {
+    return !this.#workObserved && this.#eventRepair.recovery === null
   }
 
   #touch() {

@@ -118,3 +118,30 @@ export async function selectAutomaticProviderAfterRefresh(
   }
   return selectAutomaticProvider(current, priorityOrder)
 }
+
+/**
+ * Ensync Host provider statuses carry `connectionState`, `routeKind`, and a
+ * usage object; the automatic selector expects the renderer's shape with a
+ * boolean `connected` and a numeric used percentage. Map the same way the app
+ * does (`providerFromStatus` in App.tsx) so Host-side fallback sees exactly the
+ * candidates a window would.
+ */
+export function routingProviderFromStatus(status) {
+  const usedPercent = status?.usage?.usedPercent
+  return {
+    id: status?.id,
+    name: status?.name ?? status?.id,
+    connected: status?.routeKind === 'subscription' && status?.connectionState === 'ready',
+    chatExecution: status?.chatExecution,
+    usage: typeof usedPercent === 'number' && Number.isFinite(usedPercent) ? usedPercent : null,
+  }
+}
+
+/**
+ * Host-side automatic fallback: saved top-to-bottom priority, providers already
+ * attempted this turn excluded, verified remaining usage before unknown usage.
+ */
+export function selectHostFallbackProvider(statuses, attemptedProviderIds = [], priorityOrder = DEFAULT_FALLBACK_PROVIDER_ORDER) {
+  const providers = (Array.isArray(statuses) ? statuses : []).map(routingProviderFromStatus)
+  return selectAutomaticProvider(providers, priorityOrder, attemptedProviderIds)
+}

@@ -15,11 +15,11 @@ import {
 } from './chat-attachments.mjs'
 import { ChatImageError, ChatImageService } from './chat-images.mjs'
 import { ChatRunError, ChatRunService, redactTerminalText } from './chat.mjs'
-import { ChatJobError, ChatJobService } from './chat-jobs.mjs'
+import { ChatJobError, ChatJobService, DELIVERY_REPAIR_WORKSPACE_PREFIX } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
 import { GitWorkflowError, GitWorkflowService, runGit } from './git.mjs'
-import { selectAutomaticProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './automatic-routing.mjs'
+import { selectHostFallbackProvider, DEFAULT_FALLBACK_PROVIDER_ORDER } from './automatic-routing.mjs'
 import { anchorLandingSnapshot, LandingCoordinator } from './landing-coordinator.mjs'
 import { LandingIntegrator } from './landing-integrator.mjs'
 import { LandingJournal } from './landing-journal.mjs'
@@ -613,7 +613,11 @@ export function createEnsyncHost(options = {}) {
     selectFallbackProvider: async (attemptedProviderIds) => {
       try {
         const providers = await statuses.list()
-        const selected = selectAutomaticProvider(providers, DEFAULT_FALLBACK_PROVIDER_ORDER, attemptedProviderIds)
+        // Host statuses are mapped to the renderer's routing shape and ranked by
+        // the same saved priority the app uses, so a Host-side continuation
+        // lands where the window would have sent the turn.
+        const order = (await agentConnector.preferences().catch(() => null))?.order ?? DEFAULT_FALLBACK_PROVIDER_ORDER
+        const selected = selectHostFallbackProvider(providers, attemptedProviderIds, order)
         return selected?.id ?? null
       } catch {
         return null
@@ -708,7 +712,7 @@ export function createEnsyncHost(options = {}) {
         request: {
           provider: selected.id,
           projectPath: record.projectPath,
-          workspaceKey: `delivery-repair:${record.id}`,
+          workspaceKey: `${DELIVERY_REPAIR_WORKSPACE_PREFIX}${record.id}`,
           prompt,
           sessionId: null,
           model: null,

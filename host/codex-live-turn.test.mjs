@@ -63,6 +63,21 @@ function fakeCodexAppServer(options = {}) {
         const turn = { id: '01900000-0000-7000-8000-000000000002', items: [], status: 'inProgress' }
         send({ id: message.id, result: { turn } })
         if (!options.deferTurnStarted) activateTurn()
+        if (options.failTurn) {
+          for (const item of options.failTurn.itemsBeforeFailure ?? []) {
+            send({
+              method: item.method ?? 'item/started',
+              params: { threadId: '01900000-0000-7000-8000-000000000001', turnId: '01900000-0000-7000-8000-000000000002', item: item.item },
+            })
+          }
+          send({
+            method: 'turn/completed',
+            params: {
+              threadId: '01900000-0000-7000-8000-000000000001',
+              turn: { id: '01900000-0000-7000-8000-000000000002', items: [], status: 'failed', error: { message: options.failTurn.message } },
+            },
+          })
+        }
       } else if (message.method === 'turn/steer') {
         if (!turnActivated) {
           send({ id: message.id, error: { code: -32602, message: 'no active turn to steer' } })
@@ -275,5 +290,100 @@ test('an app-server stream beyond the repair bound is never replayable', async (
   await assert.rejects(
     run,
     (error) => error.code === 'invalid_cli_output' && error.safeToRetry === false,
+  )
+})
+
+function runFailingTurn(options) {
+  const fake = fakeCodexAppServer(options)
+  const runner = new CodexLiveTurnRunner({ spawnProcess: () => fake.child, inactivityTimeoutMs: 5_000, hardTimeoutMs: 5_000 })
+  return runner.run({
+    id: 'job_4444444444444444',
+    executable: '/usr/local/bin/codex',
+    projectPath: '/project',
+    prompt: 'Is it sending?',
+    attachmentPaths: [],
+    sessionId: null,
+    model: null,
+    effort: null,
+    env: { PATH: '/usr/bin' },
+  }, { onEvent: () => {} })
+}
+
+test('a turn Codex rejects before any work item is a safe startup failure the next provider may take', async () => {
+  // Real app-server v2 sequence observed 2026-09-06: the user's own prompt is
+  // echoed as a userMessage item, then an error notification, then the failed turn.
+  await assert.rejects(
+    runFailingTurn({
+      failTurn: {
+        message: "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        itemsBeforeFailure: [
+          { method: 'item/started', item: { type: 'userMessage', id: 'user-1', content: [{ type: 'text', text: 'Is it sending?' }] } },
+          { method: 'item/completed', item: { type: 'userMessage', id: 'user-1', content: [{ type: 'text', text: 'Is it sending?' }] } },
+        ],
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'provider_startup_failed')
+      assert.equal(error.safeToRetry, true)
+      assert.match(error.message, /gpt-5\.6-sol/)
+      return true
+    },
+  )
+})
+
+test('a usage-limit failure with only agent text before it is a safe quota failure', async () => {
+  await assert.rejects(
+    runFailingTurn({
+      failTurn: {
+        message: "You've hit your usage limit. Try again later.",
+        itemsBeforeFailure: [
+          { method: 'item/started', item: { type: 'agentMessage', id: 'note-1', text: '', phase: 'commentary' } },
+          { method: 'item/completed', item: { type: 'agentMessage', id: 'note-1', text: 'Looking at the outbox.', phase: 'commentary' } },
+          { method: 'item/completed', item: { type: 'reasoning', id: 'r-1', summary: [] } },
+        ],
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'provider_quota')
+      assert.equal(error.safeToRetry, true)
+      assert.equal(error.status, 429)
+      return true
+    },
+  )
+})
+
+test('a failure after a command started is never replayable on another provider', async () => {
+  await assert.rejects(
+    runFailingTurn({
+      failTurn: {
+        message: "You've hit your usage limit. Try again later.",
+        itemsBeforeFailure: [
+          { method: 'item/started', item: { type: 'commandExecution', id: 'cmd-1', command: 'npm test' } },
+        ],
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'cli_failed')
+      assert.equal(error.safeToRetry, false)
+      return true
+    },
+  )
+})
+
+test('a failure after an unknown item type is never replayable on another provider', async () => {
+  await assert.rejects(
+    runFailingTurn({
+      failTurn: {
+        message: "The 'gpt-5.6-sol' model is not supported when using Codex with a ChatGPT account.",
+        itemsBeforeFailure: [
+          { method: 'item/completed', item: { type: 'somethingNew', id: 'x-1' } },
+        ],
+      },
+    }),
+    (error) => {
+      assert.equal(error.code, 'cli_failed')
+      assert.equal(error.safeToRetry, false)
+      return true
+    },
   )
 })

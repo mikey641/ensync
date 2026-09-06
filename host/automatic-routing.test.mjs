@@ -173,3 +173,39 @@ test('provider ids the current execution target does not expose never pin the di
     priorityOrder: ['codex', 'claude'],
   }), 'codex')
 })
+
+test('host provider statuses are mapped to the routing shape before automatic fallback selection', async () => {
+  const { selectHostFallbackProvider } = await import('./automatic-routing.mjs')
+  const status = (id, overrides = {}) => ({
+    id,
+    name: id,
+    routeKind: 'subscription',
+    connectionState: 'ready',
+    chatExecution: 'supported',
+    authentication: { state: 'authenticated' },
+    usage: { usedPercent: 0 },
+    ...overrides,
+  })
+  const statuses = [
+    status('codex', { usage: { usedPercent: 0 } }),
+    status('claude', { usage: { usedPercent: 30 } }),
+    status('droid', { usage: { usedPercent: 50 } }),
+    status('copilot', { chatExecution: 'discovery_only' }),
+  ]
+  // Codex already attempted: the next verified provider in saved priority order wins.
+  assert.equal(selectHostFallbackProvider(statuses, ['codex'], ['codex', 'claude', 'droid'])?.id, 'claude')
+  // Saved priority order is honored, not catalog order.
+  assert.equal(selectHostFallbackProvider(statuses, ['codex'], ['droid', 'claude', 'codex'])?.id, 'droid')
+  // A provider that is not ready or not subscription-routed is never selected.
+  assert.equal(selectHostFallbackProvider([
+    status('codex'),
+    status('claude', { connectionState: 'unauthenticated' }),
+    status('droid', { routeKind: 'api' }),
+  ], ['codex'], ['codex', 'claude', 'droid']), null)
+  // Raw statuses with no usage percentage are last-resort candidates, like in the renderer.
+  assert.equal(selectHostFallbackProvider([
+    status('codex'),
+    status('claude', { usage: { usedPercent: null } }),
+    status('droid', { usage: { usedPercent: 50 } }),
+  ], ['codex'], ['codex', 'claude', 'droid'])?.id, 'droid')
+})

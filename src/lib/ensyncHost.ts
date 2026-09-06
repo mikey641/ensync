@@ -879,11 +879,39 @@ export class EnsyncHostClient {
     )
   }
 
+  /**
+   * Follow a retained Host job as its owner: aborting the signal stops the
+   * provider process, the same way the chat's Stop button does.
+   */
   async attachChatJob(
     jobId: string,
     onEvent: (event: ChatExecutionEvent) => void,
     signal?: AbortSignal,
     afterSequence = 0,
+  ): Promise<ChatRunResponse> {
+    return this.#streamChatJob(jobId, onEvent, signal, afterSequence, { cancelOnAbort: true })
+  }
+
+  /**
+   * Follow a retained Host job read-only, for work this window does not own
+   * (an automatic delivery repair, a run started elsewhere). Aborting the
+   * signal only detaches this observer; the Host job keeps running.
+   */
+  async observeChatJob(
+    jobId: string,
+    onEvent: (event: ChatExecutionEvent) => void,
+    signal?: AbortSignal,
+    afterSequence = 0,
+  ): Promise<ChatRunResponse> {
+    return this.#streamChatJob(jobId, onEvent, signal, afterSequence, { cancelOnAbort: false })
+  }
+
+  async #streamChatJob(
+    jobId: string,
+    onEvent: (event: ChatExecutionEvent) => void,
+    signal: AbortSignal | undefined,
+    afterSequence: number,
+    { cancelOnAbort }: { cancelOnAbort: boolean },
   ): Promise<ChatRunResponse> {
     let cancellationReported = false
     let result: ChatRunResponse | null = null
@@ -893,6 +921,12 @@ export class EnsyncHostClient {
       499,
       { code: 'run_cancelled', safeToRetry: false },
     )
+    const detachedError = () => new EnsyncHostError(
+      'Stopped observing the retained Ensync Host job stream. The job keeps running.',
+      499,
+      { code: 'chat_job_observer_detached', safeToRetry: false },
+    )
+    const abortedError = () => (cancelOnAbort ? cancelledError() : detachedError())
     const reportCancellation = () => {
       if (cancellationReported) return
       cancellationReported = true
@@ -909,11 +943,13 @@ export class EnsyncHostClient {
       void this.cancelChatJob(jobId).catch(() => {})
     }
     if (signal?.aborted) {
-      requestCancellation()
-      reportCancellation()
-      throw cancelledError()
+      if (cancelOnAbort) {
+        requestCancellation()
+        reportCancellation()
+      }
+      throw abortedError()
     }
-    signal?.addEventListener('abort', requestCancellation, { once: true })
+    if (cancelOnAbort) signal?.addEventListener('abort', requestCancellation, { once: true })
 
     try {
       const response = await fetch(
@@ -981,8 +1017,8 @@ export class EnsyncHostClient {
       return result
     } catch (error) {
       if (signal?.aborted) {
-        reportCancellation()
-        throw cancelledError()
+        if (cancelOnAbort) reportCancellation()
+        throw abortedError()
       }
       if (error instanceof EnsyncHostError) throw error
       if (error instanceof RangeError || error instanceof MalformedNdjsonEventError) {
@@ -1002,7 +1038,7 @@ export class EnsyncHostClient {
         { code: 'chat_job_stream_disconnected', safeToRetry: false },
       )
     } finally {
-      signal?.removeEventListener('abort', requestCancellation)
+      if (cancelOnAbort) signal?.removeEventListener('abort', requestCancellation)
     }
   }
 

@@ -3,7 +3,7 @@ import { open, realpath, stat } from 'node:fs/promises'
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
-import { CodexLiveTurnError, CodexLiveTurnRunner } from './codex-live-turn.mjs'
+import { CodexLiveTurnError, CodexLiveTurnRunner, PROVIDER_QUOTA_PATTERN } from './codex-live-turn.mjs'
 import { DroidExecError, DroidExecRunner, DROID_AUTONOMY_LEVEL } from './droid-exec.mjs'
 import { CodebuddyExecError, CodebuddyExecRunner, CODEBUDDY_PERMISSION_MODE } from './codebuddy-exec.mjs'
 import { CursorAgentError, CursorAgentRunner, CURSOR_SANDBOX_MODE } from './cursor-agent.mjs'
@@ -264,7 +264,7 @@ const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9
 const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/
 const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
-const QUOTA_PATTERN = /(?:usage|spending|rate|session)[\s_-]*limit|quota|capacity|overloaded|too many requests|out of credits|insufficient credits|credit balance/i
+const QUOTA_PATTERN = PROVIDER_QUOTA_PATTERN
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
 const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
