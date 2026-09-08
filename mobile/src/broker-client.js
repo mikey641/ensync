@@ -137,7 +137,7 @@ export class BrokerClient {
       body: JSON.stringify({
         deviceId: this.deviceId,
         role: 'client',
-        label: `${navigator.platform || 'Mobile'} Ensync`,
+        label: `${(typeof navigator !== 'undefined' && navigator.platform) || 'Mobile'} Ensync`,
       }),
     })
     this.deviceToken = registration.token

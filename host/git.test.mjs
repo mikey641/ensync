@@ -11,6 +11,7 @@ import {
   captureLandingTarget,
   cloneGitRepository,
   getGitStatus,
+  gitFailureMessage,
   GitWorkflowError,
   initializeGitRepository,
   listUnlandedAgentWork,
@@ -356,6 +357,33 @@ test('a project outside a repository reports the explanation instead of raw Git 
   assert.match(error.message, /not inside a Git repository/)
   assert.doesNotMatch(error.message, /fatal:/i)
   assert.doesNotMatch(error.message, /any of the parent directories/i)
+})
+
+test('push reason extraction reads past the ref-status flag on either stream layout', () => {
+  // Porcelain style: the rejection table arrives on stdout with framing.
+  const porcelain = [
+    'To /tmp/nope/remote.git',
+    '!\tHEAD:refs/heads/feature\t[rejected] (fetch first)',
+    'Done',
+  ].join('\n')
+  const fromStdout = gitFailureMessage(porcelain, 'Git could not push to origin/feature.')
+  assert.ok(fromStdout.startsWith('Git could not push to origin/feature.'), `got: ${fromStdout}`)
+  assert.match(fromStdout, /\[rejected\]\s*\(fetch first\)/)
+  assert.doesNotMatch(fromStdout, /\. !$/)
+
+  // Progress style: the flag leads an indented stderr row followed by hints.
+  const progress = [
+    'To /tmp/nope/remote.git',
+    ' ! [rejected]        HEAD -> feature (fetch first)',
+    "error: failed to push some refs to '/tmp/nope/remote.git'",
+    'hint: Updates were rejected because the remote contains work that you do not',
+    'hint: have locally. This is usually caused by another repository pushing to',
+    'hint: the same ref.',
+  ].join('\n')
+  const fromStderr = gitFailureMessage(progress, 'Git could not push to origin/feature.')
+  assert.ok(fromStderr.startsWith('Git could not push to origin/feature.'), `got: ${fromStderr}`)
+  assert.match(fromStderr, /\[rejected\].*\(fetch first\)/)
+  assert.doesNotMatch(fromStderr, /\. !$/)
 })
 
 test('a failed push leads with the explanation and keeps the reason Git reported', async (context) => {

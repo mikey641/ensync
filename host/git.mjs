@@ -78,7 +78,14 @@ const UNINFORMATIVE_GIT_OUTPUT = [
 function gitReason(stderr) {
   const meaningful = []
   for (const rawLine of redactGitText(stderr).split(/\r?\n/)) {
-    const text = rawLine.trim().replace(/^(?:fatal|error|warning|hint):\s*/i, '').trim()
+    const text = rawLine.trim()
+      .replace(/^(?:fatal|error|warning|hint):\s*/i, '')
+      // Ref-status rows lead with a status flag (`!` for rejected refs, `+`
+      // for forced, `*` for fast-forward). The flag is not part of the reason,
+      // and left in place it becomes the extracted "sentence" because the
+      // sentence scan counts punctuation.
+      .replace(/^[!+\-*=]+\s*/, '')
+      .trim()
     if (!text) continue
     if (UNINFORMATIVE_GIT_OUTPUT.some((pattern) => pattern.test(text))) continue
     meaningful.push(text)
@@ -215,9 +222,9 @@ export function runGit(args, options = {}) {
 async function checkedGit(args, options = {}) {
   const result = await runGit(args, options)
   if (result.exitCode !== 0 && !options.allowFailure) {
-    // Push runs with `--porcelain`, which prints rejected refs to stdout on
-    // some Git versions instead of the usual stderr explanation. Callers that
-    // opt in merge both streams so the curated message never drops the reason.
+    // Push refusals can reach stdout on some Git versions instead of the
+    // usual stderr explanation. Callers that opt in merge both streams so the
+    // curated message never drops the reason.
     const reasonText = options.includeStdoutReason
       ? [result.stderr, result.stdout].filter((chunk) => typeof chunk === 'string' && chunk.trim()).join('\n')
       : result.stderr
@@ -756,8 +763,8 @@ export async function pushGit(input, options = {}) {
 
   await checkedGit(
     mode === 'current_branch'
-      ? ['push', '--porcelain', '--set-upstream', remote, `HEAD:refs/heads/${targetBranch}`]
-      : ['push', '--porcelain', remote, `HEAD:refs/heads/${targetBranch}`],
+      ? ['push', '--set-upstream', remote, `HEAD:refs/heads/${targetBranch}`]
+      : ['push', remote, `HEAD:refs/heads/${targetBranch}`],
     {
       cwd: status.repositoryPath,
       gitExecutable: options.gitExecutable,
