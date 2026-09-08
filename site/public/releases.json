@@ -1,26 +1,30 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "feedUpdatedAt": null,
+  "sourceRevision": "7eb195aca9545ad7801d9c262119ee10a37aacce",
+  "feedUpdatedAt": "2026-09-08T22:43:09.395Z",
   "latest": {
-    "version": null,
-    "publishedAt": null,
-    "notesUrl": null
+    "version": "0.1.0",
+    "publishedAt": "2026-09-08T22:43:08.926Z",
+    "notesUrl": "https://github.com/mikey641/ensync-releases/releases/tag/v0.1.0"
   },
   "platforms": {
     "macos": {
-      "status": "unavailable",
-      "reason": "No signed macOS build has been published yet.",
-      "version": null,
-      "url": null,
-      "sha256": null,
-      "signed": false,
-      "notarized": false,
-      "architectures": []
+      "status": "available",
+      "reason": null,
+      "version": "0.1.0",
+      "url": "https://github.com/mikey641/ensync-releases/releases/download/v0.1.0/Ensync-0.1.0-mac-universal.dmg",
+      "sha256": "35feac8ba02b3fce1be302842bd36ebe27208fef82cfe7f63ce66fd58ea27561",
+      "signed": true,
+      "notarized": true,
+      "buildId": "86901fe258a07ab6",
+      "architectures": [
+        "universal"
+      ]
     },
     "windows": {
       "status": "unavailable",
-      "reason": "No signed direct Windows installer has been published yet. Use the verified Microsoft Store listing once it is live.",
+      "reason": "Windows is distributed through the certified Microsoft Store listing; this manifest gates only the direct macOS release.",
       "version": null,
       "url": null,
       "sha256": null,

@@ -265,7 +265,7 @@ async function hydrateDownloads() {
   if (manifestStatus) manifestStatus.textContent = manifest ? 'Release sources checked' : 'Release manifest unavailable';
   const releaseTruth = document.querySelector('[data-release-truth]');
   if (releaseTruth && availableCount > 0) {
-    releaseTruth.textContent = 'macOS requires a manifest-verified signed build and checksum. Windows is offered only through its verified Microsoft Store listing.';
+    releaseTruth.textContent = 'macOS downloads are offered only after the published manifest, signature, and checksum verify. Windows is offered only through its certified Microsoft Store listing, never uncertified packages.';
   } else if (releaseTruth && !manifest) {
     releaseTruth.textContent = 'The release manifest could not be verified and no Microsoft Store listing is configured, so no download was offered.';
   }

@@ -29,19 +29,19 @@
         <div class="docs-content">
           <section id="status">
             <p class="eyebrow">Start here</p><h2>Current product status</h2>
-            <div class="callout"><strong>No signed installer yet — run from source</strong><p>The repository is public and MIT-licensed. The desktop app and the phone client both run from source today. Signed macOS/Windows installers and the Microsoft Store listing remain disabled until their attestations pass.</p></div>
+            <div class="callout"><strong>Signed macOS installer live — Windows still pending</strong><p>The repository is public and MIT-licensed. The stable macOS app ships as a signed, notarized, checksum-verified download from the ensync.vercel.app download section, with updates from the same verified feed. A signed Windows installer and the Microsoft Store listing remain disabled until their attestations pass. The phone client runs as a self-hosted installable web app.</p></div>
             <p>Ensync Host discovers provider CLIs and runs verified chats through authenticated Codex, Claude Code, and Factory Droid subscriptions. The broader catalog is visible for discovery, but it is not yet eligible for automatic chat routing. The same mobile client runs on iOS/Android and as a self-hosted installable web app.</p>
           </section>
           <section id="install">
             <p class="eyebrow">Get started</p><h2>Install and set up</h2>
-            <p>Everything runs from source for now. You need Node.js 20 or newer and at least one logged-in agent CLI (Codex, Claude Code, or Factory Droid).</p>
+            <p>Download the signed, notarized macOS installer from the <a href="https://ensync.vercel.app/#download">download section</a>. Windows and development builds run from source: you need Node.js 20 or newer and at least one logged-in agent CLI (Codex, Claude Code, or Factory Droid).</p>
             <h3>Desktop (macOS / Windows)</h3>
             <pre class="code-block"><code>git clone https://github.com/mikey641/ensync
 cd ensync
 npm ci
 npm --prefix desktop ci
 npm --prefix desktop start</code></pre>
-            <p>Signing, notarization, the Microsoft Store listing, and the release manifest are separate verified steps and are not bundled with the source.</p>
+            <p>Windows signing, the Microsoft Store listing, and the release manifest remain separate verified steps and are not bundled with the source.</p>
             <h3>Self-host Ensync Sync (for phone control)</h3>
             <pre class="code-block"><code>npm run sync-service</code></pre>
             <p>Deploy it behind HTTPS with a persistent <code>ENSYNC_SYNC_DATA_FILE</code>, then set the same <code>ENSYNC_SYNC_SERVICE_URL</code> on the Host. Passwords are stored as scrypt hashes and workspace documents as AES-256-GCM envelopes; Sync never receives plaintext prompts, paths, results, or credentials.</p>
