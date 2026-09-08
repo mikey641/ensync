@@ -18,6 +18,48 @@ function uniqueRecords(status) {
   })
 }
 
+export function verifiedProductionDeliveryEntries(status) {
+  return uniqueRecords(status)
+    .filter((record) => record.state === 'production'
+      && record.deliveryTarget !== 'protected_branch'
+      && record.productionAncestryVerified === true)
+    .map((record) => {
+      const deployedSha = record.replacementCommitSha ?? record.productionCommitSha
+      return typeof deployedSha === 'string' && deployedSha
+        ? {
+            key: `${record.id}:${deployedSha}:${record.productionAt ?? ''}`,
+            productionAt: typeof record.productionAt === 'string' ? record.productionAt : null,
+          }
+        : null
+    })
+    .filter(Boolean)
+}
+
+export function verifiedProductionDeliveryKeys(status) {
+  return verifiedProductionDeliveryEntries(status).map((entry) => entry.key)
+}
+
+export function productionNotificationsNeedingAlert(
+  entries,
+  announcedKeys,
+  { hydrated = false, nowMs = Date.now(), initialGraceMs = 5 * 60_000 } = {},
+) {
+  const announced = new Set(announcedKeys instanceof Set ? announcedKeys : [])
+  const unseen = entries.filter((entry) => entry && typeof entry.key === 'string' && !announced.has(entry.key))
+  const alertKeys = unseen.filter((entry) => {
+    if (hydrated) return true
+    const productionAt = Date.parse(entry.productionAt ?? '')
+    return Number.isFinite(productionAt)
+      && productionAt <= nowMs + 30_000
+      && nowMs - productionAt <= initialGraceMs
+  }).map((entry) => entry.key)
+  const alertKeySet = new Set(alertKeys)
+  entries.forEach((entry) => {
+    if (entry && typeof entry.key === 'string' && !alertKeySet.has(entry.key)) announced.add(entry.key)
+  })
+  return { alert: alertKeys.length > 0, alertKeys, announced }
+}
+
 export function scopeDeliveryStatusForBranch(status, sourceBranch) {
   if (!status || typeof sourceBranch !== 'string' || !sourceBranch) {
     return { current: null, production: null, pending: null, records: [] }
@@ -33,7 +75,14 @@ export function scopeDeliveryStatusForBranch(status, sourceBranch) {
       const rightTime = Date.parse(right.productionAt ?? right.updatedAt ?? '')
       return (Number.isFinite(rightTime) ? rightTime : 0) - (Number.isFinite(leftTime) ? leftTime : 0)
     })[0] ?? null
-  const pending = records.find((record) => record.state !== 'production' && !record.replacementCommitSha) ?? null
+  // A repair replacement is still the current delivery until Host verifies it
+  // in Production. `replacementCommitSha` proves which repaired commit is being
+  // tracked; it does not make the delivery historical. Excluding it here made
+  // the renderer fall back to an older Production record and falsely tell the
+  // person that the latest prompt had no saved delivery.
+  const pending = records
+    .filter((record) => record.state !== 'production')
+    .sort((left, right) => recordCreatedAt(right) - recordCreatedAt(left))[0] ?? null
   return {
     current: pending ?? production ?? records[0] ?? null,
     production,

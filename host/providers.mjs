@@ -2,11 +2,17 @@ import { findExecutable, runProcess } from './command.mjs'
 import { parseCodexAppServerProbe, probeCodexAppServer } from './codex-app-server.mjs'
 import { probeClaudeUsage } from './claude-usage.mjs'
 import { probeCopilotAuthentication } from './copilot-auth.mjs'
+import { probeCopilotUsage } from './copilot-usage.mjs'
+import { probeAmpAccount } from './amp-usage.mjs'
+import { probeAntigravityStatus } from './antigravity-usage.mjs'
 import { probeDroidAuthentication } from './droid-auth.mjs'
 import { probeDroidLimits } from './droid-limits.mjs'
+import { probeJunieUsage } from './junie-usage.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
 import { probeMcpConfig } from './provider-mcp.mjs'
 import { probeOllamaRuntime } from './ollama-runtime.mjs'
+import { probeOzWhoami } from './oz-whoami.mjs'
+import { probeQoderStatus } from './qoder-status.mjs'
 import { rankProvidersByAvailability } from './provider-availability.mjs'
 
 // Tie-breaker only. Live provider lists are ordered by real availability (see
@@ -81,12 +87,11 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: [],
     updateStrategy: 'provider_automatic',
-    authentication: unsupportedAuthentication(
-      'Antigravity uses Google browser sign-in on first launch, but does not document a non-interactive authentication-status command.',
-    ),
+    authentication: async (executable, checkedAt) =>
+      (await probeAntigravityStatus(executable, checkedAt)).authentication,
     usageKind: 'subscription_quota',
     usageReason:
-      'Antigravity exposes live model quotas and credits in its interactive /usage and /credits panels, but not through a stable machine-readable command Ensync can verify.',
+      'Antigravity did not render its Models & Quota view, so no weekly model-group quota could be read.',
   },
   {
     id: 'jules',
@@ -109,9 +114,9 @@ const providerDefinitions = [
     loginArgs: [],
     updateArgs: ['update'],
     authentication: probeCopilotAuthentication,
-    usageKind: 'unavailable',
+    usageKind: 'subscription_quota',
     usageReason:
-      'Copilot account quota is not exposed by the verified authentication check.',
+      'Copilot account quota did not return a chat AI-credit snapshot through account.getQuota.',
   },
   {
     id: 'cursor',
@@ -124,7 +129,7 @@ const providerDefinitions = [
     authentication: probeCursorAuthentication,
     usageKind: 'unavailable',
     usageReason:
-      'Cursor Agent status does not expose usage percentage, model allowance, or reset time.',
+      'Cursor Agent status and about report the signed-in account and subscription tier, but no usage percentage or reset time.',
   },
   {
     id: 'kiro',
@@ -145,12 +150,11 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: ['login'],
     updateArgs: ['update'],
-    authentication: unsupportedAuthentication(
-      'Qoder documents browser account login, but not a non-interactive authentication-status command.',
-    ),
+    authentication: async (executable, checkedAt) =>
+      probeQoderStatus(executable, checkedAt),
     usageKind: 'unavailable',
     usageReason:
-      'Qoder subscription credits are available in Settings → Usage, not through a supported machine-readable CLI quota command.',
+      'Qoder status reports the signed-in account but no credit percentage or reset time, so quota stays unavailable.',
   },
   {
     id: 'codebuddy',
@@ -186,12 +190,10 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: ['login'],
     updateArgs: ['upgrade'],
-    authentication: unsupportedAuthentication(
-      'Auggie documents account login and account status, but Ensync has not yet tested a stable machine-readable authentication parser.',
-    ),
+    authentication: probeAuggieAuthentication,
     usageKind: 'subscription_quota',
     usageReason:
-      'Auggie reports account billing and per-run credits, but Ensync has not verified a provider-wide included-credit percentage and reset contract.',
+      'Auggie reports account billing through `auggie account status --json`. Its signed-out state is verified (the CLI prints that it is not logged in), but the signed-in billing JSON has not been captured yet, so Ensync shows no balance until a login verifies the shape.',
   },
   {
     id: 'amp',
@@ -200,21 +202,20 @@ const providerDefinitions = [
     versionArgs: ['--version'],
     loginArgs: ['login'],
     updateArgs: ['update'],
-    authentication: unsupportedAuthentication(
-      'Amp documents browser account login, but not a separate non-interactive authentication-status command.',
-    ),
+    authentication: async (executable, checkedAt) =>
+      (await probeAmpAccount(executable, checkedAt)).authentication,
     usageKind: 'subscription_quota',
     usageReason:
-      'Amp exposes an account balance through amp usage, but Ensync has not verified a stable included-allowance percentage and reset contract.',
+      'Amp usage reports the individual credit balance (for example "$0 remaining") but no included-allowance total or reset schedule, so Ensync shows the balance without a percentage.',
   },
   {
     id: 'gitlab_duo',
     name: 'GitLab Duo CLI',
     command: 'duo',
     versionArgs: ['--version'],
-    loginArgs: null,
+    loginArgs: [],
     authentication: unsupportedAuthentication(
-      'GitLab Duo reuses GitLab CLI or GitLab account credentials; Ensync does not launch a different executable or collect a PAT from the provider wizard.',
+      'GitLab Duo signs in by saving a GitLab Personal Access Token (api scope) into duo config during first-run setup. Ensync opens that setup but never reads, collects, or stores the token.',
     ),
     usageKind: 'unavailable',
     usageReason:
@@ -226,12 +227,11 @@ const providerDefinitions = [
     command: 'oz',
     versionArgs: ['--version'],
     loginArgs: ['login'],
-    authentication: unsupportedAuthentication(
-      'Warp Oz documents browser account login, but not a non-interactive authentication-status command.',
-    ),
+    authentication: async (executable, checkedAt) =>
+      probeOzWhoami(executable, checkedAt),
     usageKind: 'subscription_quota',
     usageReason:
-      'Warp plans use account credits for agent runs, but Oz does not document a stable machine-readable remaining-plan percentage command.',
+      'Oz whoami reports the signed-in account but no plan-credit percentage or reset time, so quota stays unavailable.',
   },
   {
     id: 'junie',
@@ -243,9 +243,9 @@ const providerDefinitions = [
     authentication: unsupportedAuthentication(
       'Junie documents JetBrains Account sign-in inside its interactive welcome screen, but no non-interactive account status command.',
     ),
-    usageKind: 'session_only',
+    usageKind: 'subscription_quota',
     usageReason:
-      'Junie does not document a non-interactive JetBrains AI subscription-credit status command.',
+      "Junie did not render its /stats License & quota tab, so no license or credit balance could be read.",
   },
   {
     id: 'ollama',
@@ -309,7 +309,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/install-copilot-cli',
-    catalogReason: 'Account verification is supported. Ensync task execution and automatic fallback are not enabled yet.',
+    catalogReason: 'Account verification and its agent-credit quota are wired through the Copilot SDK (auth.getStatus and account.getQuota). Ensync task execution and automatic fallback are not enabled yet.',
   },
   cursor: {
     routeKind: 'subscription',
@@ -330,7 +330,7 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.qoder.com/en/cli/quick-start',
-    catalogReason: 'Discovery and browser login are wired, but Ensync does not yet have a tested Qoder event runner or CLI quota adapter.',
+    catalogReason: 'Account verification is wired through qodercli status (logged_in and email). Ensync does not yet have a tested Qoder event runner or CLI quota adapter.',
   },
   codebuddy: {
     routeKind: 'subscription',
@@ -358,28 +358,28 @@ const providerCatalog = {
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://ampcode.com/manual',
-    catalogReason: 'Discovery and account login are wired, but the Amp binary produces no output at all on this machine — even amp --version blocks indefinitely — so no runner could be verified. Amp is also not signed in, and its own log shows an unauthenticated run opening a browser login and blocking for five minutes before failing, so Ensync will not launch it. No paid-credit guard exists either.',
+    catalogReason: 'Account verification and the credit balance are wired through amp usage (Signed in as …, Individual credits: $… remaining). Amp stays discovery-only because its headless agent run blocks indefinitely on this machine, so no runner could be verified, and there is no paid-credit guard.',
   },
   gitlab_duo: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://docs.gitlab.com/user/gitlab_duo_cli/set_up/',
-    catalogReason: 'Discovery is wired, but setup depends on an eligible GitLab namespace and existing GitLab authentication; no chat or quota adapter is enabled.',
+    catalogReason: 'Ensync can open GitLab Duo first-run setup, which asks for the GitLab instance URL and a Personal Access Token with api scope. The token can instead be supplied through the --gitlab-auth-token flag or the GITLAB_TOKEN environment variable. Setup still requires a GitLab namespace with an active Duo plan, and no chat or quota adapter is enabled.',
   },
   oz: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'login_command',
     documentationUrl: 'https://docs.warp.dev/reference/cli',
-    catalogReason: 'Discovery and browser login are wired, but Oz can only take a prompt as a command-line argument or a server-stored prompt ID, publishes no terminal event for its ndjson stream, and expresses agent permissions only as Warp-synced execution profiles that no run flag can pin — so Ensync has no runner, quota adapter, or paid-credit guard.',
+    catalogReason: 'Account verification is wired through oz whoami (email and display name). Oz can still only take a prompt as a command-line argument or a server-stored prompt ID, publishes no terminal event for its ndjson stream, and expresses agent permissions only as Warp-synced execution profiles that no run flag can pin — so Ensync has no runner, quota adapter, or paid-credit guard.',
   },
   junie: {
     routeKind: 'subscription',
     chatExecution: 'discovery_only',
     setupKind: 'interactive_onboarding',
     documentationUrl: 'https://junie.jetbrains.com/docs/junie-cli.html',
-    catalogReason: 'Ensync can open Junie onboarding, but cannot verify account status or execute Junie chats yet.',
+    catalogReason: 'Ensync can open Junie onboarding, where the welcome screen offers Continue with JetBrains account or signing in with a Junie API key from junie.jetbrains.com/cli. Setup remains usage-based, and Ensync cannot verify account status or execute Junie chats yet.',
   },
   ollama: {
     routeKind: 'local',
@@ -472,6 +472,13 @@ async function localRuntimeAuthentication(_executable, checkedAt) {
 
 function combinedOutput(result) {
   return [result.stdout, result.stderr].filter(Boolean).join('\n')
+}
+
+function providerLogin(value) {
+  if (typeof value !== 'string') return null
+  const login = value.trim()
+  if (!login || login.length > 120 || /[\u0000-\u001f\u007f]/.test(login)) return null
+  return login
 }
 
 function providerUpdateStrategy(provider) {
@@ -582,14 +589,45 @@ async function probeClaudeAuthentication(executable, checkedAt) {
   )
 }
 
-export function parseCursorAuthentication(result, checkedAt = now()) {
-  const lower = combinedOutput(result).toLowerCase()
+export function parseCursorAuthentication(result, checkedAt = now(), account = null) {
+  const output = combinedOutput(result)
   if (result.timedOut || result.error) {
     return unavailableAuthentication(
       result.timedOut ? 'Cursor Agent status timed out.' : 'Cursor Agent status could not be started.',
       checkedAt,
     )
   }
+
+  // `agent status --format json` is the structured surface: an explicit
+  // `status` value plus a `userInfo.email` that identifies the account. The
+  // text heuristics below remain for older `agent status` output.
+  const parsed = extractJsonObject(output)
+  if (parsed && !Array.isArray(parsed) && typeof parsed.status === 'string') {
+    if (parsed.status === 'authenticated' && parsed.isAuthenticated !== false) {
+      return {
+        state: 'authenticated',
+        method: 'Cursor login',
+        accountLogin: providerLogin(parsed.userInfo?.email ?? account?.login),
+        reason: 'Cursor Agent reports an active login.',
+        source: 'cli',
+        checkedAt,
+        exactPlan: account?.plan ?? null,
+      }
+    }
+    if (parsed.status === 'not_authenticated' || parsed.isAuthenticated === false) {
+      return {
+        state: 'not_authenticated',
+        method: null,
+        accountLogin: null,
+        reason: 'Cursor Agent reports that it is not logged in.',
+        source: 'cli',
+        checkedAt,
+        exactPlan: null,
+      }
+    }
+  }
+
+  const lower = output.toLowerCase()
   if (lower.includes('not authenticated') || lower.includes('not logged in')) {
     return {
       state: 'not_authenticated',
@@ -613,8 +651,27 @@ export function parseCursorAuthentication(result, checkedAt = now()) {
   return unavailableAuthentication('Cursor Agent returned no recognized authentication status.', checkedAt)
 }
 
+/**
+ * `agent about --format json` carries the account email and, separately from
+ * the status command, the subscription tier. It has no authentication-state
+ * field, so it is merged onto the status result rather than trusted on its own.
+ */
+export function parseCursorAbout(result) {
+  if (result?.timedOut || result?.error) return { plan: null, login: null }
+  const parsed = extractJsonObject(combinedOutput(result))
+  if (!parsed || Array.isArray(parsed)) return { plan: null, login: null }
+  const plan = typeof parsed.subscriptionTier === 'string' && parsed.subscriptionTier.trim()
+    ? parsed.subscriptionTier.trim()
+    : null
+  return { plan, login: providerLogin(parsed.userEmail) }
+}
+
 async function probeCursorAuthentication(executable, checkedAt) {
-  return parseCursorAuthentication(await runProcess(executable, ['status']), checkedAt)
+  const [statusResult, aboutResult] = await Promise.all([
+    runProcess(executable, ['status', '--format', 'json']),
+    runProcess(executable, ['about', '--format', 'json']),
+  ])
+  return parseCursorAuthentication(statusResult, checkedAt, parseCursorAbout(aboutResult))
 }
 
 export function parseKiroAuthentication(result, checkedAt = now()) {
@@ -640,6 +697,7 @@ export function parseKiroAuthentication(result, checkedAt = now()) {
     return {
       state: 'authenticated',
       method: 'Kiro account login',
+      accountLogin: providerLogin(parsed.email),
       reason: 'Kiro CLI whoami returned an authenticated account.',
       source: 'cli',
       checkedAt,
@@ -666,6 +724,84 @@ async function probeKiroAuthentication(executable, checkedAt) {
     await runProcess(executable, ['whoami', '--format', 'json']),
     checkedAt,
   )
+}
+
+/**
+ * `auggie account status --json` doubles as the signed-in signal and the future
+ * billing surface. The signed-out text is verified: the CLI prints "You are not
+ * currently logged in to Augment." with exit code 0. The signed-in billing JSON
+ * has not been captured on a signed-in machine yet, so the parser returns the
+ * account state without inventing a balance shape.
+ */
+export function parseAuggieAccountStatus(result, checkedAt = now()) {
+  if (result.timedOut || result.error) {
+    return unavailableAuthentication(
+      result.timedOut ? 'Auggie account status timed out.' : 'Auggie account status could not be started.',
+      checkedAt,
+    )
+  }
+  const output = combinedOutput(result)
+  if (/not currently logged in/i.test(output)) {
+    return {
+      state: 'not_authenticated',
+      method: null,
+      accountLogin: null,
+      reason: 'Auggie reports that it is not signed in.',
+      source: 'cli',
+      checkedAt,
+      exactPlan: null,
+    }
+  }
+  const parsed = extractJsonObject(output)
+  if (!parsed || Array.isArray(parsed)) {
+    return unavailableAuthentication('Auggie returned no recognized account status.', checkedAt)
+  }
+  const signedIn = parsed.loggedIn !== false && parsed.isAuthenticated !== false
+  return {
+    state: signedIn ? 'authenticated' : 'not_authenticated',
+    method: 'Augment account',
+    accountLogin: providerLogin(parsed.email ?? parsed.login ?? parsed.account?.email),
+    reason: signedIn
+      ? 'Auggie account status returned the account billing record.'
+      : 'Auggie reports that it is not signed in.',
+    source: 'cli',
+    checkedAt,
+    exactPlan: null,
+  }
+}
+
+async function probeAuggieAuthentication(executable, checkedAt) {
+  return parseAuggieAccountStatus(
+    await runProcess(executable, ['account', 'status', '--json']),
+    checkedAt,
+  )
+}
+
+/**
+ * ChatGPT plans the Codex CLI can report that are not a paid subscription.
+ * The value comes verbatim from app-server `account/read` (`planType`); Ensync
+ * never infers a plan, so only an exact CLI-reported plan can gate Codex.
+ */
+export const CODEX_INELIGIBLE_PLANS = new Set(['free'])
+
+/**
+ * Ensync routes only to paid subscription plans. A Codex account signed in on
+ * the ChatGPT Free plan stays installed and authenticated, and its CLI-reported
+ * usage stays visible, but it is unavailable for chats, automatic fallback,
+ * repairs, and landing resolution until the account reports a paid plan again.
+ */
+export function codexPlanGate(status) {
+  if (!status || status.id !== 'codex' || status.connectionState !== 'ready') return status
+  const reportedPlan = typeof status.usage?.plan === 'string' ? status.usage.plan.trim() : ''
+  if (!reportedPlan || !CODEX_INELIGIBLE_PLANS.has(reportedPlan.toLowerCase())) return status
+  const planLabel = `${reportedPlan.charAt(0).toUpperCase()}${reportedPlan.slice(1)}`
+  const reason = `Codex is signed in with a ChatGPT ${planLabel} plan. Ensync routes only to paid subscription plans, so Codex stays unavailable for chats, automatic fallback, and repairs until the account reports a paid plan.`
+  return {
+    ...status,
+    connectionState: 'unavailable',
+    authentication: { ...status.authentication, reason },
+    connectReason: reason,
+  }
 }
 
 function connectionState(installed, authentication) {
@@ -740,10 +876,30 @@ async function inspectProvider(provider) {
     }
   }
 
-  const [versionResult, authentication] = await Promise.all([
+  // Amp's one `usage` process reports both the signed-in account and the credit
+  // balance, so it runs exactly once and serves both the authentication result
+  // and the usage detail.
+  const ampAccountPromise = provider.id === 'amp'
+    ? probeAmpAccount(executable, checkedAt)
+    : Promise.resolve(null)
+  // Antigravity's one /usage process reports both the signed-in account and the
+  // weekly model-group quota, so it runs exactly once and serves both.
+  const antigravityAccountPromise = provider.id === 'antigravity'
+    ? probeAntigravityStatus(executable, checkedAt)
+    : Promise.resolve(null)
+
+  const [versionResult, authentication, ampAccount, antigravityAccount] = await Promise.all([
     runProcess(executable, provider.versionArgs),
-    provider.authentication(executable, checkedAt),
+    provider.id === 'amp'
+      ? ampAccountPromise.then((account) => account.authentication)
+      : provider.id === 'antigravity'
+        ? antigravityAccountPromise.then((account) => account.authentication)
+        : provider.authentication(executable, checkedAt),
+    ampAccountPromise,
+    antigravityAccountPromise,
   ])
+  const ampUsage = provider.id === 'amp' ? (ampAccount?.usage ?? null) : null
+  const antigravityUsage = provider.id === 'antigravity' ? (antigravityAccount?.usage ?? null) : null
   const codexAppServerResult = provider.id === 'codex' && authentication.state === 'authenticated'
     ? await probeCodexAppServer(executable)
     : null
@@ -753,8 +909,14 @@ async function inspectProvider(provider) {
   const claudeUsage = provider.id === 'claude' && authentication.state === 'authenticated'
     ? await probeClaudeUsage(executable, checkedAt, authentication.exactPlan ?? null)
     : null
+  const copilotUsage = provider.id === 'copilot' && authentication.state === 'authenticated'
+    ? await probeCopilotUsage(executable, checkedAt)
+    : null
   const droidLimits = provider.id === 'droid' && authentication.state === 'authenticated'
     ? await probeDroidLimits(executable, checkedAt)
+    : null
+  const junieUsage = provider.id === 'junie'
+    ? await probeJunieUsage(executable, checkedAt)
     : null
   const ollamaProbe = provider.id === 'ollama'
     ? await probeOllamaRuntime(executable, checkedAt)
@@ -763,7 +925,7 @@ async function inspectProvider(provider) {
   const version = versionResult.exitCode === 0 && versionOutput ? versionOutput : null
   const mcp = await probeMcpConfig(provider.id)
 
-  return {
+  return codexPlanGate({
     id: provider.id,
     name: provider.name,
     mcp,
@@ -773,7 +935,7 @@ async function inspectProvider(provider) {
     version,
     connectionState: connectionState(true, authentication),
     authentication,
-    usage: codexProbe?.usage ?? claudeUsage ?? droidLimits ?? ollamaProbe?.usage ?? usageFor(provider, authentication, checkedAt),
+    usage: codexProbe?.usage ?? claudeUsage ?? droidLimits ?? copilotUsage ?? junieUsage ?? ollamaProbe?.usage ?? ampUsage ?? antigravityUsage ?? usageFor(provider, authentication, checkedAt),
     availableModels: codexProbe?.models ?? ollamaProbe?.models ?? [],
     canConnect: Array.isArray(provider.loginArgs),
     connectReason: Array.isArray(provider.loginArgs)
@@ -790,7 +952,7 @@ async function inspectProvider(provider) {
     updateReason: providerUpdateReason(provider, true),
     ...catalog,
     checkedAt,
-  }
+  })
 }
 
 export function isProviderId(value) {

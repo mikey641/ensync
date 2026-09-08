@@ -1,5 +1,6 @@
 export type AccountSyncStatus = {
   configured: boolean
+  serviceUrl: string | null
   authenticated: boolean
   username: string | null
   remoteRevision: number | null
@@ -17,6 +18,34 @@ export type AccountWorkspacePull = {
 export type AccountWorkspacePush =
   | { status: 'saved'; revision: number; updatedAt: string }
   | { status: 'conflict'; revision: number; updatedAt: string | null; remoteState: unknown }
+
+export type SecondFactorChallenge = {
+  stage: 'second_factor'
+  challengeId: string
+  methods: string[]
+  recoveryAvailable: boolean
+}
+
+export type AccountProfile = {
+  username: string
+  email: string | null
+  twoFactorEnabled: boolean
+  recoveryRemaining: number
+  createdAt: string
+}
+
+export type TotpStart = {
+  secret: string
+  uri: string
+  challengeId: string
+}
+
+export type TotpConfirm = {
+  twoFactorEnabled: boolean
+  recoveryCodes: string[]
+}
+
+export type LoginResult = AccountSyncStatus | SecondFactorChallenge
 
 type ErrorPayload = { error?: string; code?: string }
 
@@ -66,17 +95,53 @@ export class AccountSyncHostClient {
     return this.request<AccountSyncStatus>('/status')
   }
 
-  register(username: string, password: string) {
+  register(username: string, password: string, email?: string) {
     return this.request<AccountSyncStatus>('/register', {
+      method: 'POST',
+      body: JSON.stringify({ username, password, ...(email ? { email } : {}) }),
+    })
+  }
+
+  login(username: string, password: string) {
+    return this.request<LoginResult>('/login', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     })
   }
 
-  login(username: string, password: string) {
-    return this.request<AccountSyncStatus>('/login', {
+  verifySecondFactor(challengeId: string, credentials: { code?: string; recoveryCode?: string }) {
+    return this.request<AccountSyncStatus>('/verify', {
       method: 'POST',
-      body: JSON.stringify({ username, password }),
+      body: JSON.stringify({ challengeId, ...credentials }),
+    })
+  }
+
+  account() {
+    return this.request<AccountProfile>('/account')
+  }
+
+  startTotp() {
+    return this.request<TotpStart>('/totp/start', { method: 'POST' })
+  }
+
+  confirmTotp(challengeId: string, code: string) {
+    return this.request<TotpConfirm>('/totp/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId, code }),
+    })
+  }
+
+  disableTotp(credentials: { code?: string; recoveryCode?: string }) {
+    return this.request<{ twoFactorEnabled: boolean }>('/totp/disable', {
+      method: 'POST',
+      body: JSON.stringify(credentials),
+    })
+  }
+
+  setEmail(email: string) {
+    return this.request<{ email: string | null }>('/email', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
     })
   }
 
@@ -97,4 +162,3 @@ export class AccountSyncHostClient {
 }
 
 export const accountSyncHost = new AccountSyncHostClient()
-

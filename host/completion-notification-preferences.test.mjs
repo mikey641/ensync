@@ -23,6 +23,8 @@ const spoken = Object.freeze({
   voiceId: '["Samantha","en-US"]',
   answerAlerts: true,
   answerSpeechText: 'Your Ensync task needs an answer.',
+  productionAlerts: true,
+  productionSpeechText: 'Your Ensync delivery is ready in production.',
 })
 
 test('preferences saved before question alerts existed gain them, switched on', () => {
@@ -40,7 +42,37 @@ test('preferences saved before question alerts existed gain them, switched on', 
     voiceId: null,
     answerAlerts: true,
     answerSpeechText: 'Your Ensync task needs an answer.',
+    productionAlerts: true,
+    productionSpeechText: 'Your Ensync delivery is ready in production.',
   })
+})
+
+test('an older native shell does not reset an explicit renderer Production-alert choice', async () => {
+  const local = { ...spoken, productionAlerts: false, productionSpeechText: 'The contract is live.' }
+  const localStorage = storage([
+    [COMPLETION_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(local)],
+  ])
+  const migrated = []
+  const result = await initializeCompletionNotificationPreferences({
+    localStorage,
+    ensyncDesktop: {
+      getDevicePreferences: async () => ({
+        completionNotifications: {
+          mode: spoken.mode,
+          speechText: spoken.speechText,
+          voiceId: spoken.voiceId,
+          answerAlerts: spoken.answerAlerts,
+          answerSpeechText: spoken.answerSpeechText,
+        },
+      }),
+      setCompletionNotificationPreferences: async (settings) => migrated.push(settings),
+    },
+  })
+
+  assert.equal(result.productionAlerts, false)
+  assert.equal(result.productionSpeechText, 'The contract is live.')
+  assert.deepEqual(migrated, [local])
+  assert.deepEqual(readCompletionNotificationSettings(localStorage), local)
 })
 
 test('turning question alerts off round-trips through browser storage', () => {

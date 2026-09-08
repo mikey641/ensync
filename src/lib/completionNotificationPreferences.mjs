@@ -4,6 +4,8 @@ export const COMPLETION_NOTIFICATIONS_STORAGE_KEY = 'ensync-completion-notificat
 export const ANSWER_NEEDED_ALERT = 'answer-needed'
 /** A run that has finished and left something to read. */
 export const TASK_FINISHED_ALERT = 'task-finished'
+/** An exact saved delivery has reached verified production. */
+export const PRODUCTION_READY_ALERT = 'production-ready'
 
 export const DEFAULT_COMPLETION_NOTIFICATION_SETTINGS = Object.freeze({
   mode: 'off',
@@ -11,6 +13,8 @@ export const DEFAULT_COMPLETION_NOTIFICATION_SETTINGS = Object.freeze({
   voiceId: null,
   answerAlerts: true,
   answerSpeechText: 'Your Ensync task needs an answer.',
+  productionAlerts: true,
+  productionSpeechText: 'Your Ensync delivery is ready in production.',
 })
 
 function isMode(value) {
@@ -37,6 +41,12 @@ export function normalizeCompletionNotificationSettings(value) {
     answerSpeechText: typeof stored.answerSpeechText === 'string'
       ? stored.answerSpeechText.slice(0, 240)
       : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.answerSpeechText,
+    productionAlerts: typeof stored.productionAlerts === 'boolean'
+      ? stored.productionAlerts
+      : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.productionAlerts,
+    productionSpeechText: typeof stored.productionSpeechText === 'string'
+      ? stored.productionSpeechText.slice(0, 240)
+      : DEFAULT_COMPLETION_NOTIFICATION_SETTINGS.productionSpeechText,
   }
 }
 
@@ -49,13 +59,19 @@ export function normalizeCompletionNotificationSettings(value) {
 export function completionAlertPlan(settings, trigger = TASK_FINISHED_ALERT) {
   const normalized = normalizeCompletionNotificationSettings(settings)
   const answerNeeded = trigger === ANSWER_NEEDED_ALERT
+  const productionReady = trigger === PRODUCTION_READY_ALERT
   const silent = { mode: 'off', chime: null, speechText: '', voiceId: normalized.voiceId }
   if (normalized.mode === 'off') return silent
   if (answerNeeded && !normalized.answerAlerts) return silent
+  if (productionReady && !normalized.productionAlerts) return silent
   if (normalized.mode === 'ringtone') {
     return {
       mode: 'ringtone',
-      chime: answerNeeded ? ANSWER_NEEDED_ALERT : TASK_FINISHED_ALERT,
+      chime: answerNeeded
+        ? ANSWER_NEEDED_ALERT
+        : productionReady
+          ? PRODUCTION_READY_ALERT
+          : TASK_FINISHED_ALERT,
       speechText: '',
       voiceId: normalized.voiceId,
     }
@@ -63,7 +79,11 @@ export function completionAlertPlan(settings, trigger = TASK_FINISHED_ALERT) {
   return {
     mode: 'speech',
     chime: null,
-    speechText: answerNeeded ? normalized.answerSpeechText : normalized.speechText,
+    speechText: answerNeeded
+      ? normalized.answerSpeechText
+      : productionReady
+        ? normalized.productionSpeechText
+        : normalized.speechText,
     voiceId: normalized.voiceId,
   }
 }
@@ -123,9 +143,22 @@ export async function initializeCompletionNotificationPreferences(target = globa
     const devicePreferences = await bridge.getDevicePreferences()
     const stored = devicePreferences?.completionNotifications
     const settings = stored && typeof stored === 'object'
-      ? normalizeCompletionNotificationSettings(stored)
+      ? normalizeCompletionNotificationSettings({
+          ...stored,
+          // An older installed native shell does not know these newer fields
+          // yet. Preserve the renderer's explicit choice until that shell is
+          // upgraded instead of resetting it on every app launch.
+          productionAlerts: typeof stored.productionAlerts === 'boolean'
+            ? stored.productionAlerts
+            : localSettings.productionAlerts,
+          productionSpeechText: typeof stored.productionSpeechText === 'string'
+            ? stored.productionSpeechText
+            : localSettings.productionSpeechText,
+        })
       : localSettings
-    if (!stored) await bridge.setCompletionNotificationPreferences(settings)
+    if (!stored || stored.productionAlerts === undefined || stored.productionSpeechText === undefined) {
+      await bridge.setCompletionNotificationPreferences(settings)
+    }
     writeCompletionNotificationSettings(settings, target?.localStorage)
     return settings
   } catch {

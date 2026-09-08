@@ -1351,6 +1351,62 @@ test('quota retry safety requires a structured terminal failure with zero activi
   assert.equal(quotaFailureIsSafe('claude', claudeIncomplete), false)
 })
 
+test('a real Claude 2.1.263 session-limit stream is a safe quota failure, not cli_failed', () => {
+  // Captured verbatim from `claude --print --verbose --output-format stream-json`
+  // against Claude Code 2.1.263 with the 5-hour session window exhausted (exit 1).
+  // The turn emits init, a rate_limit_event, a synthetic assistant message that
+  // only echoes the limit, and a terminal `is_error` result carrying
+  // `terminal_reason: "api_error"` and `api_error_status: 429`. None of that is
+  // work, so this must classify as provider_quota and be safe to replay elsewhere.
+  const sessionLimitStream = [
+    JSON.stringify({ type: 'system', subtype: 'init', claude_code_version: '2.1.263' }),
+    JSON.stringify({ type: 'rate_limit_event', rate_limit_info: { status: 'rejected', resetsAt: 1788745200, rateLimitType: 'five_hour', overageStatus: 'rejected', isUsingOverage: false } }),
+    JSON.stringify({ type: 'assistant', message: { id: 'f0d4b739', content: [{ type: 'text', text: "You've hit your session limit \u00b7 resets 4:40am (Asia/Jerusalem)" }] }, error: 'rate_limit', is_api_error_message: true }),
+    JSON.stringify({ type: 'result', is_error: true, terminal_reason: 'api_error', api_error_status: 429, subtype: 'success', result: "You've hit your session limit \u00b7 resets 4:40am (Asia/Jerusalem)" }),
+  ].join('\n')
+  assert.equal(quotaFailureIsSafe('claude', sessionLimitStream), true)
+  assert.throws(
+    () => parseClaudeChatResult(sessionLimitStream),
+    (error) =>
+      error instanceof ChatRunError
+      && error.code === 'provider_quota'
+      && error.status === 429
+      && error.safeToRetry === true,
+  )
+})
+
+test('a Claude per-model window limit ("Fable limit") is a safe quota failure, not cli_failed', () => {
+  // Claude 2.1.x names an exhausted per-model window the same way as the session
+  // window, e.g. "You've reached your Fable limit. Switch to another model…".
+  // That prose contains none of the shared usage/rate/session vocabulary, so it
+  // must still classify as quota (and thus hand the turn to the next provider)
+  // when the stream proves zero tool activity.
+  const fableLimit = "You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue."
+  const stream = [
+    JSON.stringify({ type: 'system', subtype: 'init', claude_code_version: '2.1.263' }),
+    JSON.stringify({ type: 'assistant', message: { id: 'f0d4b739', content: [{ type: 'text', text: fableLimit }] }, error: 'rate_limit', is_api_error_message: true }),
+    JSON.stringify({ type: 'result', is_error: true, terminal_reason: 'api_error', api_error_status: 429, subtype: 'success', result: fableLimit }),
+  ].join('\n')
+  assert.equal(quotaFailureIsSafe('claude', stream), true)
+  assert.throws(
+    () => parseClaudeChatResult(stream),
+    (error) =>
+      error instanceof ChatRunError
+      && error.code === 'provider_quota'
+      && error.status === 429
+      && error.safeToRetry === true,
+  )
+
+  // The named-model prose only proves quota when nothing ran: real tool work
+  // before the Fable limit still forbids an automatic replay elsewhere.
+  const withTool = [
+    JSON.stringify({ type: 'system', subtype: 'init' }),
+    JSON.stringify({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write' }] } }),
+    JSON.stringify({ type: 'result', is_error: true, result: fableLimit }),
+  ].join('\n')
+  assert.equal(quotaFailureIsSafe('claude', withTool), false)
+})
+
 test('safe quota failure and unsafe tool failure have different error contracts', () => {
   const safeOutput = [
     JSON.stringify({ type: 'system', subtype: 'init' }),
@@ -1995,6 +2051,10 @@ test('background conflict resolution keeps subscription auth and temporary-workt
   assert.match(processOptions.input, /ENSYNC HOST AUTOMATIC LANDING CONFLICT/)
   assert.match(processOptions.input, new RegExp('b{40}'))
   assert.match(processOptions.input, /src\/feature\.ts/)
+  assert.match(processOptions.input, /Do not run \`git add\`, \`git commit\`/)
+  assert.match(processOptions.input, /Ensync Host will stage exactly the listed conflict files/)
+  assert.match(processOptions.input, /Do not install packages, run tests, typechecks, builds/)
+  assert.match(processOptions.input, /only the listed conflict files are writable/)
   assert.ok(processArguments.includes('model_reasoning_effort="max"'))
 })
 

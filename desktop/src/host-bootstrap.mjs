@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   access,
   chmod,
@@ -18,6 +18,7 @@ const token = process.env.ENSYNC_HOST_AUTH_TOKEN
 const stateFile = process.env.ENSYNC_HOST_STATE_FILE
 const journalFile = process.env.ENSYNC_HOST_JOB_JOURNAL_FILE
 const projectIsolationRoot = process.env.ENSYNC_HOST_PROJECT_ISOLATION_ROOT
+const syncConfigFile = process.env.ENSYNC_HOST_SYNC_CONFIG_FILE
 const idleShutdownMs = Number(process.env.ENSYNC_HOST_IDLE_SHUTDOWN_MS || 60_000)
 const detachedMode = Boolean(token && stateFile && journalFile)
 
@@ -37,6 +38,7 @@ if (projectIsolationRoot && !isAbsolute(projectIsolationRoot)) {
 await access(hostEntry)
 
 const [{ startEnsyncHost }, {
+  combineRuntimeStamps,
   DaemonLeaseService,
   hostSourceStamp,
   shouldKeepDaemonAlive,
@@ -53,7 +55,26 @@ if (typeof startEnsyncHost !== 'function') {
 // Node caches these modules for the life of the process, so stamp the directory
 // they were just imported from: a later build shipped over it will not match.
 const hostDirectory = dirname(hostEntry)
+
+/**
+ * The desktop shell writes a one-field configuration file beside the device
+ * preferences whenever the account-sync URL changes. Hashing that file here
+ * makes the detached Host retire (only when idle) after the operator points
+ * Ensync at a different shared service, so the change applies on relaunch
+ * instead of being swallowed by descriptor reuse.
+ */
+async function syncConfigStamp() {
+  if (!syncConfigFile) return 'unset'
+  try {
+    const contents = await readFile(syncConfigFile)
+    return createHash('sha256').update(contents).digest('hex')
+  } catch {
+    return null
+  }
+}
+
 const loadedSourceStamp = detachedMode ? await hostSourceStamp(hostDirectory) : null
+const loadedRuntimeStamp = combineRuntimeStamps(loadedSourceStamp, await syncConfigStamp())
 
 const daemonLeaseService = detachedMode ? new DaemonLeaseService() : null
 const instanceId = randomUUID()
@@ -79,6 +100,7 @@ async function writeDescriptor(port) {
     pid: process.pid,
     port,
     token,
+    syncServiceUrl: process.env.ENSYNC_SYNC_SERVICE_URL || null,
     startedAt: new Date().toISOString(),
   }), { encoding: 'utf8', mode: 0o600 })
   try { await chmod(staging, 0o600) } catch { /* Windows ACLs remain user-scoped. */ }
@@ -140,7 +162,8 @@ function daemonBusy() {
   const brokerConnected = server.ensyncServices.syncBrokerHost?.status?.().running === true
   const landingActive = server.ensyncServices.landingCoordinator?.hasActiveWork?.() === true
   const deliveryActive = server.ensyncServices.deliveryCoordinator?.hasActiveWork?.() === true
-  return brokerConnected || landingActive || deliveryActive || shouldKeepDaemonAlive(
+  const scheduledActive = server.ensyncServices.scheduledTask?.hasActiveWork?.() === true
+  return brokerConnected || landingActive || deliveryActive || scheduledActive || shouldKeepDaemonAlive(
     daemonLeaseService.activeCount(),
     server.ensyncServices.chatJobs.hasRunningJobs(),
   )
@@ -151,13 +174,13 @@ function daemonBusy() {
 // busy state after the stamp resolves keeps work that started meanwhile safe.
 let retireCheckRunning = false
 async function retireIfSourceChanged() {
-  if (retireCheckRunning || stopping || !loadedSourceStamp) return
+  if (retireCheckRunning || stopping || !loadedRuntimeStamp) return
   retireCheckRunning = true
   try {
-    const currentStamp = await hostSourceStamp(hostDirectory)
-    if (!shouldRetireForStaleSource(loadedSourceStamp, currentStamp, daemonBusy())) return
+    const currentStamp = combineRuntimeStamps(await hostSourceStamp(hostDirectory), await syncConfigStamp())
+    if (!shouldRetireForStaleSource(loadedRuntimeStamp, currentStamp, daemonBusy())) return
     if (process.stderr.writable) {
-      process.stderr.write('[ensync-host] retiring: bundled host code changed\n')
+      process.stderr.write('[ensync-host] retiring: bundled host code or account-sync configuration changed\n')
     }
     await stop(0)
   } finally {

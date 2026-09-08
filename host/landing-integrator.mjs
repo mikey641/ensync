@@ -1,14 +1,14 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
 import { lstat, readFile } from 'node:fs/promises'
-import { isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { runGit } from './git.mjs'
 
 const MAX_ERROR_LENGTH = 4_096
-const DEFAULT_RESOLUTION_TIMEOUT_MS = 2 * 60_000
 const DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS = 5_000
 const CONFLICT_MARKER_PATTERN = '^(<{7}|>{7})( |$)'
+const MARKER_ONLY_WHITESPACE_RULES = '-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent'
 const MAX_CONFLICT_FILES = 128
 const MAX_CONFLICT_PATH_BYTES = 32 * 1024
 const MAX_COMMIT_SUBJECT = 100
@@ -123,6 +123,14 @@ function conflictPathsAreBounded(paths) {
     && paths.reduce((total, path) => total + Buffer.byteLength(path, 'utf8') + 1, 0) <= MAX_CONFLICT_PATH_BYTES
 }
 
+function structuralDiffArguments(range) {
+  // The exact saved snapshot owns every non-conflict byte, so whitespace style
+  // in those bytes cannot be repaired without violating resolver containment.
+  // `diff --check` still rejects introduced conflict markers with all Git
+  // whitespace-error classes explicitly disabled.
+  return ['-c', `core.whitespace=${MARKER_ONLY_WHITESPACE_RULES}`, 'diff', '--check', range]
+}
+
 function resultFor(train, landedIds, retryIds, errors, head = null, description = null) {
   const order = new Map(train.map((item) => [item.id, item.completionSequence]))
   const sorted = (ids) => [...ids].sort((left, right) => order.get(left) - order.get(right))
@@ -148,7 +156,11 @@ export class LandingIntegrator {
     this.gitRunner = options.gitRunner ?? runGit
     this.idFactory = options.idFactory ?? randomUUID
     this.gitExecutable = options.gitExecutable
-    this.resolutionTimeoutMs = options.resolutionTimeoutMs ?? DEFAULT_RESOLUTION_TIMEOUT_MS
+    // A semantic conflict resolution has no fixed wall-clock deadline. The
+    // provider runner still owns inactivity/failure detection, and Host
+    // shutdown remains able to cancel the run and verify that it stopped.
+    // Tests may supply an explicit deadline to exercise that safety path.
+    this.resolutionTimeoutMs = options.resolutionTimeoutMs ?? null
     this.resolutionShutdownTimeoutMs = options.resolutionShutdownTimeoutMs
       ?? DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS
     this.operationContext = new AsyncLocalStorage()
@@ -400,7 +412,7 @@ export class LandingIntegrator {
       }
 
       const [structural, integrationStatus, integrationHead, integrationBranchResult] = await Promise.all([
-        this.#git(['diff', '--check', `${originalHead}...HEAD`], integration.path),
+        this.#git(structuralDiffArguments(`${originalHead}...HEAD`), integration.path),
         this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], integration.path),
         this.#git(['rev-parse', '--verify', 'HEAD'], integration.path),
         this.#git(['symbolic-ref', '--quiet', 'HEAD'], integration.path),
@@ -436,7 +448,7 @@ export class LandingIntegrator {
         this.#git(['rev-parse', '--verify', 'HEAD'], integration.path),
         this.#git(['symbolic-ref', '--quiet', 'HEAD'], integration.path),
         this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], integration.path),
-        this.#git(['diff', '--check', `${originalHead}...HEAD`], integration.path),
+        this.#git(structuralDiffArguments(`${originalHead}...HEAD`), integration.path),
       ])
       const postGateUnmerged = await this.#unmergedFiles(integration.path)
       const postGateMissingSha = await this.#firstMissingAncestor(integration.path, accepted)
@@ -526,7 +538,7 @@ export class LandingIntegrator {
       }
       const [publishedStatus, publishedStructural, publishedCandidate, publishedOriginal, publishedConfig, publishedParents] = await Promise.all([
         this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], repositoryPath),
-        this.#git(['diff', '--check', `${originalHead}...${publishedSha}`], repositoryPath),
+        this.#git(structuralDiffArguments(`${originalHead}...${publishedSha}`), repositoryPath),
         this.#git(['merge-base', '--is-ancestor', verifiedIntegrationHead, publishedSha], repositoryPath),
         this.#git(['merge-base', '--is-ancestor', originalHead, publishedSha], repositoryPath),
         this.#git(['cat-file', '-e', `${publishedSha}:.agent-worktree.toml`], repositoryPath),
@@ -702,6 +714,27 @@ export class LandingIntegrator {
       }
 
       try {
+        const recovered = await this.#recoverPriorResolution(
+          integration.path,
+          item,
+          conflictFiles,
+          protectedEntries,
+        )
+        if (recovered) {
+          const finalized = await this.#finalizeResolution(
+            integration,
+            item,
+            identity,
+            conflictFiles,
+            protectedEntries,
+          )
+          if (!finalized.ok) {
+            const restored = await this.#abortIfNeeded(integration.path)
+            return { ok: false, safeToContinue: restored, reason: finalized.reason }
+          }
+          return { ok: true, safeToContinue: true }
+        }
+
         let resolutionFailure = null
         try {
           await this.#boundedResolution(resolveConflict, {
@@ -750,6 +783,113 @@ export class LandingIntegrator {
     }
   }
 
+  async #recoverPriorResolution(worktreePath, item, conflictFiles, protectedEntries) {
+    const listed = await this.#git(['worktree', 'list', '--porcelain', '-z'], worktreePath)
+    if (listed.exitCode !== 0) return false
+    const integrationParent = dirname(resolve(worktreePath))
+    const tips = []
+    const candidateRefs = []
+    for (const record of listed.stdout.split('\0\0').filter(Boolean)) {
+      const fields = Object.fromEntries(record.split('\0').map((line) => {
+        const separator = line.indexOf(' ')
+        return separator < 0 ? [line, ''] : [line.slice(0, separator), line.slice(separator + 1)]
+      }))
+      if (
+        !fields.worktree
+        || !fields.HEAD
+        || !fields.branch?.startsWith('refs/heads/ensync/landing-trains/')
+        || samePath(resolve(fields.worktree), resolve(worktreePath))
+        || !samePath(dirname(resolve(fields.worktree)), integrationParent)
+      ) continue
+      tips.push(fields.HEAD)
+      candidateRefs.push(fields.branch)
+    }
+    if (tips.length === 0) return false
+
+    const [currentStages, history, reflogHistory] = await Promise.all([
+      this.#conflictIndexEntries(worktreePath, conflictFiles),
+      this.#git(['rev-list', '--merges', '--parents', '--max-count=4096', ...tips], worktreePath),
+      // A rejected over-broad resolver result is reset back to its checkpoint,
+      // but its merge commit remains in the reflog of that retained,
+      // tool-owned landing branch. The same exact-input and bounded-path gates
+      // below make its conflict-file subset reusable without publishing any
+      // non-conflict edit that caused the original rejection.
+      this.#git([
+        'log', '-g', '--merges', '--format=%H %P', '--max-count=4096',
+        ...candidateRefs,
+      ], worktreePath),
+    ])
+    if (currentStages === null || history.exitCode !== 0) return false
+
+    const reusable = new Map()
+    const candidates = [
+      ...history.stdout.split(/\r?\n/),
+      ...(reflogHistory.exitCode === 0 ? reflogHistory.stdout.split(/\r?\n/) : []),
+    ].filter(Boolean)
+    for (const line of candidates) {
+      const [candidate, firstParent, secondParent, ...extraParents] = line.trim().split(/\s+/)
+      if (
+        !candidate
+        || !firstParent
+        || secondParent?.toLowerCase() !== item.savedSha.toLowerCase()
+        || extraParents.length > 0
+      ) continue
+      const [mergeBase, structural, markers] = await Promise.all([
+        this.#git(['merge-base', firstParent, item.savedSha], worktreePath),
+        this.#git(structuralDiffArguments(`${firstParent}...${candidate}`), worktreePath),
+        this.#git(['grep', '-l', '-E', CONFLICT_MARKER_PATTERN, candidate, '--', ...conflictFiles], worktreePath),
+      ])
+      if (
+        mergeBase.exitCode !== 0
+        || !firstLine(mergeBase.stdout)
+        || structural.exitCode !== 0
+        || ![1].includes(markers.exitCode)
+      ) continue
+      const resolution = []
+      let exactInputs = true
+      for (const path of conflictFiles) {
+        const [base, ours, theirs, resolved] = await Promise.all([
+          this.#treeEntryAt(worktreePath, firstLine(mergeBase.stdout), path),
+          this.#treeEntryAt(worktreePath, firstParent, path),
+          this.#treeEntryAt(worktreePath, item.savedSha, path),
+          this.#treeEntryAt(worktreePath, candidate, path),
+        ])
+        const stages = currentStages.get(path) ?? new Map()
+        if (
+          base === undefined
+          || ours === undefined
+          || theirs === undefined
+          || resolved === undefined
+          || (stages.get('1') ?? null) !== base
+          || (stages.get('2') ?? null) !== ours
+          || (stages.get('3') ?? null) !== theirs
+        ) {
+          exactInputs = false
+          break
+        }
+        resolution.push([path, resolved])
+      }
+      if (!exactInputs) continue
+      reusable.set(JSON.stringify(resolution), { candidate, resolution })
+    }
+    // Conflicting cached answers are ambiguous and must fall back to a live
+    // semantic resolver instead of choosing one by traversal order.
+    if (reusable.size !== 1) return false
+    const [{ candidate, resolution }] = reusable.values()
+    const present = resolution.filter(([, entry]) => entry !== null).map(([path]) => path)
+    const deleted = resolution.filter(([, entry]) => entry === null).map(([path]) => path)
+    if (present.length > 0) {
+      const restored = await this.#git(['checkout', candidate, '--', ...present], worktreePath)
+      if (restored.exitCode !== 0) return false
+    }
+    if (deleted.length > 0) {
+      const removed = await this.#git(['rm', '-f', '--', ...deleted], worktreePath)
+      if (removed.exitCode !== 0) return false
+    }
+    const resolvedEntries = await this.#nonConflictIndexEntries(worktreePath, conflictFiles)
+    return resolvedEntries !== null && resolvedEntries === protectedEntries
+  }
+
   async #finalizeResolution(integration, item, identity, conflictFiles, protectedEntries) {
     const markers = await this.#git(
       ['grep', '-l', '-E', CONFLICT_MARKER_PATTERN, '--', ...conflictFiles],
@@ -787,15 +927,18 @@ export class LandingIntegrator {
   async #boundedResolution(resolveConflict, details) {
     const controller = new AbortController()
     const parentSignal = this.#signal()
-    let timer
+    let timer = null
     let onParentAbort = null
     const resolution = Promise.resolve().then(() => resolveConflict({ ...details, signal: controller.signal }))
-    const timeout = new Promise((resolveTimeout) => {
-      timer = setTimeout(() => {
-        controller.abort()
-        resolveTimeout('timeout')
-      }, this.resolutionTimeoutMs)
-    })
+    const outcomes = [resolution.then(() => 'resolved')]
+    if (Number.isFinite(this.resolutionTimeoutMs) && this.resolutionTimeoutMs > 0) {
+      outcomes.push(new Promise((resolveTimeout) => {
+        timer = setTimeout(() => {
+          controller.abort()
+          resolveTimeout('timeout')
+        }, this.resolutionTimeoutMs)
+      }))
+    }
     const cancelled = new Promise((resolveCancellation) => {
       if (!parentSignal) return
       if (parentSignal.aborted) resolveCancellation('cancelled')
@@ -804,8 +947,9 @@ export class LandingIntegrator {
         parentSignal.addEventListener('abort', onParentAbort, { once: true })
       }
     })
+    outcomes.push(cancelled)
     try {
-      const outcome = await Promise.race([resolution.then(() => 'resolved'), timeout, cancelled])
+      const outcome = await Promise.race(outcomes)
       if (outcome === 'resolved') return
       controller.abort()
       const stopped = await Promise.race([
@@ -827,7 +971,7 @@ export class LandingIntegrator {
 
   async #validateAppliedItem(worktreePath, expectedBranch, originalHead, savedSha) {
     const [structural, status, head, branch, config, contained, retainedTarget] = await Promise.all([
-      this.#git(['diff', '--check', `${originalHead}...HEAD`], worktreePath),
+      this.#git(structuralDiffArguments(`${originalHead}...HEAD`), worktreePath),
       this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], worktreePath),
       this.#git(['rev-parse', '--verify', 'HEAD'], worktreePath),
       this.#git(['symbolic-ref', '--quiet', 'HEAD'], worktreePath),
@@ -901,7 +1045,34 @@ export class LandingIntegrator {
   }
 
   async #nonConflictTreeEntries(worktreePath, conflictFiles) {
-    const result = await this.#git(['ls-tree', '-r', '-z', 'HEAD'], worktreePath)
+    return this.#treeEntriesAt(worktreePath, 'HEAD', conflictFiles)
+  }
+
+  async #conflictIndexEntries(worktreePath, conflictFiles) {
+    const result = await this.#git(['ls-files', '--unmerged', '-z', '--', ...conflictFiles], worktreePath)
+    if (result.exitCode !== 0) return null
+    const entries = new Map(conflictFiles.map((path) => [path, new Map()]))
+    for (const record of result.stdout.split('\0').filter(Boolean)) {
+      const match = /^(\d+) ([a-f0-9]+) ([1-3])\t([\s\S]*)$/i.exec(record)
+      if (!match || !entries.has(match[4])) return null
+      entries.get(match[4]).set(match[3], `${match[1]} ${match[2].toLowerCase()}`)
+    }
+    return entries
+  }
+
+  async #treeEntryAt(worktreePath, treeish, path) {
+    const result = await this.#git(['ls-tree', '-z', treeish, '--', path], worktreePath)
+    if (result.exitCode !== 0) return undefined
+    const records = result.stdout.split('\0').filter(Boolean)
+    if (records.length === 0) return null
+    if (records.length !== 1) return undefined
+    const match = /^(\d+) \S+ ([a-f0-9]+)\t([\s\S]*)$/i.exec(records[0])
+    if (!match || match[3] !== path) return undefined
+    return `${match[1]} ${match[2].toLowerCase()}`
+  }
+
+  async #treeEntriesAt(worktreePath, treeish, conflictFiles) {
+    const result = await this.#git(['ls-tree', '-r', '-z', treeish], worktreePath)
     if (result.exitCode !== 0) return null
     const conflicts = new Set(conflictFiles)
     const entries = []

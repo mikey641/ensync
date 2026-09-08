@@ -86,6 +86,11 @@ export function parseClaudeUsageProbe(result, checkedAt = new Date().toISOString
       resetTextWasPresent: Boolean(match[3]?.trim()),
     }]
   })
+  // The five-hour session window is the one that actually gates the next turn,
+  // so it is surfaced as the headline of Provider status and usage. Routing
+  // stays on the greatest provider-wide figure below; the session value is
+  // display-only and must never lower the routing percentage.
+  const sessionWindow = windows.find((window) => window.label === 'session') ?? null
   const limitingWindow = windows.sort((left, right) => {
     const usageDifference = right.usedPercent - left.usedPercent
     return usageDifference || Number(Boolean(right.resetLabel)) - Number(Boolean(left.resetLabel))
@@ -96,10 +101,13 @@ export function parseClaudeUsageProbe(result, checkedAt = new Date().toISOString
     ? limitingWindow
     : windows.find((window) => window.resetLabel) ?? null
   const unparsedResetWasPresent = windows.some((window) => window.resetTextWasPresent && !window.resetLabel)
-  const details = windows.map((window) => ({
-    label: windowDisplayName(window.label),
-    value: `${window.usedPercent}% used${window.resetLabel ? ` · resets ${window.resetLabel}` : ''}`,
-  }))
+  const details = windows
+    .slice()
+    .sort((left, right) => Number(right.label === 'session') - Number(left.label === 'session'))
+    .map((window) => ({
+      label: windowDisplayName(window.label),
+      value: `${window.usedPercent}% used${window.resetLabel ? ` · resets ${window.resetLabel}` : ''}`,
+    }))
 
   let resetReason = ' The CLI did not report a reset schedule for either provider-wide window.'
   if (resetWindow) {
@@ -121,6 +129,8 @@ export function parseClaudeUsageProbe(result, checkedAt = new Date().toISOString
     resetAt: null,
     resetLabel: resetWindow?.resetLabel ?? null,
     resetWindow: resetWindow ? windowDisplayName(resetWindow.label) : null,
+    sessionUsedPercent: sessionWindow?.usedPercent ?? null,
+    sessionResetLabel: sessionWindow?.resetLabel ?? null,
     checkedAt,
     details,
     reason: `Claude Code /usage reported exact ${limitingWindow.usedPercent}% usage for the ${windowDisplayName(limitingWindow.label).toLowerCase()}.${resetReason}`,

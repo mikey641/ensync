@@ -28,7 +28,7 @@ import { pathToFileURL } from 'node:url'
 const DAEMON_DESCRIPTOR_FILENAME = 'ensync-host-daemon-v1.json'
 const USAGE = `Usage:
   ensync-agent run  [--cwd DIR] [--tools LEVEL] [--size TIER] [--prompt TEXT | --prompt-file FILE]
-                    [--timeout SECONDS] [--no-fallback] [--json] [--quiet]
+                    [--timeout SECONDS] [--no-fallback] [--repair] [--json] [--quiet]
   ensync-agent plan [--cwd DIR] [--tools LEVEL] [--size TIER] [--refresh] [--json]
 
   --cwd DIR        Working directory for the agent (default: current directory)
@@ -38,6 +38,8 @@ const USAGE = `Usage:
   --prompt-file -  Read the prompt from stdin (also the default when neither
                    --prompt nor --prompt-file is given)
   --refresh        Re-probe provider subscriptions instead of using cached status
+  --repair         After any stop or error, run a fresh repair turn with the next
+                   available provider instead of exiting (never replays the prompt)
   --local          Skip the running Ensync Host and probe providers in this process`
 
 function fail(message, code = 2) {
@@ -55,6 +57,7 @@ function parseArguments(argv) {
     promptFile: null,
     timeoutSeconds: null,
     fallback: true,
+    repair: false,
     json: false,
     quiet: false,
     refresh: false,
@@ -76,6 +79,7 @@ function parseArguments(argv) {
       case '--prompt-file': options.promptFile = value(); break
       case '--timeout': options.timeoutSeconds = Number(value()); break
       case '--no-fallback': options.fallback = false; break
+      case '--repair': options.repair = true; break
       case '--json': options.json = true; break
       case '--quiet': options.quiet = true; break
       case '--refresh': options.refresh = true; break
@@ -101,12 +105,13 @@ async function loadEnsyncHostModules() {
   let lastError = null
   for (const base of candidates) {
     try {
-      const [connector, runner, providers] = await Promise.all([
+      const [connector, runner, providers, scheduled] = await Promise.all([
         import(`${base}agent-connector.mjs`),
         import(`${base}agent-connector-run.mjs`),
         import(`${base}providers.mjs`),
+        import(`${base}scheduled-task.mjs`),
       ])
-      return { connector, runner, providers }
+      return { connector, runner, providers, scheduled }
     } catch (error) {
       lastError = error
     }
@@ -252,7 +257,10 @@ async function main() {
   }
 
   try {
-    const result = await context.modules.runner.runConnectorPlan(plan, {
+    const runPlan = options.repair
+      ? context.modules.scheduled.runConnectorPlanWithRepair
+      : context.modules.runner.runConnectorPlan
+    const result = await runPlan(plan, {
       prompt,
       cwd: options.cwd,
       fallbackEnabled: options.fallback,
@@ -260,8 +268,16 @@ async function main() {
         ? options.timeoutSeconds * 1_000
         : null,
       refreshPlan: options.fallback ? (attempted) => planFor(context, options, attempted) : undefined,
+      repairPlan: (attempted) => planFor(context, options, attempted),
+      repairTask: { name: 'ensync-agent run', cwd: options.cwd, prompt },
       onFallback: ({ from, to, code }) => {
         if (!options.quiet) process.stderr.write(`ensync-agent: ${from} -> ${to} after ${code}\n`)
+      },
+      onRepairFallback: ({ from, to, code }) => {
+        if (!options.quiet) process.stderr.write(`ensync-agent: repair ${from} -> ${to} after ${code}\n`)
+      },
+      onRepairNeeded: ({ code, message }) => {
+        if (!options.quiet) process.stderr.write(`ensync-agent: ${code}: ${message}; running a repair agent with the next available provider.\n`)
       },
     })
     if (options.json) {
@@ -269,13 +285,15 @@ async function main() {
     } else {
       process.stdout.write(`${result.response}\n`)
       if (!options.quiet) {
-        process.stderr.write(`ensync-agent: ${result.providerName}${result.model ? ` (${result.model})` : ''} finished in ${Math.round(result.durationMs / 1_000)}s\n`)
+        const verb = result.repaired ? 'repaired' : 'finished'
+        process.stderr.write(`ensync-agent: ${result.providerName}${result.model ? ` (${result.model})` : ''} ${verb} in ${Math.round(result.durationMs / 1_000)}s\n`)
       }
     }
     process.exit(0)
   } catch (error) {
     const code = typeof error?.code === 'string' ? error.code : 'run_failed'
-    process.stderr.write(`ensync-agent: ${code}: ${error?.message ?? 'the run failed.'}\n`)
+    const original = error?.originalError?.code ? ` (after ${error.originalError.code})` : ''
+    process.stderr.write(`ensync-agent: ${code}${original}: ${error?.message ?? 'the run failed.'}\n`)
     process.exit(4)
   }
 }

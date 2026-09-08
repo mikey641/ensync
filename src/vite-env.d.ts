@@ -137,17 +137,173 @@ interface Window {
         mode: 'off' | 'ringtone' | 'speech'
         speechText: string
         voiceId: string | null
+        answerAlerts: boolean
+        answerSpeechText: string
+        productionAlerts: boolean
+        productionSpeechText: string
       } | null
+      updateChannel: 'stable' | 'beta'
+      syncServiceUrl: string | null
     } | null>
     setCompletionNotificationPreferences?: (settings: {
       mode: 'off' | 'ringtone' | 'speech'
       speechText: string
       voiceId: string | null
+      answerAlerts: boolean
+      answerSpeechText: string
+      productionAlerts: boolean
+      productionSpeechText: string
     }) => Promise<{
       completionNotifications: {
         mode: 'off' | 'ringtone' | 'speech'
         speechText: string
         voiceId: string | null
+        answerAlerts: boolean
+        answerSpeechText: string
+        productionAlerts: boolean
+        productionSpeechText: string
+      } | null
+      updateChannel: 'stable' | 'beta'
+      syncServiceUrl: string | null
+    } | null>
+    setSyncServiceUrl?: (url: string | null) => Promise<{
+      completionNotifications: {
+        mode: 'off' | 'ringtone' | 'speech'
+        speechText: string
+        voiceId: string | null
+        answerAlerts: boolean
+        answerSpeechText: string
+        productionAlerts: boolean
+        productionSpeechText: string
+      } | null
+      updateChannel: 'stable' | 'beta'
+      syncServiceUrl: string | null
+    } | null>
+    getCloudflareTunnelStatus?: () => Promise<{
+      configured: boolean
+      hostname: string | null
+      url: string | null
+      binaryInstalled: boolean
+      running: boolean
+      pid: number | null
+      quick: {
+        enabled: boolean
+        running: boolean
+        url: string | null
+        pid: number | null
+      }
+    } | null>
+    setupCloudflareTunnel?: (input: {
+      domain: string
+      hostname: string
+      apiToken: string
+    }) => Promise<{
+      ok: boolean
+      error?: string
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
+      }
+    } | null>
+    startCloudflareTunnel?: () => Promise<{
+      ok: boolean
+      error?: string
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
+      }
+    } | null>
+    stopCloudflareTunnel?: () => Promise<{
+      ok: boolean
+      error?: string
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
+      }
+    } | null>
+    clearCloudflareTunnel?: () => Promise<{
+      ok: boolean
+      error?: string
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
+      }
+    } | null>
+    startCloudflareQuickTunnel?: () => Promise<{
+      ok: boolean
+      error?: string
+      quick?: { running: boolean; url: string | null }
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
+      }
+    } | null>
+    stopCloudflareQuickTunnel?: () => Promise<{
+      ok: boolean
+      error?: string
+      status?: {
+        configured: boolean
+        hostname: string | null
+        url: string | null
+        binaryInstalled: boolean
+        running: boolean
+        pid: number | null
+        quick: {
+          enabled: boolean
+          running: boolean
+          url: string | null
+          pid: number | null
+        }
       }
     } | null>
     openLocalFile?: (path: string) => void

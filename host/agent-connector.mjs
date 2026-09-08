@@ -290,7 +290,7 @@ export function connectorPlan({
   }
 }
 
-function userDataDirectory(env = process.env, platform = process.platform, home = homedir()) {
+export function userDataDirectory(env = process.env, platform = process.platform, home = homedir()) {
   if (platform === 'darwin') return join(home, 'Library', 'Application Support', 'Ensync')
   if (platform === 'win32') return join(env.APPDATA || join(home, 'AppData', 'Roaming'), 'Ensync')
   return join(env.XDG_CONFIG_HOME || join(home, '.config'), 'Ensync')

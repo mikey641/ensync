@@ -11,8 +11,10 @@ import {
   getProviderCatalog,
   parseClaudeAuthentication,
   parseCodexAuthentication,
+  parseCursorAbout,
   parseCursorAuthentication,
   parseKiroAuthentication,
+  parseAuggieAccountStatus,
 } from './providers.mjs'
 import { createEnsyncHost } from './server.mjs'
 
@@ -96,6 +98,26 @@ test('auth parsers only accept explicit CLI authentication signals', () => {
     parseCursorAuthentication({ ...baseResult, stdout: 'Cursor Agent is available' }).state,
     'unavailable',
   )
+  const cursorStatus = parseCursorAuthentication({
+    ...baseResult,
+    stdout: JSON.stringify({ status: 'authenticated', isAuthenticated: true, userInfo: { email: 'mikey641@gmail.com' } }),
+  }, '2026-09-07T00:00:00.000Z', { plan: 'Free', login: null })
+  assert.equal(cursorStatus.state, 'authenticated')
+  assert.equal(cursorStatus.accountLogin, 'mikey641@gmail.com')
+  assert.equal(cursorStatus.exactPlan, 'Free')
+  assert.deepEqual(
+    parseCursorAbout({
+      ...baseResult,
+      stdout: JSON.stringify({ subscriptionTier: 'Free', userEmail: 'mikey641@gmail.com' }),
+    }),
+    { plan: 'Free', login: 'mikey641@gmail.com' },
+  )
+  const kiroAccount = parseKiroAuthentication({
+    ...baseResult,
+    stdout: JSON.stringify({ accountType: 'SocialGoogle', email: 'mikey641@gmail.com' }),
+  })
+  assert.equal(kiroAccount.state, 'authenticated')
+  assert.equal(kiroAccount.accountLogin, 'mikey641@gmail.com')
   assert.equal(
     parseKiroAuthentication({ ...baseResult, stdout: JSON.stringify({ email: 'user@example.com' }) }).state,
     'authenticated',
@@ -106,6 +128,13 @@ test('auth parsers only accept explicit CLI authentication signals', () => {
   )
   assert.equal(
     parseKiroAuthentication({ ...baseResult, exitCode: 1, stdout: JSON.stringify({ account: null }) }).state,
+    'not_authenticated',
+  )
+  assert.equal(
+    parseAuggieAccountStatus({
+      ...baseResult,
+      stdout: 'You are not currently logged in to Augment.\n   Run \'auggie login\' to authenticate first.',
+    }).state,
     'not_authenticated',
   )
 })
@@ -124,7 +153,7 @@ test('catalog login definitions stay provider-specific', () => {
   assert.deepEqual(getProviderDefinition('droid').loginArgs, [])
   assert.deepEqual(getProviderDefinition('auggie').loginArgs, ['login'])
   assert.deepEqual(getProviderDefinition('amp').loginArgs, ['login'])
-  assert.equal(getProviderDefinition('gitlab_duo').loginArgs, null)
+  assert.deepEqual(getProviderDefinition('gitlab_duo').loginArgs, [])
   assert.deepEqual(getProviderDefinition('oz').loginArgs, ['login'])
   assert.deepEqual(getProviderDefinition('junie').loginArgs, [])
   assert.equal(getProviderDefinition('ollama').loginArgs, null)
@@ -164,9 +193,9 @@ test('Copilot account verification is separate from its discovery-only Ensync ru
   assert.equal(copilot?.routeKind, 'subscription')
   assert.equal(copilot?.chatExecution, 'discovery_only')
   assert.equal(copilot?.setupKind, 'interactive_onboarding')
-  assert.equal(definition?.usageKind, 'unavailable')
+  assert.equal(definition?.usageKind, 'subscription_quota')
   assert.deepEqual(definition?.loginArgs, [])
-  assert.match(copilot?.catalogReason ?? '', /Account verification is supported/)
+  assert.match(copilot?.catalogReason ?? '', /Account verification/)
   assert.match(copilot?.catalogReason ?? '', /task execution and automatic fallback are not enabled/)
 })
 

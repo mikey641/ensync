@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 export const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 export const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
 export const UPDATE_CHANNEL_SET_CHANNEL = 'ensync:device-preferences:set-update-channel'
+export const SYNC_SERVICE_URL_SET_CHANNEL = 'ensync:device-preferences:set-sync-service-url'
 export const DEVICE_PREFERENCES_FILENAME = 'device-preferences-v1.json'
 
 const FORMAT = 'ensync-device-preferences'
@@ -18,6 +19,7 @@ function checksum(value) {
 // they are repeated here because this store also has to read a file written by
 // a build that predates question alerts.
 const DEFAULT_ANSWER_SPEECH_TEXT = 'Your Ensync task needs an answer.'
+const DEFAULT_PRODUCTION_SPEECH_TEXT = 'Your Ensync delivery is ready in production.'
 
 function normalizeCompletionNotifications(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null
@@ -30,17 +32,52 @@ function normalizeCompletionNotifications(value) {
   if (value.answerAlerts !== undefined && typeof value.answerAlerts !== 'boolean') return null
   if (value.answerSpeechText !== undefined
     && (typeof value.answerSpeechText !== 'string' || value.answerSpeechText.length > 240)) return null
+  if (value.productionAlerts !== undefined && typeof value.productionAlerts !== 'boolean') return null
+  if (value.productionSpeechText !== undefined
+    && (typeof value.productionSpeechText !== 'string' || value.productionSpeechText.length > 240)) return null
   return Object.freeze({
     mode: value.mode,
     speechText: value.speechText,
     voiceId: value.voiceId,
     answerAlerts: value.answerAlerts ?? true,
     answerSpeechText: value.answerSpeechText ?? DEFAULT_ANSWER_SPEECH_TEXT,
+    productionAlerts: value.productionAlerts ?? true,
+    productionSpeechText: value.productionSpeechText ?? DEFAULT_PRODUCTION_SPEECH_TEXT,
   })
 }
 
 function normalizeUpdateChannel(value) {
   return value === 'stable' || value === 'beta' ? value : null
+}
+
+const SYNC_SERVICE_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
+
+/** Lenient decoder: invalid stored URLs fall back to null, never reject the file. */
+function normalizeSyncServiceUrl(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  let parsed
+  try {
+    parsed = new URL(trimmed)
+  } catch {
+    return null
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return null
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) return null
+  if (parsed.protocol === 'http:' && !SYNC_SERVICE_LOOPBACK_HOSTS.has(parsed.hostname.toLowerCase())) return null
+  return parsed.toString().replace(/\/$/, '')
+}
+
+/** Setter validation: an explicit non-empty value must be a usable HTTPS/loopback URL. */
+function requiredSyncServiceUrl(value) {
+  if (value === undefined || value === null || value === '') return null
+  const normalized = normalizeSyncServiceUrl(value)
+  if (normalized === null) {
+    throw new TypeError('The Sync service URL must be an HTTPS URL, or an exact loopback HTTP URL.')
+  }
+  return normalized
 }
 
 function normalizePreferences(value) {
@@ -53,7 +90,8 @@ function normalizePreferences(value) {
     ? 'stable'
     : normalizeUpdateChannel(value.updateChannel)
   if (!updateChannel) return null
-  return Object.freeze({ completionNotifications, updateChannel })
+  const syncServiceUrl = normalizeSyncServiceUrl(value.syncServiceUrl)
+  return Object.freeze({ completionNotifications, updateChannel, syncServiceUrl })
 }
 
 function decode(encoded) {
@@ -88,6 +126,7 @@ function publicPreferences(preferences) {
       ? { ...preferences.completionNotifications }
       : null,
     updateChannel: preferences.updateChannel,
+    syncServiceUrl: preferences.syncServiceUrl,
   }
 }
 
@@ -113,6 +152,7 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
   let preferences = candidates[0]?.preferences ?? Object.freeze({
     completionNotifications: null,
     updateChannel: 'stable',
+    syncServiceUrl: null,
   })
 
   if (candidates[0] && candidates[0].path !== filePath) {
@@ -149,6 +189,10 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
       if (!updateChannel) throw new TypeError('The update channel must be stable or beta.')
       return persist(Object.freeze({ ...preferences, updateChannel }))
     },
+    setSyncServiceUrl(value) {
+      const syncServiceUrl = requiredSyncServiceUrl(value)
+      return persist(Object.freeze({ ...preferences, syncServiceUrl }))
+    },
   })
 }
 
@@ -165,6 +209,9 @@ export function createDevicePreferencesHandlers({ isAuthorized, store }) {
     },
     setUpdateChannel(event, value) {
       return isAuthorized(event) ? store.setUpdateChannel(value) : null
+    },
+    setSyncServiceUrl(event, value) {
+      return isAuthorized(event) ? store.setSyncServiceUrl(value) : null
     },
   })
 }

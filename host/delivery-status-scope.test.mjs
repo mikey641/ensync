@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { deliveryPromptContext, scopeDeliveryStatusForBranch } from '../src/lib/deliveryStatus.mjs'
+import {
+  deliveryPromptContext,
+  productionNotificationsNeedingAlert,
+  scopeDeliveryStatusForBranch,
+  verifiedProductionDeliveryEntries,
+  verifiedProductionDeliveryKeys,
+} from '../src/lib/deliveryStatus.mjs'
 
 function record(id, sourceBranch, state, updatedAt, overrides = {}) {
   return {
@@ -15,6 +21,44 @@ function record(id, sourceBranch, state, updatedAt, overrides = {}) {
     ...overrides,
   }
 }
+
+test('Production-ready notification keys require exact ancestry verification', () => {
+  const ready = record('ready', 'ensync/chat-one', 'production', '2026-09-05T18:00:00.000Z', {
+    productionCommitSha: 'a'.repeat(40),
+    replacementCommitSha: 'b'.repeat(40),
+    productionAncestryVerified: true,
+    deliveryTarget: 'production',
+  })
+  const unverified = { ...ready, id: 'unverified', productionAncestryVerified: false }
+  const held = { ...ready, id: 'held', deliveryTarget: 'protected_branch' }
+
+  assert.deepEqual(verifiedProductionDeliveryKeys({ records: [ready, unverified, held] }), [
+    `ready:${'b'.repeat(40)}:2026-09-05T18:00:00.000Z`,
+  ])
+  assert.deepEqual(verifiedProductionDeliveryEntries({ records: [ready, unverified, held] }), [{
+    key: `ready:${'b'.repeat(40)}:2026-09-05T18:00:00.000Z`,
+    productionAt: '2026-09-05T18:00:00.000Z',
+  }])
+})
+
+test('a recent Production transition missed during relaunch alerts once, while old hydration stays silent', () => {
+  const nowMs = Date.parse('2026-09-05T18:02:00.000Z')
+  const recent = [{ key: 'recent', productionAt: '2026-09-05T18:01:30.000Z' }]
+  const old = [{ key: 'old', productionAt: '2026-09-05T17:00:00.000Z' }]
+
+  const recentFirstLoad = productionNotificationsNeedingAlert(recent, new Set(), { nowMs })
+  assert.equal(recentFirstLoad.alert, true)
+  assert.deepEqual(recentFirstLoad.alertKeys, ['recent'])
+  assert.deepEqual([...recentFirstLoad.announced], [])
+  assert.equal(productionNotificationsNeedingAlert(recent, recentFirstLoad.announced, { nowMs }).alert, true)
+  recentFirstLoad.announced.add('recent')
+  assert.equal(productionNotificationsNeedingAlert(recent, recentFirstLoad.announced, { nowMs }).alert, false)
+
+  const oldFirstLoad = productionNotificationsNeedingAlert(old, new Set(), { nowMs })
+  assert.equal(oldFirstLoad.alert, false)
+  assert.deepEqual(oldFirstLoad.alertKeys, [])
+  assert.deepEqual([...oldFirstLoad.announced], ['old'])
+})
 
 test('renderer rejects another chat delivery when an older Host ignores the source-branch filter', () => {
   const chatOneProduction = record('one-production', 'ensync/chat-one', 'production', '2026-09-05T01:00:00.000Z')
@@ -42,6 +86,29 @@ test('renderer keeps verified production and newer pending work for only the req
   assert.equal(scoped.production?.id, 'production')
   assert.equal(scoped.pending?.id, 'pending')
   assert.deepEqual(scoped.records.map(({ id }) => id), ['pending', 'production'])
+})
+
+test('a repaired replacement remains the current prompt delivery until Production is verified', () => {
+  const production = record('older-production', 'ensync/chat-one', 'production', '2026-09-05T01:00:00.000Z', {
+    createdAt: '2026-09-05T01:00:00.000Z',
+    replacementCommitSha: 'd'.repeat(40),
+    turnIds: ['older-turn'],
+    turnIdentityProof: 'captured',
+    productionAncestryVerified: true,
+  })
+  const repairing = record('latest-repair', 'ensync/chat-one', 'repairing', '2026-09-05T02:00:00.000Z', {
+    createdAt: '2026-09-05T02:00:00.000Z',
+    replacementCommitSha: 'e'.repeat(40),
+    turnIds: ['latest-turn'],
+    turnIdentityProof: 'captured',
+  })
+  const scoped = scopeDeliveryStatusForBranch({ records: [production, repairing] }, 'ensync/chat-one')
+  const messages = [{ role: 'user', turnId: 'latest-turn', content: 'repair this', deliveryStatus: 'completed' }]
+
+  assert.equal(scoped.current?.id, 'latest-repair')
+  assert.equal(scoped.pending?.id, 'latest-repair')
+  assert.equal(scoped.production?.id, 'older-production')
+  assert.equal(deliveryPromptContext(scoped.current, scoped.production, messages, null).deliveryTracksPrompt, true)
 })
 
 test('renderer keeps a newer merge ahead of an older delivery whose polling timestamp changed later', () => {

@@ -52,6 +52,9 @@
       "src/main.mjs",
       "src/preload.cjs",
       "src/project-picker.mjs",
+      "src/cloudflare-tunnel.mjs",
+      "src/cloudflare-tunnel-store.mjs",
+      "src/cloudflare-tunnel-manager.mjs",
       "src/crash-recovery.mjs",
       "src/native-windows.mjs",
       "src/native-workspaces.mjs",
@@ -65,6 +68,7 @@
       "src/native-updates.mjs",
       "src/continuous-update.mjs",
       "src/runtime.mjs",
+      "src/local-sync-service.mjs",
       "src/process-liveness.mjs",
       "package.json"
     ],
@@ -76,6 +80,14 @@
           "**/*",
           "!**/*.test.mjs",
           "!dev.mjs"
+        ]
+      },
+      {
+        "from": "../sync-service",
+        "to": "sync-service",
+        "filter": [
+          "**/*",
+          "!**/*.test.mjs"
         ]
       },
       {

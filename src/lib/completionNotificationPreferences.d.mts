@@ -6,9 +6,11 @@ export type CompletionNotificationSettings = {
   voiceId: string | null
   answerAlerts: boolean
   answerSpeechText: string
+  productionAlerts: boolean
+  productionSpeechText: string
 }
 
-export type CompletionAlertTrigger = 'answer-needed' | 'task-finished'
+export type CompletionAlertTrigger = 'answer-needed' | 'task-finished' | 'production-ready'
 
 export type CompletionAlertPlan = {
   mode: CompletionNotificationMode
@@ -20,6 +22,7 @@ export type CompletionAlertPlan = {
 export const COMPLETION_NOTIFICATIONS_STORAGE_KEY: string
 export const ANSWER_NEEDED_ALERT: 'answer-needed'
 export const TASK_FINISHED_ALERT: 'task-finished'
+export const PRODUCTION_READY_ALERT: 'production-ready'
 export const DEFAULT_COMPLETION_NOTIFICATION_SETTINGS: Readonly<CompletionNotificationSettings>
 export function normalizeCompletionNotificationSettings(value: unknown): CompletionNotificationSettings
 export function readCompletionNotificationSettings(storage?: Pick<Storage, 'getItem'>): CompletionNotificationSettings

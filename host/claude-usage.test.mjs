@@ -37,9 +37,12 @@ test('Claude usage parser accepts only zero-cost local usage output', () => {
   assert.equal(usage.resetAt, null)
   assert.equal(usage.resetLabel, 'Aug 9 at 12:59am (Asia/Jerusalem)')
   assert.equal(usage.resetWindow, 'Week (all models)')
+  // The five-hour session window is the display headline; routing keeps the greatest.
+  assert.equal(usage.sessionUsedPercent, 18)
+  assert.equal(usage.sessionResetLabel, null)
   assert.deepEqual(usage.details, [
-    { label: 'Week (all models)', value: '76% used · resets Aug 9 at 12:59am (Asia/Jerusalem)' },
     { label: 'Current session', value: '18% used' },
+    { label: 'Week (all models)', value: '76% used · resets Aug 9 at 12:59am (Asia/Jerusalem)' },
   ])
   assert.match(usage.reason, /did not include a year or absolute timestamp/)
 })
@@ -59,6 +62,8 @@ test('Claude usage parser preserves an exact reset label without calendar infere
   assert.equal(usage.resetAt, null)
   assert.equal(usage.resetLabel, 'Aug 9 at 1am (Asia/Jerusalem)')
   assert.equal(usage.resetWindow, 'Week (all models)')
+  assert.equal(usage.sessionUsedPercent, 0)
+  assert.equal(usage.sessionResetLabel, null)
 })
 
 test('Claude usage parser withholds reset text from an unverified CLI version but keeps exact usage', () => {
@@ -95,6 +100,29 @@ test('Claude usage parser reports honestly when no reset field exists', () => {
   assert.equal(usage.resetLabel, null)
   assert.equal(usage.resetWindow, null)
   assert.match(usage.reason, /did not report a reset schedule/)
+})
+
+test('Claude usage parser surfaces the session window as the display headline', () => {
+  // Verbatim from Claude Code 2.1.263: the five-hour session is exhausted while
+  // the weekly window is far from full. Routing must stay at 100% (greatest),
+  // while the display headline and reset belong to the session window.
+  const usage = parseClaudeUsageProbe(probeResult({
+    type: 'result',
+    is_error: false,
+    num_turns: 0,
+    duration_api_ms: 0,
+    total_cost_usd: 0,
+    usage: { input_tokens: 0, output_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+    result: 'You are currently using your subscription to power your Claude Code usage\n\nCurrent session: 100% used · resets Sep 7 at 4:40am (Asia/Jerusalem)\nCurrent week (all models): 34% used · resets Sep 13 at 1am (Asia/Jerusalem)\nCurrent week (Fable): 64% used · resets Sep 13 at 1am (Asia/Jerusalem)',
+  }), '2026-09-06T23:31:00.000Z', 'max')
+
+  assert.equal(usage.usedPercent, 100)
+  assert.equal(usage.resetWindow, 'Current session')
+  assert.equal(usage.resetLabel, 'Sep 7 at 4:40am (Asia/Jerusalem)')
+  assert.equal(usage.sessionUsedPercent, 100)
+  assert.equal(usage.sessionResetLabel, 'Sep 7 at 4:40am (Asia/Jerusalem)')
+  assert.equal(usage.details[0].label, 'Current session')
+  assert.equal(usage.details[1].label, 'Week (all models)')
 })
 
 test('Claude usage parser rejects output that consumed a model turn', () => {

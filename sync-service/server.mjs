@@ -1,5 +1,6 @@
 import {
   createHash,
+  createHmac,
   randomBytes,
   scrypt as scryptCallback,
   timingSafeEqual,
@@ -33,6 +34,24 @@ const TERMINAL_BROKER_STATES = new Set(['completed', 'failed', 'cancelled', 'rec
 const BROKER_STATES = new Set(['queued', 'claimed', 'running', ...TERMINAL_BROKER_STATES])
 const PAIRING_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
 
+// Account security. The password is kept out of server memory where possible:
+// only its scrypt verifier is stored, but the spacing above exists so the auth
+// section stays visually distinct from broker transport limits.
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const TOTP_STEP_SECONDS = 30
+const TOTP_DIGITS = 6
+const TOTP_SECRET_BYTES = 20
+const RECOVERY_CODE_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
+const RECOVERY_CODE_COUNT = 8
+const RECOVERY_CODE_GROUP = 4
+const SECOND_FACTOR_CHALLENGE_MS = 10 * 60 * 1000
+const TOTP_PROVISION_CHALLENGE_MS = 15 * 60 * 1000
+const COMMON_WEAK_PASSWORDS = new Set([
+  'password', 'password1', 'password12', 'password123', '123456789012',
+  'qwertyuiopasdf', 'letmein123456', 'changeme123456', 'ensyncpassword',
+  'iloveyou123456', 'adminadmin123', 'administrator1',
+])
+
 class SyncServiceError extends Error {
   constructor(code, message, status = 400, details = null) {
     super(message)
@@ -44,8 +63,14 @@ class SyncServiceError extends Error {
 
 function normalizedUsername(value) {
   const username = typeof value === 'string' ? value.trim().toLowerCase() : ''
-  if (!USERNAME_PATTERN.test(username)) {
-    throw new SyncServiceError('username_invalid', 'Use 3–32 lowercase letters, numbers, dots, dashes, or underscores.', 400)
+  const handle = USERNAME_PATTERN.test(username)
+  const email = username.length <= 254 && EMAIL_PATTERN.test(username)
+  if (!handle && !email) {
+    throw new SyncServiceError(
+      'username_invalid',
+      'Use a 3–32 character handle (lowercase letters, numbers, dots, dashes, underscores) or a valid email address.',
+      400,
+    )
   }
   return username
 }
@@ -55,6 +80,130 @@ function validPassword(value) {
     throw new SyncServiceError('password_invalid', 'Use a password between 12 and 256 characters.', 400)
   }
   return value
+}
+
+function normalizedEmail(value) {
+  if (value === undefined || value === null || value === '') return null
+  if (typeof value !== 'string') {
+    throw new SyncServiceError('email_invalid', 'Use a valid email address, or leave it blank.', 400)
+  }
+  const email = value.trim().toLowerCase()
+  if (email.length > 254 || !EMAIL_PATTERN.test(email)) {
+    throw new SyncServiceError('email_invalid', 'Use a valid email address, or leave it blank.', 400)
+  }
+  return email
+}
+
+/**
+ * Dependency-free password-strength policy. Strong here means "not trivially
+ * guessable": minimum length, several character classes, no username reuse, and
+ * a small blocklist of known-weak values. The renderer adds zxcvbn for richer
+ * live feedback, but the server must not depend on that bundle.
+ */
+function strongPasswordIssues(username, password) {
+  const issues = []
+  const normalized = password.toLowerCase()
+  if (COMMON_WEAK_PASSWORDS.has(normalized)) issues.push('avoid a common or predictable password')
+  if (username.length >= 4 && normalized.includes(username)) issues.push('do not reuse your username in the password')
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/]
+    .map((pattern) => pattern.test(password) ? 1 : 0)
+    .reduce((sum, value) => sum + value, 0)
+  const unique = new Set(password).size
+  if (unique < 5) issues.push('use more distinct characters')
+  // Long passphrases are strong even with fewer character classes; short
+  // passwords without length on their side need the variety.
+  if (password.length < 16 && classes < 3) issues.push('use a mix of lowercase, uppercase, numbers, and symbols')
+  if (password.length >= 16 && classes < 2) issues.push('add at least one more character type (number, uppercase, or symbol)')
+  return issues
+}
+
+/**
+ * Standard RFC 4648 base32 (no padding) for TOTP secrets, implemented locally
+ * so the packaged sync service stays dependency-free.
+ */
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567'
+
+function base32Encode(bytes) {
+  let bits = 0
+  let value = 0
+  let output = ''
+  for (const byte of bytes) {
+    value = (value << 8) | byte
+    bits += 8
+    while (bits >= 5) {
+      output += BASE32_ALPHABET[(value >>> (bits - 5)) & 31]
+      bits -= 5
+    }
+  }
+  if (bits > 0) output += BASE32_ALPHABET[(value << (5 - bits)) & 31]
+  return output
+}
+
+function otpSecret() {
+  return base32Encode(randomBytes(TOTP_SECRET_BYTES))
+}
+
+/** RFC 6238 TOTP code for a base32 secret at an epoch time (milliseconds). */
+function totpCode(secret, atMs) {
+  const counter = Math.floor(atMs / 1000 / TOTP_STEP_SECONDS)
+  const counterBytes = Buffer.alloc(8)
+  counterBytes.writeBigUInt64BE(BigInt(counter))
+  const digest = createHmac('sha1', secret).update(counterBytes).digest()
+  const offset = digest[digest.length - 1] & 0x0f
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff)
+  return String(binary % (10 ** TOTP_DIGITS)).padStart(TOTP_DIGITS, '0')
+}
+
+function totpMatches(secret, supplied, nowMs = Date.now()) {
+  if (typeof supplied !== 'string' || !/^\d{6}$/.test(supplied.trim())) return false
+  const code = supplied.trim()
+  for (const skew of [-1, 0, 1]) {
+    if (totpCode(secret, nowMs + skew * TOTP_STEP_SECONDS * 1000) === code) return true
+  }
+  return false
+}
+
+function totpUri(username, secret) {
+  const issuer = 'Ensync'
+  const label = encodeURIComponent(`${issuer}:${username}`)
+  const query = new URLSearchParams({
+    secret,
+    issuer,
+    algorithm: 'SHA1',
+    digits: String(TOTP_DIGITS),
+    period: String(TOTP_STEP_SECONDS),
+  })
+  return `otpauth://totp/${label}?${query.toString()}`
+}
+
+function generateRecoveryCodes() {
+  const codes = []
+  while (codes.length < RECOVERY_CODE_COUNT) {
+    let code = ''
+    for (let index = 0; index < RECOVERY_CODE_GROUP * 2; index += 1) {
+      code += RECOVERY_CODE_ALPHABET[randomBytes(1)[0] % RECOVERY_CODE_ALPHABET.length]
+    }
+    const formatted = `${code.slice(0, RECOVERY_CODE_GROUP)}-${code.slice(RECOVERY_CODE_GROUP)}`
+    if (!codes.includes(formatted)) codes.push(formatted)
+  }
+  return codes
+}
+
+function recoveryCodeKey(code) {
+  return String(code ?? '').trim().toUpperCase().replaceAll('-', '')
+}
+
+function hashRecoveryCodes(codes) {
+  return codes.map((code) => createHash('sha256').update(recoveryCodeKey(code)).digest('base64url'))
+}
+
+function constantTimeStringEqual(left, right) {
+  const a = Buffer.from(String(left ?? ''), 'utf8')
+  const b = Buffer.from(String(right ?? ''), 'utf8')
+  return a.length === b.length && timingSafeEqual(a, b)
 }
 
 function validDocument(value) {
@@ -301,12 +450,77 @@ function browserOriginAllowed(origin, configured) {
 export function createEnsyncSyncServer(options = {}) {
   const store = options.store ?? new MemorySyncStore()
   const sessions = new Map()
+  const secondFactorChallenges = new Map()
+  const totpProvisionChallenges = new Map()
   const allowedOrigins = configuredOrigins(options.allowedOrigins ?? process.env.ENSYNC_SYNC_ALLOWED_ORIGINS)
+  const sessionsPath = typeof options.sessionsPath === 'string' && options.sessionsPath
+    ? resolve(options.sessionsPath)
+    : null
+
+  // Bearer sessions live in a small file beside the account store so a sign-in
+  // survives the bundled service being restarted (for example when the desktop
+  // shell relaunches and re-parents the service). Only the token's keyed hash,
+  // username, and expiry are written — never the raw bearer token — so the file
+  // cannot be replayed as a credential.
+  function persistSessions() {
+    if (!sessionsPath) return
+    const entries = []
+    for (const [key, session] of sessions) {
+      if (session.expiresAt > Date.now()) {
+        entries.push({ key, username: session.username, expiresAt: session.expiresAt })
+      }
+    }
+    try {
+      mkdirSync(dirname(sessionsPath), { recursive: true })
+      const staging = `${sessionsPath}.staging`
+      writeFileSync(staging, JSON.stringify({ format: 'ensync-sync-sessions', version: 1, sessions: entries }), { encoding: 'utf8', mode: 0o600 })
+      chmodSync(staging, 0o600)
+      renameSync(staging, sessionsPath)
+    } catch {
+      // Session persistence is best-effort; the in-memory map stays authoritative.
+    }
+  }
+
+  function restoreSessions() {
+    if (!sessionsPath) return
+    try {
+      const raw = JSON.parse(readFileSync(sessionsPath, 'utf8'))
+      if (raw?.format !== 'ensync-sync-sessions' || raw?.version !== 1 || !Array.isArray(raw.sessions)) return
+      for (const entry of raw.sessions) {
+        if (!entry || typeof entry.key !== 'string' || typeof entry.username !== 'string' || !Number.isFinite(entry.expiresAt)) continue
+        if (entry.expiresAt > Date.now()) {
+          sessions.set(entry.key, { username: entry.username, expiresAt: entry.expiresAt })
+        }
+      }
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        // A corrupt or unreadable session store falls back to an empty map.
+      }
+    }
+  }
+  restoreSessions()
 
   function createSession(username) {
     const token = randomBytes(32).toString('base64url')
     sessions.set(sessionKey(token), { username, expiresAt: Date.now() + SESSION_LIFETIME_MS })
+    persistSessions()
     return token
+  }
+
+  function publicSession(username, data) {
+    const account = data.accounts[username] ?? {}
+    return {
+      username,
+      token: createSession(username),
+      encryptionSalt: account.encryptionSalt,
+      email: account.email ?? null,
+    }
+  }
+
+  function account(id, data) {
+    const found = data.accounts[id]
+    if (!found) throw new SyncServiceError('account_missing', 'The account no longer exists.', 401)
+    return found
   }
 
   function authenticate(request) {
@@ -318,6 +532,7 @@ export function createEnsyncSyncServer(options = {}) {
     const session = sessions.get(key)
     if (!session || session.expiresAt <= Date.now()) {
       sessions.delete(key)
+      persistSessions()
       throw new SyncServiceError('session_expired', 'The account session expired. Sign in again.', 401)
     }
     return { key, ...session }
@@ -379,6 +594,11 @@ export function createEnsyncSyncServer(options = {}) {
         const input = await body(request)
         const username = normalizedUsername(input.username)
         const password = validPassword(input.password)
+        const issues = strongPasswordIssues(username, password)
+        if (issues.length > 0) {
+          throw new SyncServiceError('password_weak', `Choose a stronger password: ${issues.join('; ')}.`, 400)
+        }
+        const email = normalizedEmail(input.email)
         const data = store.read()
         if (data.accounts[username]) throw new SyncServiceError('username_taken', 'That username is already registered.', 409)
         const passwordSalt = randomBytes(16).toString('base64url')
@@ -387,18 +607,22 @@ export function createEnsyncSyncServer(options = {}) {
           passwordSalt,
           passwordHash: await passwordHash(password, passwordSalt),
           encryptionSalt,
+          email,
+          twoFactor: null,
+          recovery: null,
           createdAt: new Date().toISOString(),
           workspace: null,
         }
         store.write(data)
-        return json(response, 201, { username, token: createSession(username), encryptionSalt })
+        return json(response, 201, publicSession(username, data))
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/sessions') {
         const input = await body(request)
         const username = normalizedUsername(input.username)
         const password = validPassword(input.password)
-        const account = store.read().accounts[username]
+        const data = store.read()
+        const account = data.accounts[username]
         const supplied = await passwordHash(
           password,
           account?.passwordSalt ?? randomBytes(16).toString('base64url'),
@@ -406,12 +630,139 @@ export function createEnsyncSyncServer(options = {}) {
         const expected = account?.passwordHash ?? randomBytes(32).toString('base64url')
         const valid = Boolean(account) && timingSafeEqual(Buffer.from(supplied), Buffer.from(expected))
         if (!valid) throw new SyncServiceError('login_failed', 'The username or password is incorrect.', 401)
-        return json(response, 200, { username, token: createSession(username), encryptionSalt: account.encryptionSalt })
+        if (account.twoFactor?.confirmed) {
+          const challengeId = randomBytes(24).toString('base64url')
+          secondFactorChallenges.set(challengeId, { username, expiresAt: Date.now() + SECOND_FACTOR_CHALLENGE_MS })
+          return json(response, 200, {
+            stage: 'second_factor',
+            challengeId,
+            methods: ['totp'],
+            recoveryAvailable: Array.isArray(account.recovery?.hashes) && account.recovery.hashes.length > 0,
+          })
+        }
+        return json(response, 200, publicSession(username, data))
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/sessions/verify') {
+        const input = await body(request)
+        const challengeId = typeof input.challengeId === 'string' ? input.challengeId : ''
+        const challenge = secondFactorChallenges.get(challengeId)
+        if (!challenge || challenge.expiresAt <= Date.now()) {
+          secondFactorChallenges.delete(challengeId)
+          throw new SyncServiceError('second_factor_expired', 'The sign-in step expired. Start again.', 401)
+        }
+        const data = store.read()
+        const found = account(challenge.username, data)
+
+        if (typeof input.recoveryCode === 'string' && input.recoveryCode) {
+          const key = recoveryCodeKey(input.recoveryCode)
+          const matchIndex = (found.recovery?.hashes ?? [])
+            .findIndex((hash) => constantTimeStringEqual(createHash('sha256').update(key).digest('base64url'), hash))
+          if (matchIndex < 0) {
+            throw new SyncServiceError('second_factor_failed', 'That recovery code is not valid.', 401)
+          }
+          found.recovery.hashes.splice(matchIndex, 1)
+          found.twoFactor = null
+          store.write(data)
+          secondFactorChallenges.delete(challengeId)
+          return json(response, 200, { ...publicSession(challenge.username, data), twoFactorDisabled: true })
+        }
+
+        if (found.twoFactor?.confirmed && totpMatches(found.twoFactor.secret, input.code)) {
+          secondFactorChallenges.delete(challengeId)
+          return json(response, 200, publicSession(challenge.username, data))
+        }
+        throw new SyncServiceError('second_factor_failed', 'That code is incorrect or expired.', 401)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/v1/account') {
+        const session = authenticate(request)
+        const data = store.read()
+        const found = account(session.username, data)
+        return json(response, 200, {
+          username: session.username,
+          email: found.email ?? null,
+          twoFactorEnabled: found.twoFactor?.confirmed === true,
+          recoveryRemaining: (found.recovery?.hashes ?? []).length,
+          createdAt: found.createdAt,
+        })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/account/totp/start') {
+        const session = authenticate(request)
+        const data = store.read()
+        const found = account(session.username, data)
+        if (found.twoFactor?.confirmed) {
+          throw new SyncServiceError('totp_already_enabled', 'Two-factor authentication is already enabled.', 409)
+        }
+        const secret = otpSecret()
+        const challengeId = randomBytes(24).toString('base64url')
+        totpProvisionChallenges.set(challengeId, {
+          username: session.username,
+          secret,
+          expiresAt: Date.now() + TOTP_PROVISION_CHALLENGE_MS,
+        })
+        return json(response, 200, { secret, uri: totpUri(session.username, secret), challengeId })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/account/totp/confirm') {
+        const session = authenticate(request)
+        const input = await body(request)
+        const challenge = totpProvisionChallenges.get(typeof input.challengeId === 'string' ? input.challengeId : '')
+        if (!challenge || challenge.username !== session.username || challenge.expiresAt <= Date.now()) {
+          totpProvisionChallenges.delete(input.challengeId)
+          throw new SyncServiceError('totp_provision_expired', 'Two-factor setup expired. Start again.', 401)
+        }
+        if (!totpMatches(challenge.secret, input.code)) {
+          throw new SyncServiceError('totp_code_invalid', 'That code is incorrect or expired.', 401)
+        }
+        const data = store.read()
+        const found = account(session.username, data)
+        const recoveryCodes = generateRecoveryCodes()
+        found.twoFactor = { confirmed: true, secret: challenge.secret, enabledAt: new Date().toISOString() }
+        found.recovery = { hashes: hashRecoveryCodes(recoveryCodes) }
+        store.write(data)
+        totpProvisionChallenges.delete(input.challengeId)
+        return json(response, 200, { twoFactorEnabled: true, recoveryCodes })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/account/totp/disable') {
+        const session = authenticate(request)
+        const input = await body(request)
+        const data = store.read()
+        const found = account(session.username, data)
+        if (!found.twoFactor?.confirmed) {
+          throw new SyncServiceError('totp_not_enabled', 'Two-factor authentication is not enabled.', 409)
+        }
+        const codeOk = totpMatches(found.twoFactor.secret, input.code)
+        const key = recoveryCodeKey(input.recoveryCode)
+        const recoveryOk = typeof input.recoveryCode === 'string' && (found.recovery?.hashes ?? []).some((hash) => (
+          constantTimeStringEqual(createHash('sha256').update(key).digest('base64url'), hash)
+        ))
+        if (!codeOk && !recoveryOk) {
+          throw new SyncServiceError('totp_disable_failed', 'Enter a valid authenticator code or recovery code to turn this off.', 401)
+        }
+        found.twoFactor = null
+        found.recovery = null
+        store.write(data)
+        return json(response, 200, { twoFactorEnabled: false })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/account/email') {
+        const session = authenticate(request)
+        const input = await body(request)
+        const email = normalizedEmail(input.email)
+        const data = store.read()
+        const found = account(session.username, data)
+        found.email = email
+        store.write(data)
+        return json(response, 200, { email })
       }
 
       if (request.method === 'DELETE' && url.pathname === '/v1/session') {
         const session = authenticate(request)
         sessions.delete(session.key)
+        persistSessions()
         return json(response, 200, { authenticated: false })
       }
 
@@ -827,8 +1178,35 @@ if (isEntry) {
   const port = Number.parseInt(process.env.ENSYNC_SYNC_PORT ?? '43122', 10)
   const host = process.env.ENSYNC_SYNC_HOST ?? '127.0.0.1'
   const filePath = process.env.ENSYNC_SYNC_DATA_FILE ?? resolve('.ensync-sync-data.json')
-  const server = createEnsyncSyncServer({ store: new FileSyncStore(filePath) })
+  const stateFile = process.env.ENSYNC_SYNC_STATE_FILE ?? null
+  const sessionsPath = process.env.ENSYNC_SYNC_SESSIONS_FILE
+    ?? `${filePath.replace(/\.json$/, '')}-sessions-v1.json`
+  const server = createEnsyncSyncServer({ store: new FileSyncStore(filePath), sessionsPath })
   server.listen(port, host, () => {
-    console.log(`Ensync Sync listening on http://${host}:${port}`)
+    const address = server.address()
+    const boundPort = typeof address === 'object' && address?.port ? address.port : port
+    console.log(`Ensync Sync listening on http://${host}:${boundPort}`)
+    // Machine-readable readiness so the desktop shell can confirm the bundled
+    // service actually bound (and learn the real port when one was unset) before
+    // it points the Host at the local account-sync URL.
+    if (process.stdout.writable) {
+      process.stdout.write(`ENSYNC_SYNC_READY:${JSON.stringify({ host, port: boundPort })}\n`)
+    }
+    // A detached bundled service publishes a rendezvous descriptor so a later
+    // shell can confirm readiness without inheriting stdio (which would break
+    // once the launching shell exits).
+    if (stateFile) {
+      const staging = `${stateFile}.staging`
+      mkdirSync(dirname(stateFile), { recursive: true })
+      writeFileSync(staging, JSON.stringify({
+        version: 1,
+        host,
+        port: boundPort,
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      }), { encoding: 'utf8', mode: 0o600 })
+      chmodSync(staging, 0o600)
+      renameSync(staging, stateFile)
+    }
   })
 }

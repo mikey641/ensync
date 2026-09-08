@@ -66,6 +66,10 @@ export type ProviderUsage = {
   resetLabel?: string | null
   /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
+  /** Five-hour session window percentage the CLI reports as the immediate gate. */
+  sessionUsedPercent?: number | null
+  /** Five-hour session window reset schedule the CLI reports. */
+  sessionResetLabel?: string | null
   checkedAt: string
   details: Array<{ label: string; value: string }>
   reason: string
@@ -121,6 +125,18 @@ export type DeliveryState =
 export type DeliveryTarget = 'production' | 'protected_branch'
 export type DeliveryLandingState = 'held' | 'queued' | 'integrating' | 'retry' | 'landed'
 
+export type DeliveryQueueProgress = {
+  targetSequence: number
+  targetState: DeliveryLandingState
+  targetLanded: boolean
+  mergedBefore: number
+  remainingBefore: number
+  totalBefore: number
+  remainingAfter: number
+  activeSequence: number | null
+  activeSavedSha: string | null
+}
+
 export type DeliveryRecord = {
   id: string
   projectPath: string
@@ -133,6 +149,7 @@ export type DeliveryRecord = {
   turnIdentityProof: 'captured' | 'commit_trailer' | 'legacy_job' | null
   productionAncestryVerified: boolean
   landingState: DeliveryLandingState | null
+  queueProgress?: DeliveryQueueProgress
   deliveryTarget: DeliveryTarget
   description: string | null
   productionCommitSha: string | null
@@ -173,8 +190,14 @@ export type EnsyncHostHealth = {
     deliveryTargets?: DeliveryTarget[]
     deliveryPromptIdentity?: boolean
     deliveryLandingSubstates?: boolean
+    nativeSpeechNotifications?: boolean
   }
   now: string
+}
+
+export type SystemSpeechResult = {
+  status: 'played' | 'unsupported' | 'blocked' | 'empty'
+  message: string
 }
 
 /** What the Host reports back after mirroring the Automatic ranking. */
@@ -669,6 +692,13 @@ export class EnsyncHostClient {
 
   health() {
     return this.request<EnsyncHostHealth>('/health')
+  }
+
+  speakNotification(text: string, voiceId: string | null) {
+    return this.request<SystemSpeechResult>('/notifications/speech', {
+      method: 'POST',
+      body: JSON.stringify({ text, voiceId }),
+    })
   }
 
   providers(refresh = false) {
@@ -1177,4 +1207,3 @@ export class EnsyncHostClient {
 }
 
 export const ensyncHost = new EnsyncHostClient()
-

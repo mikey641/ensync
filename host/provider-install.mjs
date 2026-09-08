@@ -1,5 +1,3 @@
-import { homedir } from 'node:os'
-import { join } from 'node:path'
 
 // Official curl install commands verified from each provider's first-party
 // documentation. These are the exact commands the provider publishes for
@@ -108,36 +106,7 @@ export function hasInstallCommand(providerId) {
   return providerId in installCommands
 }
 
-// MCP (Model Context Protocol) server configuration file locations per
-// provider. Ensync reads only whether the file exists and which server names
-// are configured; it never reads server credentials, arguments, or environment
-// variables. This is read-only discovery, not a sync or install operation.
-const mcpConfigPaths = {
-  claude: () => join(homedir(), '.claude.json'),
-  codex: () => join(homedir(), '.codex', 'config.toml'),
-  copilot: () => join(homedir(), '.copilot', 'mcp-config.json'),
-  cursor: () => join(homedir(), '.cursor', 'mcp.json'),
-  droid: () => join(homedir(), '.factory', 'mcp.json'),
-  kiro: () => join(homedir(), '.kiro', 'settings', 'cli.json'),
-  auggie: () => join(homedir(), '.augment', 'auggie', 'settings.json'),
-  amp: () => join(homedir(), '.config', 'amp', 'settings.json'),
-  qoder: () => join(homedir(), '.qoder', 'settings.json'),
-  codebuddy: () => join(homedir(), '.codebuddy', '.mcp.json'),
-  junie: () => join(homedir(), '.junie', 'mcp.json'),
-  kimi: () => join(homedir(), '.kimi-code', 'config.toml'),
-  antigravity: () => join(homedir(), '.antigravity', 'mcp.json'),
-  oz: () => join(homedir(), '.config', 'warp', 'mcp.json'),
-  gitlab_duo: () => join(homedir(), '.config', 'gitlab', 'duo-mcp.json'),
-  jules: () => null, // Jules is a cloud-session agent; no local MCP config
-  ollama: () => null, // Local runtime; no MCP config
-}
-
-export function getMcpConfigPath(providerId, environment = process.env, home = homedir()) {
-  const resolver = mcpConfigPaths[providerId]
-  if (!resolver) return null
-  return resolver(environment, home)
-}
-
-export function hasMcpConfig(providerId) {
-  return providerId in mcpConfigPaths && mcpConfigPaths[providerId] !== null
-}
+// MCP (Model Context Protocol) configuration locations and write schemas are
+// catalog-wide knowledge owned by mcp-provider-config.mjs; re-exported here so
+// existing discovery callers keep working.
+export { getMcpConfigPath, hasMcpConfig } from './mcp-provider-config.mjs'

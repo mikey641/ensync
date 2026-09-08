@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   DeliveryCoordinator,
+  landingQueueProgress,
   deliveryTurnIdFromCommitMessage,
   deliveryTurnIdentityFromCommitMessage,
 } from './delivery-coordinator.mjs'
@@ -36,6 +37,56 @@ class MemoryJournal {
 }
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 20))
+
+test('delivery queue progress distinguishes landed predecessors from work still ahead', () => {
+  const savedA = '1'.repeat(40)
+  const savedB = '2'.repeat(40)
+  const savedC = '3'.repeat(40)
+  const targetSha = '4'.repeat(40)
+  const record = {
+    ...item,
+    landingIds: ['target-landing'],
+    savedSha: targetSha,
+  }
+  const progress = landingQueueProgress(record, [
+    { ...item, id: 'a', savedSha: savedA, completionSequence: 10, state: 'landed' },
+    // Older Hosts could enqueue the same no-op snapshot twice. It remains one
+    // user-visible unit even if only the later duplicate reached landed state.
+    { ...item, id: 'a-copy', savedSha: savedA, completionSequence: 11, state: 'landed' },
+    { ...item, id: 'b', savedSha: savedB, completionSequence: 12, state: 'landed' },
+    { ...item, id: 'c', savedSha: savedC, completionSequence: 13, state: 'integrating' },
+    { ...item, id: 'target-landing', savedSha: targetSha, completionSequence: 14, state: 'retry' },
+    { ...item, id: 'later', savedSha: '5'.repeat(40), completionSequence: 15, state: 'queued' },
+  ])
+
+  assert.deepEqual(progress, {
+    targetSequence: 14,
+    targetState: 'retry',
+    targetLanded: false,
+    mergedBefore: 2,
+    remainingBefore: 1,
+    totalBefore: 3,
+    remainingAfter: 1,
+    activeSequence: 13,
+    activeSavedSha: savedC,
+  })
+})
+
+test('delivery queue progress keeps a landed target distinct from later queued work', () => {
+  const targetSha = '4'.repeat(40)
+  const record = { ...item, landingIds: ['target'], savedSha: targetSha }
+  const progress = landingQueueProgress(record, [
+    { ...item, id: 'earlier', savedSha: '1'.repeat(40), completionSequence: 1, state: 'landed' },
+    { ...item, id: 'target', savedSha: targetSha, completionSequence: 2, state: 'landed' },
+    { ...item, id: 'later', savedSha: '5'.repeat(40), completionSequence: 3, state: 'integrating' },
+    { ...item, id: 'later-copy', savedSha: '5'.repeat(40), completionSequence: 4, state: 'retry' },
+  ])
+
+  assert.equal(progress.targetLanded, true)
+  assert.equal(progress.remainingBefore, 0)
+  assert.equal(progress.remainingAfter, 1)
+  assert.equal(progress.activeSequence, 3)
+})
 
 test('commit metadata recovers explicit and legacy Host-authored turn identities', () => {
   assert.equal(deliveryTurnIdFromCommitMessage([
@@ -160,11 +211,16 @@ test('a successful authenticated retry clears an earlier lookup failure', async 
 
 test('landing status exposes exact merge activity, prompt identity, and merge description', async () => {
   const journal = new MemoryJournal()
+  const tracked = { ...item, state: 'integrating', turnId: 'turn-signed-contract', completionSequence: 3 }
   const coordinator = new DeliveryCoordinator({
     journal,
     describeCommit: async () => 'Update signing completion recovery',
+    listLandingItems: async () => [
+      { ...item, id: 'earlier-1', savedSha: '1'.repeat(40), completionSequence: 1, state: 'landed' },
+      { ...item, id: 'earlier-2', savedSha: '2'.repeat(40), completionSequence: 2, state: 'retry' },
+      tracked,
+    ],
   })
-  const tracked = { ...item, state: 'integrating', turnId: 'turn-signed-contract' }
   coordinator.handleLandingEvent({ type: 'integrating', item: tracked })
   await settle()
 
@@ -172,6 +228,8 @@ test('landing status exposes exact merge activity, prompt identity, and merge de
   assert.equal(status.pending.landingState, 'integrating')
   assert.deepEqual(status.pending.turnIds, ['turn-signed-contract'])
   assert.equal(status.pending.description, 'Update signing completion recovery')
+  assert.equal(status.pending.queueProgress.mergedBefore, 1)
+  assert.equal(status.pending.queueProgress.remainingBefore, 1)
 })
 
 test('protected-branch-only delivery is saved without deployment polling', async () => {
@@ -237,6 +295,123 @@ test('deployment failure starts one automatic max-effort repair owner', async ()
   assert.equal(status.current.repairState, 'running')
   assert.equal(status.current.repairProvider, 'codex')
   await coordinator.shutdown()
+})
+
+test('historical records sharing one failed replacement SHA share one repair owner', async () => {
+  const journal = new MemoryJournal()
+  const replacementSha = 'c'.repeat(40)
+  const first = await journal.upsertLanding(item, 'pushed')
+  await journal.update(first.id, {
+    state: 'repairing',
+    productionCommitSha: SHA,
+    replacementCommitSha: replacementSha,
+    failureCode: 'BUILD_FAILED',
+    failureMessage: 'old failure',
+  })
+  const second = await journal.upsertLanding({
+    ...item,
+    id: 'landing-2',
+    savedSha: 'd'.repeat(40),
+    branch: 'ensync/chat-2',
+  }, 'pushed')
+  await journal.update(second.id, { state: 'pushed', productionCommitSha: replacementSha })
+
+  const inspected = []
+  let repairStarts = 0
+  const coordinator = new DeliveryCoordinator({
+    journal,
+    pollMs: 100,
+    adapters: [{ inspect: async (record) => {
+      inspected.push(record.productionCommitSha)
+      return { available: true, provider: 'vercel', state: 'failed', failureMessage: 'build failed' }
+    } }],
+    startRepair: async (record) => {
+      repairStarts += 1
+      assert.equal(record.productionCommitSha, replacementSha)
+      return { jobId: 'deliveryrepair-shared', provider: 'codex', completion: new Promise(() => {}) }
+    },
+  })
+
+  await coordinator.start()
+  await settle()
+
+  assert.equal(repairStarts, 1)
+  assert.deepEqual(new Set(inspected), new Set([replacementSha]))
+  assert.deepEqual(new Set(journal.records.map((record) => record.repairJobId)), new Set(['deliveryrepair-shared']))
+  await coordinator.shutdown()
+})
+
+test('a ready replacement certifies every historical record that points at it', async () => {
+  const journal = new MemoryJournal()
+  const replacementSha = 'c'.repeat(40)
+  const first = await journal.upsertLanding(item, 'pushed')
+  await journal.update(first.id, {
+    state: 'repairing',
+    productionCommitSha: SHA,
+    replacementCommitSha: replacementSha,
+  })
+  const second = await journal.upsertLanding({
+    ...item,
+    id: 'landing-2',
+    savedSha: 'd'.repeat(40),
+    branch: 'ensync/chat-2',
+  }, 'pushed')
+  await journal.update(second.id, { state: 'pushed', productionCommitSha: replacementSha })
+
+  const coordinator = new DeliveryCoordinator({
+    journal,
+    adapters: [{ inspect: async (record) => {
+      assert.equal(record.productionCommitSha, replacementSha)
+      return { available: true, provider: 'vercel', state: 'ready', deploymentId: 'replacement-ready' }
+    } }],
+  })
+
+  await coordinator.start()
+  await settle()
+
+  assert.deepEqual(new Set(journal.records.map((record) => record.state)), new Set(['production']))
+  assert.deepEqual(new Set(journal.records.map((record) => record.deploymentId)), new Set(['replacement-ready']))
+  assert.deepEqual(new Set(journal.records.map((record) => record.failureCode)), new Set([null]))
+  assert.deepEqual(new Set(journal.records.map((record) => record.failureMessage)), new Set([null]))
+  await coordinator.shutdown()
+})
+
+test('status replaces stale failure evidence with the successful replacement deployment', async () => {
+  const journal = new MemoryJournal()
+  const replacementSha = 'c'.repeat(40)
+  const first = await journal.upsertLanding(item, 'production')
+  await journal.update(first.id, {
+    state: 'production',
+    productionCommitSha: SHA,
+    replacementCommitSha: replacementSha,
+    deploymentId: 'failed-original',
+    deploymentUrl: 'https://failed.example',
+    failureCode: 'BUILD_FAILED',
+    failureMessage: 'old failure',
+  })
+  const second = await journal.upsertLanding({
+    ...item,
+    id: 'landing-2',
+    savedSha: 'd'.repeat(40),
+    branch: 'ensync/chat-2',
+  }, 'production')
+  await journal.update(second.id, {
+    state: 'production',
+    productionCommitSha: replacementSha,
+    productionAt: '2026-09-05T18:46:54.836Z',
+    deploymentProvider: 'vercel',
+    deploymentId: 'replacement-ready',
+    deploymentUrl: 'https://ready.example',
+    deploymentDashboardUrl: 'https://vercel.example/replacement-ready',
+  })
+
+  const coordinator = new DeliveryCoordinator({ journal })
+  const status = await coordinator.status('/repo/app', 'ensync/chat-1')
+
+  assert.equal(status.current.deploymentId, 'replacement-ready')
+  assert.equal(status.current.deploymentUrl, 'https://ready.example')
+  assert.equal(status.current.failureCode, null)
+  assert.equal(status.current.failureMessage, null)
 })
 
 test('startup recovers an already-pushed production head and reports pending work separately', async () => {

@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict'
+import { createHmac } from 'node:crypto'
 import { once } from 'node:events'
 import test from 'node:test'
 
@@ -28,6 +29,16 @@ test('account sync requires HTTPS except for an exact loopback development servi
   )
 })
 
+test('account sync reports its configured service URL', () => {
+  const configured = new AccountSyncService({ baseUrl: 'https://sync.ensync.example' })
+  assert.equal(configured.status().configured, true)
+  assert.equal(configured.status().serviceUrl, 'https://sync.ensync.example')
+
+  const unconfigured = new AccountSyncService()
+  assert.equal(unconfigured.status().configured, false)
+  assert.equal(unconfigured.status().serviceUrl, null)
+})
+
 test('username login synchronizes an encrypted conversation document between computers', async (context) => {
   const { store, baseUrl } = await fixture(context)
   const firstComputer = new AccountSyncService({ baseUrl })
@@ -38,6 +49,7 @@ test('username login synchronizes an encrypted conversation document between com
   assert.equal(registered.authenticated, true)
   assert.equal(registered.username, 'mikey.sync')
   assert.equal(registered.credentialStorage, 'host_memory_only')
+  assert.equal(registered.serviceUrl, baseUrl)
 
   const state = {
     format: 'ensync-account-conversations',
@@ -92,4 +104,133 @@ test('invalid login does not reveal whether a username exists', async (context) 
       && error.code === 'login_failed'
       && error.message === 'The username or password is incorrect.',
   )
+})
+
+function totp(secret, atMs = Date.now()) {
+  const counter = Math.floor(atMs / 1000 / 30)
+  const counterBytes = Buffer.alloc(8)
+  counterBytes.writeBigUInt64BE(BigInt(counter))
+  const digest = createHmac('sha1', secret).update(counterBytes).digest()
+  const offset = digest[digest.length - 1] & 0x0f
+  const binary = ((digest[offset] & 0x7f) << 24)
+    | ((digest[offset + 1] & 0xff) << 16)
+    | ((digest[offset + 2] & 0xff) << 8)
+    | (digest[offset + 3] & 0xff)
+  return String(binary % 1_000_000).padStart(6, '0')
+}
+
+async function post(baseUrl, path, body, token = null) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+  })
+  return { status: response.status, body: await response.json() }
+}
+
+async function get(baseUrl, path, token = null) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'GET',
+    headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+  })
+  return { status: response.status, body: await response.json() }
+}
+
+test('account registration enforces a stronger password', async (context) => {
+  const { baseUrl } = await fixture(context)
+  const weak = await post(baseUrl, '/v1/accounts', { username: 'weak-user', password: 'password1234567' })
+  assert.equal(weak.status, 400)
+  assert.equal(weak.body.code, 'password_weak')
+
+  const strong = await post(baseUrl, '/v1/accounts', {
+    username: 'strong-user',
+    password: 'correct horse battery staple',
+    email: 'User@Example.com ',
+  })
+  assert.equal(strong.status, 201)
+  assert.equal(strong.body.email, 'user@example.com')
+})
+
+test('an email address works as the account identifier', async (context) => {
+  const { baseUrl } = await fixture(context)
+  const registered = await post(baseUrl, '/v1/accounts', {
+    username: 'Mikey641@Gmail.com',
+    password: 'correct horse battery staple',
+  })
+  assert.equal(registered.status, 201)
+  assert.equal(registered.body.username, 'mikey641@gmail.com')
+
+  const signedIn = await post(baseUrl, '/v1/sessions', {
+    username: 'mikey641@gmail.com',
+    password: 'correct horse battery staple',
+  })
+  assert.equal(signedIn.status, 200)
+  assert.equal(signedIn.body.username, 'mikey641@gmail.com')
+
+  const rejected = await post(baseUrl, '/v1/accounts', { username: 'mail@box', password: 'correct horse battery staple' })
+  assert.equal(rejected.status, 400)
+  assert.equal(rejected.body.code, 'username_invalid')
+})
+
+test('TOTP second factor, recovery codes, and email round-trip', async (context) => {
+  const { baseUrl } = await fixture(context)
+  const password = 'correct horse battery staple'
+  const registered = await post(baseUrl, '/v1/accounts', { username: 'totp-user', password })
+  const token = registered.body.token
+
+  const account = await get(baseUrl, '/v1/account', token)
+  assert.equal(account.status, 200)
+  assert.equal(account.body.twoFactorEnabled, false)
+  assert.equal(account.body.email, null)
+
+  const email = await post(baseUrl, '/v1/account/email', { email: 'owner@example.com' }, token)
+  assert.equal(email.status, 200)
+  assert.equal(email.body.email, 'owner@example.com')
+
+  const start = await post(baseUrl, '/v1/account/totp/start', {}, token)
+  assert.equal(start.status, 200)
+  assert.match(start.body.uri, /^otpauth:\/\/totp\//)
+
+  const confirmed = await post(baseUrl, '/v1/account/totp/confirm', {
+    challengeId: start.body.challengeId,
+    code: totp(start.body.secret),
+  }, token)
+  assert.equal(confirmed.status, 200)
+  assert.equal(confirmed.body.recoveryCodes.length, 8)
+
+  // Login now enters a second-factor stage instead of issuing a session.
+  const wrongStage = await post(baseUrl, '/v1/sessions', { username: 'totp-user', password })
+  assert.equal(wrongStage.status, 200)
+  assert.equal(wrongStage.body.stage, 'second_factor')
+
+  const badCode = await post(baseUrl, '/v1/sessions/verify', {
+    challengeId: wrongStage.body.challengeId,
+    code: '000000',
+  })
+  assert.equal(badCode.status, 401)
+
+  const challenge = await post(baseUrl, '/v1/sessions', { username: 'totp-user', password })
+  const verified = await post(baseUrl, '/v1/sessions/verify', {
+    challengeId: challenge.body.challengeId,
+    code: totp(start.body.secret),
+  })
+  assert.equal(verified.status, 200)
+  assert.equal(verified.body.username, 'totp-user')
+  assert.equal(typeof verified.body.encryptionSalt, 'string')
+
+  // A recovery code both signs in and disables 2FA.
+  const recoveryChallenge = await post(baseUrl, '/v1/sessions', { username: 'totp-user', password })
+  const recovered = await post(baseUrl, '/v1/sessions/verify', {
+    challengeId: recoveryChallenge.body.challengeId,
+    recoveryCode: confirmed.body.recoveryCodes[0],
+  })
+  assert.equal(recovered.status, 200)
+  assert.equal(recovered.body.twoFactorDisabled, true)
+
+  const after = await get(baseUrl, '/v1/account', recovered.body.token)
+  assert.equal(after.body.twoFactorEnabled, false)
+  assert.equal(after.body.recoveryRemaining, 7)
 })

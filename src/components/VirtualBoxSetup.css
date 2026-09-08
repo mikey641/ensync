@@ -53,7 +53,7 @@
 .ensync-vbox h3 { font-size: 15px; line-height: 1.4; }
 .ensync-vbox__header p,
 .ensync-vbox__section-heading p { margin-top: 4px; color: var(--vbox-muted); line-height: 1.5; overflow-wrap: anywhere; }
-.ensync-vbox__eyebrow { display: block; margin-bottom: 5px; color: var(--vbox-accent); font-size: 10px; font-weight: 750; letter-spacing: .11em; }
+.ensync-vbox__eyebrow { display: block; margin-bottom: 5px; color: var(--vbox-accent); font-size: var(--font-label, 13px); font-weight: 750; letter-spacing: .11em; }
 
 .ensync-vbox__icon-button {
   width: 34px;
@@ -123,12 +123,12 @@
 .ensync-vbox__facts > div { min-width: 0; padding: 10px 11px; display: grid; gap: 3px; border-bottom: 1px solid var(--vbox-line); }
 .ensync-vbox__facts > div:nth-child(odd) { border-right: 1px solid var(--vbox-line); }
 .ensync-vbox__facts > div:nth-last-child(-n + 2) { border-bottom: 0; }
-.ensync-vbox__facts dt { color: var(--vbox-muted); font-size: 11px; }
+.ensync-vbox__facts dt { color: var(--vbox-muted); font-size: var(--font-label, 13px); }
 .ensync-vbox__facts dd { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .ensync-vbox__form-grid { margin-top: 13px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; }
 .ensync-vbox label { min-width: 0; display: grid; gap: 6px; }
-.ensync-vbox label > span { color: var(--vbox-muted); font-size: 12px; font-weight: 650; overflow-wrap: anywhere; }
+.ensync-vbox label > span { color: var(--vbox-muted); font-size: var(--font-label, 13px); font-weight: 650; overflow-wrap: anywhere; }
 .ensync-vbox label.is-wide { grid-column: 1 / -1; }
 .ensync-vbox input,
 .ensync-vbox select {

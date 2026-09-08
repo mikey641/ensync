@@ -277,16 +277,11 @@ export class LandingCoordinator {
       while (!this.stopping && state.ready.size > 0) {
         const ordered = [...state.ready.values()]
           .sort((left, right) => left.completionSequence - right.completionSequence)
-        const firstTarget = ordered[0]?.targetBranch ?? null
-        const firstCheckout = ordered[0]?.repositoryPath ?? null
-        const candidates = []
-        for (const item of ordered) {
-          if (
-            (item.targetBranch ?? null) !== firstTarget
-            || (item.repositoryPath ?? null) !== firstCheckout
-          ) break
-          candidates.push(item)
-        }
+        // Publish one durable FIFO checkpoint at a time. A larger atomic train
+        // makes every already-verified item disappear when the Host exits before
+        // the final candidate finishes, and lets new completions extend the wait
+        // after a restart. Single-item trains bound replay to the one active item.
+        const candidates = ordered.slice(0, 1)
         recoveryItems = candidates
 
         const train = []

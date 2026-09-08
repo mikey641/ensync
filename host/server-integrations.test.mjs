@@ -39,6 +39,7 @@ test('Host startup resumes the automatic landing queue without polling', async (
       async start() { deliveryStarts += 1 },
       hasActiveWork() { return false },
     },
+    scheduledTaskService: { start: async () => {}, stop: async () => {}, status: () => ({ enabled: false }) },
     statusService: { list: async () => [], get: async () => null },
     chatService: { run: async () => ({ response: 'unused' }) },
     projectService: {},
@@ -53,6 +54,31 @@ test('Host startup resumes the automatic landing queue without polling', async (
   assert.equal(starts, 1)
   assert.equal(deliveryStarts, 1)
   assert.equal(server.ensyncServices.landingCoordinator.hasActiveWork(), false)
+})
+
+test('scheduled-task status route exposes only bounded task state', async (context) => {
+  let statusCalls = 0
+  const baseUrl = await withHost(context, {
+    scheduledTaskService: {
+      stop: async () => {},
+      status() {
+        statusCalls += 1
+        return {
+          enabled: true,
+          task: { name: 'watchdog', schedule: { intervalMinutes: 5 }, cwd: '/tmp/project', tools: 'full-access', size: null },
+          live: { running: false, nextRunAt: '2026-09-07T03:10:00.000Z', lastRun: null },
+        }
+      },
+    },
+  })
+  const response = await fetch(`${baseUrl}/api/scheduled-task/status`)
+  assert.equal(response.status, 200)
+  const payload = await response.json()
+  assert.equal(payload.enabled, true)
+  assert.equal(payload.task.name, 'watchdog')
+  assert.equal(payload.task.cwd, '/tmp/project')
+  assert.equal('prompt' in payload.task, false)
+  assert.equal(statusCalls, 1)
 })
 
 test('delivery status route returns Host-owned exact-commit state', async (context) => {

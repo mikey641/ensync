@@ -25,10 +25,15 @@ async function main() {
 
   console.log(`Updating ${APP_BUNDLE}...`)
 
-  const { changed, total, relaunched } = await performIncrementalUpdate({
+  const { changed, total, relaunched, deferred } = await performIncrementalUpdate({
     rebuildUi: !HOST_ONLY,
     killAndRelaunch: true,
   })
+
+  if (deferred) {
+    console.log('Automatic landing is active; app replacement/restart was deferred.')
+    return
+  }
 
   for (const file of changed) console.log(`  ${file}`)
   if (total === 0) console.log('  (all files already up to date)')

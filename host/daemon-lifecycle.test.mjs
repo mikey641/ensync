@@ -5,6 +5,7 @@ import { basename, join } from 'node:path'
 import test from 'node:test'
 
 import {
+  combineRuntimeStamps,
   DaemonLeaseError,
   DaemonLeaseService,
   hostSourceStamp,
@@ -15,6 +16,18 @@ import { createEnsyncHost } from './server.mjs'
 
 const TOKEN = 'a'.repeat(64)
 const OWNER = 'shell_1111111111111111'
+
+test('runtime freshness joins bundle and config stamps only when both are known', () => {
+  assert.equal(combineRuntimeStamps(null, 'config'), null)
+  assert.equal(combineRuntimeStamps('source', null), null)
+  assert.equal(combineRuntimeStamps('', 'config'), null)
+  assert.equal(combineRuntimeStamps('source', ''), null)
+
+  const stamp = combineRuntimeStamps('source', 'config')
+  assert.equal(stamp, combineRuntimeStamps('source', 'config'))
+  assert.notEqual(stamp, combineRuntimeStamps('source-changed', 'config'))
+  assert.notEqual(stamp, combineRuntimeStamps('source', 'config-changed'))
+})
 
 test('daemon leases expire and cannot be revived without a new claim', () => {
   let now = 1_000

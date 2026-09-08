@@ -220,6 +220,7 @@ export class AccountSyncService {
   #fetch
   #session = null
   #brokerDevice = null
+  #pendingCredentials = null
   #lastSyncedAt = null
   #remoteRevision = 0
 
@@ -231,6 +232,7 @@ export class AccountSyncService {
   status() {
     return {
       configured: Boolean(this.#baseUrl),
+      serviceUrl: this.#baseUrl,
       authenticated: Boolean(this.#session),
       username: this.#session?.username ?? null,
       remoteRevision: this.#session ? this.#remoteRevision : null,
@@ -316,10 +318,15 @@ export class AccountSyncService {
       method: 'POST',
       body: JSON.stringify(credentials),
     })
+    await this.#completeAuthentication(credentials.password, payload)
+    return this.status()
+  }
+
+  async #completeAuthentication(password, payload) {
     if (typeof payload.username !== 'string' || typeof payload.token !== 'string' || typeof payload.encryptionSalt !== 'string') {
       throw new AccountSyncError('sync_protocol_invalid', 'The account sync service returned an invalid login response.', 502)
     }
-    const key = await deriveEncryptionKey(credentials.password, payload.encryptionSalt)
+    const key = await deriveEncryptionKey(password, payload.encryptionSalt)
     this.#session = { username: payload.username, token: payload.token, key }
     this.#brokerDevice = null
     this.#remoteRevision = 0
@@ -331,8 +338,83 @@ export class AccountSyncService {
     return this.#authenticate('/v1/accounts', credentials)
   }
 
-  login(credentials) {
-    return this.#authenticate('/v1/sessions', credentials)
+  async login(credentials) {
+    const payload = await this.#request('/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify(credentials),
+    })
+    if (payload.stage === 'second_factor') {
+      // Retain only the supplied credentials in host memory until the second
+      // factor completes; they are never persisted or returned to the renderer.
+      this.#pendingCredentials = { ...credentials }
+      return {
+        stage: 'second_factor',
+        challengeId: payload.challengeId,
+        methods: payload.methods ?? ['totp'],
+        recoveryAvailable: payload.recoveryAvailable === true,
+      }
+    }
+    await this.#completeAuthentication(credentials.password, payload)
+    return this.status()
+  }
+
+  async verifySecondFactor(input) {
+    if (!this.#pendingCredentials) {
+      throw new AccountSyncError('second_factor_required', 'Sign in with your password before completing two-factor authentication.', 401)
+    }
+    const { challengeId, code, recoveryCode } = input ?? {}
+    if (typeof challengeId !== 'string' || !challengeId) {
+      throw new AccountSyncError('second_factor_invalid', 'A sign-in step is required.', 400)
+    }
+    const password = this.#pendingCredentials.password
+    try {
+      const payload = await this.#request('/v1/sessions/verify', {
+        method: 'POST',
+        body: JSON.stringify({
+          challengeId,
+          ...(typeof code === 'string' && code ? { code } : {}),
+          ...(typeof recoveryCode === 'string' && recoveryCode ? { recoveryCode } : {}),
+        }),
+      })
+      await this.#completeAuthentication(password, payload)
+      this.#pendingCredentials = null
+      return this.status()
+    } catch (error) {
+      if (!(error instanceof AccountSyncError) || error.status >= 500) this.#pendingCredentials = null
+      throw error
+    }
+  }
+
+  async account() {
+    return this.#request('/v1/account')
+  }
+
+  async startTotp() {
+    return this.#request('/v1/account/totp/start', { method: 'POST', body: '{}' })
+  }
+
+  async confirmTotp(input) {
+    return this.#request('/v1/account/totp/confirm', {
+      method: 'POST',
+      body: JSON.stringify({ challengeId: input.challengeId, code: input.code }),
+    })
+  }
+
+  async disableTotp(input) {
+    return this.#request('/v1/account/totp/disable', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...(typeof input?.code === 'string' && input.code ? { code: input.code } : {}),
+        ...(typeof input?.recoveryCode === 'string' && input.recoveryCode ? { recoveryCode: input.recoveryCode } : {}),
+      }),
+    })
+  }
+
+  async setEmail(email) {
+    return this.#request('/v1/account/email', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    })
   }
 
   async logout() {
@@ -342,6 +424,7 @@ export class AccountSyncService {
     } finally {
       this.#session = null
       this.#brokerDevice = null
+      this.#pendingCredentials = null
       this.#remoteRevision = 0
       this.#lastSyncedAt = null
     }

@@ -1265,6 +1265,40 @@ test('a provider that rejects the turn before any activity auto-continues on the
   assert.equal(events.at(-1).result.provider, 'claude')
 })
 
+test('a Claude session-limit quota failure auto-continues on the next provider when the worktree is clean', async () => {
+  const attempts = []
+  const service = new ChatJobService({
+    runLocal: async (request, options) => {
+      attempts.push(request.provider)
+      options.onEvent({ type: 'started', provider: request.provider, cwd: '/project', command: `${request.provider} --print`, at: '2026-09-07T01:31:02.000Z' })
+      if (request.provider === 'claude') {
+        throw new ChatJobError('provider_quota', "Claude Code reported a quota, rate-limit, or capacity failure before any tool activity.", 429, true)
+      }
+      return { provider: request.provider, response: 'ok', completedAt: '2026-09-07T01:32:00.000Z' }
+    },
+    runRemote: async () => { throw new Error('not used') },
+    checkWorktreeClean: async () => true,
+    selectFallbackProvider: async (attempted) => (attempted.includes('codex') ? null : 'codex'),
+  })
+
+  await service.start({
+    jobId: JOB_A,
+    kind: 'local',
+    request: { provider: 'claude', prompt: 'fix all the todos', projectPath: '/project', workspaceKey: 'conversation:chat-session-limit' },
+  })
+  await waitFor(() => ['completed', 'failed'].includes(service.get(JOB_A).state))
+
+  assert.deepEqual(attempts, ['claude', 'codex'])
+  assert.equal(service.get(JOB_A).state, 'completed')
+  const events = []
+  service.subscribe(JOB_A, { onEvent: (event) => events.push(event), onEnd() {} })
+  const continuation = events.find((event) => event.type === 'notice' && event.code === 'auto_continuation')
+  assert.ok(continuation, 'expected an auto_continuation notice')
+  assert.match(continuation.message, /exhausted its quota/)
+  assert.match(continuation.message, /codex/)
+  assert.equal(events.at(-1).result.provider, 'codex')
+})
+
 test('an unproven CLI failure never auto-continues on another provider even when the worktree is clean', async () => {
   const attempts = []
   const service = new ChatJobService({

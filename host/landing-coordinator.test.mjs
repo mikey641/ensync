@@ -186,7 +186,7 @@ test('snapshot anchors use the repository object ID width for SHA-256 commits', 
   assert.equal(update.at(-1), '0'.repeat(64))
 })
 
-test('completion sequence controls FIFO and arrivals during a train form the next train', async () => {
+test('completion sequence controls FIFO and every item becomes its own durable train', async () => {
   const firstTrain = deferred()
   const calls = []
   const journal = new MemoryJournal()
@@ -210,7 +210,8 @@ test('completion sequence controls FIFO and arrivals during a train form the nex
 
   assert.deepEqual(calls, [
     ['ensync/first'],
-    ['ensync/second', 'ensync/third'],
+    ['ensync/second'],
+    ['ensync/third'],
   ])
   assert.deepEqual(
     journal.items.map((item) => [item.id, item.completionSequence, item.state]),
@@ -413,11 +414,13 @@ test('one rejected item enters retry without blocking compatible items', async (
   const coordinator = new LandingCoordinator({
     journal,
     landingRetryDelays: [],
-    integrate: async (train) => ({
-      landedIds: [train[1].id],
-      retryIds: [train[0].id],
-      errors: { [train[0].id]: 'conflict remains' },
-    }),
+    integrate: async (train) => train[0].branch === 'ensync/conflict'
+      ? {
+          landedIds: [],
+          retryIds: [train[0].id],
+          errors: { [train[0].id]: 'conflict remains' },
+        }
+      : { landedIds: [train[0].id], retryIds: [] },
   })
 
   const [conflicting, compatible] = await Promise.all([
@@ -497,7 +500,8 @@ test('a new completion automatically retrains older retry items without blocking
 
   assert.deepEqual(calls, [
     ['ensync/retry-first'],
-    ['ensync/retry-first', 'ensync/new-completion'],
+    ['ensync/retry-first'],
+    ['ensync/new-completion'],
   ])
   assert.ok(journal.items.every((item) => item.state === 'landed'))
 })
@@ -538,7 +542,7 @@ test('start resumes queued and retry entries once even when called repeatedly', 
   await Promise.all([coordinator.start(), coordinator.start()])
   await coordinator.whenIdle()
 
-  assert.deepEqual(calls, [['landing-1', 'landing-2']])
+  assert.deepEqual(calls, [['landing-1'], ['landing-2']])
   assert.ok(journal.items.every((item) => item.state === 'landed'))
 })
 

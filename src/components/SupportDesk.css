@@ -50,7 +50,7 @@
 
 .ensync-support__header > div > span {
   color: var(--support-accent);
-  font-size: 11px;
+  font-size: var(--font-label, 13px);
   font-weight: 800;
   letter-spacing: .11em;
 }
@@ -132,7 +132,7 @@
 }
 
 .ensync-support__availability small {
-  font-size: 11px;
+  font-size: var(--font-label, 13px);
   font-weight: 750;
   letter-spacing: .06em;
   text-transform: uppercase;
@@ -154,7 +154,7 @@
 
 .ensync-support__availability span {
   overflow-wrap: anywhere;
-  font-size: 12px;
+  font-size: var(--font-label, 13px);
   line-height: 1.42;
 }
 
@@ -195,7 +195,7 @@
 
 .ensync-support__section-heading span {
   color: var(--support-muted);
-  font-size: 12px;
+  font-size: var(--font-label, 13px);
   line-height: 1.4;
 }
 
@@ -248,6 +248,7 @@
 .ensync-support__fields label > small,
 .ensync-support__check small {
   color: var(--support-muted);
+  font-size: var(--font-label, 13px);
   line-height: 1.45;
 }
 
@@ -298,6 +299,7 @@
 
 .ensync-support__privacy small {
   color: var(--support-muted);
+  font-size: var(--font-label, 13px);
   line-height: 1.45;
 }
 
@@ -356,7 +358,7 @@
 
 .ensync-support__tickets li > span {
   color: var(--support-accent);
-  font-size: 10px;
+  font-size: var(--font-label, 13px);
   font-weight: 800;
   letter-spacing: .08em;
   text-transform: uppercase;
@@ -370,6 +372,7 @@
 .ensync-support__tickets li > small,
 .ensync-support__empty {
   color: var(--support-muted);
+  font-size: var(--font-label, 13px);
   line-height: 1.42;
 }
 
@@ -381,7 +384,7 @@
   align-items: center;
   gap: 5px;
   color: var(--support-muted);
-  font-size: 11px;
+  font-size: var(--font-label, 13px);
 }
 
 .ensync-support__empty {
@@ -413,7 +416,9 @@
   overflow: auto;
   border-top: 1px solid var(--support-line);
   color: var(--support-text);
-  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--font-label, 13px);
+  line-height: 1.55;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
@@ -463,7 +468,7 @@
 .ensync-support__action-note {
   margin: 10px 0 0;
   color: var(--support-muted);
-  font-size: 12px;
+  font-size: var(--font-label, 13px);
 }
 
 .ensync-support__repair-result {

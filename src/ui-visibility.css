@@ -147,7 +147,7 @@
   background: var(--surface-subtle, #202420);
   color: var(--text-secondary, #c2c9c0);
   font: inherit;
-  font-size: .85em;
+  font-size: var(--font-label, 13px);
   white-space: nowrap;
 }
 

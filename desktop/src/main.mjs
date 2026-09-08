@@ -1,10 +1,10 @@
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { existsSync, readFileSync } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { mkdir, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 
-import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, Menu, protocol, safeStorage, screen, shell } from 'electron'
 
 import {
   APP_HOST,
@@ -78,6 +78,7 @@ import {
   createDevicePreferencesStore,
   DEVICE_PREFERENCES_FILENAME,
   DEVICE_PREFERENCES_GET_CHANNEL,
+  SYNC_SERVICE_URL_SET_CHANNEL,
 } from './device-preferences.mjs'
 import {
   createLocalFileOpenHandler,
@@ -103,10 +104,25 @@ import {
   UPDATE_STATE_CHANNEL,
 } from './native-updates.mjs'
 import { readBuildInfoFile } from './build-info.mjs'
+import { startLocalSyncService } from './local-sync-service.mjs'
+import { CloudflareTunnelManager } from './cloudflare-tunnel-manager.mjs'
+import {
+  CLOUDFLARE_TUNNEL_STORE_FILENAME,
+  createCloudflareTunnelStore,
+} from './cloudflare-tunnel-store.mjs'
+
+const CLOUDFLARE_TUNNEL_STATUS_CHANNEL = 'ensync:tunnel:status'
+const CLOUDFLARE_TUNNEL_SETUP_CHANNEL = 'ensync:tunnel:setup'
+const CLOUDFLARE_TUNNEL_START_CHANNEL = 'ensync:tunnel:start'
+const CLOUDFLARE_TUNNEL_STOP_CHANNEL = 'ensync:tunnel:stop'
+const CLOUDFLARE_TUNNEL_CLEAR_CHANNEL = 'ensync:tunnel:clear'
+const CLOUDFLARE_TUNNEL_QUICK_START_CHANNEL = 'ensync:tunnel:quick-start'
+const CLOUDFLARE_TUNNEL_QUICK_STOP_CHANNEL = 'ensync:tunnel:quick-stop'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const HOST_DAEMON_STATE_FILENAME = 'ensync-host-daemon-v1.json'
 const HOST_JOB_JOURNAL_FILENAME = 'ensync-host-jobs-v1.json'
+const HOST_SYNC_CONFIG_FILENAME = 'ensync-host-sync-config-v1.json'
 const HOST_PROJECT_ISOLATION_DIRECTORY = 'agent-workspaces-v1'
 // A drag emits a resize event per frame. Waiting out the gesture keeps the
 // window-state file from being rewritten hundreds of times per drag.
@@ -117,8 +133,21 @@ protocol.registerSchemesAsPrivileged([{
 }])
 const singleInstance = app.requestSingleInstanceLock()
 
+/**
+ * The retained Host watches this tiny file so a changed account-sync URL makes
+ * it retire (only when idle) instead of being reused with stale environment.
+ */
+async function writeHostSyncConfig(syncServiceUrl) {
+  const filePath = join(app.getPath('userData'), HOST_SYNC_CONFIG_FILENAME)
+  const staging = `${filePath}.${process.pid}.staging`
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 })
+  await writeFile(staging, JSON.stringify({ syncServiceUrl }), { encoding: 'utf8', mode: 0o600 })
+  await rename(staging, filePath)
+}
+
 let hostController = null
 let appProtocolRegistered = false
+let localSyncService = null
 let runtimeStart = null
 let quitting = false
 let nativeBridgeRegistered = false
@@ -127,6 +156,7 @@ let nativeWorkspaceStore = null
 let recentProjectStore = null
 let devicePreferencesStore = null
 let windowStateStore = null
+let cloudflareTunnelManager = null
 const nativeWindows = createNativeWindowRegistry()
 const projectLaunchByWorkspace = new Map()
 const isAuthorizedNativeEvent = createNativeIpcAuthorizer({ nativeWindows, isAppUrl })
@@ -394,6 +424,49 @@ function registerNativeBridge() {
     COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
     devicePreferencesHandlers.setCompletionNotifications,
   )
+  ipcMain.handle(SYNC_SERVICE_URL_SET_CHANNEL, async (event, value) => {
+    const updated = devicePreferencesHandlers.setSyncServiceUrl(event, value)
+    if (updated) await writeHostSyncConfig(updated.syncServiceUrl)
+    return updated
+  })
+
+  const tunnelGuarded = async (event, action) => {
+    if (!isAuthorizedNativeEvent(event)) return null
+    try {
+      return { ok: true, ...(await action()) }
+    } catch (error) {
+      return {
+        ok: false,
+        error: error instanceof Error ? error.message : 'The phone connection setup failed.',
+      }
+    }
+  }
+  ipcMain.handle(CLOUDFLARE_TUNNEL_STATUS_CHANNEL, (event) => (
+    isAuthorizedNativeEvent(event) ? cloudflareTunnelManager?.status() ?? null : null
+  ))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_SETUP_CHANNEL, (event, input) => tunnelGuarded(event, async () => {
+    return { status: await cloudflareTunnelManager.setup(input ?? {}) }
+  }))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_START_CHANNEL, (event) => tunnelGuarded(event, async () => {
+    return { status: cloudflareTunnelManager.status(), started: await cloudflareTunnelManager.start() }
+  }))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_STOP_CHANNEL, (event) => tunnelGuarded(event, async () => {
+    cloudflareTunnelManager.stop()
+    return { status: cloudflareTunnelManager.status() }
+  }))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_CLEAR_CHANNEL, (event) => tunnelGuarded(event, async () => {
+    await cloudflareTunnelManager.clear()
+    return { status: cloudflareTunnelManager.status() }
+  }))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_QUICK_START_CHANNEL, (event) => tunnelGuarded(event, async () => {
+    const quick = await cloudflareTunnelManager.startQuick()
+    return { status: cloudflareTunnelManager.status(), quick }
+  }))
+  ipcMain.handle(CLOUDFLARE_TUNNEL_QUICK_STOP_CHANNEL, (event) => tunnelGuarded(event, async () => {
+    cloudflareTunnelManager.stopQuick({ disable: true })
+    return { status: cloudflareTunnelManager.status() }
+  }))
+
   const updateActions = new Map([
     [UPDATE_GET_STATE_CHANNEL, () => updateManager.getState()],
     [UPDATE_CHECK_CHANNEL, () => updateManager.check()],
@@ -438,6 +511,14 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(RECENT_PROJECTS_REMEMBER_CHANNEL)
   ipcMain.removeHandler(DEVICE_PREFERENCES_GET_CHANNEL)
   ipcMain.removeHandler(COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL)
+  ipcMain.removeHandler(SYNC_SERVICE_URL_SET_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_STATUS_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_SETUP_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_START_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_STOP_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_CLEAR_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_QUICK_START_CHANNEL)
+  ipcMain.removeHandler(CLOUDFLARE_TUNNEL_QUICK_STOP_CHANNEL)
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL)
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL)
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL)
@@ -469,7 +550,16 @@ async function stopRuntime() {
   // active provider jobs and their output buffer alive for the next launch.
   const stoppingHost = hostController?.release()
   hostController = null
-  await Promise.allSettled([stoppingHost])
+  // The bundled loopback Sync service exists only for single-computer account
+  // sync and can end with this shell; an explicitly configured shared service
+  // has no child to stop and remains the detached Host's responsibility.
+  const stoppingSync = localSyncService?.stop()
+  localSyncService = null
+  // The quick tunnel points at the bundled loopback service above, so it must
+  // not outlive it as an orphan. Keeping the "enabled" pref lets the next
+  // launch republish a fresh URL automatically.
+  cloudflareTunnelManager?.stopQuick()
+  await Promise.allSettled([stoppingHost, stoppingSync])
 }
 
 async function ensureRuntime() {
@@ -478,6 +568,20 @@ async function ensureRuntime() {
 
   const paths = runtimePaths()
   runtimeStart = (async () => {
+    const configuredSyncServiceUrl = devicePreferencesStore?.get().syncServiceUrl ?? null
+    await writeHostSyncConfig(configuredSyncServiceUrl)
+    const localSync = await startLocalSyncService({
+      isPackaged: app.isPackaged,
+      resourcesPath: process.resourcesPath,
+      repositoryRoot: resolve(desktopRoot, '..'),
+      userDataPath: app.getPath('userData'),
+      env: {
+        ...process.env,
+        ...(configuredSyncServiceUrl ? { ENSYNC_SYNC_SERVICE_URL: configuredSyncServiceUrl } : {}),
+      },
+    })
+    localSyncService = localSync
+    const effectiveSyncServiceUrl = configuredSyncServiceUrl || localSync.url || null
     const controller = new HostProcessController({
       bootstrapPath: paths.bootstrapPath,
       hostEntryPath: paths.hostEntryPath,
@@ -486,6 +590,8 @@ async function ensureRuntime() {
       env: {
         ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
         ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
+        ENSYNC_HOST_SYNC_CONFIG_FILE: join(app.getPath('userData'), HOST_SYNC_CONFIG_FILENAME),
+        ...(effectiveSyncServiceUrl ? { ENSYNC_SYNC_SERVICE_URL: effectiveSyncServiceUrl } : {}),
       },
       stateFilePath: join(app.getPath('userData'), HOST_DAEMON_STATE_FILENAME),
       journalFilePath: join(app.getPath('userData'), HOST_JOB_JOURNAL_FILENAME),
@@ -711,6 +817,37 @@ if (!singleInstance) {
     windowStateStore = createWindowStateStore({
       filePath: join(app.getPath('userData'), NATIVE_WINDOW_STATE_FILENAME),
     })
+    cloudflareTunnelManager = new CloudflareTunnelManager({
+      store: createCloudflareTunnelStore({
+        filePath: join(app.getPath('userData'), CLOUDFLARE_TUNNEL_STORE_FILENAME),
+        encrypt: (value) => {
+          if (!safeStorage.isEncryptionAvailable()) {
+            throw new Error('Secure credential storage is unavailable on this device.')
+          }
+          return safeStorage.encryptString(value).toString('base64')
+        },
+        decrypt: (value) => {
+          if (!safeStorage.isEncryptionAvailable()) return null
+          return safeStorage.decryptString(Buffer.from(value, 'base64'))
+        },
+      }),
+      userDataPath: app.getPath('userData'),
+      appBinsDir: join(app.getPath('userData'), 'bin'),
+      log: (message) => console.log('[ensync-tunnel]', message),
+    })
+    // Reconnect an already-configured named tunnel so phone access survives an
+    // app relaunch without the user touching anything. Best-effort and
+    // non-blocking.
+    void cloudflareTunnelManager.start().catch((error) => {
+      console.error('[ensync-tunnel] reconnect failed:', error?.message ?? error)
+    })
+    // A quick tunnel was enabled in a previous session; republish a fresh
+    // zero-config URL automatically instead of asking the user to click again.
+    if (cloudflareTunnelManager.quickEnabled()) {
+      void cloudflareTunnelManager.startQuick().catch((error) => {
+        console.error('[ensync-tunnel] quick reconnect failed:', error?.message ?? error)
+      })
+    }
     const installedBuildInfo = app.isPackaged
       ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
       : null

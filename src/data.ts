@@ -389,7 +389,7 @@ const defaultProviderCatalog: Provider[] = [
     status: 'Checking Ensync Host…',
     plan: null,
     usageSource: 'unavailable',
-    usageKind: 'session_only',
+    usageKind: 'subscription_quota',
     usageDetails: [],
     resetsIn: null,
     usageReason: 'Waiting for the local Ensync Host.',

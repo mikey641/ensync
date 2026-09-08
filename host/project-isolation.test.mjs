@@ -345,22 +345,55 @@ test('run-end snapshotting never executes a repository-controlled post-commit ho
   await lease.release()
 })
 
-test('a reused chat does not merge a newer baseline before the provider starts', async (context) => {
+test('a reused chat synchronizes the current target baseline before the provider starts', async (context) => {
   const current = await fixture(context)
   const isolation = new ProjectIsolationService({ rootPath: current.workspaceRoot })
-  const first = await isolation.acquire(current.repository, 'chat:no-baseline-merge')
+  const first = await isolation.acquire(current.repository, 'chat:current-baseline')
   await writeFile(join(first.workspace.projectPath, 'chat.txt'), 'chat work\n')
-  await isolation.commitAgentWork(first.workspace, { outcome: 'succeeded' })
+  const saved = await isolation.commitAgentWork(first.workspace, { outcome: 'succeeded' })
   await first.release()
   await writeFile(join(current.repository, 'baseline.txt'), 'new baseline\n')
   await git(current.repository, ['add', 'baseline.txt'])
   await git(current.repository, ['commit', '-m', 'advance baseline'])
+  const baseline = await git(current.repository, ['rev-parse', 'HEAD'])
 
-  const resumed = await isolation.acquire(current.repository, 'chat:no-baseline-merge')
+  const resumed = await isolation.acquire(current.repository, 'chat:current-baseline')
 
   assert.equal(resumed.workspace.reused, true)
-  await assert.rejects(readFile(join(resumed.workspace.projectPath, 'baseline.txt'), 'utf8'))
+  assert.equal(await readFile(join(resumed.workspace.projectPath, 'baseline.txt'), 'utf8'), 'new baseline\n')
+  assert.equal(await git(resumed.workspace.repositoryPath, ['merge-base', '--is-ancestor', saved.head, 'HEAD']).then(() => true), true)
+  assert.equal(await git(resumed.workspace.repositoryPath, ['merge-base', '--is-ancestor', baseline, 'HEAD']).then(() => true), true)
   assert.equal(resumed.workspace.integration.integrated, false)
+  assert.equal(resumed.workspace.base.canonicalSha, baseline)
+  assert.equal(resumed.workspace.base.refreshed, true)
+
+  const noOp = await isolation.commitAgentWork(resumed.workspace, { outcome: 'succeeded' })
+  assert.equal(noOp.sourceChanged, false)
+  await resumed.release()
+})
+
+test('a conflicting target sync is aborted and preserves the exact clean conversation branch', async (context) => {
+  const current = await fixture(context)
+  const isolation = new ProjectIsolationService({ rootPath: current.workspaceRoot })
+  const first = await isolation.acquire(current.repository, 'chat:baseline-conflict')
+  await writeFile(join(first.workspace.projectPath, 'README.md'), '# conversation version\n')
+  const saved = await isolation.commitAgentWork(first.workspace, { outcome: 'succeeded' })
+  await first.release()
+  await writeFile(join(current.repository, 'README.md'), '# target version\n')
+  await git(current.repository, ['add', 'README.md'])
+  await git(current.repository, ['commit', '-m', 'conflicting baseline'])
+  const baseline = await git(current.repository, ['rev-parse', 'HEAD'])
+
+  const resumed = await isolation.acquire(current.repository, 'chat:baseline-conflict')
+
+  assert.equal(await git(resumed.workspace.repositoryPath, ['rev-parse', 'HEAD']), saved.head)
+  assert.equal(await git(resumed.workspace.repositoryPath, ['status', '--porcelain']), '')
+  assert.deepEqual(resumed.workspace.baselineConflict, {
+    baselineSha: baseline,
+    files: ['README.md'],
+    reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+  })
+  assert.equal(resumed.workspace.base.refreshed, false)
   await resumed.release()
 })
 

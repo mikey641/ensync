@@ -40,10 +40,78 @@ function timestampAfter(delay) {
   return new Date(Date.now() + delay).toISOString()
 }
 
+function deliveryDeploymentSha(record) {
+  return record?.replacementCommitSha ?? record?.productionCommitSha ?? null
+}
+
+function deliveryRepairKey(record) {
+  const sha = deliveryDeploymentSha(record)
+  return sha ? `${record.repositoryPath}\0${record.targetBranch}\0${sha}` : null
+}
+
 function publicRecord(record) {
   if (!record) return null
   const { failureLog, ...safe } = record
   return { ...safe, failureLogAvailable: Boolean(failureLog) }
+}
+
+export function landingQueueProgress(record, landingItems) {
+  if (!record || !Array.isArray(landingItems)) return null
+  const landingIds = new Set(Array.isArray(record.landingIds) ? record.landingIds : [])
+  const matching = landingItems.filter((item) => (
+    item?.repositoryPath === record.repositoryPath
+    && item?.targetBranch === record.targetBranch
+    && item?.deliveryTarget !== 'protected_branch'
+    && Number.isSafeInteger(item?.completionSequence)
+  ))
+  const targetEntries = matching
+    .filter((item) => landingIds.has(item.id) || item.savedSha === record.savedSha)
+    .sort((left, right) => left.completionSequence - right.completionSequence)
+  const target = targetEntries[0]
+  if (!target) return null
+
+  // A saved SHA can appear more than once when an older Host queued a no-op
+  // follow-up. Show work, not journal duplication: one exact snapshot is one
+  // queue unit and counts as merged when any durable entry for it landed.
+  const earlierBySha = new Map()
+  for (const item of matching) {
+    if (item.completionSequence >= target.completionSequence || item.savedSha === target.savedSha) continue
+    const current = earlierBySha.get(item.savedSha)
+    if (!current) {
+      earlierBySha.set(item.savedSha, { ...item })
+      continue
+    }
+    if (item.state === 'landed') current.state = 'landed'
+    if (item.completionSequence < current.completionSequence) current.completionSequence = item.completionSequence
+  }
+  const earlier = [...earlierBySha.values()]
+  const mergedBefore = earlier.filter((item) => item.state === 'landed').length
+  const remainingBefore = earlier.length - mergedBefore
+  const active = earlier
+    .filter((item) => item.state === 'integrating')
+    .sort((left, right) => left.completionSequence - right.completionSequence)[0] ?? null
+  const laterBySha = new Map()
+  for (const item of matching) {
+    if (item.completionSequence <= target.completionSequence || item.savedSha === target.savedSha) continue
+    const current = laterBySha.get(item.savedSha)
+    if (!current || (current.state !== 'landed' && item.state === 'landed')) laterBySha.set(item.savedSha, item)
+  }
+  const laterPending = [...laterBySha.values()].filter((item) => item.state !== 'landed')
+  const activeAnywhere = matching
+    .filter((item) => item.state === 'integrating')
+    .sort((left, right) => left.completionSequence - right.completionSequence)[0] ?? active
+  const targetLanded = targetEntries.some((item) => item.state === 'landed')
+  return {
+    targetSequence: target.completionSequence,
+    targetState: targetLanded ? 'landed' : target.state,
+    targetLanded,
+    mergedBefore,
+    remainingBefore,
+    totalBefore: earlier.length,
+    remainingAfter: laterPending.length,
+    activeSequence: activeAnywhere?.completionSequence ?? null,
+    activeSavedSha: activeAnywhere?.savedSha ?? null,
+  }
 }
 
 export class DeliveryCoordinator {
@@ -57,11 +125,16 @@ export class DeliveryCoordinator {
     this.resolvePushedHead = options.resolvePushedHead ?? null
     this.describeCommit = options.describeCommit ?? null
     this.resolveTurnId = options.resolveTurnId ?? null
+    this.listLandingItems = options.listLandingItems ?? null
     this.redact = options.redact ?? ((value) => value)
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS
     this.retryDelays = options.retryDelays ?? DEFAULT_RETRY_DELAYS
     this.timers = new Map()
     this.running = new Set()
+    // Several historical delivery records can point at one replacement SHA.
+    // Claim before starting the async provider job so concurrent polls share
+    // one repair owner instead of launching one agent per historical record.
+    this.repairClaims = new Map()
     this.stopping = false
   }
 
@@ -93,6 +166,34 @@ export class DeliveryCoordinator {
       records = (await this.journal.list())
         .filter((record) => record.projectPath === projectPath || record.repositoryPath === projectPath)
     }
+    // A repaired delivery retains its original production SHA for history and
+    // points at the successful descendant through replacementCommitSha. Copy
+    // that descendant record's exact deployment evidence so the repaired card
+    // never says Production while linking to the earlier failed deployment.
+    const productionBySha = new Map(records
+      .filter((record) => record.state === 'production' && record.productionCommitSha)
+      .map((record) => [record.productionCommitSha, record]))
+    records = await Promise.all(records.map(async (record) => {
+      const replacement = record.replacementCommitSha
+        ? productionBySha.get(record.replacementCommitSha)
+        : null
+      if (!replacement || record.id === replacement.id) return record
+      const patch = {
+        state: 'production',
+        repairState: 'idle',
+        deploymentProvider: replacement.deploymentProvider ?? null,
+        deploymentId: replacement.deploymentId ?? null,
+        deploymentUrl: replacement.deploymentUrl ?? null,
+        deploymentDashboardUrl: replacement.deploymentDashboardUrl ?? null,
+        productionAt: replacement.productionAt ?? record.productionAt,
+        failureCode: null,
+        failureMessage: null,
+        failureLog: null,
+        nextActionAt: null,
+      }
+      const matches = Object.entries(patch).every(([key, value]) => record[key] === value)
+      return matches ? record : await this.journal.update(record.id, patch) ?? record
+    }))
     if (typeof sourceBranch === 'string' && sourceBranch) {
       records = records.filter((record) => record.sourceBranches.includes(sourceBranch))
     }
@@ -147,11 +248,26 @@ export class DeliveryCoordinator {
       .filter((record) => record.state === 'production')
       .sort((left, right) => Date.parse(right.productionAt ?? right.updatedAt) - Date.parse(left.productionAt ?? left.updatedAt))[0] ?? null
     const pending = records.find((record) => record.state !== 'production' && !record.replacementCommitSha) ?? null
+    let landingItems = []
+    if (this.listLandingItems) {
+      try {
+        landingItems = await this.listLandingItems()
+      } catch {
+        // Delivery remains available if the independent landing journal cannot
+        // be read; only the optional queue explanation is omitted.
+      }
+    }
+    const present = (record) => {
+      const safe = publicRecord(record)
+      if (!safe) return null
+      const queueProgress = landingQueueProgress(record, landingItems)
+      return queueProgress ? { ...safe, queueProgress } : safe
+    }
     return {
-      current: publicRecord(pending ?? production ?? records[0] ?? null),
-      production: publicRecord(production),
-      pending: publicRecord(pending),
-      records: records.slice(0, 10).map(publicRecord),
+      current: present(pending ?? production ?? records[0] ?? null),
+      production: present(production),
+      pending: present(pending),
+      records: records.slice(0, 10).map(present),
     }
   }
 
@@ -191,13 +307,14 @@ export class DeliveryCoordinator {
         || older.repositoryPath !== event.repositoryPath
         || !['failed', 'repairing'].includes(older.state)) continue
       if (await this.isAncestor(older.repositoryPath, older.productionCommitSha, event.productionCommitSha)) {
-        await this.journal.update(older.id, {
+        const updated = await this.journal.update(older.id, {
           state: 'repairing',
           repairState: 'waiting',
           replacementCommitSha: event.productionCommitSha,
           productionAncestryVerified: false,
           nextActionAt: null,
         })
+        this.#schedule(updated.id, 0)
       }
     }
   }
@@ -267,7 +384,10 @@ export class DeliveryCoordinator {
       this.#schedule(id, 60_000)
       return
     }
-    const observed = await adapter.inspect(record)
+    const deploymentSha = deliveryDeploymentSha(record)
+    const observed = await adapter.inspect(deploymentSha === record.productionCommitSha
+      ? record
+      : { ...record, productionCommitSha: deploymentSha })
     if (!observed.available) {
       await this.journal.update(id, {
         state: 'unavailable',
@@ -308,8 +428,17 @@ export class DeliveryCoordinator {
         nextActionAt: null,
       })
       for (const candidate of await this.journal.list()) {
-        if (candidate.replacementCommitSha === record.productionCommitSha && candidate.state !== 'production') {
-          await this.journal.update(candidate.id, { state: 'production', repairState: 'idle', productionAt, nextActionAt: null })
+        if (candidate.replacementCommitSha === deploymentSha && candidate.state !== 'production') {
+          await this.journal.update(candidate.id, {
+            ...deployment,
+            state: 'production',
+            repairState: 'idle',
+            failureCode: null,
+            failureMessage: null,
+            failureLog: null,
+            productionAt,
+            nextActionAt: null,
+          })
         }
       }
       return
@@ -322,7 +451,9 @@ export class DeliveryCoordinator {
       failureMessage: observed.failureMessage ?? 'The production deployment failed.',
       failureLog: redactedLog || null,
     })
-    await this.#repair(failed)
+    await this.#repair(deploymentSha === failed.productionCommitSha
+      ? failed
+      : { ...failed, productionCommitSha: deploymentSha })
   }
 
   async #repair(record) {
@@ -343,9 +474,33 @@ export class DeliveryCoordinator {
       this.#schedule(record.id, 60_000)
       return
     }
+    const repairKey = deliveryRepairKey(record)
+    const claimed = repairKey ? this.repairClaims.get(repairKey) : null
+    if (claimed) {
+      try {
+        const repair = await claimed
+        if (this.repairClaims.get(repairKey) !== claimed) {
+          this.#schedule(record.id, 0)
+          return
+        }
+        await this.journal.update(record.id, {
+          state: 'repairing',
+          repairState: 'running',
+          repairJobId: repair.jobId,
+          repairProvider: repair.provider,
+          nextActionAt: null,
+          lastRepairError: null,
+        })
+      } catch {
+        this.#schedule(record.id, this.pollMs)
+      }
+      return
+    }
     const attempts = record.repairAttempts + 1
+    const claim = Promise.resolve().then(() => this.startRepair({ ...record, repairAttempts: attempts }))
+    if (repairKey) this.repairClaims.set(repairKey, claim)
     try {
-      const repair = await this.startRepair({ ...record, repairAttempts: attempts })
+      const repair = await claim
       const running = await this.journal.update(record.id, {
         state: 'repairing',
         repairState: 'running',
@@ -358,16 +513,29 @@ export class DeliveryCoordinator {
       })
       void Promise.resolve(repair.completion).then(async (result) => {
         if (this.stopping) return
+        const related = (await this.journal.list()).filter((candidate) => candidate.repairJobId === repair.jobId)
         if (result?.state === 'completed') {
-          await this.journal.update(running.id, {
-            state: 'repairing', repairState: 'waiting', nextActionAt: timestampAfter(this.retryDelays.at(-1) ?? 600_000),
-          })
-          this.#schedule(running.id, this.retryDelays.at(-1) ?? 600_000)
+          for (const candidate of related.length > 0 ? related : [running]) {
+            await this.journal.update(candidate.id, {
+              state: 'repairing', repairState: 'waiting', nextActionAt: timestampAfter(this.retryDelays.at(-1) ?? 600_000),
+            })
+            this.#schedule(candidate.id, this.retryDelays.at(-1) ?? 600_000)
+          }
         } else {
-          await this.#repairFailed(running, result?.error ?? 'The automatic repair run did not complete.')
+          for (const candidate of related.length > 0 ? related : [running]) {
+            await this.#repairFailed(candidate, result?.error ?? 'The automatic repair run did not complete.')
+          }
         }
-      }).catch((error) => this.#repairFailed(running, error instanceof Error ? error.message : String(error)))
+      }).catch(async (error) => {
+        const related = (await this.journal.list()).filter((candidate) => candidate.repairJobId === repair.jobId)
+        for (const candidate of related.length > 0 ? related : [running]) {
+          await this.#repairFailed(candidate, error instanceof Error ? error.message : String(error))
+        }
+      }).finally(() => {
+        if (repairKey && this.repairClaims.get(repairKey) === claim) this.repairClaims.delete(repairKey)
+      })
     } catch (error) {
+      if (repairKey && this.repairClaims.get(repairKey) === claim) this.repairClaims.delete(repairKey)
       await this.#repairFailed({ ...record, repairAttempts: attempts }, error instanceof Error ? error.message : String(error))
     }
   }

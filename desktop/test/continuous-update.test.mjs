@@ -4,9 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
+  appShellProcessPattern,
   copyIfChanged,
+  hasActiveLanding,
   hashFile,
   pathExists,
+  performIncrementalUpdate,
   readMainCommit,
   updateHostFiles,
   updateUiFiles,
@@ -51,6 +54,12 @@ test('copyIfChanged creates destination directory if missing', async () => {
   assert.equal(await copyIfChanged(src, dest), true)
   assert.equal(await readFile(dest, 'utf8'), 'content')
   await rm(dir, { recursive: true })
+})
+
+test('app relaunch targets the Electron shell without matching the detached Host', () => {
+  const pattern = new RegExp(appShellProcessPattern('/Applications/Ensync.app'))
+  assert.equal(pattern.test('/Applications/Ensync.app/Contents/MacOS/Ensync'), true)
+  assert.equal(pattern.test('/Applications/Ensync.app/Contents/MacOS/Ensync /Applications/Ensync.app/Contents/Resources/desktop-host-bootstrap.mjs'), false)
 })
 
 test('updateHostFiles copies .mjs files and skips test files and dev.mjs', async (context) => {
@@ -132,4 +141,54 @@ test('readMainCommit returns null when main does not exist', async (context) => 
     .catch(() => {}))
   const commit = await readMainCommit({ repoRoot: repo })
   assert.equal(commit, null)
+})
+
+test('continuous updates defer only queued or integrating landing work', async (context) => {
+  const directory = await makeTempDir('ensync-active-landing-')
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const journalPath = join(directory, 'landing-journal.json')
+
+  for (const state of ['queued', 'integrating']) {
+    await writeFile(journalPath, JSON.stringify({ payload: { items: [{ state }] } }))
+    assert.equal(await hasActiveLanding({ journalPath }), true, state)
+  }
+  for (const state of ['retry', 'held', 'landed']) {
+    await writeFile(journalPath, JSON.stringify({ payload: { items: [{ state }] } }))
+    assert.equal(await hasActiveLanding({ journalPath }), false, state)
+  }
+})
+
+test('continuous updates fail closed for an existing unreadable landing journal', async (context) => {
+  const directory = await makeTempDir('ensync-invalid-landing-')
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const journalPath = join(directory, 'landing-journal.json')
+  await writeFile(journalPath, '{not-json')
+
+  assert.equal(await hasActiveLanding({ journalPath }), true)
+  assert.equal(await hasActiveLanding({ journalPath: join(directory, 'missing.json') }), false)
+})
+
+test('the shared app updater refuses bundle mutation while landing is active', async (context) => {
+  const directory = await makeTempDir('ensync-guarded-bundle-update-')
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const appBundle = join(directory, 'Ensync.app')
+  const hostSrc = join(directory, 'host-src')
+  const hostDest = join(appBundle, 'Contents', 'Resources', 'host')
+  const journalPath = join(directory, 'landing-journal.json')
+  await mkdir(appBundle, { recursive: true })
+  await mkdir(hostSrc, { recursive: true })
+  await writeFile(join(hostSrc, 'server.mjs'), 'new host bytes\n')
+  await writeFile(journalPath, JSON.stringify({ payload: { items: [{ state: 'integrating' }] } }))
+
+  const result = await performIncrementalUpdate({
+    appBundle,
+    hostSrc,
+    hostDest,
+    rebuildUi: false,
+    killAndRelaunch: false,
+    landingJournalPath: journalPath,
+  })
+
+  assert.deepEqual(result, { changed: [], total: 0, relaunched: false, deferred: true })
+  assert.equal(await pathExists(join(hostDest, 'server.mjs')), false)
 })

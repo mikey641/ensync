@@ -38,6 +38,7 @@ provider had capacity, `4` the run failed on every provider Ensync offered.
 | `--size TIER` | `small`/`medium`/`large`/`xl` — Ensync's Model size, mapped to each provider's own reasoning effort. Providers keep their own default model. |
 | `--timeout SECONDS` | Hard ceiling for one run. An inactivity watchdog applies regardless. |
 | `--no-fallback` | Stay on the first provider; report its failure instead of routing on. |
+| `--repair` | After any stop or error, run a fresh repair turn with the next available provider instead of exiting. The repair prompt is a new inspection task, never a replay of the original prompt. |
 | `--json` | Print the full result (provider, model, attempts, fallback reason) instead of just the answer. |
 | `--refresh` | Re-probe subscriptions instead of using the Host's cached status. |
 | `--local` | Ignore a running Host and probe providers in this process. |
@@ -66,6 +67,14 @@ only after a verified quota failure whose complete structured stream shows zero 
 file activity, or a preflight failure before execution. Any other failure stops the run and reports
 that provider's error, because partial work may exist and replaying it elsewhere could repeat a
 side effect — a second `docker restart`, a second push.
+
+### Repair after a stop or error
+
+`--repair` changes what happens when the run stops. Instead of exiting, the connector launches one
+repair turn with the next provider that has remaining capacity. The repair prompt is composed fresh:
+it tells the provider what failed and asks it to inspect the working directory and report or apply
+the safest recovery, so the original prompt is never blindly replayed after a mutating tool call.
+A failed repair is reported with the original error attached and the usual `4` exit code.
 
 ## When Ensync is not running
 

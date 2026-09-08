@@ -32,7 +32,8 @@ You (desktop or phone) ──┐
 - **Safe automatic fallback** (separate toggle) continues a run only when the Host proves the failure is safe to retry with **no** tool, command, file, or unknown activity. Ambiguous or post-mutation failures are never replayed.
 - **Host-enforced Git isolation**: each conversation gets a durable protected worktree/branch via the pinned open-source `agent-worktree` runtime, so different chats in one repo run concurrently. A dirty canonical checkout fails closed and stays unchanged.
 - **Immediate automatic landing**: each completed turn queues its exact commit and releases the chat; per-repository FIFO trains merge compatible completions in the background. There is no manual merge-review state. Conflicts use a subscription resolver (Codex, Claude Code, or Factory Droid) and otherwise remain preserved for automatic retry.
-- **Delivery pipeline**: `Saved → Landing → Pushed → Building → Production`, with a per-project destination of **Production** (merge, push, deploy-verify) or **Protected branch only** (anchor the exact commit, never merge/push/deploy).
+- **Delivery pipeline**: `Saved → Landing → Merge verified → Pushed → Building → Repairing (if needed) → Production`, with queue-aware landed/remaining counts and a per-project destination of **Production** (merge, push, deploy-verify) or **Protected branch only** (anchor the exact commit, never merge/push/deploy).
+- **MCP servers, once for every provider**: add a Model Context Protocol server in Preferences and the Host merges it into the native config of every installed CLI with a verified MCP format (Claude Code, Codex, Copilot CLI, Cursor, Antigravity, Kimi Code, Kiro, Junie, GitLab Duo, Droid, Amp, Auggie, Qoder, CodeBuddy), leaving provider-owned entries untouched.
 - **Typed, non-fabricated usage telemetry**: quota percentages, plans, resets, and models appear only when the real CLI reports them.
 - **Remote execution**: local Host, SSL-free **SSH worker** (public-key only), a guided **VirtualBox** Ubuntu VM, and **Ensync Sync**-brokered mobile/web clients.
 - **Telegram bridge**: approval-gated operation through a private chat.
@@ -47,9 +48,9 @@ You (desktop or phone) ──┐
 | **Claude Code** | Tested structured runner | Claude subscription |
 | **Factory Droid** | Tested structured runner | Factory subscription |
 
-Everything else in the catalog is shown honestly as **discovery-only** until its runner, quota contract, session adapter, and paid-overage guard are verified: GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code. **Ollama** is a separate local runtime, not a subscription runner.
+Everything else in the catalog is shown honestly as **discovery-only** until its runner, session adapter, and paid-overage guard are verified: GitHub Copilot CLI, Cursor Agent, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code. **Ollama** is a separate local runtime, not a subscription runner.
 
-> Cursor has an implemented adapter but stays discovery-only because account login and quota telemetry do not prove paid Additional Usage is disabled. GitHub Copilot CLI account status is verified via the official `auth.getStatus`, but its task runner and fallback remain disabled.
+> Cursor has an implemented adapter but stays discovery-only because account login and quota telemetry do not prove paid Additional Usage is disabled. GitHub Copilot CLI account status and AI-credit quota are verified via the official `auth.getStatus` and `account.getQuota`, but its task runner and fallback remain disabled.
 
 ## Mobile features (phone)
 
@@ -85,7 +86,8 @@ All settings are in the Settings modal (**Preferences — Make Ensync yours**, g
 | Agent alerts | Off / Ringtone / Spoken text (+ "answer needed" alerts, words, voice) | Off |
 | Interface sections | Activity rail, Title bar, Tab strip, Sidebar, Header, Composer — each toggleable | all on |
 | Ensync updates | Stable / Beta channel; auto-check + auto-download, then explicit open | Stable |
-| Account & chat sync | username (3–32) + password (12–256); create / sign in / sync | — |
+| MCP servers | add (form or pasted JSON) / enable / edit / remove / sync now; per-provider sync report | — |
+| Account & chat sync | handle (3–32) or email + password (12–256); create / sign in / sync | — |
 
 ## Run it yourself
 
@@ -120,11 +122,31 @@ npm --prefix mobile run open:android  # Android Studio + Android SDK
 
 ### Self-host Ensync Sync (for two devices / remote mobile)
 
-1. Deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`.
-2. Set the same `ENSYNC_SYNC_SERVICE_URL` on Ensync Host for both computers/devices.
+1. Deploy `npm run sync-service` behind HTTPS with one persistent `ENSYNC_SYNC_DATA_FILE`. See `sync-service/DEPLOY.md` for the container image and a free Cloudflare Tunnel option.
+2. Set the same Sync URL for every computer/device — in desktop Settings (**Account & chat sync → Sync service URL**) or with `ENSYNC_SYNC_SERVICE_URL`.
 3. Add the browser origin of a hosted phone PWA to `ENSYNC_SYNC_ALLOWED_ORIGINS`.
 
+For a phone with zero deploy steps, choose **Account & chat sync → Enable
+phone access**: the desktop app publishes its bundled loopback service through
+a free Cloudflare quick tunnel in a few seconds. A permanent
+`https://phone.example.com` link is available under **Use my own domain for a
+stable link** (see `sync-service/DEPLOY.md`, Option C). The Mac must stay awake
+for either path.
+
+Desktop account settings expose a **Connect your phone** link that opens the phone app with `?sync=<Sync URL>` so the Sync URL fills in automatically and the phone only asks for the account username and password. Changing the Sync URL takes effect after Ensync is fully restarted.
+
 Plain HTTP is accepted only for an exact loopback address. The service hashes account passwords with scrypt and stores only AES-256-GCM encrypted conversation documents. Host login state is memory-only, so restarting the Host requires signing in again; uploads remain available.
+
+The packaged desktop app starts a loopback Sync service automatically when no `ENSYNC_SYNC_SERVICE_URL` is set, so single-computer account sync works with zero setup. A shared service for two devices still needs the deployment above.
+
+### Account security
+
+- **Strong passwords** are enforced at sign-up; the desktop app also shows live strength feedback and a **generate strong password** action.
+- **Two-factor authentication** (authenticator TOTP) can be turned on from Settings, with a one-time set of **recovery codes**.
+- An optional **recovery email** can be stored so a future shared Sync service can send a reset link.
+- Because the conversation encryption key is derived from your password, a password reset restores *account access* but not the ability to decrypt chats already saved under the old password. The source worktrees on the Host remain the durable copy.
+
+Passkeys (fingerprint/biometric) are planned as a second sign-in factor in the web/mobile client; the desktop app uses an `ensync://` origin that browsers do not accept for WebAuthn origins.
 
 ### Configuration knobs (`ENSYNC_*`)
 
@@ -173,7 +195,7 @@ npm --prefix site test
 
 ## Distribution
 
-There is currently **no signed public installer**. macOS unlocks only after signing, notarization, and checksum verification; Windows unlocks only through the certified Microsoft Store listing. Development and unsigned builds are local test artifacts and fail closed for updates. The tag-triggered release workflow refuses generation unless macOS and Windows signing plus notarization are verified. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
+There is currently **no signed public installer**. macOS unlocks only after signing, notarization, and checksum verification; Windows unlocks through the certified Microsoft Store listing. Development and unsigned builds are local test artifacts and fail closed for updates. The tag-triggered release workflow refuses a full generation unless macOS and Windows signing plus notarization are verified, and a manual macOS-only release publishes only the signed, notarized macOS DMG while Windows stays Store-distributed. See `docs/release-runbook.md`, `desktop/README.md`, and `site/README.md`.
 
 ## Project memory
 

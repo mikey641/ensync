@@ -4,6 +4,7 @@ import test from 'node:test'
 
 import {
   ANSWER_NEEDED_ALERT,
+  PRODUCTION_READY_ALERT,
   TASK_FINISHED_ALERT,
   completionAlertPlan,
   normalizeCompletionNotificationSettings,
@@ -52,6 +53,21 @@ test('a device with alerts off stays silent for questions too', () => {
   const settings = normalizeCompletionNotificationSettings({ mode: 'off', answerAlerts: true })
   assert.equal(completionAlertPlan(settings, ANSWER_NEEDED_ALERT).mode, 'off')
   assert.equal(completionAlertPlan(settings, TASK_FINISHED_ALERT).mode, 'off')
+})
+
+test('Production-ready alerts have distinct words and can be switched off independently', () => {
+  const spoken = normalizeCompletionNotificationSettings({ mode: 'speech' })
+  assert.equal(
+    completionAlertPlan(spoken, PRODUCTION_READY_ALERT).speechText,
+    'Your Ensync delivery is ready in production.',
+  )
+
+  const ringtone = normalizeCompletionNotificationSettings({ mode: 'ringtone' })
+  assert.equal(completionAlertPlan(ringtone, PRODUCTION_READY_ALERT).chime, PRODUCTION_READY_ALERT)
+
+  const disabled = normalizeCompletionNotificationSettings({ mode: 'ringtone', productionAlerts: false })
+  assert.equal(completionAlertPlan(disabled, PRODUCTION_READY_ALERT).mode, 'off')
+  assert.equal(completionAlertPlan(disabled, TASK_FINISHED_ALERT).mode, 'ringtone')
 })
 
 test('the person is alerted about a question waiting in a conversation they are not looking at', () => {
@@ -105,4 +121,20 @@ test('every window alerts for a question in any conversation, and reopening Ensy
 
   assert.match(notifications, /export function playAnswerNeededRingtone\(\)/)
   assert.match(notifications, /notifyAnswerNeeded/)
+})
+
+test('verified Production transitions are monitored across project conversations', async () => {
+  const [app, notifications] = await Promise.all([
+    readFile(new URL('../src/App.tsx', import.meta.url), 'utf8'),
+    readFile(new URL('../src/completion-notifications.tsx', import.meta.url), 'utf8'),
+  ])
+
+  assert.match(app, /verifiedProductionDeliveryEntries\(delivery\)/)
+  assert.match(app, /productionNotificationsNeedingAlert\(/)
+  assert.match(app, /PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY/)
+  assert.match(app, /await notifyProductionReady\(\)/)
+  assert.match(app, /\['played', 'queued', 'disabled'\]\.includes\(result\.status\)/)
+  assert.match(app, /hydratedProjects/)
+  assert.match(notifications, /Alert when Production is ready/)
+  assert.match(notifications, /Preview Production ready/)
 })

@@ -2,9 +2,9 @@
 
 Status in Ensync: **`discovery_only`, and explicitly gated for chat**
 (`host/providers.mjs` catalog; entry in `GATED_CHAT_PROVIDERS` in
-`host/chat.mjs`). Account verification already works through
-`host/copilot-auth.mjs`. **No chat runner was written**, deliberately — see
-*Why this is gated* at the end.
+`host/chat.mjs`). Account verification works through `host/copilot-auth.mjs`
+and account quota through `host/copilot-usage.mjs`. **No chat runner was
+written**, deliberately — see *Why this is gated* at the end.
 
 Everything below was verified on 2026-08-10 from `--version`, `--help`,
 `copilot help <topic>`, `copilot login --help`, and local config/state files.
@@ -174,12 +174,16 @@ sandbox cannot be pinned per run from argv.
   `COPILOT_OFFLINE`, `COPILOT_PROVIDER_API_KEY`, `COPILOT_PROVIDER_BASE_URL`,
   `COPILOT_PROVIDER_TYPE`.
 
-**Usage/quota is not readable headlessly.** `copilot help billing` shows AI
-credits only through interactive surfaces (`/usage`, `/statusline quota`, the
-footer, the `/exit` summary). There is no non-interactive usage command, so the
-catalog keeps `usageKind: 'unavailable'`. `--max-ai-credits <credits>` (minimum
-30) caps a session, but it is a soft cap: usage is known only after a response
-returns.
+**Usage/quota IS readable headlessly now.** `copilot help billing` still shows AI
+credits only through interactive surfaces, but the SDK-compatible stdio server
+(verified 2026-09-07) exposes `account.getQuota`, a non-consuming billing read.
+`host/copilot-usage.mjs` drives the same bounded LSP-style framing as the auth
+probe, calls `connect` then `account.getQuota`, and parses the `chat` AI-credit
+bucket: on this machine it reports about 98.9% remaining and `2 of 200` requests
+used, so the card shows `usageKind: 'subscription_quota'`. The `completions` and
+`premium_interactions` buckets are ignored because they do not describe the CLI
+agent's credits. `--max-ai-credits <credits>` (minimum 30) caps a session, but it
+is a soft cap: usage is known only after a response returns.
 
 ## Why this is gated (and what would ungate it)
 

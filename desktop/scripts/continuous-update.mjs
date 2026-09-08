@@ -23,6 +23,7 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import {
   APP_BUNDLE,
+  hasActiveLanding,
   readMainCommit,
   performIncrementalUpdate,
   pathExists,
@@ -81,13 +82,23 @@ async function checkOnce({ hostOnly }) {
     return false
   }
 
+  if (await hasActiveLanding()) {
+    log(`main advanced to ${currentCommit.slice(0, 12)}, but an automatic landing is active; deferring the app restart.`)
+    return false
+  }
+
   log(`main advanced to ${currentCommit.slice(0, 12)}${lastSeen ? ` (was ${lastSeen.slice(0, 12)})` : ' (first check)'}; rebuilding…`)
 
   try {
-    const { changed, total, relaunched } = await performIncrementalUpdate({
+    const { changed, total, relaunched, deferred } = await performIncrementalUpdate({
       rebuildUi: !hostOnly,
       killAndRelaunch: true,
     })
+
+    if (deferred) {
+      log('An automatic landing became active during the update; deferring the app restart.')
+      return false
+    }
 
     if (total === 0) {
       log('No files changed after rebuild.')

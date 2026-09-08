@@ -8,7 +8,7 @@ import { getMcpConfigPath, hasMcpConfig } from './provider-install.mjs'
 // are non-sensitive labels (e.g. "linear", "github", "filesystem").
 
 function parseTomlMcpServers(content) {
-  // Codex and Kimi use TOML with [mcp_servers.<name>] sections.
+  // Codex uses TOML with [mcp_servers.<name>] sections.
   // We extract only the top-level server names, not nested sub-sections
   // like [mcp_servers.<name>.env] which are configuration for the same server.
   const names = new Set()
@@ -64,10 +64,15 @@ function parseClaudeMcpServers(content) {
 }
 
 function parseAmpMcpServers(content) {
-  // Amp nests MCP servers under amp.mcpServers in settings.json
+  // Amp keeps MCP servers under the flat dotted top-level key "amp.mcpServers"
+  // in settings.json; a nested { amp: { mcpServers } } shape is tolerated.
   try {
     const parsed = JSON.parse(content)
     if (!parsed || typeof parsed !== 'object') return []
+    const flat = parsed['amp.mcpServers']
+    if (flat && typeof flat === 'object' && !Array.isArray(flat)) {
+      return Object.keys(flat).filter((k) => typeof k === 'string')
+    }
     const amp = parsed.amp
     if (amp && typeof amp === 'object' && amp.mcpServers && typeof amp.mcpServers === 'object') {
       return Object.keys(amp.mcpServers).filter((k) => typeof k === 'string')
@@ -91,7 +96,7 @@ export async function probeMcpConfig(providerId, options = {}) {
     }
   }
 
-  const configPath = options.configPath ?? getMcpConfigPath(
+  const configPath = options.configPath ?? await getMcpConfigPath(
     providerId,
     options.environment,
     options.home,
@@ -154,7 +159,7 @@ export async function probeMcpConfig(providerId, options = {}) {
     const result = parseClaudeMcpServers(content)
     serverNames = result.global
     projects = result.projects
-  } else if (providerId === 'codex' || providerId === 'kimi') {
+  } else if (providerId === 'codex') {
     serverNames = parseTomlMcpServers(content)
   } else if (providerId === 'amp') {
     serverNames = parseAmpMcpServers(content)

@@ -15,6 +15,7 @@ import { execFile as execFileCallback } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { readFile, readdir, rm, mkdir, copyFile, access } from 'node:fs/promises'
 import { join, dirname, resolve } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
@@ -24,6 +25,7 @@ export const APP_BUNDLE = '/Applications/Ensync.app'
 export const RESOURCES = join(APP_BUNDLE, 'Contents', 'Resources')
 export const HOST_DEST = join(RESOURCES, 'host')
 export const UI_DEST = join(RESOURCES, 'ui')
+export const LANDING_JOURNAL = join(homedir(), 'Library', 'Application Support', 'Ensync', 'landing-journal.json')
 
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 export const DESKTOP_ROOT = resolve(scriptDir, '..')
@@ -33,6 +35,25 @@ export const DIST_SRC = join(REPO_ROOT, 'dist')
 
 export async function pathExists(path) {
   try { await access(path); return true } catch { return false }
+}
+
+/**
+ * A continuous update may restart the installed shell only when no landing
+ * train is queued or integrating. Retry records are durable and terminal for
+ * the current attempt, so they do not keep an update waiting indefinitely.
+ * An existing unreadable journal fails closed because idle cannot be proven.
+ */
+export async function hasActiveLanding({ journalPath = LANDING_JOURNAL } = {}) {
+  try {
+    const document = JSON.parse(await readFile(journalPath, 'utf8'))
+    const payload = typeof document?.payload === 'string'
+      ? JSON.parse(document.payload)
+      : document?.payload
+    if (!Array.isArray(payload?.items)) return true
+    return payload.items.some((item) => item?.state === 'queued' || item?.state === 'integrating')
+  } catch (error) {
+    return error?.code !== 'ENOENT'
+  }
 }
 
 export async function hashFile(path) {
@@ -106,9 +127,17 @@ export async function updateUiFiles({
   return changed
 }
 
-export async function killApp() {
+export function appShellProcessPattern(appBundle = APP_BUNDLE) {
+  const executable = join(appBundle, 'Contents', 'MacOS', 'Ensync')
+  return `^${executable.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`
+}
+
+export async function killApp(appBundle = APP_BUNDLE) {
   try {
-    await execFile('pkill', ['-f', 'Ensync'], { stdio: 'ignore' })
+    // The detached Host uses the same executable with the bootstrap path as an
+    // argument. Match only the argument-free Electron shell so a UI relaunch
+    // can never terminate an in-flight Host job or landing resolver.
+    await execFile('pkill', ['-f', appShellProcessPattern(appBundle)], { stdio: 'ignore' })
     await new Promise((r) => setTimeout(r, 1500))
   } catch { /* not running */ }
 }
@@ -144,7 +173,7 @@ export async function readMainCommit({ repoRoot = REPO_ROOT } = {}) {
  * Run one full incremental update cycle: rebuild UI, copy changed host and UI
  * files into the installed app bundle, optionally kill and relaunch.
  *
- * Returns { changed: string[], total: number, relaunched: boolean }.
+ * Returns { changed: string[], total: number, relaunched: boolean, deferred: boolean }.
  */
 export async function performIncrementalUpdate({
   rebuildUi = true,
@@ -155,9 +184,15 @@ export async function performIncrementalUpdate({
   distSrc = DIST_SRC,
   uiDest = UI_DEST,
   repoRoot = REPO_ROOT,
+  landingJournalPath = LANDING_JOURNAL,
 } = {}) {
   if (!await pathExists(appBundle)) {
     throw new Error(`${appBundle} not found. Build and install the app first.`)
+  }
+  // Keep the guard in the shared mutation primitive: manual and one-shot
+  // update entry points call this function without going through the poller.
+  if (await hasActiveLanding({ journalPath: landingJournalPath })) {
+    return { changed: [], total: 0, relaunched: false, deferred: true }
   }
 
   const changed = []
@@ -172,9 +207,14 @@ export async function performIncrementalUpdate({
 
   let relaunched = false
   if (killAndRelaunch && changed.length > 0) {
-    await killApp()
+    // Close the build-time race where landing begins after the first check.
+    // Cached modules keep the current Host stable; it can retire once idle.
+    if (await hasActiveLanding({ journalPath: landingJournalPath })) {
+      return { changed, total: changed.length, relaunched: false, deferred: true }
+    }
+    await killApp(appBundle)
     relaunched = await launchApp(appBundle)
   }
 
-  return { changed, total: changed.length, relaunched }
+  return { changed, total: changed.length, relaunched, deferred: false }
 }

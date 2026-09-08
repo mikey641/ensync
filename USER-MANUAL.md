@@ -25,7 +25,7 @@ Agents run through their **official CLIs** (Codex, Claude Code, Factory Droid). 
 | **Host** | The background service on your computer that runs providers, queues jobs, and owns merge/deploy state. |
 | **Conversation / tab** | One durable chat with its own project, provider, model size, and execution state. |
 | **Landing** | Automatically merging a finished turn's exact commit into the target branch. |
-| **Delivery** | The state after landing: Saved → Landing → Pushed → Building → Production. |
+| **Delivery** | The exact commit state plus its repository queue: Saved → Landing → Merge verified → Pushed → Building → Repairing (if needed) → Production. |
 | **Ensync Sync** | Optional self-hosted account service for encrypted sync and phone control. |
 | **Pairing** | A one-time code that links your phone to a specific Host. |
 
@@ -77,8 +77,9 @@ The packaged desktop app is a thin native shell: it starts the Ensync Host and s
 Ensync discovers the signed-in CLIs on your computer through their official login commands. Nothing you do in Ensync signs you into a provider; you still log in through each vendor's own CLI.
 
 - **Runnable today:** Codex, Claude Code, Factory Droid.
-- **Discovery-only:** GitHub Copilot CLI (account verified, runner not ready), Cursor, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code.
+- **Discovery-only:** GitHub Copilot CLI (account and AI-credit quota verified, runner not ready), Cursor, Google Antigravity, Google Jules, Kimi Code, Kiro CLI, Junie CLI, GitLab Duo CLI, Warp Oz, Amp, Augment Auggie, Qoder CLI, CodeBuddy Code.
 - **Local runtime:** Ollama (model discovery only; it is not a subscription runner).
+- **MCP servers:** add a Model Context Protocol server once under Preferences → MCP servers and Ensync writes it into every installed provider with a verified MCP format (see §9).
 
 A provider in the catalog can be **connected** (discovered + authenticated), **not installed**, or **installed but not ready**. Only the concrete state each CLI actually reports is shown.
 
@@ -130,7 +131,9 @@ Each prompt remembers its destination:
 - **Production** (default) — merge, push, then verify a deployment artifact.
 - **Protected branch only** — anchor the exact commit under a protected ref; never merge, push, or deploy.
 
-Watch the per-chat delivery panel for `Saved → Landing → Pushed → Building → Production`.
+Watch the per-chat delivery panel for `Saved → Landing → Merge verified → Pushed → Building → Repairing (if needed) → Production`. Its merge-queue meter separately shows earlier work already landed, work still ahead of this exact commit, and later queued work that does not delay it.
+
+In **Settings → Agent alerts**, enable **Alert when Production is ready** to hear a distinct local alert only after Ensync verifies the exact saved delivery in Production. You can switch this alert off independently and customize its spoken words when Spoken text is selected.
 
 ---
 
@@ -171,8 +174,21 @@ Open **Settings → Preferences**. Changes save automatically.
 ### Interface
 - Toggle each section independently: **Activity rail, Title bar, Tab strip, Conversation sidebar, Conversation header, Composer and status**.
 
+### MCP servers
+
+- **Add server** — a form (name, transport `stdio` / `http` / `sse`, command and arguments or URL, environment variables or headers) or **Paste JSON** for the `mcpServers` snippet most server READMEs publish.
+- **Enable / disable / edit / remove** per server. A disabled server is removed from every provider; a removed server is deleted only from the entries Ensync wrote.
+- **Provider sync** — per-provider state (`synced`, `partly synced` when the provider already had a same-named server that Ensync left alone, `not installed`, `waiting` while an agent run is active, `error` when a file could not be parsed, `no mcp` for Jules, Warp Oz, and Ollama) with the exact file each provider reads. **Sync now** re-applies the list.
+- Secrets are stored by Ensync Host on this computer and shown masked; leave a masked value in place when editing to keep it. Sync applies to the local Host only, not to SSH or VirtualBox targets.
+
 ### Account & chat sync
-- Create an account or sign in, sync now, or sign out. Username 3–32 characters, password 12–256 characters.
+- Create an account or sign in, sync now, or sign out. Account name 3–32-character handle or email address; password 12–256 characters.
+- Sign-up requires a strong password; the settings panel gives live strength feedback and a **generate strong password** action.
+- Turn on **two-factor authentication** from the connected account panel: scan the enrollment QR with any authenticator app, confirm a 6-digit code, and store the one-time **recovery codes**.
+- An optional **recovery email** can be saved for future reset links on a shared Sync service.
+- The **Sync service URL** field points Ensync at a shared HTTPS service (for phone or multi-computer sync) without editing environment variables. It takes effect after Ensync is fully restarted. See `sync-service/DEPLOY.md` for deployment options.
+- **Phone access** is one click: Ensync publishes the bundled loopback Sync service through a free Cloudflare **quick tunnel**, so **Connect your phone** gets a live HTTPS link without any account, domain, or terminal steps. The quick link is temporary and re-connects after an app restart; re-scan the QR if you stop it. For a permanent `https://phone.example.com` URL, choose **Use my own domain for a stable link** — that needs a domain on Cloudflare and an API token with Zone Read, Zone DNS Edit, and Cloudflare Tunnel Edit, stored encrypted on this computer. The Mac must stay awake and running Ensync for the phone to reach it.
+- Your encryption key is derived from your password, so a password reset restores account access but not old encrypted chats; the Host's source worktrees stay the durable copy.
 
 ---
 
@@ -232,7 +248,7 @@ npm --prefix mobile run open:android  # Android Studio + Android SDK
 ```
 
 ### Pairing walkthrough
-1. On the phone: enter the Sync URL, then create an account or sign in.
+1. On the phone: open the Sync app. Desktop account settings show a **Connect your phone** link that prefills the Sync URL (or append `?sync=<Sync URL>` to the app URL); otherwise type it, then create an account or sign in.
 2. On the desktop: open account settings and generate a pairing code.
 3. On the phone: enter the 8-character code in the **Pair** field.
 4. Enter the Host project's absolute path, pick Codex or Claude Code, write the instruction, and **Run remotely**.

@@ -160,8 +160,10 @@ export class ProjectIsolationError extends Error {
 /**
  * Gives each conversation one stable worktree. agent-worktree owns workspace
  * creation; this service only records active ownership inside the single Host
- * process. There are no filesystem leases, heartbeats, polling loops, or
- * baseline merges on the provider's critical path.
+ * process. There are no filesystem leases, heartbeats, or polling loops.
+ * Reused worktrees are synchronized to their pinned current landing target by
+ * agent-worktree before the provider starts; a conflicting sync is aborted and
+ * reported without changing the saved conversation branch.
  */
 export class ProjectIsolationService {
   #rootPath
@@ -726,9 +728,9 @@ export class ProjectIsolationService {
       )
     }
 
-    const worktreeStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
+    let worktreeStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
     const worktreeHead = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
-    const currentHead = firstLine(worktreeHead.stdout)
+    let currentHead = firstLine(worktreeHead.stdout)
     const targetHeadResult = await this.#git(['rev-parse', '--verify', `refs/heads/${targetBranch}^{commit}`], {
       cwd: worktreePath,
       code: 'managed_worktree_target_unavailable',
@@ -747,14 +749,114 @@ export class ProjectIsolationService {
         409,
       )
     }
-    await this.#git(['config', `branch.${branch}.ensyncTargetBranch`, targetBranch], { cwd: worktreePath })
-    await this.#git(['config', `branch.${branch}.ensyncTargetBaseSha`, targetBaseSha], { cwd: worktreePath })
-    const changes = statusEntries(worktreeStatus.stdout)
-    const integrated = await this.#git(['merge-base', '--is-ancestor', currentHead, repository.head], {
+
+    let baselineConflict = null
+    let refreshed = false
+    const targetAlreadyPresent = await this.#git(['merge-base', '--is-ancestor', targetHead, currentHead], {
       cwd: worktreePath,
       allowFailure: true,
     })
-    const count = await this.#git(['rev-list', '--count', `${repository.head}..${currentHead}`], {
+    if (reused && targetAlreadyPresent.exitCode !== 0) {
+      const immutableTarget = await this.#immutableBaseBranch(repository.repositoryPath, targetHead)
+      try {
+        await (await this.#clientForRun()).sync({
+          worktreePath,
+          from: immutableTarget,
+          strategy: 'merge',
+          signal: this.#signal(),
+        })
+        const refreshedHead = await this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath })
+        currentHead = firstLine(refreshedHead.stdout)
+        const [keptConversation, includedTarget] = await Promise.all([
+          this.#git(['merge-base', '--is-ancestor', firstLine(worktreeHead.stdout), currentHead], {
+            cwd: worktreePath,
+            allowFailure: true,
+          }),
+          this.#git(['merge-base', '--is-ancestor', targetHead, currentHead], {
+            cwd: worktreePath,
+            allowFailure: true,
+          }),
+        ])
+        worktreeStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath })
+        if (
+          keptConversation.exitCode !== 0
+          || includedTarget.exitCode !== 0
+          || statusEntries(worktreeStatus.stdout).length > 0
+        ) {
+          throw new ProjectIsolationError(
+            'managed_worktree_sync_failed',
+            `agent-worktree did not preserve both ${branch} and the exact ${targetBranch} baseline, so the provider was not started.`,
+            409,
+          )
+        }
+        refreshed = true
+      } catch (error) {
+        if (error instanceof ProjectIsolationError) throw error
+        const cancelled = this.#signal()?.aborted === true
+        const cleanupSignal = cancelled ? new AbortController().signal : this.#signal()
+        const conflicts = await this.#git(['diff', '--name-only', '--diff-filter=U', '-z'], {
+          cwd: worktreePath,
+          allowFailure: true,
+          signal: cleanupSignal,
+        })
+        const conflictFiles = conflicts.exitCode === 0 ? statusEntries(conflicts.stdout) : []
+        const mergeHead = await this.#git(['rev-parse', '--verify', '--quiet', 'MERGE_HEAD'], {
+          cwd: worktreePath,
+          allowFailure: true,
+          signal: cleanupSignal,
+        })
+        if (mergeHead.exitCode === 0 || conflictFiles.length > 0) {
+          try {
+            // Cleanup must finish even when the request signal stopped the
+            // in-flight sync. Otherwise a cancellation would strand this
+            // durable conversation worktree in a conflicted merge state.
+            await (await this.#clientForRun()).abortSync({ worktreePath })
+          } catch (abortError) {
+            throw new ProjectIsolationError(
+              'managed_worktree_sync_failed',
+              `agent-worktree could not abort a failed ${targetBranch} baseline sync: ${abortError instanceof Error ? abortError.message : 'unknown failure'}`,
+              409,
+            )
+          }
+        }
+        const [restoredHead, restoredStatus] = await Promise.all([
+          this.#git(['rev-parse', '--verify', 'HEAD'], { cwd: worktreePath, signal: cleanupSignal }),
+          this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], { cwd: worktreePath, signal: cleanupSignal }),
+        ])
+        if (
+          firstLine(restoredHead.stdout) !== currentHead
+          || statusEntries(restoredStatus.stdout).length > 0
+        ) {
+          throw new ProjectIsolationError(
+            'managed_worktree_sync_failed',
+            `agent-worktree could not restore ${branch} after the ${targetBranch} baseline sync failed, so the provider was not started.`,
+            409,
+          )
+        }
+        if (cancelled) throw cancellationError()
+        if (conflictFiles.length === 0) {
+          throw new ProjectIsolationError(
+            'managed_worktree_sync_failed',
+            `agent-worktree could not synchronize ${branch} with ${targetBranch}: ${error instanceof Error ? error.message : 'unknown failure'}`,
+            409,
+          )
+        }
+        baselineConflict = {
+          baselineSha: targetHead,
+          files: conflictFiles,
+          reason: 'New baseline changes conflict with this conversation’s work. Ensync preserved the clean conversation branch and will reconcile it before landing.',
+        }
+        worktreeStatus = restoredStatus
+      }
+    }
+    await this.#git(['config', `branch.${branch}.ensyncTargetBranch`, targetBranch], { cwd: worktreePath })
+    await this.#git(['config', `branch.${branch}.ensyncTargetBaseSha`, targetBaseSha], { cwd: worktreePath })
+    const changes = statusEntries(worktreeStatus.stdout)
+    const integrated = await this.#git(['merge-base', '--is-ancestor', currentHead, targetHead], {
+      cwd: worktreePath,
+      allowFailure: true,
+    })
+    const count = await this.#git(['rev-list', '--count', `${targetHead}..${currentHead}`], {
       cwd: worktreePath,
       allowFailure: true,
     })
@@ -767,7 +869,7 @@ export class ProjectIsolationService {
       branch,
       reused,
       seededFromSharedCheckout: false,
-      baselineConflict: null,
+      baselineConflict,
       shared: {
         repositoryPath: repository.repositoryPath,
         head: repository.head,
@@ -775,15 +877,15 @@ export class ProjectIsolationService {
       },
       base: {
         sha: currentHead,
-        canonicalSha: targetBaseSha,
+        canonicalSha: targetHead,
         source: reused ? 'conversation_branch' : 'canonical_head',
         reason: null,
         remote: null,
         branch: targetBranch,
-        refreshed: false,
+        refreshed,
       },
       integration: {
-        canonicalSha: repository.head,
+        canonicalSha: targetHead,
         integrated: integrated.exitCode === 0,
         unintegratedCommits: Number.isInteger(unintegratedCommits) ? unintegratedCommits : null,
       },

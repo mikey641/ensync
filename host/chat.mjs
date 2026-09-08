@@ -265,6 +265,12 @@ const MODEL_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,127}$/
 const MODEL_EFFORTS = new Set(['low', 'medium', 'high', 'max'])
 const CODEX_IMAGE_EXTENSIONS = new Set(['.gif', '.jpeg', '.jpg', '.png', '.webp'])
 const QUOTA_PATTERN = PROVIDER_QUOTA_PATTERN
+// Claude Code names the exhausted window directly in the terminal error
+// ("You've reached your Fable limit", "You've hit your Opus limit"), which the
+// shared usage/rate/session vocabulary above does not cover. This matches the
+// "reached/hit your <window> limit" phrasing while the activity-free proof in
+// `claudeEventsProveNoActivity` remains the real safety gate.
+const CLAUDE_QUOTA_PATTERN = /(?:reached|hit)\s+your\s+[a-z0-9][a-z0-9 .:'_-]{0,32}\s+limit/i
 const TERMINAL_EVENT_TEXT_LIMIT = 256 * 1024
 const CLAUDE_PENDING_NOTE_MESSAGES = 8
 const SECRET_PATTERNS = [
@@ -406,9 +412,9 @@ function conflictResolutionPrompt({ item, conflictFiles }) {
 Ensync is integrating the exact saved commit ${item.savedSha} from ${item.branch} in a temporary landing worktree, and the merge stopped with conflicts. The merge is still in progress in the current working directory (MERGE_HEAD exists). Your only task is to finish it:
 1. Inspect the conflicts with \`git status\` and \`git diff\`.
 2. Edit each conflicted file so the already-landed changes and this saved commit are both preserved, and remove every conflict marker. Only drop one side when the two changes are truly incompatible.
-3. Stage each resolved file with \`git add\`.
-4. Conclude the merge with \`git commit --no-verify --no-edit\`.
-Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work.
+3. Do not run \`git add\`, \`git commit\`, or any other command that writes the shared Git directory; the sandbox intentionally blocks it.
+4. After every marker is removed, stop and report the resolution. Ensync Host will stage exactly the listed conflict files, verify containment, and conclude the merge after your process exits.
+Do not push, do not modify any other checkout or worktree, do not rebase or amend existing commits, and do not start unrelated work or broad repository verification. Do not install packages, run tests, typechecks, builds, or repository-wide guards, and do not update documentation or memory. If an existing check appears stale or another file appears to need a change, report that fact without editing it; only the listed conflict files are writable for this task.
 Conflicted files:
   ${conflictFiles.map((file) => `- ${file}`).join('\n')}`
 }
@@ -921,7 +927,12 @@ export function quotaFailureIsSafe(provider, stdout, stderr = '', options = {}) 
   // A capture that dropped provider output cannot prove the run performed no
   // work, so it can never authorize an automatic replay on another provider.
   if (options.outputTruncated) return false
-  if (!QUOTA_PATTERN.test(`${stdout}\n${stderr}`)) return false
+  const combined = `${stdout}\n${stderr}`
+  if (provider === 'claude') {
+    if (!QUOTA_PATTERN.test(combined) && !CLAUDE_QUOTA_PATTERN.test(combined)) return false
+  } else if (!QUOTA_PATTERN.test(combined)) {
+    return false
+  }
   const events = structuredEvents(stdout)
   if (!events) return false
   return provider === 'codex'

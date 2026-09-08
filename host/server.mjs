@@ -41,11 +41,18 @@ import {
   RemoteSshService,
 } from './remote-ssh.mjs'
 import { SupportService, SupportValidationError } from './support.mjs'
+import {
+  ScheduledTaskService,
+  defaultScheduledTaskConfigPath,
+  runConnectorPlanWithRepair,
+} from './scheduled-task.mjs'
+import { SystemSpeechService } from './system-speech.mjs'
 import { SyncBrokerHostWorker } from './sync-broker-host.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
 import { TelegramChatRouter } from './telegram-router.mjs'
 import { displayCommand, launchTerminalCommand } from './terminal.mjs'
 import { getInstallCommand, hasInstallCommand } from './provider-install.mjs'
+import { McpRegistryError, McpRegistryService } from './mcp-registry.mjs'
 import { VirtualBoxError, VirtualBoxService } from './virtualbox.mjs'
 
 const DEFAULT_PORT = 43_121
@@ -688,6 +695,7 @@ export function createEnsyncHost(options = {}) {
       )
       return repaired ? { turnId: repaired.turnId, proof: repaired.turnIdentityProof } : null
     },
+    listLandingItems: () => landingJournal.load(),
     redact: (value) => redactTerminalText(value).text,
     startRepair: async (record) => {
       const providers = await statuses.list()
@@ -700,7 +708,7 @@ export function createEnsyncHost(options = {}) {
       const failure = [record.failureMessage, record.failureLog].filter(Boolean).join('\n\n').slice(0, 18_000)
       const prompt = [
         'Ensync detected that the exact pushed production commit failed to deploy. Repair the underlying issue completely.',
-        `Failed production commit: ${record.productionCommitSha}`,
+        `Failed production commit: ${record.replacementCommitSha ?? record.productionCommitSha}`,
         `Deployment provider: ${record.deploymentProvider ?? 'unknown'}`,
         failure ? `Verified failure output:\n${failure}` : null,
         'Inspect the repository and its instructions, implement the deepest safe fix, run the relevant verification, and leave the repair committed for Ensync automatic landing.',
@@ -738,6 +746,7 @@ export function createEnsyncHost(options = {}) {
     pollIntervalMs: options.syncBrokerPollIntervalMs,
   })
   const daemonLeases = options.daemonLeaseService ?? null
+  const systemSpeech = options.systemSpeechService ?? new SystemSpeechService()
   const authToken = typeof options.authToken === 'string' && options.authToken.length >= 32
     ? options.authToken
     : null
@@ -754,6 +763,25 @@ export function createEnsyncHost(options = {}) {
   const virtualBox = options.virtualBoxService ?? new VirtualBoxService({
     allowMutation: allowVirtualBoxMutation,
   })
+  // One MCP server list for every provider. Provider files are only edited
+  // while no Host-owned agent run is active, for the same reason CLI updates
+  // wait: a CLI mid-turn may rewrite its own config file underneath us.
+  const mcpRegistry = options.mcpRegistryService ?? new McpRegistryService({
+    registryPath: options.mcpRegistryPath,
+    statusService: statuses,
+    isBusy: () => chatJobs.hasRunningJobs() || chats.hasRunningRuns?.() === true,
+  })
+  // Recurring scheduled task. The shared connector runner already walks the
+  // fallback sequence when quota runs out; `runConnectorPlanWithRepair` adds
+  // the after-failure repair hop so a stop or error is handed to an available
+  // provider instead of leaving the job stopped.
+  const scheduledTask = options.scheduledTaskService ?? new ScheduledTaskService({
+    configPath: options.scheduledTaskConfigPath ?? defaultScheduledTaskConfigPath(),
+    planner: agentConnector,
+    run: runConnectorPlanWithRepair,
+    log: options.log ?? null,
+  })
+
   const server = createServer(async (request, response) => {
     const origin = request.headers.origin
     if (!isAllowedOrigin(origin)) {
@@ -786,6 +814,8 @@ export function createEnsyncHost(options = {}) {
             deliveryTargets: ['production', 'protected_branch'],
             deliveryPromptIdentity: true,
             deliveryLandingSubstates: true,
+            nativeSpeechNotifications: true,
+            scheduledTask: scheduledTask.status(),
           },
           now: new Date().toISOString(),
         }, origin)
@@ -798,6 +828,13 @@ export function createEnsyncHost(options = {}) {
       // below, so only the app can reorder routing.
       if (request.method === 'GET' && url.pathname === '/api/agent-connector/preferences') {
         return sendJson(response, 200, await agentConnector.preferences(), origin)
+      }
+
+      // The scheduled task's routing plan is a read above the lease gate just
+      // like a connector plan; it names the same bounded fields and never runs
+      // the task.
+      if (request.method === 'GET' && url.pathname === '/api/scheduled-task/status') {
+        return sendJson(response, 200, scheduledTask.status(), origin)
       }
 
       if (request.method === 'GET' && url.pathname === '/api/agent-connector/plan') {
@@ -841,16 +878,61 @@ export function createEnsyncHost(options = {}) {
         return sendJson(response, 200, accountSync.status(), origin)
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/notifications/speech') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await systemSpeech.speak({
+          text: body.text,
+          voiceId: body.voiceId,
+        }), origin)
+      }
+
       if (request.method === 'POST' && url.pathname === '/api/account-sync/register') {
         const body = await readJsonBody(request)
-        const status = await accountSync.register({ username: body.username, password: body.password })
+        const status = await accountSync.register({
+          username: body.username,
+          password: body.password,
+          ...(typeof body.email === 'string' && body.email.trim() ? { email: body.email.trim() } : {}),
+        })
         return sendJson(response, 201, status, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/account-sync/login') {
         const body = await readJsonBody(request)
-        const status = await accountSync.login({ username: body.username, password: body.password })
+        const result = await accountSync.login({ username: body.username, password: body.password })
+        return sendJson(response, 200, result, origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/verify') {
+        const body = await readJsonBody(request)
+        const status = await accountSync.verifySecondFactor({
+          challengeId: body.challengeId,
+          code: body.code,
+          recoveryCode: body.recoveryCode,
+        })
         return sendJson(response, 200, status, origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/account') {
+        return sendJson(response, 200, await accountSync.account(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/totp/start') {
+        return sendJson(response, 200, await accountSync.startTotp(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/totp/confirm') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await accountSync.confirmTotp({ challengeId: body.challengeId, code: body.code }), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/totp/disable') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await accountSync.disableTotp({ code: body.code, recoveryCode: body.recoveryCode }), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/email') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await accountSync.setEmail(body.email), origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/account-sync/logout') {
@@ -873,6 +955,38 @@ export function createEnsyncHost(options = {}) {
       if (request.method === 'PUT' && url.pathname === '/api/agent-connector/preferences') {
         const body = await readJsonBody(request)
         return sendJson(response, 200, await agentConnector.savePreferences(body.order), origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/mcp/servers') {
+        return sendJson(response, 200, await mcpRegistry.autoAdopt(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mcp/servers') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 201, await mcpRegistry.add(body.server ?? body), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mcp/servers/import') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 201, await mcpRegistry.importJson(body.json), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mcp/sync') {
+        return sendJson(response, 200, await mcpRegistry.sync({ trigger: 'manual' }), origin)
+      }
+
+      const mcpServerMatch = url.pathname.match(/^\/api\/mcp\/servers\/([^/]+)$/)
+      if (mcpServerMatch && (request.method === 'PUT' || request.method === 'PATCH')) {
+        const id = decodeURIComponent(mcpServerMatch[1])
+        const body = await readJsonBody(request)
+        if (request.method === 'PATCH' && typeof body.enabled === 'boolean' && Object.keys(body).length === 1) {
+          return sendJson(response, 200, await mcpRegistry.setEnabled(id, body.enabled), origin)
+        }
+        return sendJson(response, 200, await mcpRegistry.update(id, body.server ?? body), origin)
+      }
+      if (mcpServerMatch && request.method === 'DELETE') {
+        const id = decodeURIComponent(mcpServerMatch[1])
+        return sendJson(response, 200, await mcpRegistry.remove(id), origin)
       }
 
       if (request.method === 'GET' && url.pathname === '/api/providers') {
@@ -1252,16 +1366,30 @@ export function createEnsyncHost(options = {}) {
 
         const launch = await terminalLauncher(provider.executable, definition.loginArgs)
         if (launch.started) statuses.invalidate()
+        const connectMessages = {
+          copilot(started) {
+            return started
+              ? 'Copilot opened. Sign in only if prompted, then check again in Ensync.'
+              : 'Automatic launch was unavailable. Run the shown command, sign in if needed, then check again.'
+          },
+          gitlab_duo(started) {
+            return started
+              ? 'GitLab Duo setup opened. Enter your GitLab instance URL and a Personal Access Token with api scope, then check again in Ensync.'
+              : 'Automatic launch was unavailable. Run the shown command to open GitLab Duo setup.'
+          },
+          junie(started) {
+            return started
+              ? 'Junie onboarding opened. Choose Continue with JetBrains account or paste a Junie API key from junie.jetbrains.com/cli, then check again in Ensync.'
+              : 'Automatic launch was unavailable. Run the shown command to open Junie onboarding.'
+          },
+        }
+        const connectMessage = connectMessages[id] ?? ((started) => started
+          ? 'Login opened in a terminal. Complete it there, then Ensync can refresh the status.'
+          : 'Automatic launch was unavailable. Run the shown command in a terminal.')
         return sendJson(response, 200, {
           ...launch,
           command,
-          message: id === 'copilot'
-            ? launch.started
-              ? 'Copilot opened. Sign in only if prompted, then check again in Ensync.'
-              : 'Automatic launch was unavailable. Run the shown command, sign in if needed, then check again.'
-            : launch.started
-              ? 'Login opened in a terminal. Complete it there, then Ensync can refresh the status.'
-              : 'Automatic launch was unavailable. Run the shown command in a terminal.',
+          message: connectMessage(launch.started),
         }, origin)
       }
 
@@ -1457,6 +1585,12 @@ export function createEnsyncHost(options = {}) {
           code: error.code,
         }, origin)
       }
+      if (error instanceof McpRegistryError) {
+        return sendJson(response, error.status, {
+          error: error.message,
+          code: error.code,
+        }, origin)
+      }
       if (error instanceof ChatImageError) {
         return sendJson(response, error.status, {
           error: error.message,
@@ -1503,8 +1637,10 @@ export function createEnsyncHost(options = {}) {
     }
   })
   server.once('close', () => {
+    mcpRegistry.close()
     clearInterval(autoPushInterval)
     clearInterval(strandedRecoveryInterval)
+    void scheduledTask.stop()
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
   })
@@ -1515,7 +1651,10 @@ export function createEnsyncHost(options = {}) {
     daemonLeases,
     deliveryCoordinator,
     landingCoordinator,
+    mcpRegistry,
     projectIsolation,
+    scheduledTask,
+    systemSpeech,
     syncBrokerHost,
   }
   return server
@@ -1534,6 +1673,12 @@ export function startEnsyncHost(options = {}) {
     })
     server.ensyncServices?.deliveryCoordinator?.start?.().catch((error) => {
       console.error('Ensync production-delivery recovery failed:', error instanceof Error ? error.message : error)
+    })
+    server.ensyncServices?.mcpRegistry?.startupSync?.().catch((error) => {
+      console.error('Ensync MCP sync failed:', error instanceof Error ? error.message : error)
+    })
+    server.ensyncServices?.scheduledTask?.start?.().catch((error) => {
+      console.error('Ensync scheduled task failed to start:', error instanceof Error ? error.message : error)
     })
   })
   return server

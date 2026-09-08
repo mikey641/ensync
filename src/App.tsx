@@ -15,29 +15,38 @@ import {
   Command,
   Copy,
   Cloud,
+  Eye,
+  EyeOff,
   FileText,
   FolderGit2,
   FolderOpen,
   GitBranch,
   GitFork,
+  Globe,
   History,
+  KeyRound,
   Layers3,
   LifeBuoy,
   LockKeyhole,
   LogOut,
+  Mail,
   Menu,
   MessageSquareText,
   Paperclip,
   Plus,
+  Power,
+  Radio,
   RotateCw,
   Search,
   Server,
   Settings,
+  ShieldAlert,
   ShieldCheck,
   SlidersHorizontal,
   Square,
   Smartphone,
   TerminalSquare,
+  Trash2,
   UserRound,
   Wifi,
   X,
@@ -45,6 +54,7 @@ import {
 import { defaultProviders, initialChats } from './data'
 import type { Chat, ConversationLayoutMode, FileAttachment, ModelSizeTier, NewTabPlacement, Provider, ProviderId, WorkspaceTab } from './types'
 import { DisplayPreferences, useDisplayPreferences } from './display-preferences'
+import { McpServerSettings } from './mcp-servers'
 import {
   CompletionNotificationPreferences,
   primeCompletionNotifications,
@@ -54,7 +64,11 @@ import { SplitWorkspace, type SplitWorkspaceLayout } from './components/SplitWor
 import { ChatContextHeader } from './components/ChatContextHeader'
 import { MessageContent } from './components/MessageContent'
 import { isLongMessageContent } from './lib/messageContent.mjs'
-import { deliveryPromptContext } from './lib/deliveryStatus.mjs'
+import {
+  deliveryPromptContext,
+  productionNotificationsNeedingAlert,
+  verifiedProductionDeliveryEntries,
+} from './lib/deliveryStatus.mjs'
 import { useChatAutoScroll } from './components/useChatAutoScroll'
 import { ResizableSidebar, readResizableSidebarPreferences } from './components/ResizableSidebar'
 import { RemoteSshSetup } from './components/RemoteSshSetup'
@@ -62,6 +76,7 @@ import { TelegramSetup } from './components/TelegramSetup'
 import { VirtualBoxSetup } from './components/VirtualBoxSetup'
 import { GitWorkflowModal } from './components/GitWorkflowModal'
 import { FileViewerModal } from './components/FileViewerModal'
+import { ConnectPhoneQr } from './components/ConnectPhoneQr'
 import { NativeUpdatePreferences } from './components/NativeUpdatePreferences'
 import { SupportDesk } from './components/SupportDesk'
 import { UIVisibilityPreferences, useUIVisibility, type UIVisibilityState } from './ui-visibility'
@@ -90,11 +105,31 @@ import { supportRepairHost } from './lib/supportRepairHost'
 import {
   accountSyncHost,
   type AccountSyncStatus,
+  type AccountProfile,
+  type SecondFactorChallenge,
+  type TotpStart,
 } from './lib/accountSyncHost'
 import {
   mergeAccountWorkspace,
   prepareAccountWorkspace,
 } from './lib/accountWorkspaceSync.mjs'
+import {
+  readSyncServiceUrl,
+  syncServiceUrlPreferenceAvailable,
+  writeSyncServiceUrl,
+} from './lib/syncServiceUrlPreference.mjs'
+import {
+  clearCloudflareTunnel,
+  cloudflareTunnelAvailable,
+  readCloudflareTunnelStatus,
+  setupCloudflareTunnel,
+  startCloudflareQuickTunnel,
+  startCloudflareTunnel,
+  stopCloudflareQuickTunnel,
+  stopCloudflareTunnel,
+  type CloudflareTunnelResult,
+  type CloudflareTunnelStatus,
+} from './lib/cloudflareTunnelHost.mjs'
 import {
   DEFAULT_FALLBACK_PROVIDER_ORDER,
   conversationProviderId,
@@ -268,10 +303,14 @@ import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
 
 const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'ensync-workspace-v2'
+const PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY = 'ensync-production-notification-keys-v1'
+const MAX_PRODUCTION_NOTIFICATION_KEYS = 512
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
+const MOBILE_PWA_URL = 'https://ensync.vercel.app/mobile/'
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   configured: false,
+  serviceUrl: null,
   authenticated: false,
   username: null,
   remoteRevision: null,
@@ -285,7 +324,7 @@ function useWorkingElapsedLabel(running: boolean, startedAt: string | null) {
 
   useEffect(() => {
     if (!running || !startedAt || workingElapsedLabel({ running: true, startedAt, nowMs: Date.now() }) === null) return
-    let timer: ReturnType<typeof window.setTimeout> | null = null
+    let timer: number | null = null
     const update = () => {
       const currentTime = Date.now()
       setNowMs(currentTime)
@@ -298,6 +337,28 @@ function useWorkingElapsedLabel(running: boolean, startedAt: string | null) {
   }, [running, startedAt])
 
   return workingElapsedLabel({ running, startedAt, nowMs })
+}
+
+function readProductionNotificationKeys(storage: Storage = window.localStorage) {
+  try {
+    const parsed = JSON.parse(storage.getItem(PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY) ?? '[]')
+    return new Set(Array.isArray(parsed)
+      ? parsed.filter((key): key is string => typeof key === 'string' && key.length <= 512).slice(-MAX_PRODUCTION_NOTIFICATION_KEYS)
+      : [])
+  } catch {
+    return new Set<string>()
+  }
+}
+
+function writeProductionNotificationKeys(keys: Set<string>, storage: Storage = window.localStorage) {
+  try {
+    storage.setItem(
+      PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY,
+      JSON.stringify([...keys].slice(-MAX_PRODUCTION_NOTIFICATION_KEYS)),
+    )
+  } catch {
+    // The in-memory set still prevents duplicate alerts for this window.
+  }
 }
 
 function runWasCancelled(error: unknown, signal: AbortSignal) {
@@ -494,6 +555,8 @@ function providerFromStatus(status: CliProviderStatus, current: Provider): Provi
     resetsIn: status.usage.resetAt,
     resetLabel: status.usage.resetLabel ?? null,
     resetWindow: status.usage.resetWindow ?? null,
+    sessionUsedPercent: status.usage.sessionUsedPercent ?? null,
+    sessionResetLabel: status.usage.sessionResetLabel ?? null,
     usageReason: status.usage.reason,
     usageStale: status.usage.stale === true,
     usageCheckedAt: status.usage.checkedAt ?? null,
@@ -799,6 +862,7 @@ function App() {
     settings: completionNotificationSettings,
     notifyCompletion,
     notifyAnswerNeeded,
+    notifyProductionReady,
   } = useCompletionNotifications()
   const [hydrated] = useState<StoredState | null>(readInitialStoredState)
   const workspaceRecoveryIds = hydrated?.workspaceRecoveryIds ?? []
@@ -980,6 +1044,65 @@ function App() {
     if (alreadyLoaded && alerts.length > 0) void notifyAnswerNeeded()
   }, [chatExecutionEvents, notifyAnswerNeeded])
 
+  const productionNotificationProjectPaths = useMemo(() => {
+    const projectIdsWithDeliveries = new Set(chats
+      .filter((chat) => Boolean(chat.workspace?.branch))
+      .map((chat) => chat.projectId))
+    return [...new Set(projects
+      .filter((project) => projectIdsWithDeliveries.has(project.id) && Boolean(project.path))
+      .map((project) => project.path))]
+      .sort()
+  }, [chats, projects])
+  const productionNotificationProjectPathsKey = JSON.stringify(productionNotificationProjectPaths)
+  const productionNotificationStateRef = useRef({
+    hydratedProjects: new Set<string>(),
+    announced: readProductionNotificationKeys(),
+  })
+  useEffect(() => {
+    let disposed = false
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const monitoredProjectPaths = JSON.parse(productionNotificationProjectPathsKey) as string[]
+    const refresh = async () => {
+      const results = await Promise.all(monitoredProjectPaths.map(async (projectPath) => {
+        try {
+          return { projectPath, delivery: (await ensyncHost.deliveryStatus(projectPath)).delivery }
+        } catch {
+          return { projectPath, delivery: null }
+        }
+      }))
+      if (disposed) return
+
+      const newlyReadyKeys: string[] = []
+      for (const { projectPath, delivery } of results) {
+        if (!delivery) continue
+        const state = productionNotificationStateRef.current
+        const hydrated = state.hydratedProjects.has(projectPath)
+        const next = productionNotificationsNeedingAlert(
+          verifiedProductionDeliveryEntries(delivery),
+          state.announced,
+          { hydrated },
+        )
+        if (next.alert) newlyReadyKeys.push(...next.alertKeys)
+        state.announced = next.announced
+        state.hydratedProjects.add(projectPath)
+      }
+      if (newlyReadyKeys.length > 0) {
+        const result = await notifyProductionReady()
+        if (['played', 'queued', 'disabled'].includes(result.status)) {
+          newlyReadyKeys.forEach((key) => productionNotificationStateRef.current.announced.add(key))
+        }
+      }
+      writeProductionNotificationKeys(productionNotificationStateRef.current.announced)
+      if (disposed) return
+      timer = setTimeout(refresh, 5_000)
+    }
+    if (monitoredProjectPaths.length > 0) void refresh()
+    return () => {
+      disposed = true
+      if (timer) clearTimeout(timer)
+    }
+  }, [notifyProductionReady, productionNotificationProjectPathsKey])
+
   const workspaceSnapshot: StoredState = {
     chats,
     tabs,
@@ -1115,18 +1238,38 @@ function App() {
     return run
   }, [commitWorkspace])
 
-  const authenticateAccountSync = useCallback(async (mode: 'register' | 'login', username: string, password: string) => {
+  const authenticateAccountSync = useCallback(async (mode: 'register' | 'login', username: string, password: string, email?: string) => {
     setAccountSyncPhase('syncing')
     setAccountSyncMessage(null)
     try {
-      const status = mode === 'register'
-        ? await accountSyncHost.register(username, password)
+      const result = mode === 'register'
+        ? await accountSyncHost.register(username, password, email)
         : await accountSyncHost.login(username, password)
+      if (result && typeof result === 'object' && 'stage' in result && result.stage === 'second_factor') {
+        setAccountSyncPhase('idle')
+        return result
+      }
+      const authenticated = result as AccountSyncStatus
+      setAccountSyncStatus(authenticated)
+      await synchronizeAccountWorkspace()
+      return authenticated
+    } catch (error) {
+      setAccountSyncPhase('error')
+      setAccountSyncMessage(error instanceof Error ? error.message : 'Account login failed.')
+      throw error
+    }
+  }, [synchronizeAccountWorkspace])
+
+  const verifyAccountSecondFactor = useCallback(async (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => {
+    setAccountSyncPhase('syncing')
+    setAccountSyncMessage(null)
+    try {
+      const status = await accountSyncHost.verifySecondFactor(challengeId, credentials)
       setAccountSyncStatus(status)
       await synchronizeAccountWorkspace()
     } catch (error) {
       setAccountSyncPhase('error')
-      setAccountSyncMessage(error instanceof Error ? error.message : 'Account login failed.')
+      setAccountSyncMessage(error instanceof Error ? error.message : 'Two-factor sign-in failed.')
       throw error
     }
   }, [synchronizeAccountWorkspace])
@@ -1427,7 +1570,7 @@ function App() {
 
   useEffect(() => {
     let stopped = false
-    let timer: ReturnType<typeof window.setTimeout> | null = null
+    let timer: number | null = null
     let consecutiveFailures = 0
 
     const schedule = (delay: number) => {
@@ -4489,7 +4632,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} deliveryTarget={deliveryTarget} setDeliveryTarget={setDeliveryTarget} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} deliveryTarget={deliveryTarget} setDeliveryTarget={setDeliveryTarget} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountVerifySecondFactor={verifyAccountSecondFactor} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -5034,8 +5177,8 @@ function ConversationPane({
       {chat.workspace && (
         <div className="chat-workspace-status" role="status" title={chat.workspace.path}>
           <ShieldCheck size={14} />
-          <span><strong>Protected branch</strong> {chat.workspace.branch}</span>
-          <small>Shared checkout unchanged</small>
+          <span><strong>Chat workspace</strong> {chat.workspace.branch}</span>
+          <small>Isolated source branch · Production status below</small>
         </div>
       )}
 
@@ -5237,9 +5380,12 @@ function deliveryProgressPosition(record: DeliveryRecord | null) {
   if (!record) return -1
   if (record.deliveryTarget === 'protected_branch') return 0
   if (record.state === 'unavailable' && !record.productionCommitSha) {
-    return ['integrating', 'retry', 'landed'].includes(record.landingState ?? '') ? 1 : 0
+    return record.landingState === 'landed'
+      ? 2
+      : ['integrating', 'retry'].includes(record.landingState ?? '') ? 1 : 0
   }
-  return ({ saved: 0, landing: 1, pushed: 2, building: 3, failed: 3, repairing: 3, unavailable: 2, production: 4 } as const)[record.state]
+  if (record.state === 'landing') return record.landingState === 'landed' ? 2 : 1
+  return ({ saved: 0, pushed: 3, building: 4, failed: 4, repairing: 5, unavailable: 3, production: 6 } as const)[record.state]
 }
 
 function deliveryProgressDetail(record: DeliveryRecord, exactCommit: string | null) {
@@ -5263,6 +5409,44 @@ function deliveryProgressDetail(record: DeliveryRecord, exactCommit: string | nu
   return `Tracking exact commit ${(record.productionCommitSha ?? record.savedSha).slice(0, 12)} through ${record.deploymentProvider ?? 'the production provider'}.`
 }
 
+const REPAIR_EVENT_LIMIT = 80
+
+function retainRepairEvents(events: ChatExecutionEvent[]) {
+  const retained = events.filter((event) => (
+    event.type === 'note' || event.type === 'notice' || event.type === 'started' || event.type === 'finished'
+  ))
+  return retained.length > REPAIR_EVENT_LIMIT ? retained.slice(retained.length - REPAIR_EVENT_LIMIT) : retained
+}
+
+/**
+ * Read-only follower for the Host job that is repairing a delivery. The panel
+ * never owns that job: unmounting or switching records only detaches the
+ * observer, so the repair keeps running in Ensync Host.
+ */
+function useRepairJobEvents(jobId: string | null) {
+  const [state, setState] = useState<{ jobId: string | null; events: ChatExecutionEvent[]; live: boolean }>({
+    jobId: null, events: [], live: false,
+  })
+  useEffect(() => {
+    if (!jobId) {
+      setState({ jobId: null, events: [], live: false })
+      return
+    }
+    const controller = new AbortController()
+    setState({ jobId, events: [], live: true })
+    void ensyncHost.observeChatJob(jobId, (event) => {
+      setState((current) => (current.jobId === jobId
+        ? { ...current, events: retainRepairEvents([...current.events, event]) }
+        : current))
+    }, controller.signal).catch(() => {}).finally(() => {
+      if (controller.signal.aborted) return
+      setState((current) => (current.jobId === jobId ? { ...current, live: false } : current))
+    })
+    return () => controller.abort()
+  }, [jobId])
+  return state
+}
+
 function DeliveryPanel({
   delivery,
   productionDelivery,
@@ -5283,6 +5467,11 @@ function DeliveryPanel({
   onOpenChange: (open: boolean) => void
 }) {
   const previousProduction = delivery && productionDelivery?.id !== delivery.id ? productionDelivery : null
+  const repairJobId = delivery?.state === 'repairing' ? delivery.repairJobId : null
+  const { events: repairEvents, live: repairLive } = useRepairJobEvents(repairJobId)
+  const repairNotes = repairEvents.filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
+  const latestRepairNote = repairNotes.at(-1) ?? null
+  const repairFinished = repairEvents.find((event): event is Extract<ChatExecutionEvent, { type: 'finished' }> => event.type === 'finished') ?? null
   const {
     prompt,
     promptIsActive,
@@ -5312,12 +5501,35 @@ function DeliveryPanel({
   const previousProductionDescription = previousProduction
     ? deliveryWorkDescription(previousProduction, messages)
     : null
-  const previousProductionCommit = previousProduction?.productionCommitSha ?? previousProduction?.savedSha ?? null
-  const deploymentLinkLabel = delivery?.state === 'production' && (delivery.deploymentDashboardUrl || delivery.deploymentUrl)
-    ? `${deliveryTracksPrompt ? `Open ${deliverySubject.toLowerCase()}’s` : 'Open earlier work’s'} verified deployment · ${(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}`
+  const previousProductionCommit = previousProduction
+    ? previousProduction.replacementCommitSha ?? previousProduction.productionCommitSha ?? previousProduction.savedSha
+    : null
+  const deliveryHasExactDeploymentLink = Boolean(
+    delivery?.state === 'production'
+    && (delivery.deploymentDashboardUrl || delivery.deploymentUrl)
+    // Older running Hosts retained the failed original deployment evidence on
+    // repaired records. Hide that stale link until the Host copies the exact
+    // successful replacement evidence rather than opening an Error page.
+    && (!delivery.replacementCommitSha || !delivery.failureCode),
+  )
+  const deploymentLinkLabel = deliveryHasExactDeploymentLink && exactCommit
+    ? `${deliveryTracksPrompt ? `Open ${deliverySubject.toLowerCase()}’s` : 'Open earlier work’s'} verified deployment · ${exactCommit.slice(0, 12)}`
     : null
   const landingStepLabel = delivery?.state === 'landing' ? deliveryLabel(delivery) : 'Landing'
-  const deliverySteps = ['Saved', landingStepLabel, 'Pushed', 'Building', 'Production']
+  const repairStepLabel = delivery?.state === 'repairing'
+    ? 'Repairing'
+    : delivery?.replacementCommitSha || (delivery?.repairAttempts ?? 0) > 0
+      ? 'Repaired'
+      : 'Repair if needed'
+  const deliverySteps = [
+    'Working', 'Saved', landingStepLabel, 'Merge verified', 'Pushed', 'Building', repairStepLabel, 'Production',
+  ]
+  const queueProgress = delivery?.queueProgress
+  const queueTargetMerged = Boolean(queueProgress?.targetLanded || (delivery && [
+    'pushed', 'building', 'failed', 'repairing', 'production',
+  ].includes(delivery.state)))
+  const queueProgressMaximum = (queueProgress?.totalBefore ?? 0) + 1
+  const queueProgressValue = (queueProgress?.mergedBefore ?? 0) + (queueTargetMerged ? 1 : 0)
   const summary = !delivery
     ? 'Delivery · not saved yet'
     : deliveryTracksPrompt
@@ -5366,12 +5578,72 @@ function DeliveryPanel({
           {delivery && <div className="delivery-panel__work" aria-label={`${deliveryScope}: ${deliveryDescription}`}>
             <span>{deliveryScope}</span>
             <strong>{deliveryDescription}</strong>
-            <small>{delivery.deliveryTarget === 'protected_branch' ? 'Protected branch only' : delivery.state === 'production' ? 'Verified production' : 'Tracked delivery'} · {(delivery.productionCommitSha ?? delivery.savedSha).slice(0, 12)}</small>
+            <small>{delivery.deliveryTarget === 'protected_branch' ? 'Protected branch only' : delivery.state === 'production' ? 'Verified production' : 'Tracked delivery'} · {(exactCommit ?? delivery.savedSha).slice(0, 12)}</small>
+          </div>}
+          {delivery && repairJobId && <div className="delivery-panel__repair" aria-label={repairLive ? 'Live repair notes' : 'Repair notes'}>
+            <span>{repairLive && <i />}{repairLive ? 'Live repair notes' : 'Repair notes'} · {delivery.repairProvider ?? 'provider'}{delivery.repairAttempts > 0 ? ` · attempt ${delivery.repairAttempts}` : ''}</span>
+            <strong title={latestRepairNote?.text}>{latestRepairNote
+              ? latestRepairNote.text.replace(/\s+/g, ' ').trim()
+              : repairFinished
+                ? repairFinished.message
+                : repairLive
+                  ? 'Waiting for the repair provider’s first note…'
+                  : 'No notes were retained for this repair.'}</strong>
+            <small>{repairFinished
+              ? `Repair run ${repairFinished.outcome}. Ensync verifies the exact replacement commit independently.`
+              : 'Provider notes and Host notices from the isolated repair worktree · hidden reasoning is never available.'}</small>
+            {repairEvents.length > 0 && <pre className="delivery-panel__repair-log" aria-live="polite" dir="auto">
+              {repairEvents.map((event, index) => {
+                if (event.type === 'note') {
+                  return <span className="execution-panel__note" key={`${event.at}-${index}`}>[{event.provider} note] {event.text}{event.redacted ? '\n[Ensync Host] Possible secret redacted from this note.' : ''}{'\n'}</span>
+                }
+                if (event.type === 'notice') {
+                  return <span className="execution-panel__host" key={`${event.at}-${index}`}>[Ensync Host] {event.message}{'\n'}</span>
+                }
+                if (event.type === 'started') {
+                  return <span className="execution-panel__command" key={`${event.at}-${index}`}># cwd: {event.cwd}{'\n'}$ {event.command}{'\n'}</span>
+                }
+                if (event.type === 'finished') {
+                  return <span className="execution-panel__host" key={`${event.at}-${index}`}>[Ensync Host] {event.message}{'\n'}</span>
+                }
+                return null
+              })}
+            </pre>}
+          </div>}
+          {queueProgress && (queueProgress.totalBefore > 0 || queueProgress.remainingAfter > 0 || queueTargetMerged) && <div
+            className="delivery-panel__queue"
+            aria-label={queueTargetMerged
+              ? `This exact saved commit is merged; ${queueProgress.remainingAfter} later commits remain in the repository queue`
+              : `${queueProgress.mergedBefore} of ${queueProgress.totalBefore} earlier saved commits merged; ${queueProgress.remainingBefore} remain ahead of this commit`}
+          >
+            <span>Merge queue</span>
+            <strong>{queueTargetMerged
+              ? 'This exact saved commit is merged'
+              : `${queueProgress.mergedBefore} of ${queueProgress.totalBefore} earlier saved commits already merged`}</strong>
+            <small>{queueProgress.activeSequence ? `Queue item ${queueProgress.activeSequence} is currently merging. ` : ''}{queueTargetMerged
+              ? queueProgress.remainingAfter === 0
+                ? 'No later saved commits are waiting behind it.'
+                : `${queueProgress.remainingAfter} later ${queueProgress.remainingAfter === 1 ? 'commit remains' : 'commits remain'} in the repository queue after it.`
+              : queueProgress.remainingBefore === 0
+                ? 'This exact saved commit is next.'
+                : `${queueProgress.remainingBefore} ${queueProgress.remainingBefore === 1 ? 'commit remains' : 'commits remain'} ahead of this exact saved commit.`}</small>
+            <div
+              className="delivery-panel__queue-progress"
+              role="progressbar"
+              aria-valuemin={0}
+              aria-valuemax={queueProgressMaximum}
+              aria-valuenow={queueProgressValue}
+            ><i style={{ width: `${(queueProgressValue / queueProgressMaximum) * 100}%` }} /></div>
           </div>}
           <div className="delivery-panel__steps" aria-label={deliverySteps.join(', ')}>
             {deliverySteps.map((step, index) => {
-              const position = deliveryProgressPosition(delivery)
-              return <span key={index} className={index <= position ? 'is-complete' : ''}><i />{step}</span>
+              // "Working" always leads the lifecycle. While the agent is still
+              // working it is the only reached step; once work is saved the
+              // pipeline stages complete behind it.
+              const complete = promptIsActive
+                ? index === 0
+                : delivery !== null && index <= deliveryProgressPosition(delivery) + 1
+              return <span key={index} className={complete ? 'is-complete' : ''}><i />{step}</span>
             })}
           </div>
           <p>{!delivery
@@ -5603,21 +5875,338 @@ function ConnectionWizard({ providers, hostOnline, hostError, hasActiveRuns, onR
   )
 }
 
-function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
+function strongPasswordIssues(username: string, password: string): string[] {
+  const issues: string[] = []
+  const normalized = password.toLowerCase()
+  if (/^(password|password1|password12|password123|123456789012|qwertyuiopasdf|letmein123456|changeme123456|iloveyou123456|adminadmin123|administrator1)$/.test(normalized)) {
+    issues.push('avoid a common or predictable password')
+  }
+  if (username.length >= 4 && normalized.includes(username.toLowerCase())) issues.push('do not reuse your username')
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((pattern) => pattern.test(password)).length
+  const unique = new Set(password).size
+  if (unique < 5) issues.push('use more distinct characters')
+  if (password.length < 16 && classes < 3) issues.push('use more letter, number, and symbol variety')
+  if (password.length >= 16 && classes < 2) issues.push('add another character type')
+  return issues
+}
+
+function generateStrongPassword(): string {
+  const lower = 'abcdefghjkmnpqrstuvwxyz'
+  const upper = 'ABCDEFGHJKMNPQRSTUVWXYZ'
+  const digits = '23456789'
+  const symbols = '!@#$%^&*()-_=+'
+  const pool = lower + upper + digits + symbols
+  const random = new Uint32Array(24)
+  crypto.getRandomValues(random)
+  let password = ''
+  password += lower[random[0] % lower.length]
+  password += upper[random[1] % upper.length]
+  password += digits[random[2] % digits.length]
+  password += symbols[random[3] % symbols.length]
+  for (let index = 4; index < 24; index += 1) password += pool[random[index] % pool.length]
+  return password
+}
+
+function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onVerifySecondFactor, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
+  const [showPassword, setShowPassword] = useState(false)
+  const [email, setEmail] = useState('')
+  const [challenge, setChallenge] = useState<SecondFactorChallenge | null>(null)
+  const [secondFactorCode, setSecondFactorCode] = useState('')
+  const [usingRecovery, setUsingRecovery] = useState(false)
+  const [recoveryInput, setRecoveryInput] = useState('')
+  const [profile, setProfile] = useState<AccountProfile | null>(null)
+  const [totp, setTotp] = useState<TotpStart | null>(null)
+  const [totpCode, setTotpCode] = useState('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null)
+  const [securityBusy, setSecurityBusy] = useState(false)
+  const [securityError, setSecurityError] = useState<string | null>(null)
+  const [authError, setAuthError] = useState<string | null>(null)
+  const [confirmingDisable, setConfirmingDisable] = useState(false)
+  const [disableCode, setDisableCode] = useState('')
+  const [syncUrlDraft, setSyncUrlDraft] = useState('')
+  const [savedSyncUrl, setSavedSyncUrl] = useState<string | null>(null)
+  const [syncUrlBusy, setSyncUrlBusy] = useState(false)
+  const [syncUrlError, setSyncUrlError] = useState<string | null>(null)
+  const [syncUrlAvailable, setSyncUrlAvailable] = useState(false)
+  const [tunnelStatus, setTunnelStatus] = useState<CloudflareTunnelStatus>({
+    configured: false,
+    hostname: null,
+    url: null,
+    binaryInstalled: false,
+    running: false,
+    pid: null,
+    quick: {
+      enabled: false,
+      running: false,
+      url: null,
+      pid: null,
+    },
+  })
+  const [tunnelAvailable, setTunnelAvailable] = useState(false)
+  const [tunnelDomain, setTunnelDomain] = useState('')
+  const [tunnelHostname, setTunnelHostname] = useState('')
+  const [tunnelApiToken, setTunnelApiToken] = useState('')
+  const [tunnelBusy, setTunnelBusy] = useState(false)
+  const [tunnelError, setTunnelError] = useState<string | null>(null)
+  const [showAdvancedTunnel, setShowAdvancedTunnel] = useState(false)
   const busy = phase === 'checking' || phase === 'syncing'
   const lastSynced = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString()
     : 'Not synced yet'
+  const connectSyncUrl = (tunnelStatus.quick.running && tunnelStatus.quick.url)
+    ?? (tunnelStatus.running && tunnelStatus.url)
+    ?? (status.serviceUrl?.startsWith('https://') ? status.serviceUrl : null)
+  const mobileConnectUrl = connectSyncUrl
+    ? `${MOBILE_PWA_URL}?sync=${encodeURIComponent(connectSyncUrl)}${status.authenticated && status.username ? `&user=${encodeURIComponent(status.username)}` : ''}`
+    : null
+  const passwordIssues = password.length >= 12 ? strongPasswordIssues(username.trim(), password) : []
+  const passwordReady = password.length >= 12 && username.trim().length >= 3 && passwordIssues.length === 0
+
+  const loadProfile = async () => {
+    try {
+      setProfile(await accountSyncHost.account())
+    } catch {
+      setProfile(null)
+    }
+  }
+
+  useEffect(() => {
+    if (status.authenticated) void loadProfile()
+    else {
+      setProfile(null)
+      setChallenge(null)
+      setTotp(null)
+      setRecoveryCodes(null)
+      setPassword('')
+    }
+  }, [status.authenticated, status.username])
+
+  useEffect(() => {
+    if (!syncServiceUrlPreferenceAvailable()) return
+    setSyncUrlAvailable(true)
+    let cancelled = false
+    void readSyncServiceUrl().then((value) => {
+      if (cancelled) return
+      setSavedSyncUrl(value)
+      setSyncUrlDraft(value ?? '')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const saveSyncServiceUrl = async () => {
+    setSyncUrlBusy(true)
+    setSyncUrlError(null)
+    try {
+      const saved = await writeSyncServiceUrl(syncUrlDraft)
+      setSavedSyncUrl(saved)
+      setSyncUrlDraft(saved ?? '')
+    } catch (error) {
+      setSyncUrlError(error instanceof Error ? error.message : 'Could not save the Sync service URL.')
+    } finally {
+      setSyncUrlBusy(false)
+    }
+  }
+
+  const clearSyncServiceUrl = async () => {
+    setSyncUrlBusy(true)
+    setSyncUrlError(null)
+    try {
+      const cleared = await writeSyncServiceUrl('')
+      setSavedSyncUrl(cleared)
+      setSyncUrlDraft('')
+    } catch (error) {
+      setSyncUrlError(error instanceof Error ? error.message : 'Could not clear the Sync service URL.')
+    } finally {
+      setSyncUrlBusy(false)
+    }
+  }
+
+  const refreshTunnelStatus = async () => {
+    if (!cloudflareTunnelAvailable()) {
+      setTunnelAvailable(false)
+      return false
+    }
+    setTunnelAvailable(true)
+    setTunnelStatus(await readCloudflareTunnelStatus())
+    return true
+  }
+
+  useEffect(() => {
+    void refreshTunnelStatus()
+    // The quick tunnel is republished asynchronously when the app starts, so a
+    // single snapshot can land before cloudflared has reported its URL. Poll
+    // until a published URL is known so the connect QR does not stay hidden.
+    const timer = window.setInterval(() => {
+      void refreshTunnelStatus()
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [])
+
+  const tunnelSetup = async () => {
+    setTunnelBusy(true)
+    setTunnelError(null)
+    try {
+      const result = await setupCloudflareTunnel({
+        domain: tunnelDomain.trim(),
+        hostname: tunnelHostname.trim(),
+        apiToken: tunnelApiToken,
+      })
+      if (result.ok && result.status) {
+        setTunnelStatus(result.status)
+        setTunnelApiToken('')
+      } else {
+        setTunnelError(result.error ?? 'Could not enable phone access.')
+      }
+    } finally {
+      setTunnelBusy(false)
+    }
+  }
+
+  const tunnelAction = async (action: () => Promise<CloudflareTunnelResult>) => {
+    setTunnelBusy(true)
+    setTunnelError(null)
+    try {
+      const result = await action()
+      if (result.ok && result.status) setTunnelStatus(result.status)
+      else if (!result.ok) setTunnelError(result.error ?? 'The phone connection action failed.')
+    } finally {
+      setTunnelBusy(false)
+    }
+  }
+
+  const enableQuickTunnel = async () => {
+    setTunnelBusy(true)
+    setTunnelError(null)
+    try {
+      const result = await startCloudflareQuickTunnel()
+      if (result.ok && result.status) {
+        setTunnelStatus(result.status)
+      } else {
+        setTunnelError(result.error ?? 'Could not publish phone access. Is your computer online?')
+      }
+    } finally {
+      setTunnelBusy(false)
+    }
+  }
+
+  const stopQuickTunnel = async () => {
+    setTunnelBusy(true)
+    setTunnelError(null)
+    try {
+      const result = await stopCloudflareQuickTunnel()
+      if (result.ok && result.status) setTunnelStatus(result.status)
+      else if (!result.ok) setTunnelError(result.error ?? 'Could not stop phone access.')
+    } finally {
+      setTunnelBusy(false)
+    }
+  }
 
   const authenticate = async (mode: 'register' | 'login') => {
-    if (busy || !username.trim() || password.length < 12) return
+    if (busy) return
+    setSecurityError(null)
+    setAuthError(null)
+    const name = username.trim()
+    if (name.length < 3) {
+      setAuthError('Enter a short handle or your email address.')
+      return
+    }
+    if (password.length < 12) {
+      setAuthError('Use a password of at least 12 characters.')
+      return
+    }
+    if (mode === 'register' && passwordIssues.length > 0) {
+      setAuthError('That password needs more variety — use “Generate strong password” or add another character type.')
+      return
+    }
     try {
-      await onAuthenticate(mode, username.trim(), password)
+      const result = await onAuthenticate(mode, username.trim(), password, mode === 'register' ? email.trim() || undefined : undefined)
+      if (result && typeof result === 'object' && 'stage' in result && result.stage === 'second_factor') {
+        setChallenge(result)
+        return
+      }
       setPassword('')
+      setEmail('')
+      setProfile(null)
     } catch {
       // The parent owns the durable, user-visible error state.
+    }
+  }
+
+  const submitSecondFactor = async (kind: 'code' | 'recovery') => {
+    if (!challenge || busy) return
+    setSecurityError(null)
+    try {
+      await onVerifySecondFactor(challenge.challengeId, kind === 'code' ? { code: secondFactorCode.trim() } : { recoveryCode: recoveryInput.trim() })
+      setChallenge(null)
+      setSecondFactorCode('')
+      setRecoveryInput('')
+      setUsingRecovery(false)
+      setPassword('')
+    } catch {
+      // Parent owns the visible error.
+    }
+  }
+
+  const startTotp = async () => {
+    setSecurityBusy(true)
+    setSecurityError(null)
+    try {
+      setTotp(await accountSyncHost.startTotp())
+      setTotpCode('')
+      setRecoveryCodes(null)
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : 'Two-factor setup failed.')
+    } finally {
+      setSecurityBusy(false)
+    }
+  }
+
+  const confirmTotp = async () => {
+    if (!totp || !/^\d{6}$/.test(totpCode.trim())) return
+    setSecurityBusy(true)
+    setSecurityError(null)
+    try {
+      const result = await accountSyncHost.confirmTotp(totp.challengeId, totpCode.trim())
+      setRecoveryCodes(result.recoveryCodes)
+      setTotp(null)
+      setTotpCode('')
+      await loadProfile()
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : 'Two-factor confirmation failed.')
+    } finally {
+      setSecurityBusy(false)
+    }
+  }
+
+  const disableTotp = async (credentials: { code?: string; recoveryCode?: string } = {}) => {
+    setSecurityBusy(true)
+    setSecurityError(null)
+    try {
+      await accountSyncHost.disableTotp(credentials)
+      setConfirmingDisable(false)
+      setDisableCode('')
+      await loadProfile()
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : 'Could not turn two-factor off.')
+    } finally {
+      setSecurityBusy(false)
+    }
+  }
+
+  const saveEmail = async () => {
+    setSecurityBusy(true)
+    setSecurityError(null)
+    try {
+      await accountSyncHost.setEmail(email.trim())
+      await loadProfile()
+    } catch (error) {
+      setSecurityError(error instanceof Error ? error.message : 'Could not save the recovery email.')
+    } finally {
+      setSecurityBusy(false)
     }
   }
 
@@ -5627,6 +6216,115 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
         <div><h3>Account &amp; chat sync</h3><p>Use one username to keep your conversation history available across your computers.</p></div>
         {status.authenticated && <span className="account-sync-badge"><i /> SYNC ON</span>}
       </div>
+
+      {status.configured && !mobileConnectUrl && (
+        <div className="account-sync-connect-phone account-sync-connect-phone--notice">
+          <div className="account-sync-connect-phone__copy"><Smartphone size={15} /><span><strong>Phone sync is ready to turn on</strong><small>Press “Enable phone access” below and Ensync will publish a link for your phone — no account or setup needed.</small></span></div>
+        </div>
+      )}
+      {mobileConnectUrl && (
+        <div className="account-sync-connect-phone">
+          <div className="account-sync-connect-phone__copy"><Smartphone size={15} /><span><strong>Connect your phone</strong><small>Scan the code, or copy the link, to open the phone app with the Sync URL already filled in.</small></span></div>
+          <ConnectPhoneQr url={mobileConnectUrl} />
+          <CopyTextButton text={mobileConnectUrl} label="Copy connect link" />
+        </div>
+      )}
+
+      {syncUrlAvailable && (
+        <div className="account-sync-shared-service">
+          <div className="account-sync-shared-service__head">
+            <Globe size={15} />
+            <span><strong>Sync service URL</strong><small>Point Ensync at a shared HTTPS Sync service (for example a tunnel or a self-hosted server) so your phone can reach it. Takes effect after Ensync is fully restarted.</small></span>
+          </div>
+          <div className="account-sync-shared-service__row">
+            <input value={syncUrlDraft} onChange={(event) => { setSyncUrlDraft(event.target.value); setSyncUrlError(null) }} type="text" placeholder={savedSyncUrl ?? 'https://sync.your-domain.com'} aria-label="Sync service URL" autoComplete="off" spellCheck={false} disabled={syncUrlBusy} />
+            <button type="button" className="button button--ghost" onClick={() => void saveSyncServiceUrl()} disabled={syncUrlBusy}>{syncUrlBusy ? 'Saving…' : 'Save'}</button>
+            {savedSyncUrl && <button type="button" className="button button--ghost" onClick={() => void clearSyncServiceUrl()} disabled={syncUrlBusy}>Clear</button>}
+          </div>
+          {savedSyncUrl && <small className="account-sync-shared-service__applied">Currently set to {savedSyncUrl}. Close Ensync completely and reopen it for the change to apply.</small>}
+          {syncUrlError && <p className="account-sync-form__error" role="alert">{syncUrlError}</p>}
+        </div>
+      )}
+
+      {tunnelAvailable && (
+        <div className="account-sync-tunnel">
+          <div className="account-sync-tunnel__head">
+            <Radio size={15} />
+            <span><strong>{tunnelStatus.quick.running ? 'Phone access is on' : tunnelStatus.configured ? 'Stable phone access' : 'Phone access'}</strong><small>{tunnelStatus.quick.running
+              ? `Scan or copy the link above. It points straight at this computer's Sync service.`
+              : tunnelStatus.configured
+                ? 'A named Cloudflare Tunnel publishes this computer\u2019s Sync service over HTTPS so your phone can reach it anywhere.'
+                : 'One click gives this computer a public link for your phone. No account or setup needed.'}</small></span>
+          </div>
+
+          {!tunnelStatus.configured && !tunnelStatus.quick.running && (
+            <div className="account-sync-tunnel__quick">
+              <p><span className="account-sync-tunnel__pill"><i /> Automatic</span><small>Ensync downloads the official Cloudflare connector and opens a temporary link in a few seconds. The link changes each time it is stopped or your computer restarts.</small></p>
+              <button type="button" className="button button--primary" onClick={() => void enableQuickTunnel()} disabled={tunnelBusy}>
+                {tunnelBusy ? 'Publishing…' : 'Enable phone access'}
+              </button>
+              <button type="button" className="button button--ghost" onClick={() => setShowAdvancedTunnel((value) => !value)}>
+                {showAdvancedTunnel ? 'Hide' : 'Use my own domain for a stable link'} <ChevronDown size={13} style={{ transform: showAdvancedTunnel ? 'rotate(180deg)' : undefined }} />
+              </button>
+            </div>
+          )}
+
+          {tunnelStatus.quick.running && (
+            <div className="account-sync-tunnel__configured">
+              <div className="account-sync-tunnel__status">
+                <span className="account-sync-tunnel__pill account-sync-tunnel__pill--on"><i /> Published</span>
+                <code>{tunnelStatus.quick.url}</code>
+                <small>This temporary link is live now. For a permanent link, stop it and choose “Use my own domain” below.</small>
+              </div>
+              <div className="account-sync-tunnel__actions">
+                <button type="button" className="button button--ghost" onClick={() => void stopQuickTunnel()} disabled={tunnelBusy}><Power size={14} /> {tunnelBusy ? 'Stopping…' : 'Stop'}</button>
+                <button type="button" className="button button--ghost" onClick={() => setShowAdvancedTunnel((value) => !value)}>Use my own domain</button>
+              </div>
+            </div>
+          )}
+
+          {tunnelStatus.configured && !tunnelStatus.quick.running && (
+            <div className="account-sync-tunnel__configured">
+              <div className="account-sync-tunnel__status">
+                <span className={`account-sync-tunnel__pill ${tunnelStatus.running ? 'account-sync-tunnel__pill--on' : ''}`}><i /> {tunnelStatus.running ? 'Published' : 'Stopped'}</span>
+                <code>{tunnelStatus.url ?? tunnelStatus.hostname}</code>
+                {tunnelStatus.running && <small>Your phone can use {tunnelStatus.url} in the Sync URL field.</small>}
+              </div>
+              <div className="account-sync-tunnel__actions">
+                {tunnelStatus.running ? (
+                  <button type="button" className="button button--ghost" onClick={() => void tunnelAction(stopCloudflareTunnel)} disabled={tunnelBusy}><Power size={14} /> Stop</button>
+                ) : (
+                  <button type="button" className="button button--primary" onClick={() => void tunnelAction(startCloudflareTunnel)} disabled={tunnelBusy}><Power size={14} /> {tunnelBusy ? 'Publishing…' : 'Publish'}</button>
+                )}
+                <button type="button" className="button button--ghost" onClick={() => void tunnelAction(clearCloudflareTunnel)} disabled={tunnelBusy}><Trash2 size={14} /> Forget tunnel</button>
+              </div>
+            </div>
+          )}
+
+          {showAdvancedTunnel && !tunnelStatus.quick.running && (
+            <div className="account-sync-tunnel__setup">
+              <p className="account-sync-tunnel__setup-note">A permanent link uses your own Cloudflare domain. You will need an API token with <strong>Zone Read</strong>, <strong>Zone DNS Edit</strong>, and <strong>Cloudflare Tunnel Edit</strong>.</p>
+              <div className="account-sync-tunnel__row">
+                <input value={tunnelDomain} onChange={(event) => { setTunnelDomain(event.target.value); setTunnelError(null) }} type="text" placeholder="example.com" aria-label="Cloudflare domain" autoComplete="off" spellCheck={false} disabled={tunnelBusy} />
+                <span className="account-sync-tunnel__label">Cloudflare domain</span>
+              </div>
+              <div className="account-sync-tunnel__row">
+                <input value={tunnelHostname} onChange={(event) => { setTunnelHostname(event.target.value); setTunnelError(null) }} type="text" placeholder="phone.example.com" aria-label="Tunnel hostname" autoComplete="off" spellCheck={false} disabled={tunnelBusy} />
+                <span className="account-sync-tunnel__label">Subdomain to publish</span>
+              </div>
+              <div className="account-sync-tunnel__row">
+                <input value={tunnelApiToken} onChange={(event) => { setTunnelApiToken(event.target.value); setTunnelError(null) }} type="password" placeholder="Cloudflare API token" aria-label="Cloudflare API token" autoComplete="off" spellCheck={false} disabled={tunnelBusy} />
+                <span className="account-sync-tunnel__label">API token · stored encrypted on this computer</span>
+              </div>
+              <button type="button" className="button button--primary" onClick={() => void tunnelSetup()} disabled={tunnelBusy || !tunnelDomain.trim() || !tunnelHostname.trim() || !tunnelApiToken.trim()}>
+                {tunnelBusy ? 'Setting up…' : 'Enable stable phone access'}
+              </button>
+            </div>
+          )}
+          {tunnelError && <p className="account-sync-form__error" role="alert">{tunnelError}</p>}
+        </div>
+      )}
+
       {phase === 'checking' ? (
         <div className="account-sync-unavailable"><RotateCw className="spin" size={17} /><span><strong>Checking account sync</strong><small>Asking the local Ensync Host for its configured service.</small></span></div>
       ) : !status.configured ? (
@@ -5639,13 +6337,99 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
             <button type="button" className="button button--ghost" onClick={() => void onSync().catch(() => {})} disabled={busy}><RotateCw className={busy ? 'spin' : ''} size={14} /> {busy ? 'Syncing…' : 'Sync now'}</button>
             <button type="button" className="button button--ghost" onClick={() => void onLogout()} disabled={busy}><LogOut size={14} /> Sign out</button>
           </div>
-          <small className="account-sync-session-note">For now, login stays only in Ensync Host memory. Restarting the Host requires signing in again; synchronized chats remain in your account.</small>
+
+          {profile && (
+            <div className="account-security">
+              <div className="account-security__row">
+                <KeyRound size={15} />
+                <span><strong>Two-factor authentication</strong><small>{profile.twoFactorEnabled ? `On · ${profile.recoveryRemaining} recovery ${profile.recoveryRemaining === 1 ? 'code' : 'codes'} left` : 'Off · protect your account with an authenticator code'}</small></span>
+                {profile.twoFactorEnabled ? (
+                  confirmingDisable ? (
+                    <div className="account-security__totp-confirm">
+                      <input value={disableCode} onChange={(event) => setDisableCode(event.target.value)} inputMode="numeric" maxLength={6} placeholder="code" aria-label="Authenticator code to turn off two-factor" disabled={securityBusy} />
+                      <button type="button" className="button button--ghost" onClick={() => { setConfirmingDisable(false); setDisableCode('') }} disabled={securityBusy}>Cancel</button>
+                      <button type="button" className="button button--primary" onClick={() => void disableTotp({ code: disableCode.trim() })} disabled={securityBusy || !/^\d{6}$/.test(disableCode.trim())}>Confirm</button>
+                    </div>
+                  ) : (
+                    <button type="button" className="button button--ghost" onClick={() => setConfirmingDisable(true)}>Turn off</button>
+                  )
+                ) : (
+                  <button type="button" className="button button--primary" onClick={() => void startTotp()} disabled={securityBusy}>{securityBusy && totp === null ? 'Starting…' : 'Turn on'}</button>
+                )}
+              </div>
+
+              {totp && (
+                <div className="account-security__totp">
+                  <p><ShieldCheck size={13} /> Scan this with your authenticator app, then enter the 6-digit code.</p>
+                  <div className="account-security__totp-scan"><ConnectPhoneQr url={totp.uri} /><span><code>{totp.uri}</code><small>Use any authenticator (Google Authenticator, 1Password, Authy, …).</small></span></div>
+                  <div className="account-security__totp-confirm">
+                    <input value={totpCode} onChange={(event) => setTotpCode(event.target.value)} inputMode="numeric" maxLength={6} placeholder="123456" aria-label="Authenticator code" disabled={securityBusy} />
+                    <button type="button" className="button button--primary" onClick={() => void confirmTotp()} disabled={securityBusy || !/^\d{6}$/.test(totpCode.trim())}>Confirm</button>
+                  </div>
+                </div>
+              )}
+
+              {recoveryCodes && (
+                <div className="account-security__recovery">
+                  <p><ShieldAlert size={13} /> Store these recovery codes somewhere safe. Each works once to sign in if you lose your authenticator.</p>
+                  <div className="account-security__codes">{recoveryCodes.map((code) => <code key={code}>{code}</code>)}</div>
+                  <CopyTextButton text={recoveryCodes.join('\n')} label="Copy recovery codes" />
+                  <button type="button" className="button button--ghost" onClick={() => setRecoveryCodes(null)}>Done</button>
+                </div>
+              )}
+
+              <div className="account-security__row">
+                <Mail size={15} />
+                <span><strong>Recovery email</strong><small>{profile.email ?? 'Optional · lets a reset link find you on a shared Sync service'}</small></span>
+                <div className="account-security__email">
+                  <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder={profile.email ?? 'you@example.com'} type="email" autoComplete="email" disabled={securityBusy} />
+                  <button type="button" className="button button--ghost" onClick={() => void saveEmail()} disabled={securityBusy}>Save</button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {securityError && <div className="connection-error" role="alert">{securityError}</div>}
+          <small className="account-sync-session-note">Two-factor and recovery protect sign-in. Your conversation encryption key still comes from your password, so keep that password: a reset restores access, not old encrypted chats.</small>
         </div>
+      ) : challenge ? (
+        <form className="account-sync-form account-sync-form--second-factor" onSubmit={(event) => { event.preventDefault(); void submitSecondFactor(usingRecovery ? 'recovery' : 'code') }}>
+          <div className="account-sync-form__factor"><ShieldCheck size={16} /><span><strong>Two-factor sign-in</strong><small>Enter the code from your authenticator app, or use a recovery code.</small></span></div>
+          {usingRecovery ? (
+            <label><span>Recovery code</span><input value={recoveryInput} onChange={(event) => setRecoveryInput(event.target.value)} autoComplete="off" placeholder="XXXX-XXXX" disabled={busy} /></label>
+          ) : (
+            <label><span>Authenticator code</span><input value={secondFactorCode} onChange={(event) => setSecondFactorCode(event.target.value)} inputMode="numeric" maxLength={6} placeholder="123456" autoFocus disabled={busy} /></label>
+          )}
+          <div className="account-sync-form__actions">
+            <button type="button" className="button button--ghost" onClick={() => { setChallenge(null); setUsingRecovery(false); setSecondFactorCode(''); setRecoveryInput('') }}>Back</button>
+            {challenge.recoveryAvailable && <button type="button" className="button button--ghost" onClick={() => setUsingRecovery((value) => !value)}>{usingRecovery ? 'Use code' : 'Use recovery code'}</button>}
+            <button type="submit" className="button button--primary" disabled={busy || (usingRecovery ? recoveryInput.trim().length < 4 : !/^\d{6}$/.test(secondFactorCode.trim()))}>{busy ? 'Verifying…' : 'Verify'}</button>
+          </div>
+        </form>
       ) : (
         <form className="account-sync-form" onSubmit={(event) => { event.preventDefault(); void authenticate('login') }}>
-          <label><span>Username</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" minLength={3} maxLength={32} placeholder="your-name" disabled={busy} /></label>
-          <label><span>Password</span><input value={password} onChange={(event) => setPassword(event.target.value)} type="password" autoComplete="current-password" minLength={12} maxLength={256} placeholder="At least 12 characters" disabled={busy} /></label>
-          <div className="account-sync-form__actions"><button type="button" className="button button--ghost" onClick={() => void authenticate('register')} disabled={busy || !username.trim() || password.length < 12}>Create account</button><button type="submit" className="button button--primary" disabled={busy || !username.trim() || password.length < 12}>{busy ? 'Connecting…' : 'Sign in & sync'}</button></div>
+          <label><span>Username or email</span><input value={username} onChange={(event) => { setUsername(event.target.value); setAuthError(null) }} autoComplete="username" minLength={3} maxLength={254} placeholder="your-name or you@example.com" disabled={busy} /></label>
+          <label>
+            <span>Password</span>
+            <div className="account-sync-form__password">
+              <input value={password} onChange={(event) => { setPassword(event.target.value); setAuthError(null) }} type={showPassword ? 'text' : 'password'} autoComplete="current-password" minLength={12} maxLength={256} placeholder="At least 12 characters" disabled={busy} />
+              <button type="button" className="account-sync-form__reveal" onClick={() => setShowPassword((value) => !value)} aria-label={showPassword ? 'Hide password' : 'Show password'} title={showPassword ? 'Hide password' : 'Show password'} tabIndex={-1}>{showPassword ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            </div>
+          </label>
+          {passwordIssues.length > 0 && <p className="account-sync-form__strength">{passwordIssues.map((issue) => <span key={issue}>{issue}</span>)}</p>}
+          {!passwordReady && (
+            <p className="account-sync-form__strength">
+              {username.trim().length < 3 && <span>enter a handle or an email address</span>}
+              {username.trim().length >= 3 && password.length < 12 && <span>use at least 12 characters</span>}
+            </p>
+          )}
+          {passwordReady && <p className="account-sync-form__strength account-sync-form__strength--ok">Strong password.</p>}
+          <div className="account-sync-form__actions">
+            <button type="button" className="button button--ghost" onClick={() => { const strong = generateStrongPassword(); setPassword(strong); void navigator.clipboard?.writeText(strong).catch(() => {}) }} title="Generate and copy a strong password">Generate strong password</button>
+            <button type="button" className="button button--ghost" onClick={() => void authenticate('register')} disabled={busy}>{busy ? 'Connecting…' : 'Create account'}</button>
+            <button type="submit" className="button button--primary" disabled={busy}>{busy ? 'Connecting…' : 'Sign in & sync'}</button>
+          </div>
+          {authError && <p className="account-sync-form__error" role="alert">{authError}</p>}
           <p><LockKeyhole size={13} /> Your password is used for account login and local encryption-key derivation. It is never stored in the conversation snapshot.</p>
         </form>
       )}
@@ -5695,7 +6479,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, deliveryTarget, setDeliveryTarget, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; deliveryTarget: DeliveryTarget; setDeliveryTarget: (value: DeliveryTarget) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, deliveryTarget, setDeliveryTarget, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountVerifySecondFactor, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; deliveryTarget: DeliveryTarget; setDeliveryTarget: (value: DeliveryTarget) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onAccountVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -5718,7 +6502,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
       <div className="modal settings-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal__header compact"><div><span className="eyebrow">PREFERENCES</span><h2>Make Ensync yours</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>
         <div className="settings-body">
-          <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onLogout={onAccountLogout} onSync={onAccountSync} />
+          <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onVerifySecondFactor={onAccountVerifySecondFactor} onLogout={onAccountLogout} onSync={onAccountSync} />
           <section className="setting-section workspace-layout-setting">
             <div className="setting-title"><div><h3>New conversation view</h3><p>Choose whether open conversations share the screen or use one workspace.</p></div></div>
             <div className="choice-row layout-choice-row" role="radiogroup" aria-label="New conversation view">
@@ -5740,6 +6524,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
           <UIVisibilityPreferences />
           <NativeUpdatePreferences />
           <AgentUpdateSettings preferences={agentUpdatePreferences} providers={installedAgentProviders} onModeChange={setAgentUpdateMode} onReview={onReviewAgentUpdates} />
+          <McpServerSettings />
           <section className="setting-section production-delivery-setting">
             <div className="setting-title"><div><h3>Delivery destination</h3><p>Choose what Ensync does with future successful local prompts after saving their exact commit. Work already saved keeps its original destination.</p></div></div>
             <div className="choice-row" role="radiogroup" aria-label="Delivery destination">
@@ -6030,6 +6815,7 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
     if (provider.usageKind === 'session_only') return 'Only per-run usage is available.'
     if (provider.usageKind === 'unavailable') return 'No machine-readable quota data.'
     if (provider.chatExecution === 'supported') return 'CLI quota data was not returned.'
+    if (provider.usageDetails.length > 0) return 'CLI reported usage details, not a subscription percentage.'
     return 'No verified non-consuming quota probe.'
   }
 
@@ -6051,6 +6837,13 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
     }
   }
 
+  // Claude's five-hour session window is the immediate gate for the next turn,
+  // so it headlines the card while routing keeps the greatest provider-wide
+  // figure (`provider.usage`). Providers without a session reading fall back to
+  // the routing percentage.
+  const shownUsage = (provider: Provider) => (provider.sessionUsedPercent ?? provider.usage)
+  const sessionReported = (provider: Provider) => provider.sessionUsedPercent !== null && provider.sessionUsedPercent !== undefined
+
   return (
     <div className="modal-backdrop" onMouseDown={onClose}>
       <div className="modal usage-modal" onMouseDown={(event) => event.stopPropagation()}>
@@ -6059,18 +6852,18 @@ function UsageDashboard({ providers, modelTelemetry, hostOnline, onRefresh, auto
         <div className="usage-modal__body">
           <div className="plan-cards">
             {providers.map((provider) => (
-              <div className={`plan-card ${provider.usage !== null && provider.usage >= 90 ? 'plan-card--warning' : ''}`} key={provider.id}>
+              <div className={`plan-card ${shownUsage(provider) !== null && shownUsage(provider)! >= 90 ? 'plan-card--warning' : ''}`} key={provider.id}>
                 <div className="plan-card__head"><ProviderMark provider={provider} /><div><strong>{provider.name}</strong><small>{providerMeta(provider)}</small></div><span className={`source-badge ${provider.usageSource}`}>{provider.usageSource === 'cli' ? 'CLI' : 'No CLI data'}</span></div>
                 <div className="plan-usage">{provider.usage !== null
-                  ? <><strong>{provider.usage}%</strong><span>of current window used</span></>
+                  ? <><strong>{shownUsage(provider)}%</strong><span>{sessionReported(provider) ? 'of current session used' : 'of current window used'}</span></>
                   : provider.usageKind === 'local_runtime'
                     ? <><strong>{provider.usageDetails.find((item) => item.label === 'Installed models')?.value ?? '—'}</strong><span>local models installed</span></>
                     : provider.usageKind === 'session_only'
                       ? <><strong>Per run</strong><span>session totals only</span></>
                       : <><strong>—</strong><span>quota unavailable</span></>}</div>
-                <div className={`plan-meter ${provider.usage === null ? 'plan-meter--unknown' : ''}`}>{provider.usage !== null && <i style={{ width: `${provider.usage}%`, background: provider.color }} />}</div>
+                <div className={`plan-meter ${provider.usage === null ? 'plan-meter--unknown' : ''}`}>{provider.usage !== null && <i style={{ width: `${shownUsage(provider)}%`, background: provider.color }} />}</div>
                 {provider.usageDetails.length > 0 && <dl className="usage-details">{provider.usageDetails.map((item) => <div key={item.label}><dt>{item.label}</dt><dd>{item.value}</dd></div>)}</dl>}
-                <div className="plan-card__foot"><span>{providerResetText(provider) ? <strong>{providerResetText(provider)}</strong> : 'Reset not reported'}</span><span>{provider.routeKind === 'local' ? (provider.installed ? 'Local runtime' : 'Not installed') : provider.connected ? 'Authenticated' : provider.installed ? provider.authenticationState === 'not_authenticated' ? 'Not authenticated' : 'Login not checked' : 'Not installed'}</span></div>
+                <div className="plan-card__foot"><span>{sessionReported(provider) && provider.sessionResetLabel ? <strong>{`Current session resets ${provider.sessionResetLabel}`}</strong> : providerResetText(provider) ? <strong>{providerResetText(provider)}</strong> : 'Reset not reported'}</span><span>{provider.routeKind === 'local' ? (provider.installed ? 'Local runtime' : 'Not installed') : provider.connected ? 'Authenticated' : provider.installed ? provider.authenticationState === 'not_authenticated' ? 'Not authenticated' : 'Login not checked' : 'Not installed'}</span></div>
                 {provider.usage === null
                   ? <p className="usage-unavailable-reason" title={provider.usageReason}>{compactUsageReason(provider)}</p>
                   : provider.usageStale && <p className="usage-unavailable-reason" title={provider.usageReason}>{staleUsageNote(provider)}</p>}

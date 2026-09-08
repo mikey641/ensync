@@ -661,6 +661,37 @@ kbd {
   font-size: var(--font-label);
 }
 
+/* Account sync, Auto Context, usage telemetry, and live execution output. */
+.account-sync-badge,
+.account-sync-profile small,
+.account-sync-encryption,
+.account-sync-actions > p,
+.account-sync-session-note,
+.account-sync-message,
+.account-sync-connect-phone__copy small,
+.account-sync-unavailable small,
+.account-sync-form label > span,
+.auto-context-summary small,
+.official-install-link small,
+.model-usage-badge,
+.provider-menu__empty-models,
+.model-telemetry__row dt {
+  font-size: var(--font-label);
+}
+
+.account-sync-form input,
+.account-sync-profile strong,
+.account-sync-connect-phone__copy strong,
+.account-sync-unavailable strong,
+.auto-context-summary strong,
+.official-install-link strong {
+  font-size: var(--font-ui);
+}
+
+.execution-panel__output {
+  font-size: var(--font-ui);
+}
+
 .message p,
 .composer textarea,
 .empty-conversation > p,
@@ -1262,7 +1293,7 @@ kbd {
 
 .native-update-build-source code {
   overflow-wrap: anywhere;
-  font-size: 0.78rem;
+  font-size: var(--font-label);
 }
 
 .native-update-status {
@@ -2172,7 +2203,7 @@ kbd {
 }
 
 .composer {
-  width: min(760px, 100%);
+  width: min(720px, 100%);
   border-color: var(--border-strong);
   border-radius: 25px;
   background: var(--surface-elevated);

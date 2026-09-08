@@ -131,6 +131,17 @@ function integrator(client, options = {}) {
   })
 }
 
+test('conflict resolution has no wall-clock deadline by default', () => {
+  const landingIntegrator = new LandingIntegrator({
+    client: {
+      async create() {},
+      async gitEnvironment() {},
+    },
+  })
+
+  assert.equal(landingIntegrator.resolutionTimeoutMs, null)
+})
+
 test('one immutable item lands and leaves its source chat worktree untouched', async (context) => {
   const current = await fixture(context)
   const source = await branchCommit(current, 'ensync/chat-one', { 'feature.txt': 'one\n' })
@@ -451,6 +462,111 @@ test('a conflict resolver lands only after conflicts and markers are gone', asyn
   assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
   assert.deepEqual(resolverCalls, [['README.md']])
   assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# combined resolution\n')
+})
+
+test('saved whitespace outside the conflict set cannot make a verified resolution impossible', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-saved-whitespace', {
+    'README.md': '# chat version\n',
+    'saved-spacing.txt': 'preserve exact saved bytes\n\n',
+  })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  await assert.rejects(
+    execFileAsync('git', ['diff', '--check', `main...${conflicting.savedSha}`], {
+      cwd: current.repositoryPath,
+    }),
+    (error) => /new blank line at EOF/i.test(error?.stdout ?? ''),
+  )
+
+  const result = await integrator(current.nativeClient).integrate([item(current, conflicting, 1)], {
+    resolveConflict: async (details) => {
+      await writeFile(join(details.worktreePath, 'README.md'), '# combined resolution\n')
+    },
+  })
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.equal(await readFile(join(current.repositoryPath, 'saved-spacing.txt'), 'utf8'), 'preserve exact saved bytes\n\n')
+})
+
+test('an abandoned Ensync train can reuse its exact verified conflict resolution', async (context) => {
+  const current = await fixture(context)
+  await writeFile(join(current.repositoryPath, 'stable.txt'), 'stable before\n')
+  await git(current.repositoryPath, ['add', 'stable.txt'])
+  await git(current.repositoryPath, ['commit', '-m', 'add stable file'])
+  const conflicting = await branchCommit(current, 'ensync/chat-recover-resolution', {
+    'README.md': '# chat version\n',
+  })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const prior = await current.nativeClient.create({
+    repositoryPath: current.repositoryPath,
+    branch: 'ensync/landing-trains/abandoned-resolution',
+    base: 'main',
+  })
+  await assert.rejects(execFileAsync('git', ['merge', '--no-ff', conflicting.savedSha], {
+    cwd: prior.path,
+  }))
+  await writeFile(join(prior.path, 'README.md'), '# previously verified resolution\n')
+  await git(prior.path, ['add', 'README.md'])
+  await git(prior.path, ['commit', '--no-verify', '-m', 'prior resolved merge'])
+  await writeFile(join(current.repositoryPath, 'stable.txt'), 'stable after\n')
+  await git(current.repositoryPath, ['add', 'stable.txt'])
+  await git(current.repositoryPath, ['commit', '-m', 'advance an unrelated path'])
+
+  let resolverCalls = 0
+  const result = await integrator(current.nativeClient).integrate([item(current, conflicting, 1)], {
+    resolveConflict: async () => { resolverCalls += 1 },
+  })
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.equal(resolverCalls, 0)
+  assert.equal(
+    await readFile(join(current.repositoryPath, 'README.md'), 'utf8'),
+    '# previously verified resolution\n',
+  )
+  assert.equal(await readFile(join(current.repositoryPath, 'stable.txt'), 'utf8'), 'stable after\n')
+})
+
+test('a reset rejected train reuses only its conflict-file resolution from the reflog', async (context) => {
+  const current = await fixture(context)
+  await writeFile(join(current.repositoryPath, 'stable.txt'), 'stable\n')
+  await git(current.repositoryPath, ['add', 'stable.txt'])
+  await git(current.repositoryPath, ['commit', '-m', 'add stable file'])
+  const conflicting = await branchCommit(current, 'ensync/chat-recover-reset-resolution', {
+    'README.md': '# chat version\n',
+  })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer baseline\n')
+  await git(current.repositoryPath, ['add', 'README.md'])
+  await git(current.repositoryPath, ['commit', '-m', 'baseline changed'])
+
+  const prior = await current.nativeClient.create({
+    repositoryPath: current.repositoryPath,
+    branch: 'ensync/landing-trains/rejected-resolution',
+    base: 'main',
+  })
+  await assert.rejects(execFileAsync('git', ['merge', '--no-ff', conflicting.savedSha], {
+    cwd: prior.path,
+  }))
+  await writeFile(join(prior.path, 'README.md'), '# recovered bounded resolution\n')
+  await writeFile(join(prior.path, 'stable.txt'), 'rejected unrelated edit\n')
+  await git(prior.path, ['add', 'README.md', 'stable.txt'])
+  await git(prior.path, ['commit', '--no-verify', '-m', 'rejected over-broad merge'])
+  await git(prior.path, ['reset', '--hard', 'main'])
+
+  let resolverCalls = 0
+  const result = await integrator(current.nativeClient).integrate([item(current, conflicting, 1)], {
+    resolveConflict: async () => { resolverCalls += 1 },
+  })
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.equal(resolverCalls, 0)
+  assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# recovered bounded resolution\n')
+  assert.equal(await readFile(join(current.repositoryPath, 'stable.txt'), 'utf8'), 'stable\n')
 })
 
 test('a conflict resolver cannot commit changes outside the reported conflict files', async (context) => {

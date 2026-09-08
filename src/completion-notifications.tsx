@@ -9,6 +9,7 @@ import {
   ANSWER_NEEDED_ALERT,
   COMPLETION_NOTIFICATIONS_STORAGE_KEY,
   DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  PRODUCTION_READY_ALERT,
   TASK_FINISHED_ALERT,
   completionAlertPlan,
   normalizeCompletionNotificationSettings,
@@ -21,6 +22,7 @@ import type {
   CompletionNotificationMode,
   CompletionNotificationSettings,
 } from './lib/completionNotificationPreferences.mjs'
+import { ensyncHost } from './lib/ensyncHost'
 import './completion-notifications.css'
 
 const COMPLETION_NOTIFICATIONS_CHANGE_EVENT = 'ensync:completion-notifications-change'
@@ -29,6 +31,7 @@ export {
   ANSWER_NEEDED_ALERT,
   COMPLETION_NOTIFICATIONS_STORAGE_KEY,
   DEFAULT_COMPLETION_NOTIFICATION_SETTINGS,
+  PRODUCTION_READY_ALERT,
   TASK_FINISHED_ALERT,
   completionAlertPlan,
   normalizeCompletionNotificationSettings,
@@ -56,6 +59,7 @@ type AudioContextWindow = Window & typeof globalThis & {
 }
 
 let preparedAudioContext: AudioContext | null = null
+const activeSpeechUtterances = new Set<SpeechSynthesisUtterance>()
 
 function voiceId(voice: SpeechSynthesisVoice) {
   return JSON.stringify([voice.voiceURI, voice.name, voice.lang])
@@ -138,10 +142,11 @@ export function primeCompletionNotifications(): Promise<boolean> {
 }
 
 /**
- * The two chimes are deliberately different figures, not the same notes at a
+ * The chimes are deliberately different figures, not the same notes at a
  * different pitch: a finished run resolves upwards and stops, a waiting
- * question asks the same rising pair twice and never resolves. Hearing one
- * from another room has to be enough to know whether anything is blocked.
+ * question asks the same rising pair twice and never resolves, and verified
+ * production adds a fourth resolving note. Hearing one from another room has
+ * to be enough to know what changed.
  */
 const CHIMES: Record<CompletionAlertTrigger, { notes: { frequency: number, at: number }[], end: number }> = {
   [TASK_FINISHED_ALERT]: {
@@ -156,6 +161,10 @@ const CHIMES: Record<CompletionAlertTrigger, { notes: { frequency: number, at: n
       { frequency: 880, at: 0.38 },
     ],
     end: 0.7,
+  },
+  [PRODUCTION_READY_ALERT]: {
+    notes: [523.25, 659.25, 783.99, 1046.5].map((frequency, index) => ({ frequency, at: index * 0.09 })),
+    end: 0.64,
   },
 }
 
@@ -226,10 +235,10 @@ export function playAnswerNeededRingtone(): Promise<CompletionNotificationResult
   return playChime(ANSWER_NEEDED_ALERT)
 }
 
-export function speakCompletionText(
+async function speakWithBrowser(
   text: string,
   selectedVoiceId: string | null,
-): CompletionNotificationResult {
+): Promise<CompletionNotificationResult> {
   const mode = 'speech' as const
   if (
     typeof window === 'undefined'
@@ -250,21 +259,72 @@ export function speakCompletionText(
     return { mode, status: 'voice-unavailable', message: 'No browser or system voice is currently available.' }
   }
 
+  let utterance: SpeechSynthesisUtterance | null = null
   try {
-    const utterance = new SpeechSynthesisUtterance(message)
-    utterance.voice = selectedVoice
-    utterance.lang = selectedVoice.lang
-    window.speechSynthesis.speak(utterance)
-    return { mode, status: 'queued', message: `Speaking with ${selectedVoice.name} (${selectedVoice.lang}).` }
+    utterance = new SpeechSynthesisUtterance(message)
+    const activeUtterance = utterance
+    activeUtterance.voice = selectedVoice
+    activeUtterance.lang = selectedVoice.lang
+    activeSpeechUtterances.add(activeUtterance)
+    return await new Promise<CompletionNotificationResult>((resolve) => {
+      let settled = false
+      const finish = (result: CompletionNotificationResult) => {
+        if (settled) return
+        settled = true
+        window.clearTimeout(startTimeout)
+        window.clearTimeout(playbackTimeout)
+        activeSpeechUtterances.delete(activeUtterance)
+        resolve(result)
+      }
+      const startTimeout = window.setTimeout(() => {
+        window.speechSynthesis.cancel()
+        finish({ mode, status: 'blocked', message: 'The browser did not start spoken playback.' })
+      }, 2_000)
+      const playbackTimeout = window.setTimeout(() => {
+        window.speechSynthesis.cancel()
+        finish({ mode, status: 'blocked', message: 'The browser did not finish spoken playback.' })
+      }, 30_000)
+      activeUtterance.onstart = () => window.clearTimeout(startTimeout)
+      activeUtterance.onend = () => finish({
+        mode,
+        status: 'played',
+        message: `Spoken with ${selectedVoice.name} (${selectedVoice.lang}).`,
+      })
+      activeUtterance.onerror = () => finish({ mode, status: 'blocked', message: 'The browser could not play the spoken notification.' })
+      window.speechSynthesis.speak(activeUtterance)
+      if (window.speechSynthesis.paused) window.speechSynthesis.resume()
+    })
   } catch {
+    if (utterance) activeSpeechUtterances.delete(utterance)
     return { mode, status: 'blocked', message: 'The browser could not start spoken playback.' }
   }
+}
+
+export async function speakCompletionText(
+  text: string,
+  selectedVoiceId: string | null,
+): Promise<CompletionNotificationResult> {
+  const mode = 'speech' as const
+  const message = text.trim()
+  if (!message) return { mode, status: 'empty', message: 'Enter the words Ensync should speak.' }
+
+  try {
+    const nativeResult = await ensyncHost.speakNotification(message, selectedVoiceId)
+    if (nativeResult.status === 'played' || nativeResult.status === 'empty') {
+      return { mode, ...nativeResult }
+    }
+  } catch {
+    // Browser-only development and an older rolling Host still get the safe
+    // fallback below. The native route is authoritative once it can play.
+  }
+  return speakWithBrowser(message, selectedVoiceId)
 }
 
 export function stopCompletionSpeech() {
   if (typeof window === 'undefined' || !('speechSynthesis' in window)) return false
   try {
     window.speechSynthesis.cancel()
+    activeSpeechUtterances.clear()
     return true
   } catch {
     return false
@@ -329,7 +389,7 @@ export function useCompletionNotifications() {
   ) => {
     const plan = completionAlertPlan(settings, trigger)
     if (plan.mode === 'ringtone') {
-      return plan.chime === ANSWER_NEEDED_ALERT ? playAnswerNeededRingtone() : playCompletionRingtone()
+      return playChime(plan.chime ?? TASK_FINISHED_ALERT)
     }
     if (plan.mode === 'speech') return speakCompletionText(speechTextOverride ?? plan.speechText, plan.voiceId)
     return {
@@ -337,7 +397,9 @@ export function useCompletionNotifications() {
       status: 'disabled',
       message: trigger === ANSWER_NEEDED_ALERT
         ? 'Question alerts are off.'
-        : 'Completion notifications are off.',
+        : trigger === PRODUCTION_READY_ALERT
+          ? 'Production ready alerts are off.'
+          : 'Completion notifications are off.',
     } satisfies CompletionNotificationResult
   }, [settings])
 
@@ -348,6 +410,9 @@ export function useCompletionNotifications() {
 
   /** A run that stopped to ask something cannot go on until the person answers. */
   const notifyAnswerNeeded = useCallback(() => notify(ANSWER_NEEDED_ALERT), [notify])
+
+  /** An exact saved delivery has reached Host-verified production. */
+  const notifyProductionReady = useCallback(() => notify(PRODUCTION_READY_ALERT), [notify])
 
   return {
     settings,
@@ -360,6 +425,7 @@ export function useCompletionNotifications() {
     prime: primeCompletionNotifications,
     notifyCompletion,
     notifyAnswerNeeded,
+    notifyProductionReady,
   }
 }
 
@@ -429,6 +495,7 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
     updateSettings,
     notifyCompletion,
     notifyAnswerNeeded,
+    notifyProductionReady,
   } = useCompletionNotifications()
   const [previewStatus, setPreviewStatus] = useState('')
 
@@ -451,7 +518,11 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
 
   const preview = async (trigger: CompletionAlertTrigger) => {
     setPreviewStatus('Playing preview…')
-    const result = trigger === ANSWER_NEEDED_ALERT ? await notifyAnswerNeeded() : await notifyCompletion()
+    const result = trigger === ANSWER_NEEDED_ALERT
+      ? await notifyAnswerNeeded()
+      : trigger === PRODUCTION_READY_ALERT
+        ? await notifyProductionReady()
+        : await notifyCompletion()
     setPreviewStatus(result.message)
   }
 
@@ -460,7 +531,7 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
       <div className="completion-notification-preferences__heading">
         <div>
           <h3 id="completion-notification-title">Agent alerts</h3>
-          <p>Play a local alert when an agent finishes, or needs an answer. Saved on this device.</p>
+          <p>Play a local alert when an agent finishes, needs an answer, or reaches Production. Saved on this device.</p>
         </div>
         <span>{settings.mode === 'off' ? 'Off' : 'On'}</span>
       </div>
@@ -485,26 +556,41 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
 
       {settings.mode === 'ringtone' && (
         <p className="completion-notification-preferences__note">
-          Ensync will play a short three-note chime on this device, and a different, unresolved
-          two-note chime when an agent is waiting on you.
+          Ensync uses distinct chimes for a finished task, a question that needs you, and a
+          delivery that is verified in Production.
         </p>
       )}
 
       {settings.mode !== 'off' && (
-        <label className="completion-notification-preferences__toggle">
-          <input
-            type="checkbox"
-            checked={settings.answerAlerts}
-            onChange={(event) => updateSettings({ answerAlerts: event.target.checked })}
-          />
-          <span>
-            Alert when an agent needs an answer
-            <small>
-              A question or a permission request stops the run in that conversation until you
-              answer it, including one you are not looking at.
-            </small>
-          </span>
-        </label>
+        <>
+          <label className="completion-notification-preferences__toggle">
+            <input
+              type="checkbox"
+              checked={settings.answerAlerts}
+              onChange={(event) => updateSettings({ answerAlerts: event.target.checked })}
+            />
+            <span>
+              Alert when an agent needs an answer
+              <small>
+                A question or a permission request stops the run in that conversation until you
+                answer it, including one you are not looking at.
+              </small>
+            </span>
+          </label>
+          <label className="completion-notification-preferences__toggle">
+            <input
+              type="checkbox"
+              checked={settings.productionAlerts}
+              onChange={(event) => updateSettings({ productionAlerts: event.target.checked })}
+            />
+            <span>
+              Alert when Production is ready
+              <small>
+                Plays only after Ensync verifies that the exact saved delivery is live in production.
+              </small>
+            </span>
+          </label>
+        </>
       )}
 
       {settings.mode === 'speech' && (
@@ -529,6 +615,19 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
                 rows={2}
                 onChange={(event) => updateSettings({ answerSpeechText: event.target.value })}
                 placeholder="Your Ensync task needs an answer."
+              />
+            </label>
+          )}
+
+          {settings.productionAlerts && (
+            <label>
+              Words to speak when Production is ready
+              <textarea
+                value={settings.productionSpeechText}
+                maxLength={240}
+                rows={2}
+                onChange={(event) => updateSettings({ productionSpeechText: event.target.value })}
+                placeholder="Your Ensync delivery is ready in production."
               />
             </label>
           )}
@@ -577,6 +676,17 @@ export function CompletionNotificationPreferences({ className = '' }: Completion
           }
         >
           Preview needs answer
+        </button>
+        <button
+          type="button"
+          onClick={() => void preview(PRODUCTION_READY_ALERT)}
+          disabled={
+            settings.mode === 'off'
+            || !settings.productionAlerts
+            || (settings.mode === 'speech' && (!settings.productionSpeechText.trim() || !selectedVoiceExists))
+          }
+        >
+          Preview Production ready
         </button>
         <span role="status" aria-live="polite">{previewStatus}</span>
       </div>

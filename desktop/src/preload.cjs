@@ -33,7 +33,15 @@ const RECENT_PROJECTS_CHANGED_CHANNEL = 'ensync:recent-projects:changed'
 const LOCAL_FILE_OPEN_CHANNEL = 'ensync:shell:open-local-file'
 const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
+const SYNC_SERVICE_URL_SET_CHANNEL = 'ensync:device-preferences:set-sync-service-url'
 const TITLEBAR_APPEARANCE_CHANNEL = 'ensync:window:set-titlebar-appearance'
+const CLOUDFLARE_TUNNEL_STATUS_CHANNEL = 'ensync:tunnel:status'
+const CLOUDFLARE_TUNNEL_SETUP_CHANNEL = 'ensync:tunnel:setup'
+const CLOUDFLARE_TUNNEL_START_CHANNEL = 'ensync:tunnel:start'
+const CLOUDFLARE_TUNNEL_STOP_CHANNEL = 'ensync:tunnel:stop'
+const CLOUDFLARE_TUNNEL_CLEAR_CHANNEL = 'ensync:tunnel:clear'
+const CLOUDFLARE_TUNNEL_QUICK_START_CHANNEL = 'ensync:tunnel:quick-start'
+const CLOUDFLARE_TUNNEL_QUICK_STOP_CHANNEL = 'ensync:tunnel:quick-stop'
 
 contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
@@ -83,6 +91,14 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
     COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL,
     settings,
   ),
+  setSyncServiceUrl: (url) => ipcRenderer.invoke(SYNC_SERVICE_URL_SET_CHANNEL, url),
+  getCloudflareTunnelStatus: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_STATUS_CHANNEL),
+  setupCloudflareTunnel: (input) => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_SETUP_CHANNEL, input),
+  startCloudflareTunnel: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_START_CHANNEL),
+  stopCloudflareTunnel: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_STOP_CHANNEL),
+  clearCloudflareTunnel: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_CLEAR_CHANNEL),
+  startCloudflareQuickTunnel: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_QUICK_START_CHANNEL),
+  stopCloudflareQuickTunnel: () => ipcRenderer.invoke(CLOUDFLARE_TUNNEL_QUICK_STOP_CHANNEL),
   setTitleBarAppearance: (theme) => ipcRenderer.invoke(TITLEBAR_APPEARANCE_CHANNEL, theme),
   onRecentProjectsChanged: (callback) => {
     if (typeof callback !== 'function') return () => {}

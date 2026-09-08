@@ -43,6 +43,10 @@ export type Provider = {
   resetLabel?: string | null
   /** Provider-reported quota window associated with the reset schedule. */
   resetWindow?: string | null
+  /** Five-hour session window percentage the CLI reports as the immediate gate. */
+  sessionUsedPercent?: number | null
+  /** Five-hour session window reset schedule the CLI reports. */
+  sessionResetLabel?: string | null
   usageReason: string
   /** True when the shown percentage is the last verified reading, not this refresh's. */
   usageStale?: boolean
