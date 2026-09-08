@@ -91,18 +91,20 @@ import {
   readNativeWindowState,
   resolveWindowPlacement,
 } from './window-state.mjs'
+import { createUpdateManager } from './update/update-manager.mjs'
 import {
-  checkAndDownloadIfAvailable,
   createAuthorizedUpdateHandler,
-  createNativeUpdateManager,
+  updateIpcActions,
+  UPDATE_APPLY_CHANNEL,
   UPDATE_CANCEL_CHANNEL,
   UPDATE_CHECK_CHANNEL,
   UPDATE_DOWNLOAD_CHANNEL,
   UPDATE_GET_STATE_CHANNEL,
-  UPDATE_OPEN_INSTALLER_CHANNEL,
+  UPDATE_QUIT_AND_INSTALL_CHANNEL,
   UPDATE_SET_CHANNEL_CHANNEL,
+  UPDATE_SET_MODE_CHANNEL,
   UPDATE_STATE_CHANNEL,
-} from './native-updates.mjs'
+} from './update/update-ipc.mjs'
 import { readBuildInfoFile } from './build-info.mjs'
 import { startLocalSyncService } from './local-sync-service.mjs'
 import { CloudflareTunnelManager } from './cloudflare-tunnel-manager.mjs'
@@ -467,15 +469,16 @@ function registerNativeBridge() {
     return { status: cloudflareTunnelManager.status() }
   }))
 
-  const updateActions = new Map([
-    [UPDATE_GET_STATE_CHANNEL, () => updateManager.getState()],
-    [UPDATE_CHECK_CHANNEL, () => updateManager.check()],
-    [UPDATE_DOWNLOAD_CHANNEL, () => updateManager.download()],
-    [UPDATE_CANCEL_CHANNEL, () => updateManager.cancel()],
-    [UPDATE_OPEN_INSTALLER_CHANNEL, () => updateManager.openDownloadedInstaller()],
-    [UPDATE_SET_CHANNEL_CHANNEL, (channel) => updateManager.setChannel(channel)],
-  ])
-  for (const [channel, action] of updateActions) {
+  for (const [channel, action] of updateIpcActions({
+    getSnapshot: () => updateManager.getSnapshot(),
+    checkForUpdates: (explicit) => updateManager.checkForUpdates(explicit),
+    downloadUpdate: (explicit) => updateManager.downloadUpdate(explicit),
+    cancelDownload: () => updateManager.cancelDownload(),
+    applyUpdate: () => updateManager.applyUpdate(),
+    quitAndInstall: () => updateManager.quitAndInstall(),
+    setChannel: (value) => updateManager.setChannel(value),
+    setMode: (value) => updateManager.setMode(value),
+  })) {
     ipcMain.handle(channel, createAuthorizedUpdateHandler({
       isAuthorized: isAuthorizedNativeEvent,
       action,
@@ -523,20 +526,22 @@ function unregisterNativeBridge() {
   ipcMain.removeHandler(UPDATE_CHECK_CHANNEL)
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL)
   ipcMain.removeHandler(UPDATE_CANCEL_CHANNEL)
-  ipcMain.removeHandler(UPDATE_OPEN_INSTALLER_CHANNEL)
+  ipcMain.removeHandler(UPDATE_APPLY_CHANNEL)
+  ipcMain.removeHandler(UPDATE_QUIT_AND_INSTALL_CHANNEL)
   ipcMain.removeHandler(UPDATE_SET_CHANNEL_CHANNEL)
+  ipcMain.removeHandler(UPDATE_SET_MODE_CHANNEL)
   nativeBridgeRegistered = false
   return true
 }
 
-function broadcastUpdateState(state) {
+function broadcastUpdateSnapshot(snapshot) {
   for (const window of BrowserWindow.getAllWindows()) {
     if (
       window.isDestroyed()
       || !nativeWindows.ownsWebContents(window.webContents)
       || !isAppUrl(window.webContents.getURL())
     ) continue
-    window.webContents.send(UPDATE_STATE_CHANNEL, state)
+    window.webContents.send(UPDATE_STATE_CHANNEL, snapshot)
   }
 }
 
@@ -851,35 +856,30 @@ if (!singleInstance) {
     const installedBuildInfo = app.isPackaged
       ? readBuildInfoFile(join(process.resourcesPath, 'build-info.json'), { expectedVersion: app.getVersion() })
       : null
-    updateManager = createNativeUpdateManager({
+    updateManager = createUpdateManager({
       installedVersion: app.getVersion(),
-      installedBuildInfo,
+      installedBuildId: installedBuildInfo?.buildId ?? null,
       platform: process.platform,
       storeManaged: process.windowsStore === true,
       isPackaged: app.isPackaged,
       executablePath: process.execPath,
       manifestUrls: configuredUpdateManifestUrls(),
-      initialChannel: devicePreferencesStore.get().updateChannel,
+      preferences: devicePreferencesStore,
       tempRoot: app.getPath('temp'),
       openInstaller: (path) => shell.openPath(path),
-      persistChannel: (channel) => devicePreferencesStore.setUpdateChannel(channel),
-      onStateChange: broadcastUpdateState,
+      onSnapshotChange: broadcastUpdateSnapshot,
     })
     // Register native IPC before awaiting updater initialization. On macOS an
     // activate event may create a window while that async work is in flight.
     registerNativeBridge()
     installApplicationMenu()
     nativeWorkspaceStore.ensureRestorable()
+    // The update service schedules its own checks: 30 seconds after this
+    // resolves, then hourly, honouring the user's `update.mode`. A build that is
+    // unsupported, unsigned, Store-managed or without a feed lands in Disabled
+    // here and never schedules anything.
     return updateManager.initialize()
   }).then(() => {
-    // Auto-check for updates shortly after startup, then every hour, and
-    // auto-download a verified release when one appears, like VS Code's
-    // background update checker. Non-blocking — if the build is unsigned or no
-    // feed is configured, canCheck is false and these calls are no-ops. The
-    // installer is still opened only by an explicit user action.
-    const pollForUpdates = () => { checkAndDownloadIfAvailable(updateManager).catch(() => {}) }
-    setTimeout(pollForUpdates, 5_000)
-    setInterval(pollForUpdates, 3_600_000)
     const retainedIdentities = nativeWorkspaceStore.list()
     const startupFocusIdentity = retainedIdentities.at(-1)
     const identities = nativeWorkspaceRestorationOrder(retainedIdentities)

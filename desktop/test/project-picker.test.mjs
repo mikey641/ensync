@@ -264,8 +264,10 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
     'checkForUpdates',
     'downloadUpdate',
     'cancelUpdateDownload',
-    'openUpdateInstaller',
+    'applyUpdate',
+    'quitAndInstall',
     'setUpdateChannel',
+    'setUpdateMode',
     'onUpdateState',
   ])
   assert.equal(Object.isFrozen(exposed[0].value), true)
@@ -392,20 +394,24 @@ test('sandboxed preload exposes only fixed native bridge invocations', async () 
   await exposed[0].value.checkForUpdates()
   await exposed[0].value.downloadUpdate()
   await exposed[0].value.cancelUpdateDownload()
-  await exposed[0].value.openUpdateInstaller()
+  await exposed[0].value.applyUpdate()
+  await exposed[0].value.quitAndInstall()
   await exposed[0].value.setUpdateChannel('beta')
+  await exposed[0].value.setUpdateMode('manual')
   assert.deepEqual(invocations.slice(18), [
     ['ensync:updates:get-state'],
     ['ensync:updates:check'],
     ['ensync:updates:download'],
     ['ensync:updates:cancel'],
-    ['ensync:updates:open-installer'],
+    ['ensync:updates:apply'],
+    ['ensync:updates:quit-and-install'],
     ['ensync:updates:set-channel', 'beta'],
+    ['ensync:updates:set-mode', 'manual'],
   ])
   const states = []
   const unsubscribe = exposed[0].value.onUpdateState((state) => states.push(state))
-  listeners.get('ensync:updates:state')({}, { phase: 'available' })
-  assert.deepEqual(states, [{ phase: 'available' }])
+  listeners.get('ensync:updates:state')({}, { state: { type: 'idle' } })
+  assert.deepEqual(states, [{ state: { type: 'idle' } }])
   unsubscribe()
   assert.equal(listeners.has('ensync:updates:state'), false)
   const recentStates = []

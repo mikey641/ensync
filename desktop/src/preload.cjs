@@ -9,8 +9,10 @@ const UPDATE_GET_STATE_CHANNEL = 'ensync:updates:get-state'
 const UPDATE_CHECK_CHANNEL = 'ensync:updates:check'
 const UPDATE_DOWNLOAD_CHANNEL = 'ensync:updates:download'
 const UPDATE_CANCEL_CHANNEL = 'ensync:updates:cancel'
-const UPDATE_OPEN_INSTALLER_CHANNEL = 'ensync:updates:open-installer'
+const UPDATE_APPLY_CHANNEL = 'ensync:updates:apply'
+const UPDATE_QUIT_AND_INSTALL_CHANNEL = 'ensync:updates:quit-and-install'
 const UPDATE_SET_CHANNEL_CHANNEL = 'ensync:updates:set-channel'
+const UPDATE_SET_MODE_CHANNEL = 'ensync:updates:set-mode'
 const WORKSPACE_IDENTITY_CHANNEL = 'ensync:workspace:get-identity'
 const WORKSPACE_FOCUS_CHANNEL = 'ensync:workspace:focus'
 const WORKSPACE_OPEN_PROJECT_CHANNEL = 'ensync:workspace:open-project'
@@ -112,8 +114,10 @@ contextBridge.exposeInMainWorld('ensyncDesktop', Object.freeze({
   checkForUpdates: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),
   cancelUpdateDownload: () => ipcRenderer.invoke(UPDATE_CANCEL_CHANNEL),
-  openUpdateInstaller: () => ipcRenderer.invoke(UPDATE_OPEN_INSTALLER_CHANNEL),
+  applyUpdate: () => ipcRenderer.invoke(UPDATE_APPLY_CHANNEL),
+  quitAndInstall: () => ipcRenderer.invoke(UPDATE_QUIT_AND_INSTALL_CHANNEL),
   setUpdateChannel: (channel) => ipcRenderer.invoke(UPDATE_SET_CHANNEL_CHANNEL, channel),
+  setUpdateMode: (mode) => ipcRenderer.invoke(UPDATE_SET_MODE_CHANNEL, mode),
   onUpdateState: (callback) => {
     if (typeof callback !== 'function') return () => {}
     const listener = (_event, state) => callback(state)
