@@ -25,6 +25,7 @@
     "qrcode": "^1.5.4",
     "react": "latest",
     "react-dom": "latest",
+    "scrypt-js": "3.0.1",
     "typescript": "latest",
     "vite": "latest"
   },

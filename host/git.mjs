@@ -63,6 +63,10 @@ const UNINFORMATIVE_GIT_OUTPUT = [
   /^failed to push some refs\b/i,
   /^See the '[^']*' in 'git [^']*' for details\.?$/i,
   /^Everything up-to-date$/i,
+  // Porcelain push framing: the destination header repeats the remote
+  // location and the terminator carries no explanation.
+  /^To \S+$/,
+  /^Done$/,
 ]
 
 /**
@@ -211,8 +215,14 @@ export function runGit(args, options = {}) {
 async function checkedGit(args, options = {}) {
   const result = await runGit(args, options)
   if (result.exitCode !== 0 && !options.allowFailure) {
+    // Push runs with `--porcelain`, which prints rejected refs to stdout on
+    // some Git versions instead of the usual stderr explanation. Callers that
+    // opt in merge both streams so the curated message never drops the reason.
+    const reasonText = options.includeStdoutReason
+      ? [result.stderr, result.stdout].filter((chunk) => typeof chunk === 'string' && chunk.trim()).join('\n')
+      : result.stderr
     throw new GitWorkflowError(
-      gitFailureMessage(result.stderr, options.failureMessage, options.includeGitReason !== false),
+      gitFailureMessage(reasonText, options.failureMessage, options.includeGitReason !== false),
       { code: options.code ?? 'git_failed', status: options.status ?? 409 },
     )
   }
@@ -753,6 +763,7 @@ export async function pushGit(input, options = {}) {
       gitExecutable: options.gitExecutable,
       timeoutMs: options.timeoutMs ?? 120_000,
       failureMessage: `Git could not push to ${remote}/${targetBranch}.`,
+      includeStdoutReason: true,
       code: 'git_push_failed',
     },
   )
