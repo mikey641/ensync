@@ -133,7 +133,7 @@ test('desktop packages the native multi-window contract', async () => {
   assert.ok(manifest.build.files.includes('src/native-workspaces.mjs'))
   assert.ok(manifest.build.files.includes('src/recent-projects.mjs'))
   assert.ok(manifest.build.files.includes('src/workspace-recovery.mjs'))
-  assert.ok(manifest.build.files.includes('src/native-updates.mjs'))
+  assert.ok(manifest.build.files.includes('src/update/*.mjs'))
 })
 
 // The native title-bar appearance bridge shipped only inside the installed

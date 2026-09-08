@@ -1,4 +1,4 @@
-import { compareVersions } from '../src/native-updates.mjs'
+import { compareVersions } from '../src/update/release-feed.mjs'
 
 const SHA256_PATTERN = /^[a-f0-9]{64}$/i
 const SOURCE_COMMIT_PATTERN = /^[a-f0-9]{40,64}$/i

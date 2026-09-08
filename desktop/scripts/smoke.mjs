@@ -11,7 +11,8 @@ import {
   createNativeWindowMenuTemplate,
   NEW_WINDOW_ACCELERATOR,
 } from '../src/native-windows.mjs'
-import { createNativeUpdateManager } from '../src/native-updates.mjs'
+import { createUpdateManager } from '../src/update/update-manager.mjs'
+import { DisablementReason, StateType } from '../src/update/update.mjs'
 
 const desktopRoot = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const repositoryRoot = resolve(desktopRoot, '..')
@@ -19,18 +20,22 @@ const uiRoot = resolve(repositoryRoot, 'dist')
 
 await verifyUiBundle(uiRoot)
 
-const developmentUpdates = createNativeUpdateManager({
+const developmentUpdates = createUpdateManager({
   installedVersion: '0.0.0-development',
   platform: process.platform,
   isPackaged: false,
   executablePath: process.execPath,
   manifestUrl: 'https://ensync.vercel.app/releases.json',
+  preferences: { get: () => ({ updateChannel: 'stable', updateMode: 'default' }) },
   tempRoot: process.cwd(),
   fetchImpl: async () => { throw new Error('Development update smoke check must not use the network.') },
+  verifyInstalledBuild: async () => { throw new Error('Development update smoke check must not read signatures.') },
   openInstaller: async () => '',
+  logService: { trace() {}, info() {}, warn() {}, error() {} },
 })
-const developmentUpdateState = await developmentUpdates.initialize()
-if (developmentUpdateState.phase !== 'unavailable' || developmentUpdateState.canCheck) {
+const developmentUpdateState = (await developmentUpdates.initialize()).state
+if (developmentUpdateState.type !== StateType.Disabled
+  || developmentUpdateState.reason !== DisablementReason.NotBuilt) {
   throw new Error('Development builds did not fail closed for native updates.')
 }
 

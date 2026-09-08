@@ -20,8 +20,8 @@ const spoken = Object.freeze({
   productionSpeechText: 'Your Ensync delivery is ready in production.',
 })
 
-function publicPreferences(completionNotifications, updateChannel = 'stable', syncServiceUrl = null) {
-  return { completionNotifications, updateChannel, syncServiceUrl }
+function publicPreferences(completionNotifications, updateChannel = 'stable', syncServiceUrl = null, updateMode = 'default') {
+  return { completionNotifications, updateChannel, updateMode, syncServiceUrl }
 }
 
 test('a device preference file written before question alerts still loads, with them on', async (t) => {
@@ -113,6 +113,18 @@ test('device preferences persist an explicit beta channel without dropping compl
   assert.throws(() => store.setUpdateChannel('nightly'), /stable or beta/)
 })
 
+test('device preferences persist an update mode, and a file predating it defaults to automatic', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-device-preferences-mode-'))
+  t.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'device-preferences-v1.json')
+  const store = createDevicePreferencesStore({ filePath })
+
+  assert.equal(store.get().updateMode, 'default')
+  assert.deepEqual(store.setUpdateMode('manual'), publicPreferences(null, 'stable', null, 'manual'))
+  assert.equal(createDevicePreferencesStore({ filePath }).get().updateMode, 'manual')
+  assert.throws(() => store.setUpdateMode('hourly'), /none, manual, start, or default/)
+})
+
 test('device preferences persist an explicit Sync service URL and clear it again', async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'ensync-device-preferences-sync-url-'))
   t.after(() => rm(directory, { recursive: true, force: true }))
@@ -122,11 +134,13 @@ test('device preferences persist an explicit Sync service URL and clear it again
   assert.deepEqual(store.setSyncServiceUrl('https://sync.example.com/'), {
     completionNotifications: null,
     updateChannel: 'stable',
+    updateMode: 'default',
     syncServiceUrl: 'https://sync.example.com',
   })
   assert.deepEqual(createDevicePreferencesStore({ filePath }).get(), {
     completionNotifications: null,
     updateChannel: 'stable',
+    updateMode: 'default',
     syncServiceUrl: 'https://sync.example.com',
   })
 
@@ -149,6 +163,7 @@ test('device preference handlers reject unauthorized renderers and malformed set
     get: () => publicPreferences(spoken),
     setCompletionNotifications: (settings) => publicPreferences(settings),
     setUpdateChannel: (updateChannel) => publicPreferences(spoken, updateChannel),
+    setUpdateMode: (updateMode) => publicPreferences(spoken, 'stable', null, updateMode),
     setSyncServiceUrl: (syncServiceUrl) => publicPreferences(spoken, 'stable', syncServiceUrl),
   }
   const handlers = createDevicePreferencesHandlers({

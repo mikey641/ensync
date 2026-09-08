@@ -65,7 +65,7 @@
       "src/workspace-recovery.mjs",
       "src/codex-conversation-import.mjs",
       "src/build-info.mjs",
-      "src/native-updates.mjs",
+      "src/update/*.mjs",
       "src/continuous-update.mjs",
       "src/runtime.mjs",
       "src/local-sync-service.mjs",

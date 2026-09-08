@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 export const DEVICE_PREFERENCES_GET_CHANNEL = 'ensync:device-preferences:get'
 export const COMPLETION_NOTIFICATION_PREFERENCES_SET_CHANNEL = 'ensync:device-preferences:set-completion-notifications'
 export const UPDATE_CHANNEL_SET_CHANNEL = 'ensync:device-preferences:set-update-channel'
+export const UPDATE_MODE_SET_CHANNEL = 'ensync:device-preferences:set-update-mode'
 export const SYNC_SERVICE_URL_SET_CHANNEL = 'ensync:device-preferences:set-sync-service-url'
 export const DEVICE_PREFERENCES_FILENAME = 'device-preferences-v1.json'
 
@@ -50,6 +51,15 @@ function normalizeUpdateChannel(value) {
   return value === 'stable' || value === 'beta' ? value : null
 }
 
+// `update.mode`, with the meanings VS Code gives it: none disables updates,
+// manual allows only user-initiated checks, start checks once per launch, and
+// default checks periodically in the background.
+const UPDATE_MODES = new Set(['none', 'manual', 'start', 'default'])
+
+function normalizeUpdateMode(value) {
+  return UPDATE_MODES.has(value) ? value : null
+}
+
 const SYNC_SERVICE_LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]', '::1'])
 
 /** Lenient decoder: invalid stored URLs fall back to null, never reject the file. */
@@ -90,8 +100,13 @@ function normalizePreferences(value) {
     ? 'stable'
     : normalizeUpdateChannel(value.updateChannel)
   if (!updateChannel) return null
+  // A file written before update modes existed is not malformed; it defaults.
+  const updateMode = value.updateMode === undefined
+    ? 'default'
+    : normalizeUpdateMode(value.updateMode)
+  if (!updateMode) return null
   const syncServiceUrl = normalizeSyncServiceUrl(value.syncServiceUrl)
-  return Object.freeze({ completionNotifications, updateChannel, syncServiceUrl })
+  return Object.freeze({ completionNotifications, updateChannel, updateMode, syncServiceUrl })
 }
 
 function decode(encoded) {
@@ -126,6 +141,7 @@ function publicPreferences(preferences) {
       ? { ...preferences.completionNotifications }
       : null,
     updateChannel: preferences.updateChannel,
+    updateMode: preferences.updateMode,
     syncServiceUrl: preferences.syncServiceUrl,
   }
 }
@@ -152,6 +168,7 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
   let preferences = candidates[0]?.preferences ?? Object.freeze({
     completionNotifications: null,
     updateChannel: 'stable',
+    updateMode: 'default',
     syncServiceUrl: null,
   })
 
@@ -189,6 +206,11 @@ export function createDevicePreferencesStore({ filePath, now = () => new Date().
       if (!updateChannel) throw new TypeError('The update channel must be stable or beta.')
       return persist(Object.freeze({ ...preferences, updateChannel }))
     },
+    setUpdateMode(value) {
+      const updateMode = normalizeUpdateMode(value)
+      if (!updateMode) throw new TypeError('The update mode must be none, manual, start, or default.')
+      return persist(Object.freeze({ ...preferences, updateMode }))
+    },
     setSyncServiceUrl(value) {
       const syncServiceUrl = requiredSyncServiceUrl(value)
       return persist(Object.freeze({ ...preferences, syncServiceUrl }))
@@ -209,6 +231,9 @@ export function createDevicePreferencesHandlers({ isAuthorized, store }) {
     },
     setUpdateChannel(event, value) {
       return isAuthorized(event) ? store.setUpdateChannel(value) : null
+    },
+    setUpdateMode(event, value) {
+      return isAuthorized(event) ? store.setUpdateMode(value) : null
     },
     setSyncServiceUrl(event, value) {
       return isAuthorized(event) ? store.setSyncServiceUrl(value) : null

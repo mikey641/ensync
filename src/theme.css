@@ -1311,10 +1311,7 @@ kbd {
   white-space: nowrap;
 }
 
-.native-update-status--available,
-.native-update-status--downloaded,
-.native-update-status--up_to_date,
-.native-update-status--installer_opened {
+.native-update-status--positive {
   border-color: color-mix(in srgb, var(--accent-ui) 45%, var(--border-default));
   background: var(--accent-ui-soft);
   color: var(--accent-ui);
