@@ -25,6 +25,7 @@ import {
   Globe,
   History,
   KeyRound,
+  Laptop,
   Layers3,
   LifeBuoy,
   LockKeyhole,
@@ -109,6 +110,15 @@ import {
   type SecondFactorChallenge,
   type TotpStart,
 } from './lib/accountSyncHost'
+import {
+  remoteBrokerHost,
+  type RemoteBrokerCapabilities,
+  type RemoteBrokerHostListing,
+  type RemoteBrokerHostStatus,
+  type RemoteBrokerJob,
+  type RemoteBrokerJobEvent,
+  type RemoteBrokerPairingOffer,
+} from './lib/remoteBrokerHost'
 import {
   mergeAccountWorkspace,
   prepareAccountWorkspace,
@@ -6438,6 +6448,548 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
   )
 }
 
+const remoteJobTerminalStates = new Set<string>(['completed', 'failed', 'cancelled', 'reconciliation_required'])
+
+const remoteJobStateLabels: Record<RemoteBrokerJob['state'], string> = {
+  queued: 'Queued on the secure Sync service.',
+  claimed: 'Claimed by the Host.',
+  running: 'Running on the Host.',
+  completed: 'Completed.',
+  failed: 'Failed — see the transcript below.',
+  cancelled: 'Cancelled.',
+  reconciliation_required: 'Needs reconciliation — activity on the Host may be partial.',
+}
+
+function remoteEventText(event: RemoteBrokerJobEvent): string {
+  if (event.type === 'started') {
+    return typeof event.provider === 'string' && event.provider ? `Started with ${event.provider}.` : 'Started.'
+  }
+  if (event.type === 'completed') {
+    const response = event.result?.response
+    return typeof response === 'string' && response.trim() ? response : 'Completed.'
+  }
+  if (event.type === 'error') {
+    return typeof event.error === 'string' && event.error.trim() ? event.error : 'Failed.'
+  }
+  if (event.type === 'cancelled') {
+    return typeof event.message === 'string' && event.message.trim() ? event.message : 'Cancelled.'
+  }
+  if (event.type === 'notice') {
+    return typeof event.message === 'string' && event.message ? event.message : 'Notice.'
+  }
+  if (event.type === 'live_steer_ready') return 'Live instruction is now available.'
+  if (event.type === 'live_steer_closed') return 'Live instruction window closed.'
+  return event.type
+}
+
+function remoteHostCapabilityLabel(host: RemoteBrokerHostListing): string {
+  const capabilities = host.capabilities
+  if (!capabilities) return 'Capabilities not published yet'
+  const agents = capabilities.providers.filter((item) => item.available).length
+  const projects = capabilities.recentProjects.length
+  return `${agents} available ${agents === 1 ? 'agent' : 'agents'} · ${projects} recent ${projects === 1 ? 'project' : 'projects'}`
+}
+
+function remoteSteerIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `steer_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`
+}
+
+function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
+  const [status, setStatus] = useState<RemoteBrokerHostStatus | null>(null)
+  const [statusError, setStatusError] = useState<string | null>(null)
+
+  const [hostLabel, setHostLabel] = useState('')
+  const [hostBusy, setHostBusy] = useState<string | null>(null)
+  const [hostError, setHostError] = useState<string | null>(null)
+  const [pairing, setPairing] = useState<RemoteBrokerPairingOffer | null>(null)
+  const [capabilities, setCapabilities] = useState<RemoteBrokerCapabilities | null>(null)
+  const [confirmingForget, setConfirmingForget] = useState(false)
+
+  const [clientRegistered, setClientRegistered] = useState(false)
+  const [clientBusy, setClientBusy] = useState<string | null>(null)
+  const [clientError, setClientError] = useState<string | null>(null)
+  const [pairCode, setPairCode] = useState('')
+  const [hosts, setHosts] = useState<RemoteBrokerHostListing[]>([])
+  const [selectedHostId, setSelectedHostId] = useState('')
+  const [projectPath, setProjectPath] = useState('')
+  const [provider, setProvider] = useState('')
+  const [prompt, setPrompt] = useState('')
+
+  const [job, setJob] = useState<RemoteBrokerJob | null>(null)
+  const [jobError, setJobError] = useState<string | null>(null)
+  const [steerText, setSteerText] = useState('')
+  const afterSequence = useRef(0)
+
+  useEffect(() => {
+    if (!authenticated) {
+      setStatus(null)
+      setStatusError(null)
+      setPairing(null)
+      setCapabilities(null)
+      setJob(null)
+      setHosts([])
+      setClientRegistered(false)
+      setSelectedHostId('')
+      setProvider('')
+      setProjectPath('')
+      return
+    }
+    let cancelled = false
+    const load = async () => {
+      try {
+        const next = await remoteBrokerHost.status()
+        if (cancelled) return
+        setStatus(next)
+        setStatusError(null)
+        if (next.brokerDevice?.role === 'client') {
+          setClientRegistered(true)
+          try {
+            const { hosts: nextHosts } = await remoteBrokerHost.listClientHosts()
+            if (cancelled) return
+            setHosts(nextHosts)
+            setSelectedHostId(nextHosts[0]?.id ?? '')
+          } catch {
+            // Host listing is best-effort when the settings panel first opens.
+          }
+        }
+      } catch (error) {
+        if (cancelled) return
+        setStatusError(error instanceof Error ? error.message : 'Could not read remote execution status.')
+      }
+    }
+    void load()
+    return () => {
+      cancelled = true
+    }
+  }, [authenticated])
+
+  useEffect(() => {
+    if (!job || remoteJobTerminalStates.has(job.state)) return
+    const timer = window.setTimeout(() => {
+      void (async () => {
+        try {
+          const { job: next } = await remoteBrokerHost.getClientJob(job.id, afterSequence.current)
+          afterSequence.current = next.events.reduce(
+            (max, record) => Math.max(max, record.sequence),
+            afterSequence.current,
+          )
+          setJob(next)
+          setJobError(null)
+        } catch (error) {
+          setJobError(error instanceof Error ? error.message : 'Could not check the remote job.')
+        }
+      })()
+    }, 1500)
+    return () => window.clearTimeout(timer)
+  }, [job])
+
+  if (!authenticated) return null
+
+  if (!status) {
+    return (
+      <section className="setting-section account-sync-remote-setting">
+        <div className="setting-title"><div><h3>Remote execution</h3><p>Share this computer as a Host, or run jobs on another paired computer.</p></div></div>
+        {statusError ? (
+          <div className="account-sync-unavailable"><Server size={18} /><span><strong>Remote execution is not reachable</strong><small>{statusError}</small></span></div>
+        ) : (
+          <div className="account-sync-unavailable"><RotateCw className="spin" size={17} /><span><strong>Checking remote execution</strong><small>Asking the local Ensync Host for its remote broker.</small></span></div>
+        )}
+      </section>
+    )
+  }
+
+  const role = status.brokerDevice?.role ?? null
+  const selectedHost = hosts.find((item) => item.id === selectedHostId) ?? null
+  const providerOptions = selectedHost?.capabilities?.providers?.length
+    ? selectedHost.capabilities.providers
+    : [
+        { id: 'codex', name: 'Codex', available: true },
+        { id: 'claude', name: 'Claude Code', available: true },
+      ]
+  const recentProjects = selectedHost?.capabilities?.recentProjects ?? []
+  const effectiveProvider = providerOptions.some((item) => item.id === provider)
+    ? provider
+    : (providerOptions.find((item) => item.available)?.id ?? providerOptions[0]?.id ?? '')
+
+  const ensureClientRegistered = async (): Promise<boolean> => {
+    const currentRole = status.brokerDevice?.role ?? null
+    if (currentRole === 'host') return false
+    if (currentRole === 'client') {
+      setClientRegistered(true)
+      return true
+    }
+    try {
+      const { device } = await remoteBrokerHost.registerClient()
+      setClientRegistered(true)
+      setStatus((previous) => previous ? { ...previous, brokerDevice: { id: device.id, role: device.role } } : previous)
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  const enableHost = async () => {
+    setHostBusy('start')
+    setHostError(null)
+    try {
+      const next = await remoteBrokerHost.start(hostLabel)
+      setStatus(next)
+      setPairing(null)
+      setConfirmingForget(false)
+      try {
+        const result = await remoteBrokerHost.capabilities()
+        setCapabilities(result.capabilities)
+      } catch {
+        // Capabilities publish is best-effort right after enabling the Host.
+      }
+    } catch (error) {
+      setHostError(error instanceof Error ? error.message : 'Could not enable remote access.')
+    } finally {
+      setHostBusy(null)
+    }
+  }
+
+  const generatePairing = async () => {
+    setHostBusy('pairing')
+    setHostError(null)
+    setPairing(null)
+    try {
+      setPairing(await remoteBrokerHost.pairing())
+    } catch (error) {
+      setHostError(error instanceof Error ? error.message : 'Could not create a pairing code.')
+    } finally {
+      setHostBusy(null)
+    }
+  }
+
+  const refreshCapabilities = async () => {
+    setHostBusy('capabilities')
+    setHostError(null)
+    try {
+      const result = await remoteBrokerHost.capabilities()
+      setCapabilities(result.capabilities)
+    } catch (error) {
+      setHostError(error instanceof Error ? error.message : 'Could not refresh Host capabilities.')
+    } finally {
+      setHostBusy(null)
+    }
+  }
+
+  const disableHost = async (revoke: boolean) => {
+    setHostBusy(revoke ? 'forget' : 'stop')
+    setHostError(null)
+    try {
+      const next = await remoteBrokerHost.stop(revoke)
+      setStatus(next)
+      setPairing(null)
+      setCapabilities(null)
+      setConfirmingForget(false)
+    } catch (error) {
+      setHostError(error instanceof Error ? error.message : 'Could not stop remote access.')
+    } finally {
+      setHostBusy(null)
+    }
+  }
+
+  const fetchHosts = async () => {
+    const { hosts: nextHosts } = await remoteBrokerHost.listClientHosts()
+    setHosts(nextHosts)
+    setSelectedHostId((previous) => nextHosts.some((item) => item.id === previous) ? previous : (nextHosts[0]?.id ?? ''))
+  }
+
+  const loadHosts = async () => {
+    setClientBusy('hosts')
+    setClientError(null)
+    try {
+      if (!(await ensureClientRegistered())) {
+        setClientError('This computer is set up as a Host, so it cannot list paired Hosts.')
+        return
+      }
+      await fetchHosts()
+    } catch (error) {
+      setClientError(error instanceof Error ? error.message : 'Could not list paired Hosts.')
+    } finally {
+      setClientBusy(null)
+    }
+  }
+
+  const claim = async () => {
+    const code = pairCode.trim()
+    if (code.length !== 8) {
+      setClientError('Enter the eight-character Host pairing code.')
+      return
+    }
+    setClientBusy('claim')
+    setClientError(null)
+    try {
+      if (!(await ensureClientRegistered())) {
+        setClientError('This computer is acting as a Host, so it cannot pair as a client.')
+        return
+      }
+      await remoteBrokerHost.claimClient(code)
+      setPairCode('')
+      await fetchHosts()
+    } catch (error) {
+      setClientError(error instanceof Error ? error.message : 'Could not pair with that Host.')
+    } finally {
+      setClientBusy(null)
+    }
+  }
+
+  const runRemote = async () => {
+    if (!selectedHostId || !effectiveProvider || !prompt.trim()) {
+      setClientError('Choose a Host and agent, then write an instruction before running.')
+      return
+    }
+    setClientBusy('run')
+    setClientError(null)
+    setJobError(null)
+    try {
+      if (!(await ensureClientRegistered())) {
+        setClientError('This computer is acting as a Host, so it cannot submit a remote job.')
+        return
+      }
+      const { job: submitted } = await remoteBrokerHost.submitClientJob({
+        hostId: selectedHostId,
+        provider: effectiveProvider,
+        projectPath: projectPath.trim(),
+        prompt: prompt.trim(),
+      })
+      afterSequence.current = submitted.lastEventSequence ?? 0
+      setJob(submitted)
+      setSteerText('')
+    } catch (error) {
+      setClientError(error instanceof Error ? error.message : 'Could not start the remote job.')
+    } finally {
+      setClientBusy(null)
+    }
+  }
+
+  const sendSteer = async () => {
+    if (!job || remoteJobTerminalStates.has(job.state) || !steerText.trim()) return
+    setClientBusy('steer')
+    setJobError(null)
+    try {
+      await remoteBrokerHost.sendClientCommand(job.id, 'steer', {
+        prompt: steerText.trim(),
+        idempotencyKey: remoteSteerIdempotencyKey(),
+      })
+      setSteerText('')
+      const { job: next } = await remoteBrokerHost.getClientJob(job.id, afterSequence.current)
+      setJob(next)
+    } catch (error) {
+      setJobError(error instanceof Error ? error.message : 'Could not send the live instruction.')
+    } finally {
+      setClientBusy(null)
+    }
+  }
+
+  const cancelJob = async () => {
+    if (!job || remoteJobTerminalStates.has(job.state)) return
+    setClientBusy('cancel')
+    setJobError(null)
+    try {
+      await remoteBrokerHost.sendClientCommand(job.id, 'cancel', {})
+    } catch (error) {
+      setJobError(error instanceof Error ? error.message : 'Could not stop the remote job.')
+    } finally {
+      setClientBusy(null)
+    }
+  }
+
+  return (
+    <>
+      <section className="setting-section account-sync-remote-setting">
+        <div className="setting-title">
+          <div><h3>This computer as Host</h3><p>Accept remote jobs from your other signed-in computers through encrypted Account Sync. Runs use this computer’s existing provider subscriptions, on macOS or Windows.</p></div>
+          {status.running && <span className="account-sync-badge"><i /> SHARING</span>}
+        </div>
+
+        {role === 'client' ? (
+          <div className="account-sync-remote">
+            <div className="account-sync-remote__head"><Laptop size={15} /><span><strong>This computer is a remote client</strong><small>Ensync uses one role per machine. To make this computer a Host, restart Ensync — it cannot safely be both at once.</small></span></div>
+          </div>
+        ) : status.running ? (
+          <div className="account-sync-remote">
+            <div className="account-sync-remote__head">
+              <Server size={15} />
+              <span>
+                <strong>{status.host?.label ?? 'This computer'}</strong>
+                <small>{status.activeJobs} active {status.activeJobs === 1 ? 'job' : 'jobs'} · {status.state === 'connected' ? 'connected through outbound HTTPS polling' : status.state === 'degraded' ? 'connected with a recent error' : 'disconnected'}</small>
+              </span>
+              <span className={`account-sync-remote__pill ${status.state === 'degraded' ? '' : 'account-sync-remote__pill--on'}`}><i /> {status.state === 'degraded' ? 'Degraded' : status.state === 'connected' ? 'Connected' : 'Disconnected'}</span>
+            </div>
+            <div className="account-sync-remote__body">
+              {status.lastError && <p className="account-sync-remote__error" role="alert"><ShieldAlert size={13} /> {status.lastError.message}{status.lastError.code ? ` (${status.lastError.code})` : ''}</p>}
+              {pairing && (
+                <div className="account-sync-remote__pairing">
+                  <span><strong>Pairing code</strong><small>Expires {pairing.pairing.expiresAt ? new Date(pairing.pairing.expiresAt).toLocaleString() : 'soon'}. Enter it on the other computer to pair it with this Host.</small></span>
+                  <code>{pairing.code}</code>
+                  <div className="account-sync-remote__actions">
+                    <CopyTextButton text={pairing.code} label="Copy pairing code" />
+                    <button type="button" className="button button--ghost" onClick={() => void generatePairing()} disabled={hostBusy !== null}>{hostBusy === 'pairing' ? 'Generating…' : 'New code'}</button>
+                  </div>
+                </div>
+              )}
+              <div className="account-sync-remote__actions">
+                <button type="button" className="button button--primary" onClick={() => void generatePairing()} disabled={hostBusy !== null}>{hostBusy === 'pairing' ? 'Generating…' : 'Generate pairing code'}</button>
+                <button type="button" className="button button--ghost" onClick={() => void refreshCapabilities()} disabled={hostBusy !== null}><RotateCw size={14} /> {hostBusy === 'capabilities' ? 'Refreshing…' : 'Refresh capabilities'}</button>
+                <button type="button" className="button button--ghost" onClick={() => void disableHost(false)} disabled={hostBusy !== null}><Power size={14} /> {hostBusy === 'stop' ? 'Stopping…' : 'Stop'}</button>
+                {confirmingForget ? (
+                  <>
+                    <button type="button" className="button button--ghost" onClick={() => setConfirmingForget(false)} disabled={hostBusy !== null}>Keep</button>
+                    <button type="button" className="button button--primary" onClick={() => void disableHost(true)} disabled={hostBusy !== null}>{hostBusy === 'forget' ? 'Forgetting…' : 'Forget this Host'}</button>
+                  </>
+                ) : (
+                  <button type="button" className="button button--ghost" onClick={() => setConfirmingForget(true)} disabled={hostBusy !== null}><Trash2 size={14} /> Forget</button>
+                )}
+              </div>
+              {capabilities && (
+                <p className="account-sync-remote__capabilities"><Check size={13} /> Published {capabilities.providers.filter((item) => item.available).length} available {capabilities.providers.filter((item) => item.available).length === 1 ? 'agent' : 'agents'} · {capabilities.recentProjects.length} recent {capabilities.recentProjects.length === 1 ? 'project' : 'projects'}</p>
+              )}
+              {hostError && <p className="account-sync-form__error" role="alert">{hostError}</p>}
+            </div>
+          </div>
+        ) : (
+          <div className="account-sync-remote">
+            <div className="account-sync-remote__head"><Server size={15} /><span><strong>Remote access is off</strong><small>Turn this computer into a Host that your other signed-in computer can run jobs on. The Host uses this computer’s existing provider subscriptions.</small></span></div>
+            <div className="account-sync-remote__body">
+              {role === 'host' && <p className="account-sync-remote__note">This computer is still registered as a Host from a previous session. Use “Forget this Host” to release the role so it could act as a client instead.</p>}
+              <label className="account-sync-remote__field">
+                <span>Host name (empty uses this computer’s name)</span>
+                <input value={hostLabel} onChange={(event) => { setHostLabel(event.target.value); setHostError(null) }} type="text" placeholder="Studio or your computer’s name" autoComplete="off" spellCheck={false} disabled={hostBusy !== null} />
+              </label>
+              <div className="account-sync-remote__actions">
+                <button type="button" className="button button--primary" onClick={() => void enableHost()} disabled={hostBusy !== null}>{hostBusy === 'start' ? 'Enabling…' : 'Enable remote access'}</button>
+                {role === 'host' && (
+                  confirmingForget ? (
+                    <>
+                      <button type="button" className="button button--ghost" onClick={() => setConfirmingForget(false)} disabled={hostBusy !== null}>Keep</button>
+                      <button type="button" className="button button--primary" onClick={() => void disableHost(true)} disabled={hostBusy !== null}>{hostBusy === 'forget' ? 'Forgetting…' : 'Forget this Host'}</button>
+                    </>
+                  ) : (
+                    <button type="button" className="button button--ghost" onClick={() => setConfirmingForget(true)} disabled={hostBusy !== null}><Trash2 size={14} /> Forget this Host</button>
+                  )
+                )}
+              </div>
+              {hostError && <p className="account-sync-form__error" role="alert">{hostError}</p>}
+            </div>
+          </div>
+        )}
+      </section>
+
+      <section className="setting-section account-sync-remote-setting">
+        <div className="setting-title">
+          <div><h3>Connect to another computer</h3><p>Pair this computer with a Host and run jobs on it. Instructions and results stay end-to-end encrypted over Account Sync.</p></div>
+          {role === 'client' && <span className="account-sync-badge"><i /> CLIENT</span>}
+        </div>
+
+        {role === 'host' ? (
+          <div className="account-sync-remote">
+            <div className="account-sync-remote__head"><Laptop size={15} /><span><strong>This computer is the Host</strong><small>Ensync uses one role per machine. For the expected split, keep this machine as the Host and pair your other computer instead. To switch this machine to a client, stop and “Forget this Host” above.</small></span></div>
+          </div>
+        ) : (
+          <div className="account-sync-remote">
+            <div className="account-sync-remote__head"><Laptop size={15} /><span><strong>Pair with a Host</strong><small>Ask the Host to generate a pairing code, then enter it here. This computer registers as a client the first time you pair it.</small></span></div>
+            <div className="account-sync-remote__body">
+              <div className="account-sync-remote__row">
+                <input value={pairCode} onChange={(event) => { setPairCode(event.target.value.toUpperCase()); setClientError(null) }} type="text" placeholder="8-character pairing code" maxLength={8} autoComplete="off" spellCheck={false} disabled={clientBusy !== null} aria-label="Host pairing code" />
+                <button type="button" className="button button--primary" onClick={() => void claim()} disabled={clientBusy !== null || pairCode.trim().length !== 8}>{clientBusy === 'claim' ? 'Pairing…' : 'Pair'}</button>
+              </div>
+
+              {hosts.length > 0 && (
+                <div className="account-sync-remote__hosts">
+                  <div className="account-sync-remote__hosts-head">
+                    <strong>Paired Hosts</strong>
+                    <button type="button" className="button button--ghost" onClick={() => void loadHosts()} disabled={clientBusy !== null}><RotateCw size={13} /> Refresh</button>
+                  </div>
+                  {hosts.map((host) => (
+                    <div key={host.id} className="account-sync-remote__host">
+                      <strong>{host.label}</strong>
+                      <small>{remoteHostCapabilityLabel(host)}</small>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {hosts.length === 0 && clientRegistered && (
+                <p className="account-sync-remote__note">No paired Hosts yet. Pairing a Host makes it appear here.</p>
+              )}
+
+              <div className="account-sync-remote__run">
+                <div className="account-sync-remote__run-head">
+                  <strong>Run on Host</strong>
+                  <small>{selectedHost ? `Target: ${selectedHost.label}` : 'Choose a paired Host to run on'}</small>
+                </div>
+                <label className="account-sync-remote__field">
+                  <span>Host</span>
+                  <select value={selectedHostId} onChange={(event) => setSelectedHostId(event.target.value)} disabled={hosts.length === 0}>
+                    <option value="">{hosts.length === 0 ? 'Pair a Host first' : 'Choose a Host'}</option>
+                    {hosts.map((host) => <option key={host.id} value={host.id}>{host.label}</option>)}
+                  </select>
+                </label>
+                <label className="account-sync-remote__field">
+                  <span>Project path</span>
+                  <input list="account-sync-remote-project-options" value={projectPath} onChange={(event) => setProjectPath(event.target.value)} type="text" placeholder="/path/to/project" autoComplete="off" spellCheck={false} />
+                  <datalist id="account-sync-remote-project-options">
+                    {recentProjects.map((project) => <option key={project.path} value={project.path} label={project.name ? `${project.name} — ${project.path}` : project.path} />)}
+                  </datalist>
+                </label>
+                <label className="account-sync-remote__field">
+                  <span>Agent</span>
+                  <select value={effectiveProvider} onChange={(event) => setProvider(event.target.value)}>
+                    {providerOptions.map((option) => <option key={option.id} value={option.id}>{option.name}{option.available ? '' : ' (unavailable)'}</option>)}
+                  </select>
+                </label>
+                <label className="account-sync-remote__field">
+                  <span>Instruction</span>
+                  <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} rows={3} placeholder="What should the Host do?" disabled={!selectedHostId} />
+                </label>
+                <button type="button" className="button button--primary" onClick={() => void runRemote()} disabled={clientBusy !== null || !selectedHostId || !effectiveProvider || !prompt.trim()}>
+                  <TerminalSquare size={14} /> {clientBusy === 'run' ? 'Submitting…' : 'Run remotely'}
+                </button>
+              </div>
+
+              {job && (
+                <div className="account-sync-remote__job">
+                  <div className="account-sync-remote__job-head">
+                    <span className={`account-sync-remote__pill ${remoteJobTerminalStates.has(job.state) ? 'account-sync-remote__pill--done' : 'account-sync-remote__pill--on'}`}><i /> {job.state.replaceAll('_', ' ')}</span>
+                    <small>{remoteJobStateLabels[job.state]}</small>
+                  </div>
+                  <div className="account-sync-remote__transcript" aria-live="polite">
+                    {job.events.length === 0 && <p className="account-sync-remote__line"><span className="account-sync-remote__event-type">queued</span><span>Waiting for the Host to pick up the job…</span></p>}
+                    {job.events.map((record) => (
+                      <p key={record.sequence} className="account-sync-remote__line">
+                        <span className="account-sync-remote__event-type">{record.event.type}</span>
+                        <span>{remoteEventText(record.event)}</span>
+                      </p>
+                    ))}
+                  </div>
+                  {!remoteJobTerminalStates.has(job.state) && (
+                    <div className="account-sync-remote__job-actions">
+                      <div className="account-sync-remote__steer">
+                        <input value={steerText} onChange={(event) => setSteerText(event.target.value)} type="text" placeholder="Live instruction (Codex only)" disabled={clientBusy !== null} />
+                        <button type="button" className="button button--ghost" onClick={() => void sendSteer()} disabled={clientBusy !== null || !steerText.trim()}>Steer</button>
+                      </div>
+                      <button type="button" className="button button--ghost" onClick={() => void cancelJob()} disabled={clientBusy !== null}>{clientBusy === 'cancel' ? 'Stopping…' : 'Stop'}</button>
+                    </div>
+                  )}
+                  {jobError && <p className="account-sync-form__error" role="alert">{jobError}</p>}
+                </div>
+              )}
+
+              {clientError && <p className="account-sync-form__error" role="alert">{clientError}</p>}
+            </div>
+          </div>
+        )}
+      </section>
+    </>
+  )
+}
+
 function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }: { preferences: AgentUpdatePreferences; providers: Provider[]; onModeChange: (mode: AgentUpdateMode) => void; onReview: () => void }) {
   const lastCycle = preferences.lastMaintenanceAt
     ? new Date(preferences.lastMaintenanceAt).toLocaleString()
@@ -6503,6 +7055,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
         <div className="modal__header compact"><div><span className="eyebrow">PREFERENCES</span><h2>Make Ensync yours</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>
         <div className="settings-body">
           <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onVerifySecondFactor={onAccountVerifySecondFactor} onLogout={onAccountLogout} onSync={onAccountSync} />
+          <RemoteBrokerSettings authenticated={accountSyncStatus.authenticated} />
           <section className="setting-section workspace-layout-setting">
             <div className="setting-title"><div><h3>New conversation view</h3><p>Choose whether open conversations share the screen or use one workspace.</p></div></div>
             <div className="choice-row layout-choice-row" role="radiogroup" aria-label="New conversation view">

@@ -565,6 +565,66 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .account-security__email input { width: 200px; height: 30px; padding: 0 8px; border: 1px solid #303530; outline: 0; border-radius: 6px; background: #101310; color: #d9ddd7; font-size: 11px; }
 .account-security__email input:focus { border-color: #58705b; }
 
+/* Remote execution (Host / client) inside Account & chat sync. */
+.account-sync-remote { margin-top: 13px; overflow: hidden; border: 1px solid #2d322d; border-radius: 8px; background: #141714; }
+.account-sync-remote__head { padding: 10px 11px; display: flex; align-items: flex-start; gap: 9px; }
+.account-sync-remote__head > svg { flex: 0 0 auto; margin-top: 1px; color: #8ea08f; }
+.account-sync-remote__head > span { min-width: 0; flex: 1; display: grid; gap: 3px; }
+.account-sync-remote__head strong { color: #b9beb7; font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.account-sync-remote__head small { color: #686f67; font-size: 10px; line-height: 1.45; overflow-wrap: anywhere; }
+.account-sync-remote__body { padding: 0 11px 11px; display: grid; gap: 9px; }
+.account-sync-remote__row { display: flex; gap: 6px; }
+.account-sync-remote__row input { min-width: 0; flex: 1; height: 32px; padding: 0 9px; box-sizing: border-box; border: 1px solid #303530; outline: 0; border-radius: 6px; background: #101310; color: #d9ddd7; font-size: 11px; }
+.account-sync-remote__row input:focus { border-color: #58705b; }
+.account-sync-remote__row .button { height: 32px; padding: 0 9px; white-space: nowrap; }
+.account-sync-remote__actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.account-sync-remote__actions .button { height: 32px; padding: 0 9px; white-space: nowrap; }
+.account-sync-remote__note { margin: 0; color: #8e958d; font-size: 10px; line-height: 1.45; }
+.account-sync-remote__error { margin: 0; display: flex; align-items: flex-start; gap: 6px; padding: 8px 10px; border: 1px solid #4c3a33; border-radius: 7px; background: #241a15; color: #d89a8f; font-size: 10px; line-height: 1.45; }
+.account-sync-remote__error svg { flex: 0 0 auto; margin-top: 1px; }
+.account-sync-remote__pill { width: max-content; display: inline-flex; align-items: center; gap: 5px; padding: 2px 6px; border: 1px solid #4c4f49; border-radius: 999px; color: #8a9089; font-size: 9px; white-space: nowrap; }
+.account-sync-remote__pill i { width: 6px; height: 6px; border-radius: 999px; background: #5f665f; }
+.account-sync-remote__pill--on { border-color: #3d5c41; color: #78af7e; }
+.account-sync-remote__pill--on i { background: #5a9d61; }
+.account-sync-remote__pill--done { border-color: #45644a; color: #9fd4a4; }
+.account-sync-remote__pill--done i { background: #83c88b; }
+.account-sync-remote__pairing { padding: 10px; display: grid; gap: 8px; border: 1px solid #2d3a30; border-radius: 7px; background: rgba(105,171,114,.05); }
+.account-sync-remote__pairing > span { display: grid; gap: 3px; }
+.account-sync-remote__pairing strong { color: #b9beb7; font-size: 11px; font-weight: 500; }
+.account-sync-remote__pairing small { color: #686f67; font-size: 10px; line-height: 1.45; }
+.account-sync-remote__pairing code { padding: 10px; border: 1px solid #38593d; border-radius: 6px; background: #101712; color: #a5d5aa; font-size: 22px; font-weight: 700; letter-spacing: 4px; text-align: center; }
+.account-sync-remote__capabilities { margin: 0; display: flex; align-items: center; gap: 6px; color: #78af7e; font-size: 10px; }
+.account-sync-remote__capabilities svg { flex: 0 0 auto; }
+.account-sync-remote__hosts { display: grid; gap: 6px; }
+.account-sync-remote__hosts-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.account-sync-remote__hosts-head strong { color: #b9beb7; font-size: 11px; font-weight: 500; }
+.account-sync-remote__hosts-head .button { height: 26px; padding: 0 8px; font-size: 10px; }
+.account-sync-remote__host { padding: 8px 9px; display: grid; gap: 2px; border: 1px solid #2d322d; border-radius: 6px; background: #101310; }
+.account-sync-remote__host strong { color: #cfd5ce; font-size: 11px; font-weight: 500; overflow-wrap: anywhere; }
+.account-sync-remote__host small { color: #686f67; font-size: 9px; }
+.account-sync-remote__run { padding: 10px; display: grid; gap: 8px; border: 1px solid #2d322d; border-radius: 7px; background: #101310; }
+.account-sync-remote__run-head { display: grid; gap: 2px; }
+.account-sync-remote__run-head strong { color: #b9beb7; font-size: 11px; font-weight: 500; }
+.account-sync-remote__run-head small { color: #686f67; font-size: 10px; }
+.account-sync-remote__field { display: grid; gap: 4px; }
+.account-sync-remote__field > span { color: #8e958d; font-size: 10px; font-weight: 500; }
+.account-sync-remote__field input, .account-sync-remote__field select, .account-sync-remote__field textarea { width: 100%; padding: 0 9px; box-sizing: border-box; border: 1px solid #303530; outline: 0; border-radius: 6px; background: #0d100d; color: #d9ddd7; font-size: 11px; }
+.account-sync-remote__field input, .account-sync-remote__field select { height: 32px; }
+.account-sync-remote__field textarea { min-height: 64px; padding-top: 8px; padding-bottom: 8px; resize: vertical; line-height: 1.45; }
+.account-sync-remote__field input:focus, .account-sync-remote__field select:focus, .account-sync-remote__field textarea:focus { border-color: #58705b; }
+.account-sync-remote__run .button { justify-self: start; height: 32px; padding: 0 10px; }
+.account-sync-remote__job { padding: 10px; display: grid; gap: 8px; border: 1px solid #2d3a30; border-radius: 7px; background: rgba(105,171,114,.045); }
+.account-sync-remote__job-head { display: flex; align-items: center; gap: 9px; }
+.account-sync-remote__job-head > small { min-width: 0; flex: 1; color: #7f897f; font-size: 10px; line-height: 1.4; }
+.account-sync-remote__transcript { max-height: 240px; overflow: auto; display: grid; gap: 6px; padding: 8px 9px; border: 1px solid #232722; border-radius: 6px; background: #0d100d; }
+.account-sync-remote__line { margin: 0; display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px; color: #c7ccc6; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.account-sync-remote__event-type { color: #78af7e; font-size: 9px; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+.account-sync-remote__job-actions { display: flex; gap: 6px; }
+.account-sync-remote__steer { min-width: 0; flex: 1; display: flex; gap: 6px; }
+.account-sync-remote__steer input { min-width: 0; flex: 1; height: 32px; padding: 0 9px; box-sizing: border-box; border: 1px solid #303530; outline: 0; border-radius: 6px; background: #0d100d; color: #d9ddd7; font-size: 11px; }
+.account-sync-remote__steer input:focus { border-color: #58705b; }
+.account-sync-remote__steer .button, .account-sync-remote__job-actions .button { height: 32px; padding: 0 9px; white-space: nowrap; }
+
 .auto-context-summary { margin-top: 13px; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; overflow: hidden; border: 1px solid var(--line); border-radius: 8px; background: var(--line); opacity: .62; transition: opacity .15s, border-color .15s; }
 .auto-context-summary--active { opacity: 1; border-color: color-mix(in srgb, var(--accent) 38%, var(--line)); }
 .auto-context-summary > div { min-width: 0; display: flex; align-items: center; gap: 8px; padding: 10px; background: var(--panel); }

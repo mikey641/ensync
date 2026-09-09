@@ -239,13 +239,23 @@ export class AccountSyncService {
       lastSyncedAt: this.#lastSyncedAt,
       encryption: 'aes-256-gcm',
       credentialStorage: 'host_memory_only',
-      brokerDevice: this.#brokerDevice ? {
-        id: this.#brokerDevice.id,
-        role: this.#brokerDevice.role,
-        label: this.#brokerDevice.label,
-        registeredAt: this.#brokerDevice.registeredAt,
-        lastSeenAt: this.#brokerDevice.lastSeenAt ?? null,
-      } : null,
+      brokerDevice: this.brokerDevice(),
+    }
+  }
+
+  /**
+   * The current broker device identity, sanitized for display/HTTP responses.
+   * The raw device token stays in host memory and is never returned here.
+   */
+  brokerDevice() {
+    const device = this.#brokerDevice
+    if (!device) return null
+    return {
+      id: device.id,
+      role: device.role,
+      label: device.label,
+      registeredAt: device.registeredAt,
+      lastSeenAt: device.lastSeenAt ?? null,
     }
   }
 
@@ -541,6 +551,18 @@ export class AccountSyncService {
       method: 'POST',
       body: JSON.stringify({ pairingId }),
     })
+  }
+
+  async publishBrokerCapabilities(capabilities) {
+    const device = assertBrokerDevice(this.#brokerDevice, 'host')
+    const payload = await this.#request(
+      `/v1/broker/hosts/${encodeURIComponent(device.id)}/capabilities`,
+      { method: 'PUT', body: JSON.stringify({ capabilities }) },
+    )
+    if (!payload?.device || payload.device.id !== device.id) {
+      throw new AccountSyncError('sync_protocol_invalid', 'The sync service returned an invalid broker capabilities response.', 502)
+    }
+    return payload.device
   }
 
   async submitBrokerJob(input) {

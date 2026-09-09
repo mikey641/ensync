@@ -202,3 +202,90 @@ test('quick tunnel captures the printed URL and persists enablement', async (t) 
   assert.equal(manager.quickEnabled(), false)
   assert.equal(manager.quickStatus().running, false)
 })
+
+test('a relaunched shell reattaches to the persisted quick tunnel instead of republishing', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-tunnel-manager-reconnect-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const appBinsDir = join(root, 'bins')
+  const userDataPath = join(root, 'user-data')
+  mkdirSync(appBinsDir, { recursive: true })
+  mkdirSync(userDataPath, { recursive: true })
+  const binaryPath = join(appBinsDir, 'cloudflared')
+  writeFileSync(binaryPath, 'fake binary')
+  chmodSync(binaryPath, 0o755)
+
+  const store = createCloudflareTunnelStore({ filePath: join(userDataPath, 'tunnel.json') })
+  const expectations = { spawns: 0, lastArgs: null }
+  const spawnImpl = (cmd, args) => {
+    expectations.spawns += 1
+    expectations.lastArgs = args
+    return fakeQuickChild(6789, 'INF Your quick Tunnel has been created: https://steady-url-xxxx.trycloudflare.com')
+  }
+  const shared = {
+    store,
+    userDataPath,
+    appBinsDir,
+    platform: 'darwin',
+    arch: 'arm64',
+    spawnImpl,
+    isAlive: (pid) => pid === 6789,
+  }
+
+  // First launch publishes and persists a URL.
+  const first = new CloudflareTunnelManager(shared)
+  const started = await first.startQuick({ grantMs: 250 })
+  assert.equal(started.url, 'https://steady-url-xxxx.trycloudflare.com')
+  assert.equal(expectations.spawns, 1)
+
+  // "Relaunch": a brand-new manager reads the persisted pid+url and reattaches
+  // without calling cloudflared at all, so the URL does not rotate.
+  const second = new CloudflareTunnelManager(shared)
+  const reattached = await second.startQuick({ grantMs: 250 })
+  assert.deepEqual(reattached, { running: true, url: 'https://steady-url-xxxx.trycloudflare.com' })
+  assert.equal(expectations.spawns, 1)
+  assert.equal(second.quickEnabled(), true)
+  assert.equal(second.quickStatus().url, 'https://steady-url-xxxx.trycloudflare.com')
+})
+
+test('stopQuick can signal a reattached tunnel from a previous shell', async (t) => {
+  const root = await mkdtemp(join(tmpdir(), 'ensync-tunnel-manager-kill-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const appBinsDir = join(root, 'bins')
+  const userDataPath = join(root, 'user-data')
+  mkdirSync(appBinsDir, { recursive: true })
+  mkdirSync(userDataPath, { recursive: true })
+  const binaryPath = join(appBinsDir, 'cloudflared')
+  writeFileSync(binaryPath, 'fake binary')
+  chmodSync(binaryPath, 0o755)
+
+  const store = createCloudflareTunnelStore({ filePath: join(userDataPath, 'tunnel.json') })
+  const killed = []
+  const manager = new CloudflareTunnelManager({
+    store,
+    userDataPath,
+    appBinsDir,
+    platform: 'darwin',
+    arch: 'arm64',
+    spawnImpl: () => fakeQuickChild(6789, 'INF Your quick Tunnel has been created: https://kill-me-xxxx.trycloudflare.com'),
+    isAlive: (pid) => pid === 6789,
+    kill: (pid) => { killed.push(pid) },
+  })
+
+  assert.deepEqual(await manager.startQuick({ grantMs: 250 }), { running: true, url: 'https://kill-me-xxxx.trycloudflare.com' })
+
+  // Simulate a relaunch that reattaches to the detached pid (no child handle).
+  const second = new CloudflareTunnelManager({
+    store,
+    userDataPath,
+    appBinsDir,
+    platform: 'darwin',
+    arch: 'arm64',
+    spawnImpl: () => fakeQuickChild(9999, ''),
+    isAlive: (pid) => pid === 6789,
+    kill: (pid) => { killed.push(pid) },
+  })
+  assert.equal(second.quickStatus().running, true)
+  second.stopQuick({ disable: true })
+  assert.deepEqual(killed, [6789])
+  assert.equal(second.quickEnabled(), false)
+})

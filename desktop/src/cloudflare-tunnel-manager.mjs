@@ -33,6 +33,7 @@ export class CloudflareTunnelManager {
       spawnImpl = defaultSpawn,
       provisionImpl = provisionTunnel,
       isAlive = processIsAlive,
+      kill = (pid) => { try { process.kill(pid) } catch { /* already gone */ } },
       log = () => {},
     } = options
     if (!store) throw new TypeError('A Cloudflare Tunnel store is required.')
@@ -50,6 +51,7 @@ export class CloudflareTunnelManager {
     this.spawnImpl = spawnImpl
     this.provisionImpl = provisionImpl
     this.isAlive = isAlive
+    this.kill = kill
     this.log = log
     this.child = null
     this.pid = this.store.identity()?.pid ?? null
@@ -57,21 +59,36 @@ export class CloudflareTunnelManager {
     this.quickPid = null
     this.quickUrl = null
     this.quickPrefsPath = join(userDataPath, 'ensync-quick-tunnel-v1.json')
-  }
-
-  #readQuickEnabled() {
-    try {
-      const parsed = JSON.parse(readFileSync(this.quickPrefsPath, 'utf8'))
-      return parsed?.enabled === true
-    } catch {
-      return false
+    // A previous shell may have left cloudflared running detached with a known
+    // URL. Reattach to it so the phone/Mac URL does not rotate on a relaunch.
+    const persistedQuick = this.#readQuickState()
+    if (persistedQuick.url && persistedQuick.pid && this.isAlive(persistedQuick.pid)) {
+      this.quickPid = persistedQuick.pid
+      this.quickUrl = persistedQuick.url
     }
   }
 
-  #writeQuickEnabled(enabled) {
+  #readQuickState() {
+    try {
+      const parsed = JSON.parse(readFileSync(this.quickPrefsPath, 'utf8'))
+      return {
+        enabled: parsed?.enabled === true,
+        url: typeof parsed?.url === 'string' && parsed.url ? parsed.url : null,
+        pid: Number.isInteger(parsed?.pid) && parsed.pid >= 1 ? parsed.pid : null,
+      }
+    } catch {
+      return { enabled: false, url: null, pid: null }
+    }
+  }
+
+  #writeQuickState({ enabled, url = null, pid = null }) {
     if (enabled) {
       mkdirSync(dirname(this.quickPrefsPath), { recursive: true })
-      writeFileSync(this.quickPrefsPath, JSON.stringify({ enabled: true }), { encoding: 'utf8', mode: 0o600 })
+      writeFileSync(this.quickPrefsPath, JSON.stringify({
+        enabled: true,
+        url: typeof url === 'string' && url ? url : null,
+        pid: Number.isInteger(pid) && pid >= 1 ? pid : null,
+      }), { encoding: 'utf8', mode: 0o600 })
     } else {
       try { rmSync(this.quickPrefsPath, { force: true }) } catch { /* nothing persisted */ }
     }
@@ -80,20 +97,19 @@ export class CloudflareTunnelManager {
   #recordQuickRunning(pid, url = null) {
     this.quickPid = Number.isInteger(pid) && pid >= 1 ? pid : null
     this.quickUrl = url ?? this.quickUrl
+    if (this.quickUrl) this.#writeQuickState({ enabled: true, url: this.quickUrl, pid: this.quickPid })
     return this.quickPid
   }
 
   quickEnabled() {
-    return this.#readQuickEnabled()
+    return this.#readQuickState().enabled
   }
 
   quickRunning() {
     if (this.quickPid !== null && this.isAlive(this.quickPid)) return true
     this.quickPid = null
-    if (this.quickChild) {
-      this.quickUrl = null
-      this.quickChild = null
-    }
+    this.quickUrl = null
+    this.quickChild = null
     return false
   }
 
@@ -125,7 +141,9 @@ export class CloudflareTunnelManager {
     this.quickChild = child
     this.quickPid = child.pid ?? null
     if (latestUrl) this.#recordQuickRunning(child.pid ?? null, latestUrl)
-    this.#writeQuickEnabled(true)
+    // Persist the running PID even before the URL is known so a relaunch can
+    // reattach to this exact connector instead of publishing a fresh URL.
+    this.#writeQuickState({ enabled: true, url: this.quickUrl ?? null, pid: this.quickPid })
     this.log(`starting quick tunnel over ${serviceUrl}`)
     if (this.quickUrl) return { running: true, url: this.quickUrl }
 
@@ -151,10 +169,13 @@ export class CloudflareTunnelManager {
 
   stopQuick({ disable = false } = {}) {
     if (this.quickChild) stopCloudflared(this.quickChild)
+    // A reattached child from a previous shell has no Node handle here; signal
+    // it directly so the user can still turn phone access off.
+    else if (this.quickPid !== null && this.isAlive(this.quickPid)) this.kill(this.quickPid)
     this.quickChild = null
     this.quickPid = null
     this.quickUrl = null
-    if (disable) this.#writeQuickEnabled(false)
+    if (disable) this.#writeQuickState({ enabled: false })
   }
 
   #recordRunning(pid) {

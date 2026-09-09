@@ -149,7 +149,6 @@ async function writeHostSyncConfig(syncServiceUrl) {
 
 let hostController = null
 let appProtocolRegistered = false
-let localSyncService = null
 let runtimeStart = null
 let quitting = false
 let nativeBridgeRegistered = false
@@ -555,16 +554,12 @@ async function stopRuntime() {
   // active provider jobs and their output buffer alive for the next launch.
   const stoppingHost = hostController?.release()
   hostController = null
-  // The bundled loopback Sync service exists only for single-computer account
-  // sync and can end with this shell; an explicitly configured shared service
-  // has no child to stop and remains the detached Host's responsibility.
-  const stoppingSync = localSyncService?.stop()
-  localSyncService = null
-  // The quick tunnel points at the bundled loopback service above, so it must
-  // not outlive it as an orphan. Keeping the "enabled" pref lets the next
-  // launch republish a fresh URL automatically.
-  cloudflareTunnelManager?.stopQuick()
-  await Promise.allSettled([stoppingHost, stoppingSync])
+  // The loopback Sync service and the quick tunnel are detached daemons that
+  // deliberately outlive this shell: the next launch reattaches them, so the
+  // phone/Mac URL stays stable across an app rebuild or relaunch instead of
+  // rotating. Only an explicit "disable phone access" stops the quick tunnel
+  // and its URL.
+  await Promise.allSettled([stoppingHost])
 }
 
 async function ensureRuntime() {
@@ -585,7 +580,6 @@ async function ensureRuntime() {
         ...(configuredSyncServiceUrl ? { ENSYNC_SYNC_SERVICE_URL: configuredSyncServiceUrl } : {}),
       },
     })
-    localSyncService = localSync
     const effectiveSyncServiceUrl = configuredSyncServiceUrl || localSync.url || null
     const controller = new HostProcessController({
       bootstrapPath: paths.bootstrapPath,

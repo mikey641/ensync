@@ -2,6 +2,11 @@ import './styles.css'
 import { BrokerClient } from './broker-client.js'
 
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'reconciliation_required'])
+const DEFAULT_PROVIDERS = [
+  { id: 'codex', name: 'Codex', available: true },
+  { id: 'claude', name: 'Claude Code', available: true },
+]
+const ROLE_LABELS = { agent: 'Agent', you: 'You', system: 'System', error: 'Error' }
 const app = document.querySelector('#app')
 let client = null
 let selectedHost = null
@@ -65,20 +70,65 @@ async function authenticate(event) {
   }
 }
 
+// The Host advertises its subscription CLIs in `capabilities.providers`. When
+// that list is present but empty (or absent altogether), fall back to the
+// hardcoded Codex + Claude Code pair so the client still submits.
+function hostProviders() {
+  const providers = selectedHost?.capabilities?.providers
+  return Array.isArray(providers) && providers.length ? providers : DEFAULT_PROVIDERS
+}
+
+function providerOptionsHtml() {
+  return hostProviders().map((provider) => {
+    const unavailable = provider.available === false
+    const label = unavailable ? `${provider.name} (unavailable)` : provider.name
+    return `<option value="${escapeHtml(provider.id)}"${unavailable ? ' disabled' : ''}>${escapeHtml(label)}</option>`
+  }).join('')
+}
+
+// Recent projects become a datalist of suggestions while the field stays free
+// text. The option's `value` is the path (what submitting sends) and its
+// `label` carries an optional project name as a visible hint.
+function recentProjectsHtml() {
+  const projects = selectedHost?.capabilities?.recentProjects
+  if (!Array.isArray(projects) || !projects.length) return ''
+  return projects.map((project) => {
+    if (!project || typeof project.path !== 'string' || !project.path) return ''
+    const hint = project.name ? `${project.name} — ${project.path}` : project.path
+    return `<option value="${escapeHtml(project.path)}" label="${escapeHtml(hint)}"></option>`
+  }).join('')
+}
+
+function hostCapabilitiesSummary() {
+  const capabilities = selectedHost?.capabilities
+  if (!capabilities || typeof capabilities !== 'object') return ''
+  const providers = Array.isArray(capabilities.providers) ? capabilities.providers : []
+  const projects = Array.isArray(capabilities.recentProjects) ? capabilities.recentProjects : []
+  const parts = []
+  if (providers.length) {
+    const available = providers.filter((provider) => provider.available !== false).length
+    parts.push(`${available}/${providers.length} agents`)
+  }
+  if (projects.length) parts.push(`${projects.length} recent projects`)
+  return parts.join(' · ')
+}
+
 async function loadWorkspace(message = '') {
   let hosts = []
   try { hosts = await client.hosts() } catch (error) { message ||= error.message }
-  selectedHost = hosts.find((host) => host.id === selectedHost?.id) ?? hosts[0] ?? null
+  selectedHost = hosts.find((host) => host.id === selectedHost?.id) ?? hosts[0] ?? selectedHost ?? null
+  const capsSummary = hostCapabilitiesSummary()
+  const datalist = recentProjectsHtml()
   app.innerHTML = `
     <section class="screen workspace-screen">
       <header><span class="mark">E</span><div><strong>Ensync</strong><small>${escapeHtml(client.username)}</small></div><i class="status">E2E</i></header>
       <div class="host-card card">
-        <div><span class="device-icon">⌁</span><p><strong>${selectedHost ? escapeHtml(selectedHost.label) : 'Pair an Ensync Host'}</strong><small>${selectedHost ? `Last seen ${formatTime(selectedHost.lastSeenAt)}` : 'Generate a code in desktop Settings, then enter it here.'}</small></p></div>
+        <div><span class="device-icon">⌁</span><p><strong>${selectedHost ? escapeHtml(selectedHost.label) : 'Pair an Ensync Host'}</strong><small>${selectedHost ? `Last seen ${formatTime(selectedHost.lastSeenAt)}` : 'Generate a code in desktop Settings, then enter it here.'}</small>${capsSummary ? `<small class="host-caps">${escapeHtml(capsSummary)}</small>` : ''}</p></div>
         <form id="pair-form"><input name="code" inputmode="text" maxlength="8" placeholder="PAIR CODE" aria-label="Host pairing code" /><button>Pair</button></form>
       </div>
       <form id="run-form" class="composer card">
-        <label>Project path on Host<input name="projectPath" placeholder="/Users/you/project or C:\\code\\project" required ${selectedHost ? '' : 'disabled'} /></label>
-        <label>Agent<select name="provider" ${selectedHost ? '' : 'disabled'}><option value="codex">Codex</option><option value="claude">Claude Code</option></select></label>
+        <label>Project path on Host<input name="projectPath" list="project-recents" placeholder="/Users/you/project or C:\\code\\project" required ${selectedHost ? '' : 'disabled'} />${datalist ? `<datalist id="project-recents">${datalist}</datalist>` : ''}</label>
+        <label>Agent<select name="provider" ${selectedHost ? '' : 'disabled'}>${providerOptionsHtml()}</select></label>
         <label class="prompt">Instruction<textarea name="prompt" rows="5" placeholder="What should the agent do?" required ${selectedHost ? '' : 'disabled'}></textarea></label>
         <button ${selectedHost ? '' : 'disabled'}>Run remotely</button>
       </form>
@@ -93,7 +143,10 @@ async function claimPairing(event) {
   event.preventDefault()
   const code = String(new FormData(event.currentTarget).get('code')).trim()
   try {
-    await client.claimPairing(code)
+    const pairing = await client.claimPairing(code)
+    // The claim response already carries the freshly paired Host (with its
+    // capabilities); show it immediately rather than waiting for hosts().
+    if (pairing?.host) selectedHost = { ...selectedHost, ...pairing.host }
     await loadWorkspace('Host paired. Remote execution is ready.')
   } catch (error) {
     await loadWorkspace(error instanceof Error ? error.message : 'Pairing failed.')
@@ -111,7 +164,9 @@ async function submitJob(event) {
       projectPath: String(form.get('projectPath')).trim(),
       prompt: String(form.get('prompt')).trim(),
     })
-    transcript = []
+    // The user's instruction opens the conversation; later events append below
+    // it. Only held in memory — never persisted.
+    transcript = [{ type: 'you', message: String(form.get('prompt')).trim(), at: new Date().toISOString() }]
     lastSequence = 0
     renderJob()
     schedulePoll(0)
@@ -147,11 +202,62 @@ function formatTime(value) {
   return new Date(value).toLocaleString()
 }
 
+function formatClock(value) {
+  if (!value) return ''
+  return new Date(value).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function eventRole(event) {
+  switch (event.type) {
+    case 'completed':
+    case 'output':
+      return 'agent'
+    case 'error':
+    case 'cancelled':
+      return 'error'
+    case 'you':
+    case 'steer':
+      return 'you'
+    case 'notice':
+    case 'started':
+      return 'system'
+    default:
+      return 'system'
+  }
+}
+
+function eventDetail(event) {
+  if (event.type === 'output' && event.stream === 'stderr') return 'stderr'
+  if (event.type === 'error' && event.code) return event.code
+  return ''
+}
+
 function eventText(event) {
-  if (event.type === 'completed') return event.result?.response || 'Agent completed.'
-  if (event.type === 'error') return event.error || 'Remote execution failed.'
-  if (event.type === 'cancelled') return event.message || 'Remote execution stopped.'
-  return event.message || event.text || (event.type === 'started' ? 'Agent process started.' : event.type)
+  switch (event.type) {
+    case 'completed': return event.result?.response || 'Agent completed.'
+    case 'output': return event.text || ''
+    case 'error': return event.error || 'Remote execution failed.'
+    case 'cancelled': return event.message || 'Remote execution stopped.'
+    case 'notice': return event.message || ''
+    case 'started': return 'Agent process started.'
+    case 'you':
+    case 'steer': return event.message || event.text || ''
+    default: return event.message || event.text || event.type
+  }
+}
+
+function transcriptHtml() {
+  if (!transcript.length) return '<p class="waiting">Waiting for the paired Host to claim this encrypted job…</p>'
+  return transcript.map((event) => {
+    const role = eventRole(event)
+    const detail = eventDetail(event)
+    const text = eventText(event)
+    return `
+      <div class="message ${escapeHtml(role)} ${escapeHtml(event.type)}">
+        <div class="message-meta"><span class="message-role">${ROLE_LABELS[role]}</span>${detail ? `<span class="message-detail">${escapeHtml(detail)}</span>` : ''}<span class="message-time">${formatClock(event.at)}</span></div>
+        <div class="message-body${text ? '' : ' empty'}">${text ? escapeHtml(text) : ''}</div>
+      </div>`
+  }).join('')
 }
 
 function renderJob(error = '') {
@@ -160,11 +266,13 @@ function renderJob(error = '') {
   target.innerHTML = `
     <article class="job-card card">
       <div class="job-heading"><span><strong>Remote run</strong><small>${escapeHtml(currentJob.id)}</small></span><i class="job-state ${escapeHtml(currentJob.state)}">${escapeHtml(currentJob.state)}</i></div>
-      <div class="events">${transcript.map((event) => `<div class="event ${escapeHtml(event.type)}"><small>${escapeHtml(event.type)}</small><p>${escapeHtml(eventText(event))}</p></div>`).join('') || '<p class="waiting">Waiting for the paired Host to claim this encrypted job…</p>'}</div>
+      <div class="events">${transcriptHtml()}</div>
       ${error ? `<p class="error">${escapeHtml(error)}</p>` : ''}
       ${TERMINAL_STATES.has(currentJob.state) ? '' : `
-        <form id="steer-form" class="steer"><input name="prompt" placeholder="Correct the active Codex turn" /><button class="secondary">Steer</button><button type="button" id="cancel-job" class="danger">Stop</button></form>`}
+        <form id="steer-form" class="steer"><input name="prompt" placeholder="Guide the active agent turn" /><button class="secondary">Steer</button><button type="button" id="cancel-job" class="danger">Stop</button></form>`}
     </article>`
+  const events = target.querySelector('.events')
+  if (events) events.scrollTop = events.scrollHeight
   document.querySelector('#cancel-job')?.addEventListener('click', () => void sendCommand('cancel'))
   document.querySelector('#steer-form')?.addEventListener('submit', (event) => {
     event.preventDefault()
@@ -176,6 +284,10 @@ function renderJob(error = '') {
 async function sendCommand(type, payload = {}) {
   try {
     await client.command(currentJob, type, payload)
+    if (type === 'steer' && payload.prompt) {
+      // Echo the user's live instruction into the conversation (in memory only).
+      transcript.push({ type: 'you', message: payload.prompt, at: new Date().toISOString() })
+    }
     renderJob()
     schedulePoll(100)
   } catch (error) {

@@ -30,6 +30,11 @@ const MAX_BROKER_CIPHERTEXT_CHARACTERS = 2 * 1024 * 1024
 const MAX_BROKER_JOBS = 256
 const MAX_BROKER_EVENTS_PER_JOB = 2_000
 const MAX_BROKER_COMMANDS_PER_JOB = 256
+const MAX_CAPABILITY_PROVIDERS = 100
+const MAX_CAPABILITY_PROJECTS = 200
+const MAX_CAPABILITY_PROVIDER_FIELD_LENGTH = 128
+const MAX_CAPABILITY_PROJECT_PATH_LENGTH = 1024
+const MAX_CAPABILITY_PROJECT_NAME_LENGTH = 256
 const TERMINAL_BROKER_STATES = new Set(['completed', 'failed', 'cancelled', 'reconciliation_required'])
 const BROKER_STATES = new Set(['queued', 'claimed', 'running', ...TERMINAL_BROKER_STATES])
 const PAIRING_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZ'
@@ -246,6 +251,64 @@ function normalizedDeviceLabel(value) {
   return label
 }
 
+function capabilityField(value, maxLength, label) {
+  if (typeof value !== 'string') {
+    throw new SyncServiceError('broker_capabilities_invalid', `${label} must be a string.`, 400)
+  }
+  const text = value.trim()
+  if (!text || text.length > maxLength || /[\u0000-\u001f\u007f]/.test(text)) {
+    throw new SyncServiceError('broker_capabilities_invalid', `${label} is invalid.`, 400)
+  }
+  return text
+}
+
+/**
+ * Whitelist-sanitized Host capabilities. Only the fields the remote client may
+ * render are retained; any extra keys (credentials, tokens, probes) are dropped
+ * so they can never round-trip back to a paired client.
+ */
+function sanitizeCapabilities(value) {
+  if (value === null || value === undefined) return null
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new SyncServiceError('broker_capabilities_invalid', 'Broker capabilities must be an object or null.', 400)
+  }
+  const providers = Array.isArray(value.providers) ? value.providers : null
+  const recentProjects = Array.isArray(value.recentProjects) ? value.recentProjects : null
+  if (providers && providers.length > MAX_CAPABILITY_PROVIDERS) {
+    throw new SyncServiceError('broker_capabilities_invalid', `Publish at most ${MAX_CAPABILITY_PROVIDERS} providers.`, 400)
+  }
+  if (recentProjects && recentProjects.length > MAX_CAPABILITY_PROJECTS) {
+    throw new SyncServiceError('broker_capabilities_invalid', `Publish at most ${MAX_CAPABILITY_PROJECTS} recent projects.`, 400)
+  }
+  const sanitized = {}
+  if (providers) {
+    sanitized.providers = providers.map((provider) => {
+      if (!provider || typeof provider !== 'object' || Array.isArray(provider)
+        || typeof provider.available !== 'boolean') {
+        throw new SyncServiceError('broker_capabilities_invalid', 'Each provider capability needs an id, name, and available flag.', 400)
+      }
+      return {
+        id: capabilityField(provider.id, MAX_CAPABILITY_PROVIDER_FIELD_LENGTH, 'Provider ID'),
+        name: capabilityField(provider.name, MAX_CAPABILITY_PROVIDER_FIELD_LENGTH, 'Provider name'),
+        available: provider.available,
+      }
+    })
+  }
+  if (recentProjects) {
+    sanitized.recentProjects = recentProjects.map((project) => {
+      if (!project || typeof project !== 'object' || Array.isArray(project)) {
+        throw new SyncServiceError('broker_capabilities_invalid', 'Each recent project must be an object.', 400)
+      }
+      const entry = { path: capabilityField(project.path, MAX_CAPABILITY_PROJECT_PATH_LENGTH, 'Project path') }
+      if (project.name !== undefined && project.name !== null) {
+        entry.name = capabilityField(project.name, MAX_CAPABILITY_PROJECT_NAME_LENGTH, 'Project name')
+      }
+      return entry
+    })
+  }
+  return sanitized
+}
+
 function hashSecret(value) {
   return createHash('sha256').update(value).digest('base64url')
 }
@@ -289,6 +352,7 @@ function publicDevice(device) {
     label: device.label,
     registeredAt: device.registeredAt,
     lastSeenAt: device.lastSeenAt ?? null,
+    capabilities: device.capabilities ?? null,
   }
 }
 
@@ -297,7 +361,7 @@ function publicPairing(pairing, broker) {
   const client = pairing.clientId ? broker.devices[pairing.clientId] : null
   return {
     id: pairing.id,
-    host: host ? publicDevice(host) : { id: pairing.hostId, role: 'host', label: 'Unavailable Host', registeredAt: null, lastSeenAt: null },
+    host: host ? publicDevice(host) : { id: pairing.hostId, role: 'host', label: 'Unavailable Host', registeredAt: null, lastSeenAt: null, capabilities: null },
     client: client ? publicDevice(client) : null,
     createdAt: pairing.createdAt,
     expiresAt: pairing.expiresAt,
@@ -878,6 +942,18 @@ export function createEnsyncSyncServer(options = {}) {
           .filter((item) => item.host && !item.host.revokedAt)
           .map((item) => ({ ...publicDevice(item.host), pairedAt: item.pairing.claimedAt }))
         return json(response, 200, { hosts })
+      }
+
+      const hostCapabilitiesMatch = url.pathname.match(/^\/v1\/broker\/hosts\/([^/]+)\/capabilities$/)
+      if (request.method === 'PUT' && hostCapabilitiesMatch) {
+        const session = authenticate(request)
+        const hostId = decodeURIComponent(hostCapabilitiesMatch[1])
+        const input = await body(request)
+        const data = store.read()
+        const { device } = authenticateDevice(request, session, data, 'host', hostId)
+        device.capabilities = sanitizeCapabilities(input.capabilities)
+        store.write(data)
+        return json(response, 200, { device: publicDevice(device) })
       }
 
       if (request.method === 'POST' && url.pathname === '/v1/broker/pairings/revoke') {

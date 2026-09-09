@@ -1,12 +1,12 @@
 import { createServer } from 'node:http'
-import { timingSafeEqual } from 'node:crypto'
+import { randomUUID, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { readFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { AccountSyncError, AccountSyncService } from './account-sync.mjs'
-import { AgentConnectorError, AgentConnectorService } from './agent-connector.mjs'
+import { AgentConnectorError, AgentConnectorService, userDataDirectory } from './agent-connector.mjs'
 import { AgentWorktreeClient, resolveAgentWorktreeExecutable } from './agent-worktree-client.mjs'
 import {
   ChatAttachmentStore,
@@ -277,6 +277,17 @@ function refreshRequested(url) {
   return ['1', 'true'].includes(url.searchParams.get('refresh')?.toLowerCase())
 }
 
+async function readGlobalRecentProjects(recentProjectsPath) {
+  try {
+    const raw = await readFile(recentProjectsPath, 'utf8')
+    const parsed = JSON.parse(raw)
+    const payload = typeof parsed.payload === 'string' ? JSON.parse(parsed.payload) : parsed.payload
+    return Array.isArray(payload?.projects) ? payload.projects : []
+  } catch {
+    return []
+  }
+}
+
 function boundedSshOwner(owner = {}) {
   return {
     jobId: typeof owner.jobId === 'string' && owner.jobId.length <= 128 ? owner.jobId : null,
@@ -327,6 +338,10 @@ export function createEnsyncHost(options = {}) {
     baseUrl: options.accountSyncServiceUrl ?? process.env.ENSYNC_SYNC_SERVICE_URL ?? null,
   })
   const statuses = options.statusService ?? new ProviderStatusService()
+  const recentProjectsPath = options.recentProjectsPath
+    ?? join(userDataDirectory(), 'global-recent-projects-v1.json')
+  let remoteClientDeviceId = null
+  let remoteHostDeviceId = null
   const agentConnector = options.agentConnectorService ?? new AgentConnectorService({
     statusService: statuses,
     preferencesPath: options.connectorPreferencesPath,
@@ -946,6 +961,127 @@ export function createEnsyncHost(options = {}) {
       if (request.method === 'PUT' && url.pathname === '/api/account-sync/workspace') {
         const body = await readJsonBody(request, MAX_SYNC_BODY_BYTES)
         return sendJson(response, 200, await accountSync.push(body.state, body.baseRevision), origin)
+      }
+
+      // Remote broker execution. Every route below requires the same signed-in
+      // account session; account-sync keeps all job payloads end-to-end
+      // encrypted, and these routes never mint or return new secrets.
+      if (url.pathname.startsWith('/api/remote/broker/')) {
+        if (!accountSync.status().authenticated) {
+          return sendJson(response, 401, {
+            error: 'Sign in to use remote execution.',
+            code: 'sync_login_required',
+          }, origin)
+        }
+
+        if (request.method === 'GET' && url.pathname === '/api/remote/broker/status') {
+          const brokerDevice = accountSync.brokerDevice()
+          return sendJson(response, 200, {
+            ...syncBrokerHost.status(),
+            brokerDevice: brokerDevice ? { id: brokerDevice.id, role: brokerDevice.role } : null,
+          }, origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/start') {
+          const body = await readJsonBody(request)
+          const label = typeof body.label === 'string' && body.label.trim()
+            ? body.label.trim()
+            : hostname()
+          const deviceId = remoteHostDeviceId ??= `host_${randomUUID()}`
+          return sendJson(response, 200, await syncBrokerHost.connect({ label, deviceId }), origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/pairing') {
+          return sendJson(response, 200, await syncBrokerHost.createPairing(), origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/stop') {
+          const body = await readJsonBody(request)
+          return sendJson(response, 200, await syncBrokerHost.disconnect({ revoke: body.revoke === true }), origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/capabilities') {
+          const providers = (await statuses.list({ refresh: true }))
+            .filter((provider) => provider.chatExecution === 'supported')
+            .slice(0, 100)
+            .map((provider) => ({
+              id: provider.id,
+              name: provider.name,
+              available: provider.installed === true && provider.connectionState !== 'unavailable',
+            }))
+          const recentProjects = []
+          for (const project of await readGlobalRecentProjects(recentProjectsPath)) {
+            const path = typeof project.path === 'string' ? project.path.trim() : ''
+            if (!path || path.length > 1024) continue
+            const name = typeof project.name === 'string' ? project.name.trim() : ''
+            recentProjects.push(name && name.length <= 256 ? { path, name } : { path })
+            if (recentProjects.length >= 200) break
+          }
+          const capabilities = { providers, recentProjects }
+          await accountSync.publishBrokerCapabilities(capabilities)
+          return sendJson(response, 200, { capabilities }, origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/client/register') {
+          const body = await readJsonBody(request)
+          const existing = accountSync.brokerDevice()
+          const deviceId = existing?.role === 'client'
+            ? existing.id
+            : (remoteClientDeviceId ??= `client_${randomUUID()}`)
+          const label = typeof body.label === 'string' && body.label.trim()
+            ? body.label.trim()
+            : hostname()
+          const device = await accountSync.registerBrokerDevice({ deviceId, role: 'client', label })
+          return sendJson(response, 200, { device }, origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/client/claim') {
+          const body = await readJsonBody(request)
+          return sendJson(response, 200, { pairing: await accountSync.claimBrokerPairing(body.code) }, origin)
+        }
+
+        if (request.method === 'GET' && url.pathname === '/api/remote/broker/client/hosts') {
+          return sendJson(response, 200, { hosts: await accountSync.listBrokerHosts() }, origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/client/job') {
+          const body = await readJsonBody(request)
+          const device = accountSync.brokerDevice()
+          if (!device || device.role !== 'client') {
+            return sendJson(response, 409, {
+              error: 'Register this device as a remote client first.',
+              code: 'sync_broker_device_required',
+            }, origin)
+          }
+          const jobId = `job_${randomUUID()}`
+          const job = await accountSync.submitBrokerJob({
+            hostId: body.hostId,
+            jobId,
+            kind: 'local',
+            request: {
+              provider: body.provider,
+              projectPath: body.projectPath,
+              prompt: body.prompt,
+              workspaceKey: `sync:${device.id}:${jobId}`,
+            },
+          })
+          return sendJson(response, 202, { job }, origin)
+        }
+
+        if (request.method === 'GET' && url.pathname === '/api/remote/broker/client/job') {
+          const job = await accountSync.brokerJob(
+            url.searchParams.get('jobId'),
+            Number(url.searchParams.get('after') ?? 0),
+          )
+          return sendJson(response, 200, { job }, origin)
+        }
+
+        if (request.method === 'POST' && url.pathname === '/api/remote/broker/client/command') {
+          const body = await readJsonBody(request)
+          const job = await accountSync.brokerJob(body.jobId)
+          const command = await accountSync.sendBrokerCommand(job, body.type, body.payload ?? {})
+          return sendJson(response, 202, { command }, origin)
+        }
       }
 
       // The ranking a person chose in Settings lives in the renderer's
