@@ -377,9 +377,10 @@ test('claude question arguments pair the stdio prompt tool with stream-json inpu
   })
 })
 
-function claudeChannel() {
+function claudeChannel(overrides = {}) {
   const written = []
   const events = []
+  const heldResults = []
   const state = { held: 0, released: 0, ended: 0 }
   const channel = createClaudeQuestionChannel({
     write: (chunk) => written.push(JSON.parse(chunk)),
@@ -387,10 +388,23 @@ function claudeChannel() {
     hold: () => { state.held += 1 },
     release: () => { state.released += 1 },
     onEvent: (event) => events.push(event),
+    onHeldResult: (text) => heldResults.push(text),
     now: () => '2026-08-10T00:00:00.000Z',
+    ...overrides,
   })
-  return { channel, written, events, state }
+  return { channel, written, events, state, heldResults }
 }
+
+// Background-task frames as claude 2.1.267 writes them (measured 2026-09-10):
+// the level replaces the live task list and empties before the notification.
+const claudeLevel = (...tasks) => JSON.stringify({
+  type: 'system',
+  subtype: 'background_tasks_changed',
+  tasks: tasks.map(([taskId, taskType]) => ({ task_id: taskId, task_type: taskType, description: 'Probe task' })),
+})
+const CLAUDE_INIT_LINE = JSON.stringify({ type: 'system', subtype: 'init' })
+const claudeResult = (text, extra = {}) => JSON.stringify({ type: 'result', subtype: 'success', is_error: false, result: text, ...extra })
+const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 test('a claude AskUserQuestion control request becomes a question and the answer reaches the model', async () => {
   const { channel, written, events, state } = claudeChannel()
@@ -457,6 +471,81 @@ test('claude closes stdin on the terminal result and leaves ordinary output alon
   assert.equal(channel.handleLine('{"type":"result","subtype":"success"}'), true)
   assert.equal(state.ended, 1)
   assert.deepEqual(written, [])
+})
+
+test('claude keeps stdin open while a background subagent works and closes it after the follow-up turn', () => {
+  const { channel, state, heldResults } = claudeChannel()
+  channel.handleLine(CLAUDE_INIT_LINE)
+  channel.handleLine(claudeLevel(['a1', 'local_agent']))
+  assert.equal(channel.handleLine(claudeResult('The last subagent is still running.')), true)
+  // Closing here is what let Claude interrupt the subagent before it reported.
+  assert.equal(state.ended, 0)
+  assert.deepEqual(heldResults, ['The last subagent is still running.'])
+
+  channel.handleLine(claudeLevel())
+  channel.handleLine(CLAUDE_INIT_LINE)
+  channel.handleLine(claudeResult('All rows checked.'))
+  assert.equal(state.ended, 1)
+  assert.deepEqual(heldResults, ['The last subagent is still running.'])
+})
+
+test('a background shell does not hold claude stdin open, matching headless claude', () => {
+  const { channel, state, heldResults } = claudeChannel()
+  channel.handleLine(claudeLevel(['b1', 'local_bash']))
+  channel.handleLine(claudeResult('Started the dev server.'))
+  assert.equal(state.ended, 1)
+  assert.deepEqual(heldResults, [])
+})
+
+test('a failed claude turn closes stdin even while a subagent works', () => {
+  const { channel, state, heldResults } = claudeChannel()
+  channel.handleLine(claudeLevel(['a1', 'local_agent']))
+  channel.handleLine(claudeResult('API Error: 500', { is_error: true }))
+  assert.equal(state.ended, 1)
+  assert.deepEqual(heldResults, [])
+})
+
+test('a subagent report that wakes no claude turn still releases stdin', async () => {
+  const { channel, state } = claudeChannel({ backgroundSettleMs: 10 })
+  channel.handleLine(claudeLevel(['a1', 'local_agent']))
+  channel.handleLine(claudeResult('Waiting on the subagent.'))
+  channel.handleLine(claudeLevel())
+  await waitFor(() => state.ended === 1)
+})
+
+test('the follow-up turn claude opens for a report keeps stdin open until its own result', async () => {
+  const { channel, state } = claudeChannel({ backgroundSettleMs: 10 })
+  channel.handleLine(claudeLevel(['a1', 'local_agent']))
+  channel.handleLine(claudeResult('Waiting on the subagent.'))
+  channel.handleLine(claudeLevel())
+  channel.handleLine(CLAUDE_INIT_LINE)
+  await pause(40)
+  assert.equal(state.ended, 0)
+  channel.handleLine(claudeResult('Report read.'))
+  assert.equal(state.ended, 1)
+})
+
+test('a subagent that reports during a claude turn is read by that turn, not cut off by the settle wait', async () => {
+  const { channel, state } = claudeChannel({ backgroundSettleMs: 10 })
+  channel.handleLine(claudeLevel(['a1', 'local_agent'], ['a2', 'local_agent']))
+  channel.handleLine(claudeResult('Two subagents are still running.'))
+  channel.handleLine(claudeLevel(['a2', 'local_agent']))
+  channel.handleLine(CLAUDE_INIT_LINE)
+  channel.handleLine(claudeLevel())
+  await pause(40)
+  assert.equal(state.ended, 0)
+  channel.handleLine(claudeResult('Both reports read.'))
+  assert.equal(state.ended, 1)
+})
+
+test('closing the claude channel cancels a pending settle wait', async () => {
+  const { channel, state } = claudeChannel({ backgroundSettleMs: 10 })
+  channel.handleLine(claudeLevel(['a1', 'local_agent']))
+  channel.handleLine(claudeResult('Waiting on the subagent.'))
+  channel.handleLine(claudeLevel())
+  channel.close()
+  await pause(40)
+  assert.equal(state.ended, 0)
 })
 
 test('a claude control request the Host does not implement is refused, never guessed at', () => {
@@ -877,6 +966,51 @@ test('a claude run with no retained job keeps its plain non-interactive contract
   // The prompt is still delivered as plain text, exactly as before.
   assert.equal(captured.input.includes('Ship it'), true)
   assert.equal(captured.endInputCalled, 0)
+})
+
+test('a claude run that waits for a background subagent answers with the follow-up turn', async (context) => {
+  const projectPath = await mkdtemp(join(tmpdir(), 'ensync-question-run-'))
+  context.after(() => rm(projectPath, { recursive: true, force: true }))
+
+  const sessionId = '9f1a8f2e-4c5d-4a2b-8f3e-1c2d3e4f5a6b'
+  // Frame order measured from claude 2.1.267: the parent's turn ends while the
+  // subagent works, and its report arrives as an emptied level, a notification,
+  // and a follow-up turn that carries its own result and its own usage.
+  const parentTurn = [
+    { type: 'system', subtype: 'init', session_id: sessionId },
+    { type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'a1', task_type: 'local_agent', description: 'Signature' }] },
+    { type: 'system', subtype: 'task_started', task_id: 'a1', task_type: 'local_agent', is_backgrounded: true },
+    { type: 'result', subtype: 'success', is_error: false, result: 'The last subagent is still running.', session_id: sessionId, usage: { input_tokens: 34, output_tokens: 125, cache_read_input_tokens: 31174 } },
+  ]
+  const followUpTurn = [
+    { type: 'system', subtype: 'background_tasks_changed', tasks: [] },
+    { type: 'system', subtype: 'task_notification', task_id: 'a1', status: 'completed', summary: 'Signature saved' },
+    { type: 'system', subtype: 'init', session_id: sessionId },
+    { type: 'result', subtype: 'success', is_error: false, result: 'All rows checked.', session_id: sessionId, usage: { input_tokens: 4, output_tokens: 7, cache_read_input_tokens: 19912 } },
+  ]
+  const lines = (frames) => `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`
+
+  const events = []
+  let inputOpenWhileSubagentRan = null
+  const { service, captured } = claudeRunService(projectPath, async ({ onStdout }) => {
+    onStdout(lines(parentTurn))
+    await pause(20)
+    inputOpenWhileSubagentRan = captured.endInputCalled === 0
+    onStdout(lines(followUpTurn))
+    return lines(parentTurn) + lines(followUpTurn)
+  })
+
+  const result = await service.run(
+    { provider: 'claude', projectPath, prompt: 'Ship it' },
+    { liveTurnId: 'job-claude-question-0003', onEvent: (event) => events.push(event) },
+  )
+
+  assert.equal(inputOpenWhileSubagentRan, true)
+  assert.equal(captured.endInputCalled, 1)
+  assert.equal(result.response, 'All rows checked.')
+  // Each result counts only its own turn, so the run's usage is the sum.
+  assert.deepEqual(result.usage, { source: 'cli', inputTokens: 38, outputTokens: 132, cachedInputTokens: 51086 })
+  assert.equal(events.some((event) => event.type === 'note' && event.provider === 'claude' && event.text === 'The last subagent is still running.'), true)
 })
 
 test('a claude question asked mid-run is answered through the retained job', async (context) => {

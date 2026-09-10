@@ -869,6 +869,27 @@ function usageFrom(value) {
   }
 }
 
+/**
+ * Claude reports each turn's own usage on that turn's `result`. A run that
+ * waited for a background subagent ends with one result per turn, so its usage
+ * is their sum, and a count that any turn left unreported stays unknown.
+ */
+function claudeRunUsage(events, finalResult) {
+  const turns = events.filter((event) => event?.type === 'result')
+  if (turns.length <= 1) return usageFrom(finalResult.usage)
+  const reported = turns.map((event) => usageFrom(event.usage))
+  if (reported.includes(null)) return null
+  const total = (key) => reported.every((usage) => usage[key] !== null)
+    ? reported.reduce((sum, usage) => sum + usage[key], 0)
+    : null
+  return {
+    source: 'cli',
+    inputTokens: total('inputTokens'),
+    outputTokens: total('outputTokens'),
+    cachedInputTokens: total('cachedInputTokens'),
+  }
+}
+
 function structuredEvents(value) {
   if (typeof value !== 'string' || !value.trim()) return null
   try {
@@ -1109,7 +1130,7 @@ export function parseClaudeChatResult(stdout, options = {}) {
     response: result.result.trim(),
     sessionId: typeof result.session_id === 'string' ? result.session_id : initSessionId ?? null,
     model: modelUsage.length === 1 ? modelUsage[0] : initModel ?? null,
-    usage: usageFrom(result.usage),
+    usage: claudeRunUsage(events, result),
     outputRecovery: recovery,
     outputTruncation: truncation,
   }
@@ -1552,6 +1573,14 @@ export class ChatRunService {
           hold: () => session?.holdInactivity(),
           release: () => session?.releaseInactivity(),
           onEvent: (event) => emitAdvisory(options.onEvent, redactedRunEvent(event)),
+          // A turn that ended while a subagent still works is progress, not the
+          // answer: the response is the follow-up turn that reads the report.
+          onHeldResult: (text) => emitAdvisory(options.onEvent, redactedRunEvent({
+            type: 'note',
+            provider: 'claude',
+            text: text.slice(0, TERMINAL_EVENT_TEXT_LIMIT),
+            at: new Date().toISOString(),
+          })),
         })
       : null
     const args = argumentsFor(executionRequest, attachmentPaths, containment, { questions: questionsEnabled })

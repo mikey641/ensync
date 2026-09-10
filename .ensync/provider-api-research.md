@@ -1,7 +1,7 @@
 ---
 name: Provider API and automation research
 description: Dated first-party interface, authentication, billing, and readiness evidence for every Ensync provider.
-last_verified: 2026-09-07
+last_verified: 2026-09-10
 ---
 
 # Provider API and automation research
@@ -159,6 +159,17 @@ Droid's exec runner still reports quota exhaustion exactly through the `model_us
 Captured verbatim from Claude Code 2.1.263 on macOS with the 5-hour session window exhausted (`claude --print --verbose --output-format stream-json`, exit 1, empty stderr). The turn emits exactly four events: `system/init`, a `rate_limit_event` whose `rate_limit_info` has `status: "rejected"` and `rateLimitType: "five_hour"`, a synthetic `assistant` message containing one `text` block that is only the limit line (`is_api_error_message: true`, `error: "rate_limit"`), and a terminal `result` with `is_error: true`, `subtype: "success"`, `terminal_reason: "api_error"`, `api_error_status: 429`, and `result: "You've hit your session limit · resets 4:40am (Asia/Jerusalem)"`. None of these four events is work, so Ensync's `quotaFailureIsSafe` classifies the stream as `provider_quota` / `safeToRetry` (429) and the automatic-fallback continuation moves to the next provider. `host/chat.test.mjs` pins the exact stream so a future CLI change to this shape is caught instead of silently regressing to `cli_failed`.
 
 Claude also names an exhausted per-model window without the shared `usage`/`rate`/`session` vocabulary: `You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue.` Ensync's Claude quota prose additionally accepts the `reached/hit your <window> limit` phrasing, so a per-model limit with the same zero-activity structured proof also classifies as `provider_quota` / `safeToRetry` instead of surfacing as an unretryable `cli_failed`.
+
+### Claude background-task lifetime finding (verified 2026-09-10)
+
+Measured against Claude Code 2.1.267 on macOS with `claude --print --verbose --output-format stream-json`, prompted to start one background task and end the turn:
+
+- Background work is reported as a `system/background_tasks_changed` level (`tasks: [{task_id, task_type, description}]`, replace semantics, emptied before the matching notification) plus `task_started`, `task_progress`, `task_updated`, and `task_notification` (`status` `completed`, `failed`, or `stopped`) edges. Tasks a subagent starts carry `owned_by_subagent: true`. `session_state_changed`, which the Agent SDK 0.3.220 types call the authoritative idle signal, was not emitted.
+- Plain print mode (prompt on stdin, stdin closed) waits for a background subagent (`local_agent`): the process stays open, the parent gets a follow-up turn when the subagent reports, one `result` is emitted per turn, and the CLI exits 0 once no subagent remains. A background shell (`local_bash`) is not awaited: it is `stopped` about five seconds after the result and the CLI exits 0.
+- With `--input-format stream-json` and stdin left open, the first `result` is emitted immediately, and the CLI opens a follow-up turn (`system/init` within milliseconds of the level emptying) for either a subagent or a shell, then emits another `result`. Closing stdin at the first `result` stops a background shell as plain print mode does; in a 2026-09-10 Ensync chat it also left a background subagent working until it was interrupted ten minutes later, with no parent follow-up turn.
+- Each `result.usage` covers only its own turn; `total_cost_usd` is cumulative.
+
+Ensync's retained Claude jobs therefore keep stream-json stdin open while the level lists a subagent (see [`features/provider-questions.md`](features/provider-questions.md)). This measurement covers Claude Code only; other runners' background-work lifetimes were not re-measured.
 
 - Codex remains the reference for an account-authenticated, structured local runner.
 - Claude remains technically integrated, but the current third-party OAuth and separate Agent SDK credit terms are a public-release blocker until resolved.
