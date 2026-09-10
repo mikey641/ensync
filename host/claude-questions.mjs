@@ -25,8 +25,17 @@ import {
  *    reproduces exactly what headless Claude already did on its own before
  *    Ensync attached to the channel.
  * 2. The CLI does not exit while stream-json stdin is open. It exits cleanly
- *    (code 0) once stdin ends, so the channel closes stdin the moment the
- *    terminal `result` frame arrives, and the run's normal parsing is unchanged.
+ *    (code 0) once stdin ends, so the channel closes stdin when a turn's
+ *    `result` frame arrives, and the run's normal parsing is unchanged.
+ *
+ * One exception, measured against claude 2.1.267: a background subagent. Plain
+ * `claude -p`, whose stdin is closed from the start, keeps running while one is
+ * live and gives the parent a follow-up turn when it reports; a background shell
+ * it stops at exit. Closing stream-json stdin at the first `result` instead ended
+ * the run while a subagent was still working: the subagent was interrupted later
+ * and the parent never read its report. So stdin stays open while Claude's
+ * `background_tasks_changed` level lists a subagent, and closes at the next
+ * `result` once none is live.
  */
 export function claudeQuestionArguments() {
   return ['--input-format', 'stream-json', '--permission-prompt-tool', 'stdio']
@@ -40,6 +49,26 @@ export function claudeUserMessageLine(prompt) {
     parent_tool_use_id: null,
     session_id: 'ensync-host',
   })}\n`
+}
+
+/**
+ * Background task types whose report headless Claude waits for. Only subagents:
+ * `claude -p` stops a background shell at exit, and a long-lived shell such as a
+ * dev server must not hold the run open.
+ */
+const AWAITED_BACKGROUND_TASK_TYPES = new Set(['local_agent'])
+
+/**
+ * How long a subagent that has reported may take to wake the parent's follow-up
+ * turn. Claude opens it within milliseconds; a report that wakes nothing must not
+ * hold stdin open until the inactivity watchdog fails the run.
+ */
+const BACKGROUND_SETTLE_MS = 30_000
+
+function awaitedBackgroundTaskCount(tasks) {
+  // An unreadable level waits for nothing, which is how the channel behaved before.
+  if (!Array.isArray(tasks)) return 0
+  return tasks.filter((task) => AWAITED_BACKGROUND_TASK_TYPES.has(task?.task_type)).length
 }
 
 function controlSuccess(requestId, response) {
@@ -64,13 +93,33 @@ function controlError(requestId, error) {
  * person thinking about a question is not a hung CLI.
  */
 export function createClaudeQuestionChannel(options = {}) {
-  const { write, endInput, onEvent, now = () => new Date().toISOString() } = options
+  // `onHeldResult` receives the text of a turn that ended while a subagent was
+  // still working: progress to show, not the run's answer.
+  const { write, endInput, onEvent, onHeldResult, now = () => new Date().toISOString() } = options
+  const settleMs = options.backgroundSettleMs ?? BACKGROUND_SETTLE_MS
   const hold = options.hold ?? (() => {})
   const release = options.release ?? (() => {})
   const registry = options.registry ?? new ProviderQuestionRegistry({ idPrefix: 'claude' })
   // Claude cancels a control request by id when the turn moves on without it.
   const inFlight = new Map()
   let closed = false
+  // Live subagents in Claude's latest `background_tasks_changed` level.
+  let liveSubagents = 0
+  // The prompt starts the first turn; Claude opens every later one with `init`.
+  let turnRunning = true
+  // A turn ended while a subagent was live, so stdin was left open for its report.
+  let awaitingSubagents = false
+  let settleTimer = null
+
+  const cancelSettle = () => {
+    if (settleTimer) clearTimeout(settleTimer)
+    settleTimer = null
+  }
+  const finishInput = () => {
+    cancelSettle()
+    awaitingSubagents = false
+    endInput()
+  }
   // The assistant text Claude wrote immediately before the AskUserQuestion call
   // it is about to make. It rides on the question so the renderer can show it as
   // the ordinary agent message it is; see CLAUDE_ASK_PERSON_TOOL in chat.mjs.
@@ -167,10 +216,37 @@ export function createClaudeQuestionChannel(options = {}) {
         return true
       }
 
-      // The CLI keeps stream-json stdin open indefinitely; the terminal result
-      // is the Host's signal that closing it will produce a clean exit.
+      if (message.type === 'system' && message.subtype === 'background_tasks_changed') {
+        liveSubagents = awaitedBackgroundTaskCount(message.tasks)
+        // The last subagent reported while the parent sat idle. Claude wakes the
+        // parent at once; if nothing wakes it, no report is left to wait for.
+        if (awaitingSubagents && !turnRunning && liveSubagents === 0 && !settleTimer) {
+          settleTimer = setTimeout(() => {
+            settleTimer = null
+            if (!closed && awaitingSubagents && !turnRunning && liveSubagents === 0) finishInput()
+          }, settleMs)
+          settleTimer.unref?.()
+        }
+        return false
+      }
+
+      if (message.type === 'system' && message.subtype === 'init') {
+        turnRunning = true
+        cancelSettle()
+        return false
+      }
+
+      // The CLI keeps stream-json stdin open indefinitely; a turn's result is the
+      // Host's signal that closing it will produce a clean exit — unless a live
+      // subagent still owes the parent its report, which needs stdin open.
       if (message.type === 'result') {
-        endInput()
+        turnRunning = false
+        if (liveSubagents > 0 && message.is_error !== true) {
+          awaitingSubagents = true
+          if (typeof message.result === 'string' && message.result.trim()) onHeldResult?.(message.result.trim())
+          return true
+        }
+        finishInput()
         return true
       }
       return false
@@ -178,6 +254,7 @@ export function createClaudeQuestionChannel(options = {}) {
     /** Releases every unanswered question so a dead process cannot leave the run blocked. */
     close() {
       closed = true
+      cancelSettle()
       const cancelled = registry.closeAll()
       inFlight.clear()
       release()
