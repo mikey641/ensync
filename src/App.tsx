@@ -211,6 +211,7 @@ import {
   promoteQueuedPromptToActiveTurn,
   promptQueueComposerState,
   promptQueueStatusPresentation,
+  turnStoppedBeforeProviderStart,
   promptSubmissionMode,
   queueMayAdvanceAfterRun,
   queuedPromptCanStopAndSendNow,
@@ -5154,7 +5155,9 @@ function ConversationPane({
           {!sending && chat.messages.at(-1)?.deliveryStatus === 'cancelled' && (
             <div className="chat-run-stopped" role="status">
               <Square size={13} />
-              <span>Stopped. Partial project changes may exist; review them before retrying.</span>
+              <span>{turnStoppedBeforeProviderStart(chat, chat.messages.at(-1)?.turnId)
+                ? 'Stopped before the provider started. No project changes were made.'
+                : 'Stopped. Partial project changes may exist; review them before retrying.'}</span>
             </div>
           )}
           {error && <div className="chat-run-error" role="alert">

@@ -297,6 +297,20 @@ export function liveSteerWasSafelyRejected(error) {
 }
 
 /**
+ * The user stopped this exact turn before Ensync Host reported that its
+ * provider process started, so there is no partial provider work to review.
+ * Only the stopped turn's own continuation record can prove that.
+ */
+export function turnStoppedBeforeProviderStart(chat, turnId) {
+  const continuation = chat?.continuation
+  return Boolean(nonEmptyString(turnId))
+    && continuation?.turnId === turnId
+    && continuation.termination === 'cancelled'
+    && continuation.status === 'cancelled'
+    && continuation.reconciliationRequired === false
+}
+
+/**
  * Automatic advancement is intentionally success-only. A persisted explicit
  * approval lets the user continue after reviewing an unsafe/failed predecessor;
  * it never retries that predecessor.
@@ -315,6 +329,14 @@ export function queuedPromptGate(chat, entry) {
   }
   if (!predecessor || predecessor.deliveryStatus === 'queued' || predecessor.deliveryStatus === 'pending') {
     return { state: 'waiting', reason: 'Waiting for the preceding turn to finish.' }
+  }
+  if (predecessor.deliveryStatus === 'cancelled'
+    && turnStoppedBeforeProviderStart(chat, entry.predecessorTurnId)) {
+    return {
+      state: 'paused',
+      reason: 'The preceding turn was stopped before its provider started, so it made no project changes.',
+      providerActivity: 'none',
+    }
   }
   const labels = {
     failed: 'The preceding turn failed.',
@@ -335,6 +357,15 @@ export function promptQueueStatusPresentation(gate, count, delivery) {
   const headline = `${queueCount} ${messageLabel} ${gate?.state === 'paused' ? 'paused' : 'queued'}`
 
   if (gate?.state === 'paused') {
+    // Nothing to review, but Stop must still be able to halt the queue, so the
+    // head keeps waiting for the user instead of running on its own.
+    if (gate.providerActivity === 'none') {
+      return {
+        headline,
+        detail: `${gate.reason} Running the next message will not retry the stopped turn.`,
+        actionLabel: 'Run next message',
+      }
+    }
     return {
       headline,
       detail: `${gate.reason ?? 'The previous turn did not finish successfully.'} Review possible partial project changes before continuing. Running the next message will not retry the previous turn.`,
