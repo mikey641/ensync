@@ -45,7 +45,8 @@ jobs:
       - name: Install desktop dependencies
         run: npm --prefix desktop ci
       - name: Test existing host
-        run: npm run test:host
+        timeout-minutes: 25
+        run: node --test --test-timeout=120000 "host/*.test.mjs"
       - name: Test and smoke-check desktop runtime
         run: npm --prefix desktop run verify
       - name: Package unsigned Windows verification artifacts
