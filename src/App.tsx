@@ -4390,7 +4390,7 @@ function App() {
           }}
           headerActions={<><button className="icon-button" title="New conversation" onClick={() => createChat()}><Plus size={17} /></button><button className="icon-button close-mobile" onClick={() => setMobileNavOpen(false)}><X size={17} /></button></>}
         >
-          <div className="sidebar-search"><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search conversations" /></div>
+          <div className="sidebar-search"><Search size={14} /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search conversations…" /></div>
           <div className="chat-history">
             {groupedChats.map(({ group, chats: groupChats }) => groupChats.length > 0 && (
               <section className="history-group" key={group}>
@@ -7448,7 +7448,7 @@ function CommandPalette({ chats, onOpenChat, onNew, onSettings, onClose }: { cha
   return (
     <div className="command-backdrop" onMouseDown={onClose}>
       <div className="command-palette" onMouseDown={(event) => event.stopPropagation()}>
-        <div className="command-input"><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search conversations" /><kbd>esc</kbd></div>
+        <div className="command-input"><Search size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search conversations…" /><kbd>esc</kbd></div>
         <div className="command-results">
           {!query && <><span className="command-label">QUICK ACTIONS</span><button onClick={onNew}><Plus size={16} /><span>New conversation</span><kbd>Ctrl/⌘ T</kbd></button><button onClick={onSettings}><Settings size={16} /><span>Open preferences</span><kbd>Ctrl/⌘ ,</kbd></button></>}
           <span className="command-label">CONVERSATIONS</span>
