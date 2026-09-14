@@ -228,8 +228,9 @@ export async function waitForProcessExit(pid, { timeoutMs = 30_000, intervalMs =
  * A connected phone broker keeps the detached Host busy for as long as it stays
  * connected, so the Host could not switch to new code. Its status sits behind a
  * shell lease: the updater claims a lease of its own and releases it at once,
- * which never evicts the app's lease. A Host that is not answering, or that
- * predates the broker, has nothing to wait for.
+ * which never evicts the app's lease. A Host that is not answering, that
+ * predates the broker, or that has no signed-in account (the broker cannot run
+ * without one) has nothing to wait for.
  */
 export async function brokerKeepsHostBusy({ descriptorPath = HOST_DAEMON_DESCRIPTOR, fetchImpl = globalThis.fetch } = {}) {
   const descriptor = await readHostDescriptor({ descriptorPath })
@@ -255,6 +256,10 @@ export async function brokerKeepsHostBusy({ descriptorPath = HOST_DAEMON_DESCRIP
       signal: AbortSignal.timeout(5_000),
     })
     if (response.status === 404) return false
+    if (response.status === 401) {
+      const refusal = await response.json().catch(() => null)
+      return refusal?.code !== 'sync_login_required'
+    }
     if (!response.ok) return true
     return (await response.json())?.running === true
   } catch {
