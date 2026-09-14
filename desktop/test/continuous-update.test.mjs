@@ -185,10 +185,10 @@ test('a connected phone broker keeps the Host busy, read through a lease that is
   await writeFile(descriptorPath, JSON.stringify({ pid: 4242, port: 55925, token: 'a'.repeat(64), instanceId: 'host-1' }))
 
   const calls = []
-  const host = (running, statusCode = 200) => async (url, init = {}) => {
+  const host = (running, statusCode = 200, body = { running }) => async (url, init = {}) => {
     const path = new URL(url).pathname
     calls.push({ path, owner: init.headers?.['x-ensync-owner'] ?? JSON.parse(init.body ?? '{}').ownerId })
-    if (path === '/api/remote/broker/status') return new Response(JSON.stringify({ running }), { status: statusCode })
+    if (path === '/api/remote/broker/status') return new Response(JSON.stringify(body), { status: statusCode })
     return new Response(JSON.stringify({ lease: {} }), { status: 200 })
   }
 
@@ -203,6 +203,12 @@ test('a connected phone broker keeps the Host busy, read through a lease that is
 
   // A Host that predates the broker has no status route and nothing to wait for.
   assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: host(true, 404) }), false)
+  // Signed out, the Host refuses the status read, and no broker can be running.
+  // Captured from the installed Host on 2026-09-14.
+  const signedOut = { error: 'Sign in to use remote execution.', code: 'sync_login_required' }
+  assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: host(true, 401, signedOut) }), false)
+  // Any other refusal cannot prove the broker is idle, so the update keeps waiting.
+  assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: host(true, 500, { error: 'boom' }) }), true)
   // A Host that is not answering is not busy.
   assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: async () => { throw new Error('ECONNREFUSED') } }), false)
   assert.equal(await brokerKeepsHostBusy({ descriptorPath: join(directory, 'missing.json') }), false)
