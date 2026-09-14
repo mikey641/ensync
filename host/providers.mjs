@@ -1009,6 +1009,8 @@ export class ProviderStatusService {
   #definitions
   #inspect
   #inFlight = null
+  #inspecting = new Map()
+  #generation = 0
   #invalidatedWhileRefreshing = false
   #verifiedUsage = new Map()
   #verifiedUsageRetentionMs
@@ -1060,7 +1062,7 @@ export class ProviderStatusService {
     let providers
     do {
       this.#invalidatedWhileRefreshing = false
-      providers = await Promise.all(this.#definitions.map((provider) => this.#inspect(provider)))
+      providers = await Promise.all(this.#definitions.map((provider) => this.#inspectShared(provider)))
     } while (this.#invalidatedWhileRefreshing)
 
     // Retention runs before ranking so a provider whose probe lost a race keeps
@@ -1070,14 +1072,56 @@ export class ProviderStatusService {
     return ranked
   }
 
+  /** One live CLI probe per provider, shared by overlapping catalog and single-provider refreshes. */
+  #inspectShared(definition) {
+    const active = this.#inspecting.get(definition.id)
+    if (active) return active
+    const probe = new Promise((resolve) => resolve(this.#inspect(definition)))
+      .finally(() => {
+        if (this.#inspecting.get(definition.id) === probe) this.#inspecting.delete(definition.id)
+      })
+    this.#inspecting.set(definition.id, probe)
+    return probe
+  }
+
   async get(id, options = {}) {
     if (!isProviderId(id)) return null
-    const providers = await this.list(options)
-    return providers.find((provider) => provider.id === id) ?? null
+    if (!options.refresh) {
+      const providers = await this.list(options)
+      return providers.find((provider) => provider.id === id) ?? null
+    }
+
+    // A forced read for one provider probes only that provider. Refreshing the
+    // whole catalog here drove every installed CLI before each chat run and
+    // held the run for most of a minute before its own provider could start.
+    const definition = this.#definitions.find((provider) => provider.id === id)
+    if (!definition) return null
+    let inspected
+    let generation
+    do {
+      generation = this.#generation
+      inspected = await this.#inspectShared(definition)
+    } while (generation !== this.#generation)
+
+    const [provider] = this.#keepVerifiedUsage([inspected])
+    if (this.#cache?.providers.some((cached) => cached.id === id)) {
+      // Keep the catalog's createdAt: the other providers were not re-probed.
+      this.#cache = {
+        ...this.#cache,
+        providers: rankProvidersByAvailability(
+          this.#cache.providers.map((cached) => cached.id === id ? provider : cached),
+          providerNavigationOrder,
+        ),
+      }
+    }
+    return provider
   }
 
   invalidate() {
     this.#cache = null
+    this.#generation += 1
+    // A probe that started before the invalidation must not satisfy a later read.
+    this.#inspecting.clear()
     if (this.#inFlight) this.#invalidatedWhileRefreshing = true
   }
 }

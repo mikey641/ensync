@@ -87,9 +87,18 @@ export function queueMayAdvanceAfterRun(input: {
   stopAndSendArmed?: boolean
 }): boolean
 export function liveSteerWasSafelyRejected(error: unknown): boolean
-export function queuedPromptGate(chat: Pick<Chat, 'messages'> | undefined, entry: QueuedPrompt | undefined): {
+export function turnStoppedBeforeProviderStart(
+  chat: Partial<Pick<Chat, 'continuation'>> | undefined,
+  turnId: string | null | undefined,
+): boolean
+export function queuedPromptGate(
+  chat: Pick<Chat, 'messages'> & Partial<Pick<Chat, 'continuation'>> | undefined,
+  entry: QueuedPrompt | undefined,
+): {
   state: 'empty' | 'ready' | 'waiting' | 'paused'
   reason: string | null
+  /** Set only when the stopped predecessor never reported a started provider process. */
+  providerActivity?: 'none'
 }
 export function promptQueueStatusPresentation(
   gate: ReturnType<typeof queuedPromptGate>,

@@ -203,3 +203,71 @@ test('an invalidation during a probe reruns once before publishing fresh status'
   assert.deepEqual(refreshed, original)
   assert.deepEqual(await service.list(), original)
 })
+
+test('a forced single-provider read probes only that provider and updates its cached entry', async () => {
+  const calls = []
+  const service = new ProviderStatusService({
+    definitions: [{ id: 'codex' }, { id: 'claude' }, { id: 'droid' }],
+    cacheDurationMs: 60_000,
+    inspectProvider: async (provider) => {
+      calls.push(provider.id)
+      return status(provider, calls.length)
+    },
+  })
+
+  await service.list()
+  assert.deepEqual([...calls].sort(), ['claude', 'codex', 'droid'])
+  calls.length = 0
+
+  const claude = await service.get('claude', { refresh: true })
+  assert.deepEqual(calls, ['claude'], 'a run must not wait for every other provider CLI')
+  assert.deepEqual(claude, { id: 'claude', generation: 1 })
+  const cached = await service.list()
+  assert.deepEqual(calls, ['claude'], 'the catalog cache stays valid for providers that were not re-probed')
+  assert.deepEqual(cached.find((provider) => provider.id === 'claude'), claude)
+})
+
+test('a forced single-provider read joins that provider\'s probe inside a catalog refresh', async () => {
+  let claudeCalls = 0
+  let releaseClaude
+  const claudeProbe = new Promise((resolve) => { releaseClaude = resolve })
+  const service = new ProviderStatusService({
+    definitions: [{ id: 'codex' }, { id: 'claude' }],
+    cacheDurationMs: 60_000,
+    inspectProvider: async (provider) => {
+      if (provider.id !== 'claude') return status(provider, 0)
+      claudeCalls += 1
+      await claudeProbe
+      return status(provider, claudeCalls)
+    },
+  })
+
+  const catalog = service.list({ refresh: true })
+  const single = service.get('claude', { refresh: true })
+  releaseClaude()
+  const [listed, claude] = await Promise.all([catalog, single])
+  assert.equal(claudeCalls, 1)
+  assert.deepEqual(claude, { id: 'claude', generation: 1 })
+  assert.deepEqual(listed.find((provider) => provider.id === 'claude'), claude)
+})
+
+test('an invalidation during a single-provider probe reruns that probe before returning', async () => {
+  let calls = 0
+  let releaseFirst
+  const firstProbe = new Promise((resolve) => { releaseFirst = resolve })
+  const service = new ProviderStatusService({
+    definitions: [{ id: 'claude' }],
+    inspectProvider: async (provider) => {
+      calls += 1
+      if (calls === 1) await firstProbe
+      return status(provider, calls)
+    },
+  })
+
+  const read = service.get('claude', { refresh: true })
+  await Promise.resolve()
+  service.invalidate()
+  releaseFirst()
+  assert.deepEqual(await read, { id: 'claude', generation: 2 })
+  assert.equal(calls, 2)
+})

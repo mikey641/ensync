@@ -27,6 +27,7 @@ import {
   queuedPromptGate,
   removePromptFromQueue,
   transcriptMessagesBeforeTurn,
+  turnStoppedBeforeProviderStart,
 } from '../src/lib/promptQueue.mjs'
 
 const entry = (turnId, predecessorTurnId = null) => ({
@@ -128,6 +129,40 @@ test('queue status explains the safety pause and the exact action in plain langu
     detail: 'It will run automatically after the current turn finishes successfully.',
     actionLabel: null,
   })
+})
+
+test('a turn stopped before its provider started pauses without a partial-changes warning', () => {
+  const queued = entry('turn-2', 'turn-1')
+  const messages = [{ role: 'user', turnId: 'turn-1', deliveryStatus: 'cancelled' }]
+  const stoppedBeforeStart = {
+    turnId: 'turn-1', status: 'cancelled', termination: 'cancelled', reconciliationRequired: false,
+  }
+  const beforeStart = { messages, continuation: stoppedBeforeStart }
+
+  assert.equal(turnStoppedBeforeProviderStart(beforeStart, 'turn-1'), true)
+  assert.equal(turnStoppedBeforeProviderStart(beforeStart, '  '), false)
+  const gate = queuedPromptGate(beforeStart, queued)
+  // Stop must still halt the queue, so the head keeps waiting for the user.
+  assert.equal(gate.state, 'paused')
+  assert.deepEqual(promptQueueStatusPresentation(gate, 1), {
+    headline: '1 message paused',
+    detail: 'The preceding turn was stopped before its provider started, so it made no project changes. Running the next message will not retry the stopped turn.',
+    actionLabel: 'Run next message',
+  })
+
+  // Activity after start, a record for another turn, or no record keeps the safety warning.
+  for (const chat of [
+    { messages, continuation: { ...stoppedBeforeStart, status: 'reconciliation_required', reconciliationRequired: true } },
+    { messages, continuation: { ...stoppedBeforeStart, turnId: 'turn-0' } },
+    { messages },
+  ]) {
+    assert.equal(turnStoppedBeforeProviderStart(chat, 'turn-1'), false)
+    assert.deepEqual(promptQueueStatusPresentation(queuedPromptGate(chat, queued), 1), {
+      headline: '1 message paused',
+      detail: 'The preceding turn was stopped. Review possible partial project changes before continuing. Running the next message will not retry the previous turn.',
+      actionLabel: 'Run next message anyway',
+    })
+  }
 })
 
 test('a waiting queue names the provider that cannot take a mid-turn instruction', () => {
