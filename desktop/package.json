@@ -1,7 +1,7 @@
 {
   "name": "ensync-desktop",
   "productName": "Ensync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Native desktop shell for the Ensync universal AI agent workspace.",
   "author": "Ensync",
   "private": true,
