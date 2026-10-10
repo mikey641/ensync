@@ -7,7 +7,9 @@ import { validateProjectPath } from './chat.mjs'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_TERMINATION_GRACE_MS = 2_000
-const MAX_OUTPUT_BYTES = 512 * 1024
+// A memory guard, not a correctness limit: `worktree list` in a repository
+// with ~1,800 registered worktrees already prints over 512 KB.
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_REPOSITORY_URL_LENGTH = 4_096
 const REMOTE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
 
