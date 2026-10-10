@@ -2,6 +2,31 @@ const DEFAULT_POLL_MS = 10_000
 const DEFAULT_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
 const MAX_TURN_ID_CHARACTERS = 256
 const TURN_IDENTITY_PROOFS = new Set(['captured', 'commit_trailer', 'legacy_job'])
+const ETA_LANDING_SAMPLES = 10
+const ETA_MIN_INTERVALS = 3
+// A longer pause means the queue was empty, not that a landing took that long.
+const ETA_MAX_INTERVAL_MS = 30 * 60_000
+
+/**
+ * The median time between this queue's recent consecutive landings, or null
+ * when there are too few to be meaningful.
+ */
+function recentLandingIntervalMs(items) {
+  const times = items
+    .filter((item) => item.state === 'landed')
+    .map((item) => Date.parse(item.updatedAt))
+    .filter(Number.isFinite)
+    .sort((left, right) => left - right)
+    .slice(-(ETA_LANDING_SAMPLES + 1))
+  const intervals = []
+  for (let index = 1; index < times.length; index += 1) {
+    const interval = times[index] - times[index - 1]
+    if (interval > 0 && interval <= ETA_MAX_INTERVAL_MS) intervals.push(interval)
+  }
+  if (intervals.length < ETA_MIN_INTERVALS) return null
+  intervals.sort((left, right) => left - right)
+  return intervals[Math.floor(intervals.length / 2)]
+}
 
 function validTurnId(value) {
   return typeof value === 'string'
@@ -101,6 +126,7 @@ export function landingQueueProgress(record, landingItems) {
     .filter((item) => item.state === 'integrating')
     .sort((left, right) => left.completionSequence - right.completionSequence)[0] ?? active
   const targetLanded = targetEntries.some((item) => item.state === 'landed')
+  const landingIntervalMs = recentLandingIntervalMs(matching)
   return {
     targetSequence: target.completionSequence,
     targetState: targetLanded ? 'landed' : target.state,
@@ -111,6 +137,10 @@ export function landingQueueProgress(record, landingItems) {
     remainingAfter: laterPending.length,
     activeSequence: activeAnywhere?.completionSequence ?? null,
     activeSavedSha: activeAnywhere?.savedSha ?? null,
+    // This commit still needs every item ahead of it plus its own landing.
+    etaMs: targetLanded || landingIntervalMs === null
+      ? null
+      : landingIntervalMs * (earlier.length - mergedBefore + 1),
   }
 }
 

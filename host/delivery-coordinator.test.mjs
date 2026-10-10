@@ -69,7 +69,40 @@ test('delivery queue progress distinguishes landed predecessors from work still 
     remainingAfter: 1,
     activeSequence: 13,
     activeSavedSha: savedC,
+    etaMs: null,
   })
+})
+
+test('delivery queue progress estimates time left from the recent landing pace', () => {
+  const targetSha = '4'.repeat(40)
+  const record = { ...item, landingIds: ['target'], savedSha: targetSha }
+  const landedAt = (minute) => new Date(Date.UTC(2026, 9, 10, 8, minute)).toISOString()
+  const progress = landingQueueProgress(record, [
+    // An idle hour between landings is ignored rather than averaged in.
+    { ...item, id: 'old', savedSha: '0'.repeat(40), completionSequence: 1, state: 'landed', updatedAt: new Date(Date.UTC(2026, 9, 10, 6, 0)).toISOString() },
+    { ...item, id: 'a', savedSha: '1'.repeat(40), completionSequence: 2, state: 'landed', updatedAt: landedAt(0) },
+    { ...item, id: 'b', savedSha: '2'.repeat(40), completionSequence: 3, state: 'landed', updatedAt: landedAt(4) },
+    { ...item, id: 'c', savedSha: '3'.repeat(40), completionSequence: 4, state: 'landed', updatedAt: landedAt(8) },
+    { ...item, id: 'd', savedSha: '5'.repeat(40), completionSequence: 5, state: 'landed', updatedAt: landedAt(14) },
+    { ...item, id: 'e', savedSha: '6'.repeat(40), completionSequence: 6, state: 'integrating', updatedAt: landedAt(14) },
+    { ...item, id: 'f', savedSha: '7'.repeat(40), completionSequence: 7, state: 'queued', updatedAt: landedAt(14) },
+    { ...item, id: 'target', savedSha: targetSha, completionSequence: 8, state: 'queued', updatedAt: landedAt(14) },
+  ])
+
+  // Intervals 4, 4 and 6 minutes give a 4-minute median; two ahead plus itself.
+  assert.equal(progress.etaMs, 3 * 4 * 60_000)
+})
+
+test('delivery queue progress gives no estimate without enough recent landings', () => {
+  const targetSha = '4'.repeat(40)
+  const record = { ...item, landingIds: ['target'], savedSha: targetSha }
+  const progress = landingQueueProgress(record, [
+    { ...item, id: 'a', savedSha: '1'.repeat(40), completionSequence: 1, state: 'landed', updatedAt: '2026-10-10T08:00:00.000Z' },
+    { ...item, id: 'b', savedSha: '2'.repeat(40), completionSequence: 2, state: 'landed', updatedAt: '2026-10-10T08:05:00.000Z' },
+    { ...item, id: 'target', savedSha: targetSha, completionSequence: 3, state: 'queued' },
+  ])
+
+  assert.equal(progress.etaMs, null)
 })
 
 test('delivery queue progress keeps a landed target distinct from later queued work', () => {

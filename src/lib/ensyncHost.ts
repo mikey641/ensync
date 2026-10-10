@@ -135,6 +135,8 @@ export type DeliveryQueueProgress = {
   remainingAfter: number
   activeSequence: number | null
   activeSavedSha: string | null
+  /** Estimated time until this commit lands at the recent pace; null when unknown. Older Hosts omit it. */
+  etaMs?: number | null
 }
 
 export type DeliveryRecord = {

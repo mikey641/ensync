@@ -5543,6 +5543,14 @@ function DeliveryPanel({
   ].includes(delivery.state)))
   const queueProgressMaximum = (queueProgress?.totalBefore ?? 0) + 1
   const queueProgressValue = (queueProgress?.mergedBefore ?? 0) + (queueTargetMerged ? 1 : 0)
+  const queueEtaMinutes = !queueTargetMerged && typeof queueProgress?.etaMs === 'number'
+    ? Math.max(1, Math.round(queueProgress.etaMs / 60_000))
+    : null
+  const queueEta = queueEtaMinutes === null
+    ? null
+    : queueEtaMinutes < 60
+      ? `about ${queueEtaMinutes} min`
+      : `about ${Math.floor(queueEtaMinutes / 60)} h ${queueEtaMinutes % 60} min`
   const summary = !delivery
     ? 'Delivery · not saved yet'
     : deliveryTracksPrompt
@@ -5638,8 +5646,8 @@ function DeliveryPanel({
               // merged count plateaus while work still drains; count what is ahead.
               : queueProgress.remainingBefore === 0
                 ? 'Next in the merge queue'
-                : `${queueProgress.remainingBefore} earlier saved ${queueProgress.remainingBefore === 1 ? 'commit' : 'commits'} ahead`}</strong>
-            <small>{queueProgress.activeSequence ? `Queue item ${queueProgress.activeSequence} is currently merging. ` : ''}{queueTargetMerged
+                : `${queueProgress.remainingBefore} earlier saved ${queueProgress.remainingBefore === 1 ? 'commit' : 'commits'} ahead`}{queueEta ? ` · ETA ${queueEta}` : ''}</strong>
+            <small>{queueEta ? `Estimated from the recent landing pace; conflicts can take longer. ` : ''}{queueProgress.activeSequence ? `Queue item ${queueProgress.activeSequence} is currently merging. ` : ''}{queueTargetMerged
               ? queueProgress.remainingAfter === 0
                 ? 'No later saved commits are waiting behind it.'
                 : `${queueProgress.remainingAfter} later ${queueProgress.remainingAfter === 1 ? 'commit remains' : 'commits remain'} in the repository queue after it.`
