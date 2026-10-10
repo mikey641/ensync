@@ -1,12 +1,19 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { randomUUID } from 'node:crypto'
-import { lstat, readFile } from 'node:fs/promises'
+import { lstat, readFile, stat } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 
 import { runGit } from './git.mjs'
 
 const MAX_ERROR_LENGTH = 4_096
 const DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS = 5_000
+// Removing a train deletes a full checkout; 2 s was always too short for a
+// large repository, so every train leaked and each leak slowed the next one.
+const DEFAULT_TRAIN_CLEANUP_TIMEOUT_MS = 120_000
+// A train left behind by a crashed resolver may still be reused by
+// #recoverPriorResolution, so only trains older than a day are swept.
+const DEFAULT_STALE_TRAIN_AGE_MS = 24 * 60 * 60 * 1_000
+const MAX_STALE_TRAINS_PER_SWEEP = 25
 const CONFLICT_MARKER_PATTERN = '^(<{7}|>{7})( |$)'
 const MARKER_ONLY_WHITESPACE_RULES = '-blank-at-eol,-blank-at-eof,-space-before-tab,-indent-with-non-tab,-tab-in-indent'
 const MAX_CONFLICT_FILES = 128
@@ -163,6 +170,9 @@ export class LandingIntegrator {
     this.resolutionTimeoutMs = options.resolutionTimeoutMs ?? null
     this.resolutionShutdownTimeoutMs = options.resolutionShutdownTimeoutMs
       ?? DEFAULT_RESOLUTION_SHUTDOWN_TIMEOUT_MS
+    this.trainCleanupTimeoutMs = options.trainCleanupTimeoutMs ?? DEFAULT_TRAIN_CLEANUP_TIMEOUT_MS
+    this.staleTrainAgeMs = options.staleTrainAgeMs ?? DEFAULT_STALE_TRAIN_AGE_MS
+    this.now = options.now ?? Date.now
     this.operationContext = new AsyncLocalStorage()
   }
 
@@ -328,6 +338,7 @@ export class LandingIntegrator {
         retryMany(train, 'The isolated landing train did not start from the exact inspected target commit.')
         return resultFor(train, landedIds, retryIds, errors)
       }
+      await this.#sweepStaleTrains(repositoryPath, integration.path).catch(() => {})
       if (!(await this.#shortBranchResolvesExactly(repositoryPath, integrationBranch))) {
         retryMany(train, 'The generated integration branch has a colliding Git ref, so automatic landing left the target untouched.')
         return resultFor(train, landedIds, retryIds, errors)
@@ -1174,9 +1185,47 @@ export class LandingIntegrator {
     return contents.toString('base64')
   }
 
+  /**
+   * Removes clean landing-train worktrees that an earlier train failed to
+   * clean up, so a leak can never grow without bound. Only trains beside the
+   * current one, older than the stale age, unlocked, and clean qualify; plain
+   * `git worktree remove` refuses anything with changes, and the branch (with
+   * its commits and reflog) is kept.
+   */
+  async #sweepStaleTrains(repositoryPath, currentPath) {
+    const listed = await this.#git(['worktree', 'list', '--porcelain', '-z'], repositoryPath)
+    if (listed.exitCode !== 0) return
+    const parent = dirname(resolve(currentPath))
+    let removed = 0
+    for (const record of listed.stdout.split('\0\0').filter(Boolean)) {
+      if (removed >= MAX_STALE_TRAINS_PER_SWEEP) return
+      const lines = record.split('\0')
+      const fields = Object.fromEntries(lines.map((line) => {
+        const separator = line.indexOf(' ')
+        return separator < 0 ? [line, ''] : [line.slice(0, separator), line.slice(separator + 1)]
+      }))
+      if (
+        !fields.worktree
+        || !fields.branch?.startsWith('refs/heads/ensync/landing-trains/')
+        || 'locked' in fields
+        || 'prunable' in fields
+        || samePath(resolve(fields.worktree), resolve(currentPath))
+        || !samePath(dirname(resolve(fields.worktree)), parent)
+      ) continue
+      const info = await stat(fields.worktree).catch(() => null)
+      if (!info) continue
+      const createdAt = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs
+      if (this.now() - createdAt < this.staleTrainAgeMs) continue
+      const result = await this.#git(['worktree', 'remove', '--', fields.worktree], repositoryPath, {
+        timeoutMs: this.trainCleanupTimeoutMs,
+      })
+      if (result.exitCode === 0) removed += 1
+    }
+  }
+
   async #withCleanupSignal(action) {
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 2_000)
+    const timer = setTimeout(() => controller.abort(), this.trainCleanupTimeoutMs)
     try {
       return await action(controller.signal)
     } finally {

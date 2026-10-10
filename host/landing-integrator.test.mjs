@@ -128,6 +128,7 @@ function integrator(client, options = {}) {
     resolutionTimeoutMs: options.resolutionTimeoutMs,
     resolutionShutdownTimeoutMs: options.resolutionShutdownTimeoutMs,
     gitRunner: options.gitRunner,
+    now: options.now,
   })
 }
 
@@ -205,6 +206,49 @@ test('an already-landed snapshot is a no-op and leaks no landing worktree', asyn
   assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
   assert.equal(await git(current.repositoryPath, ['branch', '--list', 'ensync/landing-trains/*']), '')
   assert.doesNotMatch(await git(current.repositoryPath, ['worktree', 'list', '--porcelain']), /ensync\/landing-trains\//)
+})
+
+async function leftoverTrain(current, name, files = {}) {
+  const prior = await current.nativeClient.create({
+    repositoryPath: current.repositoryPath,
+    branch: `ensync/landing-trains/${name}`,
+    base: 'main',
+  })
+  for (const [path, contents] of Object.entries(files)) await writeFile(join(prior.path, path), contents)
+  return prior
+}
+
+test('a train sweeps clean day-old leftover trains and keeps their branches', async (context) => {
+  const current = await fixture(context)
+  const clean = await leftoverTrain(current, 'leaked-clean')
+  const dirty = await leftoverTrain(current, 'leaked-dirty', { 'README.md': '# unsaved\n' })
+  const source = await branchCommit(current, 'ensync/chat-after-leak', { 'after.txt': 'after\n' })
+  const dayLater = Date.now() + 25 * 60 * 60 * 1_000
+
+  const result = await integrator(current.nativeClient, { now: () => dayLater })
+    .integrate([item(current, source, 1)])
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  const worktrees = await git(current.repositoryPath, ['worktree', 'list', '--porcelain'])
+  assert.doesNotMatch(worktrees, /landing-trains\/leaked-clean/)
+  assert.match(worktrees, /landing-trains\/leaked-dirty/)
+  assert.equal(await readFile(join(dirty.path, 'README.md'), 'utf8'), '# unsaved\n')
+  assert.match(
+    await git(current.repositoryPath, ['branch', '--list', 'ensync/landing-trains/leaked-clean']),
+    /leaked-clean/,
+  )
+  assert.ok(clean.path)
+})
+
+test('a train keeps a recent leftover train that a resolver may still reuse', async (context) => {
+  const current = await fixture(context)
+  await leftoverTrain(current, 'recent-leftover')
+  const source = await branchCommit(current, 'ensync/chat-recent-leftover', { 'recent.txt': 'recent\n' })
+
+  const result = await integrator(current.nativeClient).integrate([item(current, source, 1)])
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.match(await git(current.repositoryPath, ['worktree', 'list', '--porcelain']), /landing-trains\/recent-leftover/)
 })
 
 test('a train applies snapshots in completion order and updates the target once', async (context) => {
