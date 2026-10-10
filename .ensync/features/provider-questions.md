@@ -180,11 +180,22 @@ no live subagent closes it, so the run's response is the turn that read the
 report. Claude opens that follow-up turn with `system/init` within milliseconds
 of the level emptying, so a report that wakes no turn closes stdin after a
 30-second settle wait rather than leaving the inactivity watchdog to fail the
-run. A failed `result` still closes stdin at once, and a long-lived background
-shell such as a dev server never holds the run open. Each `result` carries only
+run. A failed `result` still closes stdin at once. Each `result` carries only
 its own turn's `usage`, so the run's token counts are the sum across results and
 stay unknown if any turn omits one. `session_state_changed`, which the Agent SDK
 types describe as the idle signal, was not emitted in this mode.
+
+**Background shells wake the parent too.** Measured against claude 2.1.296 on
+2026-10-10: while stream-json stdin is open, a `local_bash` task that exits
+emits `task_notification` and Claude opens a follow-up turn that reads its
+output, exactly as interactive Claude Code re-invokes the agent. Closing stdin at
+the first `result` made a turn such as "I'll write as soon as #261 lands" end
+the run, and the CLI stopped the watcher. A successful `result` while the level
+lists a shell is therefore held like a subagent's. Because a shell may be a dev
+server that never exits, a wait that only shells keep open holds the inactivity
+watchdog (the idle CLI is silent by design) and is bounded at 30 minutes; after
+that stdin closes, Claude stops the shell, and the held result is the answer.
+A live subagent waits without that bound, which applies once only shells remain.
 
 **Known Claude limitation.** Headless Claude has no channel that returns a
 *successful* AskUserQuestion result. Answering `{behavior:"allow"}` runs the tool

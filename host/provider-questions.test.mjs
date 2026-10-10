@@ -489,12 +489,54 @@ test('claude keeps stdin open while a background subagent works and closes it af
   assert.deepEqual(heldResults, ['The last subagent is still running.'])
 })
 
-test('a background shell does not hold claude stdin open, matching headless claude', () => {
+// claude 2.1.296 (measured 2026-10-10): with stdin open, a background shell
+// that exits wakes the parent with a follow-up turn that reads its output.
+test('a background shell keeps claude stdin open until the turn it wakes reports', () => {
   const { channel, state, heldResults } = claudeChannel()
   channel.handleLine(claudeLevel(['b1', 'local_bash']))
-  channel.handleLine(claudeResult('Started the dev server.'))
+  channel.handleLine(claudeResult('I will report when the watcher finishes.'))
+  assert.equal(state.ended, 0)
+  assert.deepEqual(heldResults, ['I will report when the watcher finishes.'])
+  // The idle wait is silent by design, so the inactivity watchdog is held.
+  assert.equal(state.held, 1)
+  channel.handleLine(claudeLevel())
+  channel.handleLine(CLAUDE_INIT_LINE)
+  assert.equal(state.released, 1)
+  channel.handleLine(claudeResult('The watcher finished: #261 landed.'))
   assert.equal(state.ended, 1)
-  assert.deepEqual(heldResults, [])
+})
+
+test('a background shell that never exits ends the claude run after the bounded wait', async () => {
+  const { channel, state } = claudeChannel({ backgroundShellWaitMs: 10 })
+  channel.handleLine(claudeLevel(['b1', 'local_bash']))
+  channel.handleLine(claudeResult('Started the dev server.'))
+  assert.equal(state.ended, 0)
+  await waitFor(() => state.ended === 1)
+  assert.equal(state.held, 1)
+  assert.equal(state.released, 1)
+})
+
+test('a live subagent waits without the shell bound, which applies once only shells remain', async () => {
+  const { channel, state } = claudeChannel({ backgroundShellWaitMs: 10 })
+  channel.handleLine(claudeLevel(['a1', 'local_agent'], ['b1', 'local_bash']))
+  channel.handleLine(claudeResult('Waiting on both.'))
+  await pause(40)
+  assert.equal(state.ended, 0)
+  assert.equal(state.held, 0)
+  channel.handleLine(claudeLevel(['b1', 'local_bash']))
+  channel.handleLine(CLAUDE_INIT_LINE)
+  channel.handleLine(claudeResult('Subagent report read; the shell is still running.'))
+  assert.equal(state.ended, 0)
+  await waitFor(() => state.ended === 1)
+})
+
+test('closing the claude channel cancels a pending shell wait', async () => {
+  const { channel, state } = claudeChannel({ backgroundShellWaitMs: 10 })
+  channel.handleLine(claudeLevel(['b1', 'local_bash']))
+  channel.handleLine(claudeResult('Watching.'))
+  channel.close()
+  await pause(40)
+  assert.equal(state.ended, 0)
 })
 
 test('a failed claude turn closes stdin even while a subagent works', () => {
