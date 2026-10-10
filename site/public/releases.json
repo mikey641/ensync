@@ -1,23 +1,23 @@
 {
   "schemaVersion": 1,
   "channel": "stable",
-  "sourceRevision": "335aa4c3f856e51f34c185d10958d11a98f7844f",
-  "feedUpdatedAt": "2026-09-14T17:18:55.779Z",
+  "sourceRevision": "8efc304c29f0568bf2f691f06ea2d2387875bbe1",
+  "feedUpdatedAt": "2026-10-10T08:08:39.110Z",
   "latest": {
-    "version": "0.1.2",
-    "publishedAt": "2026-09-14T17:18:55.092Z",
-    "notesUrl": "https://github.com/mikey641/ensync-releases/releases/tag/v0.1.2"
+    "version": "0.1.3",
+    "publishedAt": "2026-10-10T08:08:38.107Z",
+    "notesUrl": "https://github.com/mikey641/ensync-releases/releases/tag/v0.1.3"
   },
   "platforms": {
     "macos": {
       "status": "available",
       "reason": null,
-      "version": "0.1.2",
-      "url": "https://github.com/mikey641/ensync-releases/releases/download/v0.1.2/Ensync-0.1.2-mac-universal.dmg",
-      "sha256": "6c14d95cc714041a17218c546a253f1055f761275fdf3bc67eeb134788c0fb83",
+      "version": "0.1.3",
+      "url": "https://github.com/mikey641/ensync-releases/releases/download/v0.1.3/Ensync-0.1.3-mac-universal.dmg",
+      "sha256": "b2757faaa14f047faa41cf9625540820f98a4011aa4c72e3cc6d688ed95f3d4c",
       "signed": true,
       "notarized": true,
-      "buildId": "4e1ce7be73568916",
+      "buildId": "2d9c9e0bbe57bf63",
       "architectures": [
         "universal"
       ]
@@ -34,6 +34,37 @@
     }
   },
   "history": [
+    {
+      "version": "0.1.2",
+      "publishedAt": "2026-09-14T17:18:55.092Z",
+      "notesUrl": "https://github.com/mikey641/ensync-releases/releases/tag/v0.1.2",
+      "sourceRevision": "335aa4c3f856e51f34c185d10958d11a98f7844f",
+      "platforms": {
+        "macos": {
+          "status": "available",
+          "reason": null,
+          "version": "0.1.2",
+          "url": "https://github.com/mikey641/ensync-releases/releases/download/v0.1.2/Ensync-0.1.2-mac-universal.dmg",
+          "sha256": "6c14d95cc714041a17218c546a253f1055f761275fdf3bc67eeb134788c0fb83",
+          "signed": true,
+          "notarized": true,
+          "buildId": "4e1ce7be73568916",
+          "architectures": [
+            "universal"
+          ]
+        },
+        "windows": {
+          "status": "unavailable",
+          "reason": "Windows is distributed through the certified Microsoft Store listing; this manifest gates only the direct macOS release.",
+          "version": null,
+          "url": null,
+          "sha256": null,
+          "signed": false,
+          "notarized": null,
+          "architectures": []
+        }
+      }
+    },
     {
       "version": "0.1.1",
       "publishedAt": "2026-09-14T13:53:15.111Z",
