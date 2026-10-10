@@ -5627,19 +5627,25 @@ function DeliveryPanel({
             className="delivery-panel__queue"
             aria-label={queueTargetMerged
               ? `This exact saved commit is merged; ${queueProgress.remainingAfter} later commits remain in the repository queue`
-              : `${queueProgress.mergedBefore} of ${queueProgress.totalBefore} earlier saved commits merged; ${queueProgress.remainingBefore} remain ahead of this commit`}
+              : queueProgress.remainingBefore === 0
+                ? 'This exact saved commit is next in the merge queue'
+                : `${queueProgress.remainingBefore} earlier saved commits remain ahead of this commit`}
           >
             <span>Merge queue</span>
             <strong>{queueTargetMerged
               ? 'This exact saved commit is merged'
-              : `${queueProgress.mergedBefore} of ${queueProgress.totalBefore} earlier saved commits already merged`}</strong>
+              // The landing journal keeps only the newest landed items, so a
+              // merged count plateaus while work still drains; count what is ahead.
+              : queueProgress.remainingBefore === 0
+                ? 'Next in the merge queue'
+                : `${queueProgress.remainingBefore} earlier saved ${queueProgress.remainingBefore === 1 ? 'commit' : 'commits'} ahead`}</strong>
             <small>{queueProgress.activeSequence ? `Queue item ${queueProgress.activeSequence} is currently merging. ` : ''}{queueTargetMerged
               ? queueProgress.remainingAfter === 0
                 ? 'No later saved commits are waiting behind it.'
                 : `${queueProgress.remainingAfter} later ${queueProgress.remainingAfter === 1 ? 'commit remains' : 'commits remain'} in the repository queue after it.`
               : queueProgress.remainingBefore === 0
                 ? 'This exact saved commit is next.'
-                : `${queueProgress.remainingBefore} ${queueProgress.remainingBefore === 1 ? 'commit remains' : 'commits remain'} ahead of this exact saved commit.`}</small>
+                : 'Each one merges before this exact saved commit.'}</small>
             <div
               className="delivery-panel__queue-progress"
               role="progressbar"
