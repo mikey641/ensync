@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const execFile = promisify(execFileCallback)
-const MAX_OUTPUT_BYTES = 512 * 1024
+// A memory guard, not a correctness limit: listing a repository with
+// thousands of registered worktrees already prints over 512 KB.
+const MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 const MAX_ERROR_TEXT = 4_096
 const MAX_COMMIT_MESSAGE = 16_384
 const COMMAND_TIMEOUT_MS = 2 * 60_000

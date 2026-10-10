@@ -461,6 +461,69 @@ test('a rejected landing retries on backoff until the saved item lands', async (
   assert.equal(journal.items.find((candidate) => candidate.id === item.id).state, 'landed')
 })
 
+test('a landing stops retrying after its attempt cap and new completions do not wake it', async () => {
+  const journal = new MemoryJournal()
+  const trains = []
+  const coordinator = new LandingCoordinator({
+    journal,
+    landingRetryDelays: [1],
+    maxLandingAttempts: 3,
+    integrate: async (train) => {
+      trains.push(train[0].branch)
+      if (train[0].branch === 'ensync/stuck') {
+        return { landedIds: [], retryIds: [train[0].id], errors: { [train[0].id]: 'conflict remains' } }
+      }
+      return { landedIds: train.map((item) => item.id), retryIds: [] }
+    },
+  })
+
+  const stuck = await coordinator.enqueue(input('ensync/stuck'))
+  await coordinator.whenIdle()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await coordinator.whenIdle()
+  await coordinator.enqueue(input('ensync/later', '/repo', SHA_B))
+  await coordinator.whenIdle()
+  const stored = journal.items.find((candidate) => candidate.id === stuck.id)
+
+  assert.deepEqual(trains, ['ensync/stuck', 'ensync/stuck', 'ensync/stuck', 'ensync/later'])
+  assert.equal(stored.state, 'retry')
+  assert.equal(stored.attempts, 3)
+  assert.match(stored.error, /^Automatic landing stopped after 3 attempts; restart Ensync .* Last error: conflict remains$/)
+  assert.equal(coordinator.hasActiveWork(), false)
+})
+
+test('a Host restart grants an exhausted landing one more attempt', async () => {
+  const journal = new MemoryJournal([{
+    ...input('ensync/exhausted'),
+    id: 'landing-1',
+    completionSequence: 1,
+    state: 'retry',
+    attempts: 3,
+    createdAt: '2026-09-03T00:00:01.000Z',
+    updatedAt: '2026-09-03T00:00:01.000Z',
+    error: 'Automatic landing stopped after 3 attempts.',
+  }])
+  let calls = 0
+  const coordinator = new LandingCoordinator({
+    journal,
+    landingRetryDelays: [1],
+    maxLandingAttempts: 3,
+    integrate: async (train) => {
+      calls += 1
+      return { landedIds: [], retryIds: [train[0].id], errors: { [train[0].id]: 'still conflicted' } }
+    },
+  })
+
+  await coordinator.start()
+  await coordinator.whenIdle()
+  await new Promise((resolve) => setTimeout(resolve, 20))
+  await coordinator.whenIdle()
+
+  assert.equal(calls, 1)
+  assert.equal(journal.items[0].attempts, 4)
+  assert.match(journal.items[0].error, /stopped after 4 attempts.*still conflicted$/)
+})
+
 test('integration rejection becomes retry state without an unhandled background rejection', async () => {
   const journal = new MemoryJournal()
   const coordinator = new LandingCoordinator({

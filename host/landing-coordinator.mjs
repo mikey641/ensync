@@ -5,6 +5,10 @@ import { runGit } from './git.mjs'
 const MAX_ERROR_LENGTH = 4_096
 const SAVED_SHA_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/i
 const DEFAULT_LANDING_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
+// A saved snapshot that fails this many times stops retrying on its own: each
+// failed attempt can spend a full conflict-resolver run and leave a train
+// behind. A Host restart grants one more attempt; nothing is discarded.
+const DEFAULT_MAX_LANDING_ATTEMPTS = 10
 
 export async function anchorLandingSnapshot(input = {}, options = {}) {
   if (!isAbsolute(input.repositoryPath ?? '') || !SAVED_SHA_PATTERN.test(input.savedSha ?? '')) {
@@ -81,6 +85,7 @@ export class LandingCoordinator {
     this.platform = options.platform ?? process.platform
     this.persistenceRetryDelays = options.persistenceRetryDelays ?? [100, 500, 2_000]
     this.landingRetryDelays = options.landingRetryDelays ?? DEFAULT_LANDING_RETRY_DELAYS
+    this.maxLandingAttempts = options.maxLandingAttempts ?? DEFAULT_MAX_LANDING_ATTEMPTS
     this.repositories = new Map()
     this.idleWaiters = new Set()
     this.startPromise = null
@@ -104,6 +109,7 @@ export class LandingCoordinator {
       for (const candidate of retained) {
         if (
           candidate.state === 'retry'
+          && !this.#retriesExhausted(candidate)
           && this.#repositoryKey(candidate) === this.#repositoryKey(item)
         ) {
           this.#markReady(candidate)
@@ -197,6 +203,10 @@ export class LandingCoordinator {
     state.ready.set(item.id, { ...item })
     this.#emit('queued', item)
     this.#schedule(state)
+  }
+
+  #retriesExhausted(item) {
+    return Number.isSafeInteger(item.attempts) && item.attempts >= this.maxLandingAttempts
   }
 
   #retryDelay(attempts) {
@@ -337,16 +347,18 @@ export class LandingCoordinator {
             if (transitioned) this.#emit('landed', transitioned)
             continue
           }
-          const message = boundedError(
-            result.errors[item.id]
-              ?? (result.retryIds.has(item.id)
-                ? 'Automatic integration will retry this saved branch.'
-                : 'The integrator returned no terminal result for this saved branch.'),
-          )
+          const exhausted = this.#retriesExhausted(item)
+          const reason = result.errors[item.id]
+            ?? (result.retryIds.has(item.id)
+              ? 'Automatic integration will retry this saved branch.'
+              : 'The integrator returned no terminal result for this saved branch.')
+          const message = boundedError(exhausted
+            ? `Automatic landing stopped after ${item.attempts} attempts; restart Ensync to try this saved snapshot again. Last error: ${reason}`
+            : reason)
           const transitioned = await this.journal.transition(item.id, 'integrating', 'retry', { error: message })
           if (transitioned) {
             this.#emit('retry', transitioned, message)
-            this.#deferRetry(state, transitioned)
+            if (!exhausted) this.#deferRetry(state, transitioned)
           }
         }
 

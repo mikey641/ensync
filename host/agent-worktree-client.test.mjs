@@ -156,7 +156,7 @@ test('client uses argument arrays, fixed tool storage, and parses JSON operation
     )
     assert.equal(call.options.env.GIT_CONFIG_KEY_1, 'commit.gpgsign')
     assert.equal(call.options.env.GIT_CONFIG_VALUE_1, 'false')
-    assert.equal(call.options.maxBuffer, 512 * 1024)
+    assert.equal(call.options.maxBuffer, 16 * 1024 * 1024)
   }
   assert.deepEqual(publicationGuards, [{
     storagePath: '/state/agent-worktree',
