@@ -601,6 +601,7 @@ export class LandingIntegrator {
       return resultFor(train, landedIds, retryIds, errors)
     } finally {
       if (integration) {
+        await this.#abandonMerge(integration.path).catch(() => {})
         await this.#withCleanupSignal((signal) => this.client.remove({
           repositoryPath,
           branch: integrationBranch,
@@ -1216,11 +1217,29 @@ export class LandingIntegrator {
       if (!info) continue
       const createdAt = info.birthtimeMs > 0 ? info.birthtimeMs : info.mtimeMs
       if (this.now() - createdAt < this.staleTrainAgeMs) continue
+      await this.#abandonMerge(fields.worktree)
       const result = await this.#git(['worktree', 'remove', '--', fields.worktree], repositoryPath, {
         timeoutMs: this.trainCleanupTimeoutMs,
       })
       if (result.exitCode === 0) removed += 1
     }
+  }
+
+  /**
+   * A train that stopped mid-conflict holds only Git's own merge output, which
+   * blocks removal forever. Undo that merge attempt (and nothing else) so the
+   * train can be removed; its inputs remain as commits on their branches.
+   */
+  async #abandonMerge(worktreePath) {
+    const merging = await this.#git(['rev-parse', '-q', '--verify', 'MERGE_HEAD'], worktreePath, {
+      timeoutMs: this.trainCleanupTimeoutMs,
+      signal: undefined,
+    })
+    if (merging.exitCode !== 0) return
+    await this.#git(['merge', '--abort'], worktreePath, {
+      timeoutMs: this.trainCleanupTimeoutMs,
+      signal: undefined,
+    })
   }
 
   async #withCleanupSignal(action) {

@@ -240,6 +240,24 @@ test('a train sweeps clean day-old leftover trains and keeps their branches', as
   assert.ok(clean.path)
 })
 
+test('a train sweeps a day-old leftover stuck mid-conflict', async (context) => {
+  const current = await fixture(context)
+  const conflicting = await branchCommit(current, 'ensync/chat-stuck-conflict', { 'README.md': '# chat\n' })
+  await writeFile(join(current.repositoryPath, 'README.md'), '# newer\n')
+  await git(current.repositoryPath, ['commit', '-am', 'baseline moved'])
+  const stuck = await leftoverTrain(current, 'stuck-conflict')
+  await assert.rejects(execFileAsync('git', ['merge', '--no-ff', conflicting.savedSha], { cwd: stuck.path }))
+  const source = await branchCommit(current, 'ensync/chat-after-conflict', { 'other.txt': 'other\n' })
+  const queued = { ...item(current, source, 1), targetBaseSha: await git(current.repositoryPath, ['rev-parse', 'main']) }
+  const dayLater = Date.now() + 25 * 60 * 60 * 1_000
+
+  const result = await integrator(current.nativeClient, { now: () => dayLater }).integrate([queued])
+
+  assert.deepEqual(result.landedIds, ['landing-1'], JSON.stringify(result))
+  assert.doesNotMatch(await git(current.repositoryPath, ['worktree', 'list', '--porcelain']), /landing-trains\/stuck-conflict/)
+  assert.match(await git(current.repositoryPath, ['branch', '--list', 'ensync/landing-trains/stuck-conflict']), /stuck-conflict/)
+})
+
 test('a train keeps a recent leftover train that a resolver may still reuse', async (context) => {
   const current = await fixture(context)
   await leftoverTrain(current, 'recent-leftover')
