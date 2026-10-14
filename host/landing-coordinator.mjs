@@ -9,6 +9,12 @@ const DEFAULT_LANDING_RETRY_DELAYS = [1_000, 5_000, 30_000, 120_000, 600_000]
 // failed attempt can spend a full conflict-resolver run and leave a train
 // behind. A Host restart grants one more attempt; nothing is discarded.
 const DEFAULT_MAX_LANDING_ATTEMPTS = 10
+// A landing blocked on the canonical checkout (the user's uncommitted edits,
+// another branch checked out) never ran, so it spends no attempt and rechecks
+// the checkout on this fixed cadence. The recheck is a cheap `git status`, and
+// waiting on it does not count as active work, so the Host can still retire
+// and update while the checkout stays dirty.
+const DEFAULT_BLOCKED_RETRY_DELAY_MS = 60_000
 
 export async function anchorLandingSnapshot(input = {}, options = {}) {
   if (!isAbsolute(input.repositoryPath ?? '') || !SAVED_SHA_PATTERN.test(input.savedSha ?? '')) {
@@ -53,12 +59,15 @@ function normalizedResult(result, train) {
   const retryIds = new Set(
     Array.isArray(result?.retryIds) ? result.retryIds.filter((id) => trainIds.has(id)) : [],
   )
+  const blockedIds = new Set(
+    Array.isArray(result?.blockedIds) ? result.blockedIds.filter((id) => retryIds.has(id)) : [],
+  )
   const errors = result?.errors && typeof result.errors === 'object' ? result.errors : {}
   const head = SAVED_SHA_PATTERN.test(result?.head ?? '') ? result.head.toLowerCase() : null
   const description = typeof result?.description === 'string' && result.description.trim()
     ? result.description.trim().slice(0, 240)
     : null
-  return { errors, head, description, landedIds, retryIds }
+  return { blockedIds, errors, head, description, landedIds, retryIds }
 }
 
 /**
@@ -86,6 +95,7 @@ export class LandingCoordinator {
     this.persistenceRetryDelays = options.persistenceRetryDelays ?? [100, 500, 2_000]
     this.landingRetryDelays = options.landingRetryDelays ?? DEFAULT_LANDING_RETRY_DELAYS
     this.maxLandingAttempts = options.maxLandingAttempts ?? DEFAULT_MAX_LANDING_ATTEMPTS
+    this.blockedRetryDelayMs = options.blockedRetryDelayMs ?? DEFAULT_BLOCKED_RETRY_DELAY_MS
     this.repositories = new Map()
     this.idleWaiters = new Set()
     this.startPromise = null
@@ -219,12 +229,13 @@ export class LandingCoordinator {
     return Number.isFinite(delay) && delay >= 0 ? delay : null
   }
 
-  #deferRetry(state, item) {
-    const delay = this.#retryDelay(item.attempts)
-    if (delay === null || this.stopping) return
+  #deferRetry(state, item, { blocked = false } = {}) {
+    const delay = blocked ? this.blockedRetryDelayMs : this.#retryDelay(item.attempts)
+    if (!Number.isFinite(delay) || delay < 0 || this.stopping) return
     state.delayedRetries.set(item.id, {
       item: { ...item },
       dueAt: Date.now() + delay,
+      blocked,
     })
     this.#scheduleRetryTimer(state)
   }
@@ -334,6 +345,7 @@ export class LandingCoordinator {
         } catch (error) {
           const message = boundedError(error)
           result = {
+            blockedIds: new Set(),
             landedIds: new Set(),
             retryIds: new Set(train.map((item) => item.id)),
             errors: Object.fromEntries(train.map((item) => [item.id, message])),
@@ -347,7 +359,8 @@ export class LandingCoordinator {
             if (transitioned) this.#emit('landed', transitioned)
             continue
           }
-          const exhausted = this.#retriesExhausted(item)
+          const blocked = result.blockedIds.has(item.id)
+          const exhausted = !blocked && this.#retriesExhausted(item)
           const reason = result.errors[item.id]
             ?? (result.retryIds.has(item.id)
               ? 'Automatic integration will retry this saved branch.'
@@ -355,10 +368,14 @@ export class LandingCoordinator {
           const message = boundedError(exhausted
             ? `Automatic landing stopped after ${item.attempts} attempts; restart Ensync to try this saved snapshot again. Last error: ${reason}`
             : reason)
-          const transitioned = await this.journal.transition(item.id, 'integrating', 'retry', { error: message })
+          const transitioned = await this.journal.transition(item.id, 'integrating', 'retry', {
+            error: message,
+            // The integrating transition counted an attempt that never ran.
+            ...(blocked ? { attempts: Math.max(0, item.attempts - 1) } : {}),
+          })
           if (transitioned) {
             this.#emit('retry', transitioned, message)
-            if (!exhausted) this.#deferRetry(state, transitioned)
+            if (!exhausted) this.#deferRetry(state, transitioned, { blocked })
           }
         }
 
@@ -449,8 +466,7 @@ export class LandingCoordinator {
         state.paused
         || (
           state.ready.size === 0
-          && state.delayedRetries.size === 0
-          && !state.retryTimer
+          && [...state.delayedRetries.values()].every((entry) => entry.blocked)
         )
       )
     ))

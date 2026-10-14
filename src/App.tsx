@@ -5408,7 +5408,11 @@ function deliveryProgressDetail(record: DeliveryRecord, exactCommit: string | nu
   if (record.state === 'production') return `Verified live at exact commit ${exactCommit?.slice(0, 12)}.`
   if (record.state === 'landing') {
     if (record.landingState === 'integrating') return `Ensync is merging exact saved commit ${record.savedSha.slice(0, 12)} into ${record.targetBranch}.`
-    if (record.landingState === 'retry') return `Ensync preserved exact saved commit ${record.savedSha.slice(0, 12)} and scheduled another semantic merge attempt.`
+    if (record.landingState === 'retry') {
+      return record.landingError
+        ? `Exact saved commit ${record.savedSha.slice(0, 12)} is preserved. ${record.landingError}`
+        : `Ensync preserved exact saved commit ${record.savedSha.slice(0, 12)} and scheduled another semantic merge attempt.`
+    }
     if (record.landingState === 'landed') return `Ensync merged exact saved commit ${record.savedSha.slice(0, 12)}; the production-branch push is next.`
     return `Exact saved commit ${record.savedSha.slice(0, 12)} is waiting for Ensync’s merge coordinator.`
   }

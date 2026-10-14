@@ -138,16 +138,38 @@ function structuralDiffArguments(range) {
   return ['-c', `core.whitespace=${MARKER_ONLY_WHITESPACE_RULES}`, 'diff', '--check', range]
 }
 
-function resultFor(train, landedIds, retryIds, errors, head = null, description = null) {
+function resultFor(train, landedIds, retryIds, errors, head = null, description = null, blockedIds = []) {
   const order = new Map(train.map((item) => [item.id, item.completionSequence]))
   const sorted = (ids) => [...ids].sort((left, right) => order.get(left) - order.get(right))
   return {
     landedIds: sorted(landedIds),
     retryIds: sorted(retryIds),
+    blockedIds: sorted(blockedIds),
     errors,
     head,
     description,
   }
+}
+
+const MAX_LISTED_DIRTY_PATHS = 5
+
+/** Paths named by `git status --porcelain=v1 -z`; a rename's source path follows its entry. */
+export function dirtyStatusPaths(stdout) {
+  const tokens = String(stdout ?? '').split('\0')
+  const paths = []
+  for (let index = 0; index < tokens.length; index += 1) {
+    const entry = tokens[index]
+    if (entry.length < 4) continue
+    paths.push(entry.slice(3))
+    if (/[RC]/.test(entry.slice(0, 2))) index += 1
+  }
+  return paths
+}
+
+function dirtyCheckoutMessage(paths) {
+  const listed = paths.slice(0, MAX_LISTED_DIRTY_PATHS).join(', ')
+  const more = paths.length > MAX_LISTED_DIRTY_PATHS ? ` and ${paths.length - MAX_LISTED_DIRTY_PATHS} more` : ''
+  return `The canonical checkout has unsaved changes (${listed}${more}); automatic integration left it untouched and will merge once they are committed or discarded.`
 }
 
 export class LandingIntegrator {
@@ -223,6 +245,13 @@ export class LandingIntegrator {
     const retryMany = (items, reason) => {
       for (const item of items) retry(item, reason)
     }
+    // The canonical checkout itself is not ready (the user's own edits, or a
+    // different branch checked out). The saved branches were never tried, so
+    // the coordinator waits for the checkout instead of spending attempts.
+    const blockedOnCheckout = (reason) => {
+      retryMany(train, reason)
+      return resultFor(train, landedIds, retryIds, errors, null, null, train.map((item) => item.id))
+    }
 
     const currentCommon = await this.#git([
       'rev-parse', '--path-format=absolute', '--git-common-dir',
@@ -236,13 +265,14 @@ export class LandingIntegrator {
     }
 
     const initialStatus = await this.#git(['status', '--porcelain=v1', '-z', '--untracked-files=all'], repositoryPath)
-    if (initialStatus.exitCode !== 0 || initialStatus.stdout.split('\0').filter(Boolean).length > 0) {
-      retryMany(train, 'The canonical checkout has unsaved changes; automatic integration left it untouched.')
+    if (initialStatus.exitCode !== 0) {
+      retryMany(train, 'Git could not read the canonical checkout status; automatic integration left it untouched.')
       return resultFor(train, landedIds, retryIds, errors)
     }
+    const dirtyPaths = dirtyStatusPaths(initialStatus.stdout)
+    if (dirtyPaths.length > 0) return blockedOnCheckout(dirtyCheckoutMessage(dirtyPaths))
     if (!(await this.#canonicalIndexIsOrdinary(repositoryPath))) {
-      retryMany(train, 'The canonical checkout has hidden tracked-file index flags; automatic integration left its bytes untouched.')
-      return resultFor(train, landedIds, retryIds, errors)
+      return blockedOnCheckout('The canonical checkout has hidden tracked-file index flags; automatic integration left its bytes untouched.')
     }
     const targetFormat = await this.#git(['check-ref-format', '--branch', target], repositoryPath)
     if (targetFormat.exitCode !== 0) {
@@ -252,8 +282,7 @@ export class LandingIntegrator {
     const targetResult = await this.#git(['symbolic-ref', '--quiet', 'HEAD'], repositoryPath)
     const checkedOutTarget = targetResult.exitCode === 0 ? firstLine(targetResult.stdout) : null
     if (checkedOutTarget !== targetRef) {
-      retryMany(train, `The saved target branch ${target} is not checked out; automatic integration left every branch untouched.`)
-      return resultFor(train, landedIds, retryIds, errors)
+      return blockedOnCheckout(`The saved target branch ${target} is not checked out; automatic integration left every branch untouched.`)
     }
     const originalHeadResult = await this.#git(['rev-parse', '--verify', targetRef], repositoryPath)
     const originalHead = originalHeadResult.exitCode === 0 ? firstLine(originalHeadResult.stdout) : null

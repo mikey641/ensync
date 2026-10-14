@@ -492,6 +492,50 @@ test('a landing stops retrying after its attempt cap and new completions do not 
   assert.equal(coordinator.hasActiveWork(), false)
 })
 
+test('a landing blocked on the canonical checkout spends no attempts, stays idle, and lands once unblocked', async () => {
+  const journal = new MemoryJournal()
+  let calls = 0
+  let dirty = true
+  const coordinator = new LandingCoordinator({
+    journal,
+    landingRetryDelays: [],
+    maxLandingAttempts: 2,
+    blockedRetryDelayMs: 5,
+    integrate: async (train) => {
+      calls += 1
+      if (dirty) {
+        const ids = train.map((item) => item.id)
+        return {
+          landedIds: [],
+          retryIds: ids,
+          blockedIds: ids,
+          errors: Object.fromEntries(ids.map((id) => [id, 'The canonical checkout has unsaved changes (data/log.csv).'])),
+        }
+      }
+      return { landedIds: train.map((item) => item.id), retryIds: [] }
+    },
+  })
+
+  const item = await coordinator.enqueue(input('ensync/blocked'))
+  await coordinator.whenIdle()
+  const waiting = journal.items.find((candidate) => candidate.id === item.id)
+  assert.equal(waiting.state, 'retry')
+  assert.equal(waiting.attempts, 0)
+  assert.match(waiting.error, /unsaved changes \(data\/log\.csv\)/)
+  assert.equal(coordinator.hasActiveWork(), false, 'waiting on the checkout must not keep the Host busy')
+
+  while (calls < 4) await new Promise((resolve) => setTimeout(resolve, 5))
+  await coordinator.whenIdle()
+  assert.equal(journal.items.find((candidate) => candidate.id === item.id).attempts, 0)
+
+  dirty = false
+  while (journal.items.find((candidate) => candidate.id === item.id).state !== 'landed') {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+  assert.equal(journal.items.find((candidate) => candidate.id === item.id).attempts, 1)
+  await coordinator.shutdown()
+})
+
 test('a Host restart grants an exhausted landing one more attempt', async () => {
   const journal = new MemoryJournal([{
     ...input('ensync/exhausted'),

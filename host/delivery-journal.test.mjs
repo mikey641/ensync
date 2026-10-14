@@ -37,6 +37,21 @@ test('delivery journal durably deduplicates a landing SHA', async () => {
   }
 })
 
+test('a retrying landing keeps its reason on the delivery until it moves on', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-delivery-'))
+  try {
+    const path = join(directory, 'journal.json')
+    const journal = new DeliveryJournal({ filePath: path })
+    const reason = 'The canonical checkout has unsaved changes (data/send_log.csv).'
+    await journal.upsertLanding({ ...item, state: 'retry', error: reason }, 'landing')
+    assert.equal((await new DeliveryJournal({ filePath: path }).list())[0].landingError, reason)
+    await journal.upsertLanding({ ...item, state: 'integrating', error: null }, 'landing')
+    assert.equal((await journal.list())[0].landingError, null)
+  } finally {
+    await rm(directory, { recursive: true, force: true })
+  }
+})
+
 test('one saved commit cannot acquire a second prompt identity', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'ensync-delivery-'))
   try {

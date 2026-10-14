@@ -8,7 +8,7 @@ import test from 'node:test'
 
 import { AgentWorktreeClient, resolveAgentWorktreeExecutable } from './agent-worktree-client.mjs'
 import { runGit } from './git.mjs'
-import { LandingIntegrator } from './landing-integrator.mjs'
+import { dirtyStatusPaths, LandingIntegrator } from './landing-integrator.mjs'
 
 const execFileAsync = promisify(execFile)
 
@@ -368,6 +368,14 @@ test('a missing saved commit retries only that item while compatible later work 
   await assert.rejects(readFile(join(current.repositoryPath, 'missing.txt'), 'utf8'))
 })
 
+test('dirty status paths skip a rename source and name every changed file', () => {
+  assert.deepEqual(
+    dirtyStatusPaths(' M data/send_log.csv\0R  new.txt\0old.txt\0?? notes/a b.md\0'),
+    ['data/send_log.csv', 'new.txt', 'notes/a b.md'],
+  )
+  assert.deepEqual(dirtyStatusPaths(''), [])
+})
+
 test('a dirty canonical checkout is byte-for-byte unchanged and the train retries', async (context) => {
   const current = await fixture(context)
   const source = await branchCommit(current, 'ensync/chat-dirty', { 'feature.txt': 'work\n' })
@@ -379,6 +387,8 @@ test('a dirty canonical checkout is byte-for-byte unchanged and the train retrie
 
   assert.deepEqual(result.landedIds, [])
   assert.deepEqual(result.retryIds, ['landing-1'])
+  assert.deepEqual(result.blockedIds, ['landing-1'])
+  assert.match(result.errors['landing-1'], /unsaved changes \(README\.md\)/)
   assert.equal(await git(current.repositoryPath, ['rev-parse', 'HEAD']), beforeHead)
   assert.equal(await git(current.repositoryPath, ['status', '--porcelain=v1']), beforeStatus)
   assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# unsaved user edit\n')
@@ -398,6 +408,7 @@ test('hidden tracked changes never reach native publication or lose canonical by
   assert.deepEqual(result.landedIds, [])
   assert.deepEqual(result.retryIds, ['landing-1'])
   assert.match(result.errors['landing-1'], /index flags|hidden tracked/i)
+  assert.deepEqual(result.blockedIds, ['landing-1'])
   assert.equal(await git(current.repositoryPath, ['rev-parse', 'refs/heads/main']), beforeHead)
   assert.equal(await readFile(join(current.repositoryPath, 'README.md'), 'utf8'), '# hidden local bytes\n')
 })

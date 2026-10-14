@@ -151,6 +151,7 @@ export type DeliveryRecord = {
   turnIdentityProof: 'captured' | 'commit_trailer' | 'legacy_job' | null
   productionAncestryVerified: boolean
   landingState: DeliveryLandingState | null
+  landingError?: string | null
   queueProgress?: DeliveryQueueProgress
   deliveryTarget: DeliveryTarget
   description: string | null
