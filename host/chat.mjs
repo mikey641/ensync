@@ -397,9 +397,14 @@ function isolatedPrompt(prompt, workspace) {
     && !boundedBaselineConflict(workspace)
     ? `This branch has ${workspace.integration.unintegratedCommits} saved commit(s) awaiting Ensync's automatic landing queue.\n`
     : ''
+  const livePath = workspace.shared?.repositoryPath
+  const liveOperations = livePath
+    ? `Live operations exception: when the user explicitly asks you to run or operate the live project itself (start a sender or scheduled job, create or delete a kill-switch file, inspect its runtime logs), run that project's own commands with ${livePath} as their working directory, because its runtime state lives there and a run from this worktree would act on stale copies. Never edit, commit, merge, or check out source files there. Afterwards run \`git -C ${JSON.stringify(livePath)} status --porcelain\` and tell the user about any tracked file the operation changed, because Ensync waits to land work until that checkout is clean. If your sandbox refuses the command, give the user the exact command to run instead.\n`
+    : ''
   return `[ENSYNC HOST WORKSPACE ISOLATION]
 This run is bound to the protected Git worktree that is the current working directory.
-Treat the current working directory as the only writable project for this task. Do not access or modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
+Treat the current working directory as the only project you edit for this task. Do not modify another checkout or worktree of the same repository, even if earlier conversation context names a canonical project path.
+${liveOperations}
 Ensync Host commits this branch when the run ends and performs the push and land itself, so \`git push\` is not part of your task. An approval request that nobody is there to answer is declined, and a declined request can end your run before you report back. Finish by reporting what you changed.
 Protected branch: ${workspace.branch}
 Verified worktree state before this run: ${workspace.gitBefore.dirty ? `${workspace.gitBefore.changedFiles} changed files` : 'clean'} at ${workspace.gitBefore.head}.

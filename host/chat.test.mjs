@@ -173,6 +173,8 @@ test('ChatRunService adds only protected-workspace isolation to the renderer pro
 
   assert.match(processInput, /\[ENSYNC HOST WORKSPACE ISOLATION\]/)
   assert.match(processInput, /Protected branch: ensync\/chat-renderer-envelope/)
+  assert.ok(processInput.includes(`run that project's own commands with ${projectPath} as their working directory`))
+  assert.match(processInput, /Never edit, commit, merge, or check out source files there\./)
   assert.match(processInput, /Continue the renderer-started task\.$/)
 })
 
