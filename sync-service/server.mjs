@@ -26,6 +26,12 @@ const HASH_PATTERN = /^[a-f0-9]{64}$/
 const MAX_REQUEST_BYTES = 12 * 1024 * 1024
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000
 const PAIRING_LIFETIME_MS = 10 * 60 * 1000
+const LINK_LIFETIME_MS = 10 * 60 * 1000
+const REFRESH_TOKEN_LIFETIME_MS = 180 * 24 * 60 * 60 * 1000
+const MAX_LINKS_PER_ACCOUNT = 32
+const MAX_REFRESH_TOKENS_PER_ACCOUNT = 128
+const WORKSPACE_WAIT_DEFAULT_SECONDS = 25
+const WORKSPACE_WAIT_MAX_SECONDS = 60
 const MAX_BROKER_CIPHERTEXT_CHARACTERS = 2 * 1024 * 1024
 const MAX_BROKER_JOBS = 256
 const MAX_BROKER_EVENTS_PER_JOB = 2_000
@@ -326,7 +332,7 @@ function pairingCode() {
 }
 
 function emptyBroker() {
-  return { version: 1, devices: {}, pairings: {}, jobs: {} }
+  return { version: 1, devices: {}, pairings: {}, jobs: {}, links: {}, refreshTokens: {} }
 }
 
 function brokerFor(account) {
@@ -334,7 +340,41 @@ function brokerFor(account) {
   account.broker.devices ??= {}
   account.broker.pairings ??= {}
   account.broker.jobs ??= {}
+  account.broker.links ??= {}
+  account.broker.refreshTokens ??= {}
   return account.broker
+}
+
+/** Drops expired or consumed QR link tokens so the account record stays bounded. */
+function pruneLinks(broker, now = Date.now()) {
+  for (const [id, link] of Object.entries(broker.links)) {
+    if (!link || link.consumedAt || Date.parse(link.expiresAt) <= now) delete broker.links[id]
+  }
+}
+
+function pruneRefreshTokens(broker, now = Date.now()) {
+  for (const [key, entry] of Object.entries(broker.refreshTokens)) {
+    const device = entry ? broker.devices[entry.deviceId] : null
+    if (!entry || Date.parse(entry.expiresAt) <= now || !device || device.revokedAt) {
+      delete broker.refreshTokens[key]
+    }
+  }
+}
+
+/** Revocation of a device or of its last pairing kills its refresh tokens. */
+function revokeRefreshTokensForDevice(broker, deviceId) {
+  for (const [key, entry] of Object.entries(broker.refreshTokens)) {
+    if (entry?.deviceId === deviceId) delete broker.refreshTokens[key]
+  }
+}
+
+function clientHasActivePairing(broker, clientId) {
+  return Object.values(broker.pairings).some((pairing) => pairing
+    && pairing.clientId === clientId
+    && typeof pairing.claimedAt === 'string'
+    && !pairing.revokedAt
+    && broker.devices[pairing.hostId]
+    && !broker.devices[pairing.hostId].revokedAt)
 }
 
 function activePairing(broker, hostId, clientId) {
@@ -531,7 +571,12 @@ export function createEnsyncSyncServer(options = {}) {
     const entries = []
     for (const [key, session] of sessions) {
       if (session.expiresAt > Date.now()) {
-        entries.push({ key, username: session.username, expiresAt: session.expiresAt })
+        entries.push({
+          key,
+          username: session.username,
+          expiresAt: session.expiresAt,
+          ...(session.deviceId ? { deviceId: session.deviceId } : {}),
+        })
       }
     }
     try {
@@ -553,7 +598,11 @@ export function createEnsyncSyncServer(options = {}) {
       for (const entry of raw.sessions) {
         if (!entry || typeof entry.key !== 'string' || typeof entry.username !== 'string' || !Number.isFinite(entry.expiresAt)) continue
         if (entry.expiresAt > Date.now()) {
-          sessions.set(entry.key, { username: entry.username, expiresAt: entry.expiresAt })
+          sessions.set(entry.key, {
+            username: entry.username,
+            expiresAt: entry.expiresAt,
+            ...(typeof entry.deviceId === 'string' ? { deviceId: entry.deviceId } : {}),
+          })
         }
       }
     } catch (error) {
@@ -564,18 +613,74 @@ export function createEnsyncSyncServer(options = {}) {
   }
   restoreSessions()
 
-  function createSession(username) {
+  // A session minted for a QR-linked device (link claim or refresh) is bound to
+  // that device, so revoking the device or its pairing ends the session too.
+  function createSession(username, deviceId = null) {
     const token = randomBytes(32).toString('base64url')
-    sessions.set(sessionKey(token), { username, expiresAt: Date.now() + SESSION_LIFETIME_MS })
+    const expiresAt = Date.now() + SESSION_LIFETIME_MS
+    sessions.set(sessionKey(token), { username, expiresAt, ...(deviceId ? { deviceId } : {}) })
     persistSessions()
-    return token
+    return { token, expiresAt }
+  }
+
+  const workspaceWaiters = new Map()
+
+  function notifyWorkspaceChanged(username) {
+    const waiters = workspaceWaiters.get(username)
+    if (!waiters) return
+    workspaceWaiters.delete(username)
+    for (const wake of waiters) wake()
+  }
+
+  function waitForWorkspaceChange(username, timeoutMs, response) {
+    return new Promise((resolveWait) => {
+      let settled = false
+      const finish = (reason) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        response.off('close', onClose)
+        workspaceWaiters.get(username)?.delete(wake)
+        if (workspaceWaiters.get(username)?.size === 0) workspaceWaiters.delete(username)
+        resolveWait(reason)
+      }
+      const wake = () => finish('changed')
+      const onClose = () => finish('closed')
+      const timer = setTimeout(() => finish('timeout'), timeoutMs)
+      timer.unref?.()
+      response.on('close', onClose)
+      if (!workspaceWaiters.has(username)) workspaceWaiters.set(username, new Set())
+      workspaceWaiters.get(username).add(wake)
+    })
+  }
+
+  function findRefreshToken(data, refreshToken) {
+    if (typeof refreshToken !== 'string' || refreshToken.length < 32 || refreshToken.length > 256) return null
+    const key = hashSecret(refreshToken)
+    for (const [username, candidate] of Object.entries(data.accounts)) {
+      const broker = candidate?.broker
+      const entry = broker?.refreshTokens?.[key]
+      if (entry) return { username, account: candidate, broker: brokerFor(candidate), key, entry }
+    }
+    return null
+  }
+
+  function findLink(data, token) {
+    if (typeof token !== 'string' || token.length < 32 || token.length > 256) return null
+    for (const [username, candidate] of Object.entries(data.accounts)) {
+      const links = candidate?.broker?.links
+      if (!links) continue
+      const link = Object.values(links).find((item) => item && secretMatches(token, item.tokenHash))
+      if (link) return { username, account: candidate, broker: brokerFor(candidate), link }
+    }
+    return null
   }
 
   function publicSession(username, data) {
     const account = data.accounts[username] ?? {}
     return {
       username,
-      token: createSession(username),
+      token: createSession(username).token,
       encryptionSalt: account.encryptionSalt,
       email: account.email ?? null,
     }
@@ -598,6 +703,15 @@ export function createEnsyncSyncServer(options = {}) {
       sessions.delete(key)
       persistSessions()
       throw new SyncServiceError('session_expired', 'The account session expired. Sign in again.', 401)
+    }
+    if (session.deviceId) {
+      const broker = store.read().accounts[session.username]?.broker
+      const device = broker?.devices?.[session.deviceId]
+      if (!device || device.revokedAt || !clientHasActivePairing(brokerFor({ broker }), device.id)) {
+        sessions.delete(key)
+        persistSessions()
+        throw new SyncServiceError('device_revoked', 'This device was disconnected. Scan the QR code on your computer again.', 401)
+      }
     }
     return { key, ...session }
   }
@@ -869,9 +983,13 @@ export function createEnsyncSyncServer(options = {}) {
         const { broker, device } = authenticateDevice(request, session, data)
         const revokedAt = new Date().toISOString()
         device.revokedAt = revokedAt
+        revokeRefreshTokensForDevice(broker, device.id)
         for (const pairing of Object.values(broker.pairings)) {
           if (!pairing.revokedAt && (pairing.hostId === device.id || pairing.clientId === device.id)) {
             pairing.revokedAt = revokedAt
+            if (pairing.clientId && !clientHasActivePairing(broker, pairing.clientId)) {
+              revokeRefreshTokensForDevice(broker, pairing.clientId)
+            }
           }
         }
         store.write(data)
@@ -932,6 +1050,152 @@ export function createEnsyncSyncServer(options = {}) {
         return json(response, 200, { pairing: publicPairing(pairing, broker) })
       }
 
+      // Active claimed pairings that involve the authenticated device. A Host
+      // uses this to list its linked phones; a client sees its Hosts.
+      if (request.method === 'GET' && url.pathname === '/v1/broker/pairings') {
+        const session = authenticate(request)
+        const data = store.read()
+        const { broker, device } = authenticateDevice(request, session, data)
+        const pairings = Object.values(broker.pairings)
+          .filter((pairing) => pairing && pairing.claimedAt && !pairing.revokedAt
+            && (pairing.hostId === device.id || pairing.clientId === device.id))
+          .map((pairing) => publicPairing(pairing, broker))
+          .filter((pairing) => pairing.client && pairing.host)
+        return json(response, 200, { pairings })
+      }
+
+      // QR link: a signed-in session that owns `hostId` mints a single-use,
+      // ten-minute token. Only its hash is stored.
+      if (request.method === 'POST' && url.pathname === '/v1/broker/links') {
+        const session = authenticate(request)
+        if (session.deviceId) {
+          throw new SyncServiceError('broker_link_forbidden', 'A linked phone cannot create phone links.', 403)
+        }
+        const input = await body(request)
+        const hostId = validIdentifier(input.hostId, DEVICE_ID_PATTERN, 'A valid Host ID is required.')
+        const data = store.read()
+        const found = account(session.username, data)
+        const broker = brokerFor(found)
+        const host = broker.devices[hostId]
+        if (!host || host.revokedAt || host.role !== 'host') {
+          throw new SyncServiceError('broker_host_unavailable', 'Register this computer as a Host before linking a phone.', 409)
+        }
+        pruneLinks(broker)
+        if (Object.keys(broker.links).length >= MAX_LINKS_PER_ACCOUNT) {
+          throw new SyncServiceError('broker_link_capacity', 'Too many phone links are waiting. Try again in a few minutes.', 429)
+        }
+        const token = randomBytes(32).toString('base64url')
+        const id = `link_${randomBytes(16).toString('base64url')}`
+        const expiresAt = new Date(Date.now() + LINK_LIFETIME_MS).toISOString()
+        broker.links[id] = {
+          id,
+          hostId,
+          tokenHash: hashSecret(token),
+          createdAt: new Date().toISOString(),
+          expiresAt,
+          consumedAt: null,
+        }
+        store.write(data)
+        return json(response, 201, { token, expiresAt })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/broker/links/claim') {
+        const input = await body(request)
+        const deviceId = validIdentifier(input.deviceId, DEVICE_ID_PATTERN, 'A valid device ID is required.')
+        const label = normalizedDeviceLabel(input.label)
+        const data = store.read()
+        const found = findLink(data, input.token)
+        const now = Date.now()
+        if (!found || found.link.consumedAt || Date.parse(found.link.expiresAt) <= now) {
+          throw new SyncServiceError('broker_link_invalid', 'This QR code was already used or has expired. Show a new one on your computer.', 404)
+        }
+        const { username, broker, link } = found
+        const host = broker.devices[link.hostId]
+        if (!host || host.revokedAt || host.role !== 'host') {
+          throw new SyncServiceError('broker_host_unavailable', 'The computer that showed this QR code is no longer available.', 409)
+        }
+        const existing = broker.devices[deviceId]
+        if (existing && existing.role !== 'client') {
+          throw new SyncServiceError('broker_device_conflict', 'That device ID is already registered with another role.', 409)
+        }
+        const nowIso = new Date(now).toISOString()
+        // Consume first: the token is single use even if a later step fails.
+        delete broker.links[link.id]
+        const deviceToken = randomBytes(32).toString('base64url')
+        broker.devices[deviceId] = {
+          id: deviceId,
+          role: 'client',
+          label,
+          tokenHash: hashSecret(deviceToken),
+          registeredAt: existing?.registeredAt ?? nowIso,
+          lastSeenAt: nowIso,
+          revokedAt: null,
+        }
+        let pairing = activePairing(broker, host.id, deviceId)
+        if (!pairing) {
+          const pairingId = `pair_${randomBytes(16).toString('base64url')}`
+          pairing = {
+            id: pairingId,
+            hostId: host.id,
+            clientId: deviceId,
+            createdAt: nowIso,
+            expiresAt: link.expiresAt,
+            claimedAt: nowIso,
+            revokedAt: null,
+            via: 'link',
+          }
+          broker.pairings[pairingId] = pairing
+        }
+        pruneRefreshTokens(broker, now)
+        revokeRefreshTokensForDevice(broker, deviceId)
+        if (Object.keys(broker.refreshTokens).length >= MAX_REFRESH_TOKENS_PER_ACCOUNT) {
+          throw new SyncServiceError('broker_link_capacity', 'This account has too many linked devices.', 429)
+        }
+        const refreshToken = randomBytes(32).toString('base64url')
+        broker.refreshTokens[hashSecret(refreshToken)] = {
+          deviceId,
+          createdAt: nowIso,
+          lastUsedAt: nowIso,
+          expiresAt: new Date(now + REFRESH_TOKEN_LIFETIME_MS).toISOString(),
+        }
+        store.write(data)
+        const minted = createSession(username, deviceId)
+        return json(response, 200, {
+          username,
+          session: { token: minted.token, expiresAt: new Date(minted.expiresAt).toISOString() },
+          refreshToken,
+          device: { ...publicDevice(broker.devices[deviceId]), token: deviceToken },
+          host: publicDevice(host),
+          pairing: publicPairing(pairing, broker),
+        })
+      }
+
+      if (request.method === 'POST' && url.pathname === '/v1/sessions/refresh') {
+        const input = await body(request)
+        const deviceId = validIdentifier(input.deviceId, DEVICE_ID_PATTERN, 'A valid device ID is required.')
+        const data = store.read()
+        const found = findRefreshToken(data, input.refreshToken)
+        const now = Date.now()
+        const device = found ? found.broker.devices[found.entry.deviceId] : null
+        if (!found || found.entry.deviceId !== deviceId || Date.parse(found.entry.expiresAt) <= now
+          || !device || device.revokedAt || !clientHasActivePairing(found.broker, deviceId)) {
+          if (found && (!device || device.revokedAt || Date.parse(found.entry.expiresAt) <= now
+            || !clientHasActivePairing(found.broker, found.entry.deviceId))) {
+            delete found.broker.refreshTokens[found.key]
+            store.write(data)
+          }
+          throw new SyncServiceError('refresh_invalid', 'This device is no longer linked. Scan the QR code on your computer again.', 401)
+        }
+        found.entry.lastUsedAt = new Date(now).toISOString()
+        found.entry.expiresAt = new Date(now + REFRESH_TOKEN_LIFETIME_MS).toISOString()
+        device.lastSeenAt = found.entry.lastUsedAt
+        store.write(data)
+        const minted = createSession(found.username, deviceId)
+        return json(response, 200, {
+          session: { token: minted.token, expiresAt: new Date(minted.expiresAt).toISOString() },
+        })
+      }
+
       if (request.method === 'GET' && url.pathname === '/v1/broker/hosts') {
         const session = authenticate(request)
         const data = store.read()
@@ -967,6 +1231,9 @@ export function createEnsyncSyncServer(options = {}) {
           throw new SyncServiceError('broker_pairing_not_found', 'That broker pairing is not available.', 404)
         }
         pairing.revokedAt ??= new Date().toISOString()
+        if (pairing.clientId && !clientHasActivePairing(broker, pairing.clientId)) {
+          revokeRefreshTokensForDevice(broker, pairing.clientId)
+        }
         store.write(data)
         return json(response, 200, { pairing: publicPairing(pairing, broker) })
       }
@@ -1205,6 +1472,28 @@ export function createEnsyncSyncServer(options = {}) {
         return json(response, 200, { job: publicBrokerJob(job, { after }) })
       }
 
+      if (request.method === 'GET' && url.pathname === '/v1/workspace/wait') {
+        const session = authenticate(request)
+        const afterParam = url.searchParams.get('after')
+        const after = afterParam === null || afterParam === '' ? 0 : Number(afterParam)
+        const timeoutParam = url.searchParams.get('timeout')
+        const timeoutSeconds = timeoutParam === null || timeoutParam === '' ? WORKSPACE_WAIT_DEFAULT_SECONDS : Number(timeoutParam)
+        if (!Number.isSafeInteger(after) || after < 0 || !Number.isFinite(timeoutSeconds) || timeoutSeconds < 0) {
+          throw new SyncServiceError('workspace_wait_invalid', 'A non-negative revision and timeout are required.', 400)
+        }
+        const timeoutMs = Math.min(WORKSPACE_WAIT_MAX_SECONDS, timeoutSeconds) * 1000
+        const current = () => store.read().accounts[session.username]?.workspace
+          ?? { revision: 0, document: null, updatedAt: null }
+        let workspace = current()
+        if (workspace.revision <= after && timeoutMs > 0) {
+          const reason = await waitForWorkspaceChange(session.username, timeoutMs, response)
+          if (reason === 'closed') return undefined
+          workspace = current()
+        }
+        if (workspace.revision > after) return json(response, 200, { ...workspace, changed: true })
+        return json(response, 200, { revision: workspace.revision, changed: false })
+      }
+
       if (request.method === 'GET' && url.pathname === '/v1/workspace') {
         const session = authenticate(request)
         const workspace = store.read().accounts[session.username]?.workspace ?? null
@@ -1230,6 +1519,7 @@ export function createEnsyncSyncServer(options = {}) {
           updatedAt: new Date().toISOString(),
         }
         store.write(data)
+        notifyWorkspaceChanged(session.username)
         return json(response, 200, account.workspace)
       }
 
