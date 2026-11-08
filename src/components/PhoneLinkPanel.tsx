@@ -8,6 +8,7 @@ import {
   readCloudflareTunnelStatus,
   startCloudflareQuickTunnel,
 } from '../lib/cloudflareTunnelHost.mjs'
+import { readSyncServiceUrl } from '../lib/syncServiceUrlPreference.mjs'
 
 const REFRESH_BEFORE_EXPIRY_MS = 60_000
 const MIN_REFRESH_DELAY_MS = 30_000
@@ -19,6 +20,11 @@ const PHONES_POLL_MS = 10_000
  * Host falls back to its own configured HTTPS service URL (or fails closed).
  */
 async function ensurePublicSyncUrl(): Promise<string | null> {
+  // A saved HTTPS Sync address (own domain, Tailscale Funnel, named tunnel) is
+  // stable, so a linked phone keeps working after Ensync restarts. A quick
+  // tunnel gets a new random address on every restart.
+  const saved = await readSyncServiceUrl()
+  if (saved && saved.startsWith('https://')) return saved
   if (!cloudflareTunnelAvailable()) return null
   const status = await readCloudflareTunnelStatus()
   if (status.quick.running && status.quick.url) return status.quick.url
