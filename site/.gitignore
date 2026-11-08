@@ -1,2 +1,5 @@
 .vercel
 .env*
+
+# Built from ../mobile by scripts/build-mobile.mjs on every deploy
+public/mobile/
