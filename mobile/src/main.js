@@ -1,6 +1,7 @@
 import './styles.css'
 import { BrokerClient } from './broker-client.js'
 import { linkFragment, parseLinkPayload } from './link.js'
+import { cameraAvailable, linkFromText, scanQr } from './qr-scanner.js'
 import { isQuickTunnel, PhoneSync, TERMINAL_STATES } from './phone-sync.js'
 import { renderMarkdown, renderPlain } from './render-markdown.js'
 import {
@@ -183,8 +184,66 @@ function renderLinkScreen({ title, body, action = null, busy = false, tone = '' 
   ))
 }
 
-function renderUnlinked() {
-  renderLinkScreen({})
+function linkActions() {
+  const pasteInput = h('input', { type: 'url', placeholder: 'Or paste the link from your computer', 'aria-label': 'Paste link', autocomplete: 'off' })
+  const submitPaste = (event) => {
+    event.preventDefault()
+    void useScannedText(pasteInput.value)
+  }
+  return h('div', { class: 'link-actions' },
+    cameraAvailable()
+      ? h('button', { class: 'primary scan-button', onClick: () => void openScanner() }, 'Scan QR code')
+      : null,
+    h('form', { class: 'paste-link', onSubmit: submitPaste }, pasteInput, h('button', { class: 'secondary' }, 'Connect')),
+  )
+}
+
+function renderUnlinked(options = {}) {
+  renderLinkScreen({
+    body: 'On your computer open Ensync → Settings → Connect your phone, then tap Scan and point this phone at the code.',
+    ...options,
+    action: linkActions(),
+  })
+}
+
+async function useScannedText(text) {
+  const found = linkFromText(text)
+  if (found.kind === 'link') return claimFromFragment(found.raw)
+  if (found.kind === 'empty') return renderUnlinked()
+  renderUnlinked({
+    title: found.kind === 'legacy' ? 'Update Ensync on your computer' : 'That isn’t an Ensync phone code',
+    body: found.kind === 'legacy'
+      ? 'That QR comes from an older Ensync. Update the desktop app, then scan the new code in Settings → Connect your phone.'
+      : 'Scan the code in Ensync → Settings → Connect your phone.',
+    tone: 'error',
+  })
+}
+
+async function openScanner() {
+  const controller = new AbortController()
+  const video = h('video', { class: 'scanner-video', playsinline: '', muted: '' })
+  const close = () => controller.abort()
+  app.replaceChildren(h('section', { class: 'scanner' },
+    video,
+    h('div', { class: 'scanner-frame' }),
+    h('p', { class: 'scanner-hint' }, 'Point at the QR in Ensync on your computer'),
+    h('button', { class: 'secondary scanner-cancel', onClick: close }, 'Cancel'),
+  ))
+  try {
+    const text = await scanQr(video, { signal: controller.signal })
+    navigator.vibrate?.(30)
+    await useScannedText(text)
+  } catch (error) {
+    if (error?.name === 'AbortError') return renderUnlinked()
+    const denied = error?.name === 'NotAllowedError' || error?.name === 'SecurityError'
+    renderUnlinked({
+      title: denied ? 'Camera access is off' : 'The camera didn’t start',
+      body: denied
+        ? 'Allow camera access for this site in your browser settings and try again, or paste the link instead.'
+        : `${error?.message ?? ''} You can paste the link instead.`,
+      tone: 'error',
+    })
+  }
 }
 
 async function claimFromFragment(raw) {
@@ -192,7 +251,7 @@ async function claimFromFragment(raw) {
   try {
     link = parseLinkPayload(raw)
   } catch (error) {
-    renderLinkScreen({ title: 'That QR code didn’t work', body: error.message, tone: 'error' })
+    renderLinkScreen({ title: 'That QR code didn’t work', body: error.message, tone: 'error', action: linkActions() })
     return
   }
   renderLinkScreen({ title: `Connecting to ${link.hostLabel}…`, body: 'Linking this phone to your computer. This only takes a moment.', busy: true })
@@ -216,6 +275,7 @@ async function claimFromFragment(raw) {
       title: 'This QR code expired',
       body: `${error?.message ? `${error.message} ` : ''}Show a fresh QR code in Ensync on your computer and scan it again.`,
       tone: 'error',
+      action: linkActions(),
     })
   }
 }

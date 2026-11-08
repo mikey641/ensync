@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@capacitor/core": "8.4.2",
+    "jsqr": "1.4.0",
     "scrypt-js": "3.0.1"
   },
   "devDependencies": {
