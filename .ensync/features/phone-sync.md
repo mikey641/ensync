@@ -88,6 +88,36 @@ Sync service:
   markdown/code, composer pinned to the bottom, provider picker defaulting to the chat's provider, Stop/Steer while
   running). Native back navigation via the History API; safe-area insets; dark mode.
 
+## Implementation notes (desktop/Sync/Host, 2026-11-08)
+
+Where the shipped code is more specific than the protocol above:
+
+- `POST /v1/broker/links/claim` also returns `deviceToken` (top level, same value as `device.token`) and the
+  claimed `pairing`. The phone authenticates broker routes with `X-Ensync-Device-Id`/`X-Ensync-Device-Token`.
+- Sessions minted by link claim or refresh are bound to the phone's device. Every bearer route (including
+  `/v1/workspace` and `/v1/workspace/wait`) rejects them with `401 device_revoked` once the device or its last
+  pairing is revoked; revocation also deletes its refresh tokens. A linked-phone session cannot mint links.
+- `GET /v1/workspace/wait` returns the `GET /v1/workspace` body plus `changed: true`; `timeout` is capped at 60 s.
+- `GET /v1/broker/pairings` (device-authenticated) lists active claimed pairings; the Host uses it for the
+  linked-phone list and revokes with the existing `POST /v1/broker/pairings/revoke`.
+- The Cloudflare tunnel is owned by the Electron shell, not the Host, so the renderer ensures the quick tunnel and
+  passes its URL: `POST /api/account-sync/phone-link` takes `{ syncUrl?, label? }` (falls back to the Host's own
+  HTTPS service URL, else `409 phone_link_sync_url_unavailable`) and returns
+  `{ url, expiresAt, persistent, host: { id, label } }`.
+- The silent account's credentials live in OS-backed storage owned by the Host (macOS login keychain via
+  `security -i`; Windows user DPAPI). With neither, silent account creation fails closed
+  (`503 secret_storage_unavailable`) and the user signs in under Advanced. Non-secret state (Host device ID,
+  enabled) is `ensync-phone-sync-v1.json` beside the Host rendezvous file; the detached Host resumes sign-in and
+  the Host role from it on start. Stopping remote access or signing out turns resume off.
+- Host-written reply (after the user message `messageId`, which is marked `deliveryStatus: completed|failed|cancelled`):
+  `{ id: 'msg-<jobId>-agent', role: 'agent', turnId, provider, model, sizeTier: null, executionTarget: 'local',
+  content, time, createdAt, origin: 'host', jobId }`, and `chat.continuation = { turnId, status, provider, model,
+  sessionId, workspaceKey, completedAt, ... }`. Failures add no agent message; the continuation becomes `blocked`
+  (or `cancelled` / `reconciliation_required`) with the error in `fallbackReason`.
+- The desktop renderer adopts `continuation.sessionId` as its own resumable session when the Host reply is the
+  last message. Desktop-run turns do not publish their session IDs, so a phone turn after a desktop turn has no
+  `sessionId` and must carry the transcript in its prompt.
+
 ## Known limit
 
 A Cloudflare quick-tunnel URL changes when Ensync restarts, so a linked phone loses its Sync address. Until a stable

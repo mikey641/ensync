@@ -6,8 +6,30 @@ export type AccountSyncStatus = {
   remoteRevision: number | null
   lastSyncedAt: string | null
   encryption: 'aes-256-gcm'
-  credentialStorage: 'host_memory_only'
+  credentialStorage: 'host_memory_only' | 'macos_keychain' | 'windows_dpapi' | string
+  phoneSync?: {
+    enabled: boolean
+    credentialStorage: string
+    restoreError: { code: string; message: string } | null
+  }
 }
+
+export type PhoneLink = {
+  url: string
+  expiresAt: string
+  persistent: boolean
+  host: { id: string; label: string }
+}
+
+export type LinkedPhone = {
+  pairingId: string
+  deviceId: string
+  label: string
+  pairedAt: string | null
+  lastSeenAt: string | null
+}
+
+export type WorkspaceWait = { changed: boolean; revision: number }
 
 export type AccountWorkspacePull = {
   state: unknown | null
@@ -151,6 +173,34 @@ export class AccountSyncHostClient {
 
   pull() {
     return this.request<AccountWorkspacePull>('/workspace')
+  }
+
+  /** One-shot phone setup; the returned URL carries the link only in its fragment. */
+  phoneLink(input: { syncUrl?: string | null; label?: string | null } = {}) {
+    return this.request<PhoneLink>('/phone-link', {
+      method: 'POST',
+      body: JSON.stringify({
+        ...(input.syncUrl ? { syncUrl: input.syncUrl } : {}),
+        ...(input.label ? { label: input.label } : {}),
+      }),
+    })
+  }
+
+  phones() {
+    return this.request<{ phones: LinkedPhone[] }>('/phones')
+  }
+
+  revokePhone(pairingId: string) {
+    return this.request<{ phones: LinkedPhone[] }>('/phones/revoke', {
+      method: 'POST',
+      body: JSON.stringify({ pairingId }),
+    })
+  }
+
+  /** Long-polls the Host for a newer workspace revision (the Host holds the key). */
+  waitWorkspace(after: number, timeoutSeconds = 25, signal?: AbortSignal) {
+    const revision = Number.isSafeInteger(after) && after >= 0 ? after : 0
+    return this.request<WorkspaceWait>(`/workspace/wait?after=${revision}&timeout=${timeoutSeconds}`, { signal })
   }
 
   push(state: unknown, baseRevision: number) {

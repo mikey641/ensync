@@ -2,11 +2,10 @@ import { useEffect, useState } from 'react'
 import QRCode from 'qrcode'
 
 /**
- * Renders the desktop-generated connect link as a scannable QR code. The link
- * points at the phone PWA with `?sync=<Sync URL>` so scanning it fills the
- * Sync URL field on the phone, leaving only the account username and password.
+ * Renders a desktop-generated link (phone link, authenticator URI) as a
+ * scannable QR code.
  */
-export function ConnectPhoneQr({ url }: { url: string }) {
+export function ConnectPhoneQr({ url, size = 128, alt = 'Scan with your phone' }: { url: string; size?: number; alt?: string }) {
   const [dataUrl, setDataUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -33,9 +32,9 @@ export function ConnectPhoneQr({ url }: { url: string }) {
     <img
       className="account-sync-qr"
       src={dataUrl}
-      width={128}
-      height={128}
-      alt="Scan to open Ensync on your phone with the Sync URL already filled in"
+      width={size}
+      height={size}
+      alt={alt}
     />
   )
 }

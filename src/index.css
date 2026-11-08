@@ -532,6 +532,19 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .account-sync-connect-phone__copy small { color: #686f67; font-size: 10px; line-height: 1.45; }
 .account-sync-connect-phone .button { height: 32px; padding: 0 9px; white-space: nowrap; }
 .account-sync-qr { width: 128px; height: 128px; flex: 0 0 auto; border-radius: 8px; background: #ffffff; padding: 3px; box-sizing: border-box; }
+.account-sync-connect-phone--link { flex-direction: column; align-items: stretch; }
+.account-sync-connect-phone--link .account-sync-qr { width: 192px; height: 192px; align-self: center; }
+.account-sync-connect-phone__expiry, .account-sync-connect-phone__status { color: #686f67; font-size: 10px; line-height: 1.45; text-align: center; display: flex; align-items: center; justify-content: center; gap: 6px; margin: 0; }
+.account-sync-connect-phone__error { display: flex; align-items: center; gap: 8px; justify-content: space-between; }
+.account-sync-phones { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.account-sync-phones li { display: flex; align-items: center; gap: 9px; padding: 7px 9px; border: 1px solid #2d3a30; border-radius: 7px; }
+.account-sync-phones li > svg { flex: 0 0 auto; color: var(--accent); }
+.account-sync-phones li > span { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.account-sync-phones strong { color: #b9beb7; font-size: 11px; font-weight: 500; }
+.account-sync-phones small { color: #686f67; font-size: 10px; }
+.account-sync-advanced { margin-top: 13px; }
+.account-sync-advanced > summary { cursor: pointer; color: #8b9289; font-size: 11px; user-select: none; }
+.account-sync-advanced[open] > summary { margin-bottom: 4px; }
 .account-sync-form__strength { grid-column: 1 / -1; margin: 0; display: flex; flex-wrap: wrap; gap: 4px; }
 .account-sync-form__strength > span { padding: 2px 6px; border: 1px solid #4c3a33; border-radius: 4px; background: #241a15; color: #c98f6a; font-size: 9px; }
 .account-sync-form__strength--ok { color: #78af7e; }
