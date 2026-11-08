@@ -78,6 +78,7 @@ test('a QR link token is single use, pairs a client, and yields a working sessio
   assert.equal(claimed.payload.device.id, phoneId)
   assert.equal(claimed.payload.device.role, 'client')
   assert.equal(typeof claimed.payload.device.token, 'string')
+  assert.equal(claimed.payload.deviceToken, claimed.payload.device.token)
   assert.equal(claimed.payload.host.id, owner.hostId)
   assert.equal(typeof claimed.payload.refreshToken, 'string')
   assert.ok(Date.parse(claimed.payload.session.expiresAt) > Date.now())

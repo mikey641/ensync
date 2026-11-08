@@ -1164,6 +1164,7 @@ export function createEnsyncSyncServer(options = {}) {
           username,
           session: { token: minted.token, expiresAt: new Date(minted.expiresAt).toISOString() },
           refreshToken,
+          deviceToken,
           device: { ...publicDevice(broker.devices[deviceId]), token: deviceToken },
           host: publicDevice(host),
           pairing: publicPairing(pairing, broker),
