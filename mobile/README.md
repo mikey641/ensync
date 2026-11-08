@@ -9,9 +9,11 @@ npm install
 npm run dev
 ```
 
-Use the account panel in Ensync Desktop to enable remote execution and create a one-time pairing code. The mobile app signs into the same account, claims that code, and can then submit jobs to that Host.
+Setup is one QR scan (see `.ensync/features/phone-sync.md`). Ensync Desktop shows a QR that opens `https://ensync.vercel.app/mobile/#link=<payload>`; the app claims the one-time link token, strips the fragment, and stores the session, refresh token, device token, account key, and Host in `localStorage` so it stays linked across reloads with no login form. It then mirrors the encrypted account workspace (projects and conversations) live through `GET /v1/workspace/wait`, and a message sent from the phone is appended to that conversation in the document and run on the Host in the same conversation worktree.
 
-The Sync service must be reachable at an HTTPS URL. Native Capacitor loopback origins are accepted by the bundled service; additional browser origins must be listed in the service's comma-separated `ENSYNC_SYNC_ALLOWED_ORIGINS` setting. Account passwords, the derived payload key, bearer session, and device token remain in app memory. Only the stable device ID and selected Sync URL are persisted locally in this development build.
+To try it locally without the desktop, run `npm run dev` and use the test harness in `test/phone-sync-harness.mjs` (it wraps the bundled Sync service with the link, refresh, and long-poll endpoints) to mint a `#link=` URL; `host/mobile-broker-client.test.mjs` shows the full flow.
+
+The Sync service must be reachable at an HTTPS URL. Native Capacitor loopback origins are accepted by the bundled service; additional browser origins must be listed in the service's comma-separated `ENSYNC_SYNC_ALLOWED_ORIGINS` setting.
 
 ## Web app (PWA)
 
@@ -19,7 +21,7 @@ The same client is an installable web app. It works full-screen on iOS and Andro
 
 The production site publishes this client at <https://ensync.vercel.app/mobile/>. Open that URL on your phone, then choose **Add to Home Screen** (iOS) or accept the browser install prompt (Android).
 
-Open the app with `?sync=<Sync URL>` (or use the **Connect your phone** link in desktop account settings) and the Sync URL field fills itself, leaving only your account name (handle or email) and password to enter.
+Scan the QR in desktop **Settings → Connect your phone**. On iOS, a home-screen app keeps its own storage separate from Safari, so scan with the camera, finish linking in Safari, then add that page to the Home Screen.
 
 To host it yourself:
 
@@ -38,4 +40,4 @@ npm run open:ios
 npm run open:android
 ```
 
-iOS builds require Xcode on macOS. Android builds require Android Studio and a configured Android SDK. The current client supports same-account Host pairing, manually entered Host project paths, Codex/Claude job submission, encrypted event polling, stop, and steer. Host project discovery, attachments, OS-backed credential persistence, background push wake-up, App Store/Play Store signing, and production push notifications remain release work; local native projects are development builds.
+iOS builds require Xcode on macOS. Android builds require Android Studio and a configured Android SDK. The current client supports QR linking, the synchronized project and conversation list, phone turns with live events, stop, and steer. QR deep links into the native app, attachments, OS-backed credential persistence, background push wake-up, App Store/Play Store signing, and production push notifications remain release work; local native projects are development builds.
