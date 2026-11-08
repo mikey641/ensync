@@ -298,3 +298,5 @@ button:disabled { opacity: .45; cursor: default; }
 .scanner-cancel { position: absolute; bottom: calc(env(safe-area-inset-bottom) + 28px); min-height: 48px; padding: 0 28px; border-radius: 99px; background: rgba(255, 255, 255, .92); color: #111; font-weight: 650; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .link-actions .photo-button { min-height: 48px; border-radius: 14px; background: var(--surface-2); font-weight: 600; }
+
+.link-screen p { white-space: pre-line; }

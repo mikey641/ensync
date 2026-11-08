@@ -4,8 +4,8 @@
 // every Ensync Sync request stays network-first so job state always live-updates
 // straight from the paired Host. Encrypted job/event payloads are never cached.
 
-const SHELL_CACHE = 'ensync-mobile-shell-v3'
-const STATIC_CACHE = 'ensync-mobile-static-v3'
+const SHELL_CACHE = 'ensync-mobile-shell-v4'
+const STATIC_CACHE = 'ensync-mobile-static-v4'
 const SHELL_PATHS = ['./', './index.html', './manifest.json']
 
 self.addEventListener('install', (event) => {

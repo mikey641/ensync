@@ -239,11 +239,29 @@ async function usePhoto(file) {
   })
 }
 
-function cameraBlockedHelp() {
+async function cameraDiagnosis(error) {
+  let site = 'unknown'
+  try { site = (await navigator.permissions.query({ name: 'camera' })).state } catch { /* not supported */ }
+  let policy = 'unknown'
+  try { policy = document.permissionsPolicy?.allowsFeature?.('camera') ?? document.featurePolicy?.allowsFeature?.('camera') ?? 'unknown' } catch { /* not supported */ }
+  return { site, policy: String(policy), error: error?.name ?? 'Error' }
+}
+
+const CAMERA_APP_TIP = 'Easiest fix: close this page, open your phone’s own Camera app and point it at the QR on your computer. Tap the link it shows; this page opens already linked, no permission needed.'
+
+async function cameraBlockedHelp(error) {
+  const info = await cameraDiagnosis(error)
   const ua = navigator.userAgent
-  if (/Android/i.test(ua)) return 'Your browser blocked the camera for this site without asking. Tap the icon left of the address (⚙ or 🔒) → Permissions → Camera → Allow, then try again. Or use “Take a photo of the QR” below, which needs no permission.'
-  if (/iPhone|iPad/i.test(ua)) return 'Safari blocked the camera for this site. Tap “aA” in the address bar → Website Settings → Camera → Allow, then try again. Or use “Take a photo of the QR” below.'
-  return 'Allow camera access for this site in your browser settings and try again, or use “Take a photo of the QR” below.'
+  let fix
+  if (info.policy === 'false') fix = 'This page is not allowed to use the camera (old cached copy). Close all Ensync tabs, reopen ensync.vercel.app/mobile and try again.'
+  else if (info.site === 'denied') {
+    fix = /iPhone|iPad/i.test(ua)
+      ? 'Safari has the camera blocked for this site: tap “aA” in the address bar → Website Settings → Camera → Allow.'
+      : 'Chrome has the camera blocked for this site: tap the icon left of the address (⚙ or 🔒) → Permissions → Camera → Allow (or “Reset permissions”).'
+  } else if (/Android/i.test(ua)) {
+    fix = 'Android has the camera turned off for Chrome itself, so Chrome can’t ask. Open phone Settings → Apps → Chrome → Permissions → Camera → “Allow only while using the app”, then reload.'
+  } else fix = 'Allow camera access for this browser in your phone settings, then reload.'
+  return `${CAMERA_APP_TIP}\n\nOr: ${fix}\n\n(${info.error} · site ${info.site} · policy ${info.policy})`
 }
 
 async function openScanner() {
@@ -266,8 +284,8 @@ async function openScanner() {
     renderUnlinked({
       title: denied ? 'Camera access is off' : 'The camera didn’t start',
       body: denied
-        ? cameraBlockedHelp()
-        : `${error?.message ?? ''} Use “Take a photo of the QR” below instead.`,
+        ? await cameraBlockedHelp(error)
+        : `${error?.message ?? ''} ${CAMERA_APP_TIP}`,
       tone: 'error',
     })
   }
