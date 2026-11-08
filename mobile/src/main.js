@@ -1,7 +1,7 @@
 import './styles.css'
 import { BrokerClient } from './broker-client.js'
 import { linkFragment, parseLinkPayload } from './link.js'
-import { cameraAvailable, linkFromText, scanQr } from './qr-scanner.js'
+import { cameraAvailable, decodeQrImage, linkFromText, scanQr } from './qr-scanner.js'
 import { isQuickTunnel, PhoneSync, TERMINAL_STATES } from './phone-sync.js'
 import { renderMarkdown, renderPlain } from './render-markdown.js'
 import {
@@ -190,10 +190,17 @@ function linkActions() {
     event.preventDefault()
     void useScannedText(pasteInput.value)
   }
+  const photoInput = h('input', { type: 'file', accept: 'image/*', capture: 'environment', class: 'visually-hidden', 'aria-hidden': 'true', tabindex: '-1' })
+  photoInput.addEventListener('change', () => {
+    const [file] = photoInput.files ?? []
+    if (file) void usePhoto(file)
+  })
   return h('div', { class: 'link-actions' },
     cameraAvailable()
       ? h('button', { class: 'primary scan-button', onClick: () => void openScanner() }, 'Scan QR code')
       : null,
+    h('button', { class: 'secondary photo-button', onClick: () => photoInput.click() }, 'Take a photo of the QR'),
+    photoInput,
     h('form', { class: 'paste-link', onSubmit: submitPaste }, pasteInput, h('button', { class: 'secondary' }, 'Connect')),
   )
 }
@@ -219,6 +226,26 @@ async function useScannedText(text) {
   })
 }
 
+async function usePhoto(file) {
+  renderLinkScreen({ title: 'Reading the code…', body: 'One moment.', busy: true })
+  try {
+    const text = await decodeQrImage(file)
+    if (text) return useScannedText(text)
+  } catch { /* handled below */ }
+  renderUnlinked({
+    title: 'No QR code found in that photo',
+    body: 'Take the photo straight on, with the whole code inside the frame, or paste the link instead.',
+    tone: 'error',
+  })
+}
+
+function cameraBlockedHelp() {
+  const ua = navigator.userAgent
+  if (/Android/i.test(ua)) return 'Your browser blocked the camera for this site without asking. Tap the icon left of the address (⚙ or 🔒) → Permissions → Camera → Allow, then try again. Or use “Take a photo of the QR” below, which needs no permission.'
+  if (/iPhone|iPad/i.test(ua)) return 'Safari blocked the camera for this site. Tap “aA” in the address bar → Website Settings → Camera → Allow, then try again. Or use “Take a photo of the QR” below.'
+  return 'Allow camera access for this site in your browser settings and try again, or use “Take a photo of the QR” below.'
+}
+
 async function openScanner() {
   const controller = new AbortController()
   const video = h('video', { class: 'scanner-video', playsinline: '', muted: '' })
@@ -239,8 +266,8 @@ async function openScanner() {
     renderUnlinked({
       title: denied ? 'Camera access is off' : 'The camera didn’t start',
       body: denied
-        ? 'Allow camera access for this site in your browser settings and try again, or paste the link instead.'
-        : `${error?.message ?? ''} You can paste the link instead.`,
+        ? cameraBlockedHelp()
+        : `${error?.message ?? ''} Use “Take a photo of the QR” below instead.`,
       tone: 'error',
     })
   }

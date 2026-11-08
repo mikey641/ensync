@@ -70,3 +70,30 @@ export function linkFromText(text) {
     return /^[A-Za-z0-9_-]{40,}$/.test(value) ? { kind: 'link', raw: value } : { kind: 'other' }
   }
 }
+
+/** Reads a QR code from a photo (camera app or gallery); needs no live camera permission. */
+export async function decodeQrImage(file) {
+  const bitmap = await createImageBitmap(file)
+  try {
+    if ('BarcodeDetector' in window) {
+      try {
+        const [code] = await new window.BarcodeDetector({ formats: ['qr_code'] }).detect(bitmap)
+        if (code?.rawValue) return code.rawValue
+      } catch { /* fall through to jsQR */ }
+    }
+    const canvas = document.createElement('canvas')
+    const context = canvas.getContext('2d', { willReadFrequently: true })
+    for (const size of [1200, 800, 1800]) {
+      const scale = Math.min(1, size / Math.max(bitmap.width, bitmap.height))
+      canvas.width = Math.round(bitmap.width * scale)
+      canvas.height = Math.round(bitmap.height * scale)
+      context.drawImage(bitmap, 0, 0, canvas.width, canvas.height)
+      const image = context.getImageData(0, 0, canvas.width, canvas.height)
+      const code = jsQR(image.data, image.width, image.height, { inversionAttempts: 'attemptBoth' })
+      if (code?.data) return code.data
+    }
+    return null
+  } finally {
+    bitmap.close?.()
+  }
+}
