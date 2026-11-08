@@ -1,5 +1,6 @@
 import { AccountSyncError } from './account-sync.mjs'
 import { ChatJobError } from './chat-jobs.mjs'
+import { splitConversationIdentity } from './conversation-reply-writer.mjs'
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000
 
@@ -37,6 +38,11 @@ export class SyncBrokerHostWorker {
     }
     this.account = options.accountSyncService
     this.chatJobs = options.chatJobService
+    // Called once per finished brokered job that names a conversation, so the
+    // Host can append the reply to the encrypted workspace document.
+    this.onConversationJobFinished = typeof options.onConversationJobFinished === 'function'
+      ? options.onConversationJobFinished
+      : null
     this.pollIntervalMs = Number.isFinite(options.pollIntervalMs)
       ? Math.max(50, options.pollIntervalMs)
       : DEFAULT_POLL_INTERVAL_MS
@@ -147,6 +153,15 @@ export class SyncBrokerHostWorker {
       }
     }
 
+    let identity
+    try {
+      // conversationId/messageId are Host bookkeeping; the chat job (and so the
+      // provider CLI) only ever sees the remaining request fields.
+      identity = splitConversationIdentity(claimed.request)
+    } catch (error) {
+      return this.#rejectClaimedJob(claimed, error)
+    }
+
     let localJob
     try {
       // start() is also the request-hash assertion for a retained job. When the
@@ -154,7 +169,7 @@ export class SyncBrokerHostWorker {
       const admission = await this.chatJobs.start({
         jobId: claimed.id,
         kind: claimed.kind,
-        request: claimed.request,
+        request: identity.request,
       })
       if (admission.disposition === 'occupied') {
         return this.#rejectClaimedJob(claimed, new ChatJobError(
@@ -162,11 +177,11 @@ export class SyncBrokerHostWorker {
           'That project is already running another chat job.',
           409,
           false,
-        ))
+        ), identity)
       }
       localJob = admission.job
     } catch (error) {
-      return this.#rejectClaimedJob(claimed, error)
+      return this.#rejectClaimedJob(claimed, error, identity)
     }
 
     const tracker = {
@@ -179,11 +194,15 @@ export class SyncBrokerHostWorker {
       ended: localJob.state !== 'running',
       flushing: null,
       dispose: null,
+      conversation: identity.conversation,
+      request: identity.request,
+      terminalEvent: null,
     }
     this.trackers.set(job.id, tracker)
     tracker.dispose = this.chatJobs.subscribe(job.id, {
       afterSequence: Number.isSafeInteger(job.lastEventSequence) ? job.lastEventSequence : 0,
       onEvent: (event) => {
+        if (['completed', 'error', 'cancelled'].includes(event.type)) tracker.terminalEvent = event
         if (!tracker.pendingSequences.has(event.sequence)) {
           tracker.pendingSequences.add(event.sequence)
           tracker.pendingEvents.push(event)
@@ -192,10 +211,41 @@ export class SyncBrokerHostWorker {
       },
       onEnd: () => {
         tracker.ended = true
+        this.#reportConversation(tracker)
         void this.#flushEvents(tracker).finally(() => this.#retireTracker(tracker))
       },
     })
     return tracker
+  }
+
+  #reportConversation(tracker) {
+    if (!tracker.conversation || !this.onConversationJobFinished || tracker.conversationReported) return
+    let terminalEvent = tracker.terminalEvent
+    if (!terminalEvent) {
+      // The subscription may start after the terminal event was retired from
+      // the replay window; fall back to the durable job state.
+      try {
+        const local = this.chatJobs.get(tracker.job.id)
+        if (local.state === 'completed') return
+        terminalEvent = local.state === 'cancelled'
+          ? { type: 'cancelled', message: 'The run was stopped.' }
+          : { type: 'error', error: 'The Ensync Host run did not report a result.', code: local.state === 'failed' ? 'host_job_failed' : 'host_job_orphaned' }
+      } catch {
+        return
+      }
+    }
+    tracker.conversationReported = true
+    try {
+      void Promise.resolve(this.onConversationJobFinished({
+        jobId: tracker.job.id,
+        conversationId: tracker.conversation.conversationId,
+        messageId: tracker.conversation.messageId,
+        request: tracker.request,
+        terminalEvent,
+      })).catch(() => {})
+    } catch {
+      // Reply persistence never blocks broker event delivery.
+    }
   }
 
   #reconcileMissingJob(job) {
@@ -211,9 +261,9 @@ export class SyncBrokerHostWorker {
     return tracker
   }
 
-  #rejectClaimedJob(job, error) {
+  #rejectClaimedJob(job, error, identity = null) {
     const failure = errorPayload(error)
-    return this.#syntheticTracker(job, {
+    const event = {
       type: 'error',
       error: failure.message,
       code: failure.code,
@@ -221,7 +271,15 @@ export class SyncBrokerHostWorker {
       safeToRetry: failure.safeToRetry,
       at: new Date().toISOString(),
       sequence: (job.lastEventSequence ?? 0) + 1,
-    })
+    }
+    const tracker = this.#syntheticTracker(job, event)
+    if (identity?.conversation) {
+      tracker.conversation = identity.conversation
+      tracker.request = identity.request
+      tracker.terminalEvent = event
+      this.#reportConversation(tracker)
+    }
+    return tracker
   }
 
   #syntheticTracker(job, event) {

@@ -78,6 +78,7 @@ import { VirtualBoxSetup } from './components/VirtualBoxSetup'
 import { GitWorkflowModal } from './components/GitWorkflowModal'
 import { FileViewerModal } from './components/FileViewerModal'
 import { ConnectPhoneQr } from './components/ConnectPhoneQr'
+import { PhoneLinkPanel } from './components/PhoneLinkPanel'
 import { NativeUpdatePreferences } from './components/NativeUpdatePreferences'
 import { SupportDesk } from './components/SupportDesk'
 import { UIVisibilityPreferences, useUIVisibility, type UIVisibilityState } from './ui-visibility'
@@ -320,7 +321,6 @@ const PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY = 'ensync-production-notification
 const MAX_PRODUCTION_NOTIFICATION_KEYS = 512
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
-const MOBILE_PWA_URL = 'https://ensync.vercel.app/mobile/'
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
   configured: false,
   serviceUrl: null,
@@ -1064,6 +1064,7 @@ function App() {
   const executionTargetRef = useRef(executionTarget)
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
+  const accountSyncRevisionRef = useRef<number | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
   const focusProjectRequestRef = useRef<(project: EnsyncProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
   const openChatRef = useRef<(chatId: string) => void>(() => {})
@@ -1228,6 +1229,29 @@ function App() {
     saveAgentUpdatePreferences((current) => recordAgentUpdateMaintenance(current))
   }, [saveAgentUpdatePreferences])
 
+  // A turn sent from the phone ran on this computer's Host, which recorded the
+  // provider session in the chat continuation. Adopting it lets the next
+  // desktop turn resume that same CLI session instead of replaying the
+  // transcript. Only a reply the Host wrote as the last message qualifies.
+  const adoptHostReplySessions = useCallback((nextChats: Chat[]) => {
+    let changed = false
+    const nextSessions = { ...chatSessionsRef.current }
+    for (const chat of nextChats) {
+      const continuation = chat.continuation as Record<string, unknown> | undefined
+      const last = chat.messages.at(-1) as (Record<string, unknown> | undefined)
+      const sessionId = typeof continuation?.sessionId === 'string' ? continuation.sessionId : null
+      const provider = typeof continuation?.provider === 'string' ? continuation.provider as ChatProviderId : null
+      if (!sessionId || !provider || last?.role !== 'agent' || last.origin !== 'host' || last.turnId !== continuation?.turnId) continue
+      const current = nextSessions[chat.id]
+      if (current?.sessionId === sessionId && current.syncedMessageCount === chat.messages.length) continue
+      nextSessions[chat.id] = { provider, sessionId, targetKey: 'local', syncedMessageCount: chat.messages.length }
+      changed = true
+    }
+    if (!changed) return
+    chatSessionsRef.current = nextSessions
+    setChatSessions(nextSessions)
+  }, [])
+
   const synchronizeAccountWorkspace = useCallback(() => {
     if (accountSyncInFlightRef.current) return accountSyncInFlightRef.current
     const run = (async () => {
@@ -1259,6 +1283,8 @@ function App() {
         }
 
         const nextState = merged.state as StoredState
+        adoptHostReplySessions(nextState.chats ?? [])
+        accountSyncRevisionRef.current = revision
         setChats((nextState.chats ?? []).map(normalizeChatModelChoice))
         const nextProjects = (nextState.projects ?? []).map((project) => ({
           ...project,
@@ -1293,7 +1319,18 @@ function App() {
     })
     accountSyncInFlightRef.current = run
     return run
-  }, [commitWorkspace])
+  }, [adoptHostReplySessions, commitWorkspace])
+
+  // After the phone link silently signs this computer in, pick up the new
+  // account state and pull whatever the account already holds.
+  const refreshAccountSyncStatus = useCallback(() => {
+    void accountSyncHost.status().then((status) => {
+      setAccountSyncStatus(status)
+      if (status.authenticated && accountSyncRevisionRef.current === null) {
+        void synchronizeAccountWorkspace().catch(() => {})
+      }
+    }).catch(() => {})
+  }, [synchronizeAccountWorkspace])
 
   const authenticateAccountSync = useCallback(async (mode: 'register' | 'login', username: string, password: string, email?: string) => {
     setAccountSyncPhase('syncing')
@@ -1756,22 +1793,53 @@ function App() {
   useEffect(() => {
     if (!accountSyncStatus.authenticated
       || accountWorkspaceFingerprint === accountSyncFingerprintRef.current) return
+    // Debounced push: a burst of edits becomes one encrypted upload.
     const timer = window.setTimeout(() => {
       void synchronizeAccountWorkspace().catch(() => {})
-    }, 1_200)
+    }, 1_500)
     return () => window.clearTimeout(timer)
   }, [accountSyncStatus.authenticated, accountWorkspaceFingerprint, synchronizeAccountWorkspace])
 
   useEffect(() => {
-    if (!accountSyncStatus.authenticated) return
+    if (!accountSyncStatus.authenticated) {
+      accountSyncRevisionRef.current = null
+      return
+    }
     const poll = () => {
       if (document.visibilityState === 'visible') void synchronizeAccountWorkspace().catch(() => {})
     }
-    const timer = window.setInterval(poll, 30_000)
+    // Live updates: long-poll the Host (which holds the account key) for a
+    // newer workspace revision, then pull and merge. A phone message shows up
+    // in an open tab within about a second of the phone pushing it.
+    let stopped = false
+    const controller = new AbortController()
+    const pause = (ms: number) => new Promise((resolve) => window.setTimeout(resolve, ms))
+    const loop = async () => {
+      let failures = 0
+      while (!stopped) {
+        try {
+          const after = accountSyncRevisionRef.current ?? 0
+          const result = await accountSyncHost.waitWorkspace(after, 25, controller.signal)
+          if (stopped) return
+          failures = 0
+          if (result.changed) {
+            await synchronizeAccountWorkspace().catch(() => {})
+            // Never spin if the merge could not advance the known revision.
+            if ((accountSyncRevisionRef.current ?? 0) <= after) await pause(2_000)
+          }
+        } catch {
+          if (stopped) return
+          failures += 1
+          await pause(Math.min(30_000, 1_000 * 2 ** Math.min(failures, 5)))
+        }
+      }
+    }
+    void loop()
     window.addEventListener('focus', poll)
     window.addEventListener('online', poll)
     return () => {
-      window.clearInterval(timer)
+      stopped = true
+      controller.abort()
       window.removeEventListener('focus', poll)
       window.removeEventListener('online', poll)
     }
@@ -4726,7 +4794,7 @@ function App() {
       )}
 
       {wizardOpen && <ConnectionWizard providers={providers} hostOnline={hostOnline} hostError={hostError} hasActiveRuns={Object.keys(inFlightRuns).length > 0} onRefresh={refreshProviders} onUpdateStarted={recordAgentMaintenance} onClose={() => setWizardOpen(false)} />}
-      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} deliveryTarget={deliveryTarget} setDeliveryTarget={setDeliveryTarget} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountVerifySecondFactor={verifyAccountSecondFactor} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && <SettingsModal providers={executionProviders} placement={placement} setPlacement={setPlacement} conversationLayout={conversationLayout} setConversationLayout={setConversationLayout} autoFallback={autoFallback} setAutoFallback={setAutoFallback} autoContextSkill={autoContextSkill} setAutoContextSkill={setAutoContextSkillEnabled} deliveryTarget={deliveryTarget} setDeliveryTarget={setDeliveryTarget} fallbackProviderOrder={fallbackProviderOrder} setFallbackProviderOrder={updateFallbackProviderOrder} agentUpdatePreferences={agentUpdatePreferences} setAgentUpdateMode={setAgentUpdateMode} installedAgentProviders={installedAgentProviders} onReviewAgentUpdates={() => { setSettingsOpen(false); reviewAgentUpdates() }} accountSyncStatus={accountSyncStatus} accountSyncPhase={accountSyncPhase} accountSyncMessage={accountSyncMessage} syncedChatCount={chats.length} onAccountAuthenticate={authenticateAccountSync} onAccountVerifySecondFactor={verifyAccountSecondFactor} onAccountLogout={logoutAccountSync} onAccountSync={synchronizeAccountWorkspace} onAccountStatusRefresh={refreshAccountSyncStatus} onClose={() => setSettingsOpen(false)} />}
       {contextOpen && <ContextModal project={activeProject} onClose={() => setContextOpen(false)} />}
       {viewedFilePath && <FileViewerModal path={viewedFilePath} onClose={() => setViewedFilePath(null)} />}
       {projectOpen && <ProjectSwitcher projects={recentProjectOptions} activeProject={activeProject} hostError={projectError} onInspect={inspectAndFocusProject} onOpenGit={(mode) => { setProjectOpen(false); setGitWorkflowMode(mode) }} onOpenRemote={() => { setProjectOpen(false); setRemoteInitialRuntime('remote'); setRemoteOpen(true) }} onClose={() => setProjectOpen(false)} />}
@@ -6015,7 +6083,7 @@ function generateStrongPassword(): string {
   return password
 }
 
-function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onVerifySecondFactor, onLogout, onSync }: { status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
+function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate, onVerifySecondFactor, onLogout, onSync, onStatusRefresh }: { onStatusRefresh: () => void; status: AccountSyncStatus; phase: 'checking' | 'idle' | 'syncing' | 'error'; message: string | null; chatCount: number; onAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onLogout: () => Promise<void>; onSync: () => Promise<void> }) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [showPassword, setShowPassword] = useState(false)
@@ -6063,12 +6131,6 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
   const lastSynced = status.lastSyncedAt
     ? new Date(status.lastSyncedAt).toLocaleString()
     : 'Not synced yet'
-  const connectSyncUrl = (tunnelStatus.quick.running && tunnelStatus.quick.url)
-    ?? (tunnelStatus.running && tunnelStatus.url)
-    ?? (status.serviceUrl?.startsWith('https://') ? status.serviceUrl : null)
-  const mobileConnectUrl = connectSyncUrl
-    ? `${MOBILE_PWA_URL}?sync=${encodeURIComponent(connectSyncUrl)}${status.authenticated && status.username ? `&user=${encodeURIComponent(status.username)}` : ''}`
-    : null
   const passwordIssues = password.length >= 12 ? strongPasswordIssues(username.trim(), password) : []
   const passwordReady = password.length >= 12 && username.trim().length >= 3 && passwordIssues.length === 0
 
@@ -6325,19 +6387,11 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
         {status.authenticated && <span className="account-sync-badge"><i /> SYNC ON</span>}
       </div>
 
-      {status.configured && !mobileConnectUrl && (
-        <div className="account-sync-connect-phone account-sync-connect-phone--notice">
-          <div className="account-sync-connect-phone__copy"><Smartphone size={15} /><span><strong>Phone sync is ready to turn on</strong><small>Press “Enable phone access” below and Ensync will publish a link for your phone — no account or setup needed.</small></span></div>
-        </div>
-      )}
-      {mobileConnectUrl && (
-        <div className="account-sync-connect-phone">
-          <div className="account-sync-connect-phone__copy"><Smartphone size={15} /><span><strong>Connect your phone</strong><small>Scan the code, or copy the link, to open the phone app with the Sync URL already filled in.</small></span></div>
-          <ConnectPhoneQr url={mobileConnectUrl} />
-          <CopyTextButton text={mobileConnectUrl} label="Copy connect link" />
-        </div>
-      )}
+      <PhoneLinkPanel configured={status.configured} onLinked={() => { void refreshTunnelStatus(); onStatusRefresh() }} />
 
+      {(syncUrlAvailable || tunnelAvailable) && (
+      <details className="account-sync-advanced">
+      <summary>Advanced: Sync address and phone tunnel</summary>
       {syncUrlAvailable && (
         <div className="account-sync-shared-service">
           <div className="account-sync-shared-service__head">
@@ -6432,6 +6486,8 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
           {tunnelError && <p className="account-sync-form__error" role="alert">{tunnelError}</p>}
         </div>
       )}
+      </details>
+      )}
 
       {phase === 'checking' ? (
         <div className="account-sync-unavailable"><RotateCw className="spin" size={17} /><span><strong>Checking account sync</strong><small>Asking the local Ensync Host for its configured service.</small></span></div>
@@ -6500,7 +6556,10 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
           {securityError && <div className="connection-error" role="alert">{securityError}</div>}
           <small className="account-sync-session-note">Two-factor and recovery protect sign-in. Your conversation encryption key still comes from your password, so keep that password: a reset restores access, not old encrypted chats.</small>
         </div>
-      ) : challenge ? (
+      ) : (
+        <details className="account-sync-advanced" open={challenge !== null}>
+          <summary>Advanced: sign in to an existing account</summary>
+          {challenge ? (
         <form className="account-sync-form account-sync-form--second-factor" onSubmit={(event) => { event.preventDefault(); void submitSecondFactor(usingRecovery ? 'recovery' : 'code') }}>
           <div className="account-sync-form__factor"><ShieldCheck size={16} /><span><strong>Two-factor sign-in</strong><small>Enter the code from your authenticator app, or use a recovery code.</small></span></div>
           {usingRecovery ? (
@@ -6514,7 +6573,7 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
             <button type="submit" className="button button--primary" disabled={busy || (usingRecovery ? recoveryInput.trim().length < 4 : !/^\d{6}$/.test(secondFactorCode.trim()))}>{busy ? 'Verifying…' : 'Verify'}</button>
           </div>
         </form>
-      ) : (
+          ) : (
         <form className="account-sync-form" onSubmit={(event) => { event.preventDefault(); void authenticate('login') }}>
           <label><span>Username or email</span><input value={username} onChange={(event) => { setUsername(event.target.value); setAuthError(null) }} autoComplete="username" minLength={3} maxLength={254} placeholder="your-name or you@example.com" disabled={busy} /></label>
           <label>
@@ -6540,6 +6599,8 @@ function AccountSyncSettings({ status, phase, message, chatCount, onAuthenticate
           {authError && <p className="account-sync-form__error" role="alert">{authError}</p>}
           <p><LockKeyhole size={13} /> Your password is used for account login and local encryption-key derivation. It is never stored in the conversation snapshot.</p>
         </form>
+          )}
+        </details>
       )}
       {message && <div className={phase === 'error' ? 'connection-error' : 'account-sync-message'} role={phase === 'error' ? 'alert' : 'status'}>{message}</div>}
     </section>
@@ -6601,6 +6662,11 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
 
   const [hostLabel, setHostLabel] = useState('')
   const [hostBusy, setHostBusy] = useState<string | null>(null)
+  // Publishing capabilities re-probes every provider CLI and can take a long
+  // time. It has its own flag so it never locks the Host buttons: holding
+  // hostBusy across it left "Generate pairing code" disabled while the panel
+  // already showed Connected.
+  const [capabilitiesBusy, setCapabilitiesBusy] = useState(false)
   const [hostError, setHostError] = useState<string | null>(null)
   const [pairing, setPairing] = useState<RemoteBrokerPairingOffer | null>(null)
   const [capabilities, setCapabilities] = useState<RemoteBrokerCapabilities | null>(null)
@@ -6732,22 +6798,25 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
   const enableHost = async () => {
     setHostBusy('start')
     setHostError(null)
+    let started = false
     try {
       const next = await remoteBrokerHost.start(hostLabel)
       setStatus(next)
       setPairing(null)
       setConfirmingForget(false)
-      try {
-        const result = await remoteBrokerHost.capabilities()
-        setCapabilities(result.capabilities)
-      } catch {
-        // Capabilities publish is best-effort right after enabling the Host.
-      }
+      started = true
     } catch (error) {
       setHostError(error instanceof Error ? error.message : 'Could not enable remote access.')
     } finally {
       setHostBusy(null)
     }
+    if (!started) return
+    // Best-effort, in the background, after the Host controls are usable again.
+    setCapabilitiesBusy(true)
+    void remoteBrokerHost.capabilities()
+      .then((result) => setCapabilities(result.capabilities))
+      .catch(() => {})
+      .finally(() => setCapabilitiesBusy(false))
   }
 
   const generatePairing = async () => {
@@ -6764,7 +6833,7 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
   }
 
   const refreshCapabilities = async () => {
-    setHostBusy('capabilities')
+    setCapabilitiesBusy(true)
     setHostError(null)
     try {
       const result = await remoteBrokerHost.capabilities()
@@ -6772,7 +6841,7 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
     } catch (error) {
       setHostError(error instanceof Error ? error.message : 'Could not refresh Host capabilities.')
     } finally {
-      setHostBusy(null)
+      setCapabilitiesBusy(false)
     }
   }
 
@@ -6922,6 +6991,8 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
             </div>
             <div className="account-sync-remote__body">
               {status.lastError && <p className="account-sync-remote__error" role="alert"><ShieldAlert size={13} /> {status.lastError.message}{status.lastError.code ? ` (${status.lastError.code})` : ''}</p>}
+              <details className="account-sync-advanced" open={pairing !== null}>
+                <summary>Advanced: pair another computer with a code</summary>
               {pairing && (
                 <div className="account-sync-remote__pairing">
                   <span><strong>Pairing code</strong><small>Expires {pairing.pairing.expiresAt ? new Date(pairing.pairing.expiresAt).toLocaleString() : 'soon'}. Enter it on the other computer to pair it with this Host.</small></span>
@@ -6933,8 +7004,11 @@ function RemoteBrokerSettings({ authenticated }: { authenticated: boolean }) {
                 </div>
               )}
               <div className="account-sync-remote__actions">
-                <button type="button" className="button button--primary" onClick={() => void generatePairing()} disabled={hostBusy !== null}>{hostBusy === 'pairing' ? 'Generating…' : 'Generate pairing code'}</button>
-                <button type="button" className="button button--ghost" onClick={() => void refreshCapabilities()} disabled={hostBusy !== null}><RotateCw size={14} /> {hostBusy === 'capabilities' ? 'Refreshing…' : 'Refresh capabilities'}</button>
+                <button type="button" className="button button--ghost" onClick={() => void generatePairing()} disabled={hostBusy !== null}>{hostBusy === 'pairing' ? 'Generating…' : 'Generate pairing code'}</button>
+              </div>
+              </details>
+              <div className="account-sync-remote__actions">
+                <button type="button" className="button button--ghost" onClick={() => void refreshCapabilities()} disabled={capabilitiesBusy}><RotateCw size={14} className={capabilitiesBusy ? 'spin' : ''} /> {capabilitiesBusy ? 'Refreshing…' : 'Refresh capabilities'}</button>
                 <button type="button" className="button button--ghost" onClick={() => void disableHost(false)} disabled={hostBusy !== null}><Power size={14} /> {hostBusy === 'stop' ? 'Stopping…' : 'Stop'}</button>
                 {confirmingForget ? (
                   <>
@@ -7129,7 +7203,7 @@ function AgentUpdateSettings({ preferences, providers, onModeChange, onReview }:
   )
 }
 
-function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, deliveryTarget, setDeliveryTarget, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountVerifySecondFactor, onAccountLogout, onAccountSync, onClose }: { providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; deliveryTarget: DeliveryTarget; setDeliveryTarget: (value: DeliveryTarget) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onAccountVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
+function SettingsModal({ providers, placement, setPlacement, conversationLayout, setConversationLayout, autoFallback, setAutoFallback, autoContextSkill, setAutoContextSkill, deliveryTarget, setDeliveryTarget, fallbackProviderOrder, setFallbackProviderOrder, agentUpdatePreferences, setAgentUpdateMode, installedAgentProviders, onReviewAgentUpdates, accountSyncStatus, accountSyncPhase, accountSyncMessage, syncedChatCount, onAccountAuthenticate, onAccountVerifySecondFactor, onAccountLogout, onAccountSync, onAccountStatusRefresh, onClose }: { onAccountStatusRefresh: () => void; providers: Provider[]; placement: NewTabPlacement; setPlacement: (value: NewTabPlacement) => void; conversationLayout: ConversationLayoutMode; setConversationLayout: (value: ConversationLayoutMode) => void; autoFallback: boolean; setAutoFallback: (value: boolean) => void; autoContextSkill: boolean; setAutoContextSkill: (value: boolean) => void; deliveryTarget: DeliveryTarget; setDeliveryTarget: (value: DeliveryTarget) => void; fallbackProviderOrder: ProviderId[]; setFallbackProviderOrder: (value: ProviderId[]) => void; agentUpdatePreferences: AgentUpdatePreferences; setAgentUpdateMode: (mode: AgentUpdateMode) => void; installedAgentProviders: Provider[]; onReviewAgentUpdates: () => void; accountSyncStatus: AccountSyncStatus; accountSyncPhase: 'checking' | 'idle' | 'syncing' | 'error'; accountSyncMessage: string | null; syncedChatCount: number; onAccountAuthenticate: (mode: 'register' | 'login', username: string, password: string, email?: string) => Promise<AccountSyncStatus | SecondFactorChallenge>; onAccountVerifySecondFactor: (challengeId: string, credentials: { code?: string; recoveryCode?: string }) => Promise<void>; onAccountLogout: () => Promise<void>; onAccountSync: () => Promise<void>; onClose: () => void }) {
   const rankedProviders = orderedAutomaticProviders(providers, fallbackProviderOrder)
   const moveProvider = (providerId: ProviderId, direction: -1 | 1) => {
     const current = normalizeFallbackProviderOrder(fallbackProviderOrder)
@@ -7152,7 +7226,7 @@ function SettingsModal({ providers, placement, setPlacement, conversationLayout,
       <div className="modal settings-modal" onMouseDown={(event) => event.stopPropagation()}>
         <div className="modal__header compact"><div><span className="eyebrow">PREFERENCES</span><h2>Make Ensync yours</h2></div><button className="icon-button" onClick={onClose}><X size={19} /></button></div>
         <div className="settings-body">
-          <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onVerifySecondFactor={onAccountVerifySecondFactor} onLogout={onAccountLogout} onSync={onAccountSync} />
+          <AccountSyncSettings status={accountSyncStatus} phase={accountSyncPhase} message={accountSyncMessage} chatCount={syncedChatCount} onAuthenticate={onAccountAuthenticate} onVerifySecondFactor={onAccountVerifySecondFactor} onLogout={onAccountLogout} onSync={onAccountSync} onStatusRefresh={onAccountStatusRefresh} />
           <RemoteBrokerSettings authenticated={accountSyncStatus.authenticated} />
           <section className="setting-section workspace-layout-setting">
             <div className="setting-title"><div><h3>New conversation view</h3><p>Choose whether open conversations share the screen or use one workspace.</p></div></div>

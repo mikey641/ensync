@@ -16,6 +16,7 @@ import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
 import { getProviderCatalog } from './providers.mjs'
+import { splitConversationIdentity } from './conversation-reply-writer.mjs'
 
 const execFile = promisify(execFileCallback)
 
@@ -846,6 +847,13 @@ function validateRequest(request) {
   }
   if (request.attachments != null && !Array.isArray(request.attachments)) {
     throw new ChatRunError('invalid_attachments', 'Attached files must be provided as a list.')
+  }
+  // Optional conversation identity from a phone turn. It is validated here but
+  // never forwarded: provider invocations read only the fields they need.
+  try {
+    splitConversationIdentity(request)
+  } catch (error) {
+    throw new ChatRunError(error.code, error.message)
   }
   if (
     request.timeoutMs != null
