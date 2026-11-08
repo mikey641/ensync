@@ -27,7 +27,9 @@ const MAX_REQUEST_BYTES = 12 * 1024 * 1024
 const SESSION_LIFETIME_MS = 24 * 60 * 60 * 1000
 const PAIRING_LIFETIME_MS = 10 * 60 * 1000
 const LINK_LIFETIME_MS = 10 * 60 * 1000
-const REFRESH_TOKEN_LIFETIME_MS = 180 * 24 * 60 * 60 * 1000
+// A linked phone stays signed in until it is disconnected from the desktop; the
+// sliding expiry only ever reaps tokens of phones unused for ~100 years.
+const REFRESH_TOKEN_LIFETIME_MS = 100 * 365 * 24 * 60 * 60 * 1000
 const MAX_LINKS_PER_ACCOUNT = 32
 const MAX_REFRESH_TOKENS_PER_ACCOUNT = 128
 const WORKSPACE_WAIT_DEFAULT_SECONDS = 25

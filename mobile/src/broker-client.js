@@ -162,7 +162,9 @@ export class BrokerClient {
         if (typeof payload.refreshToken === 'string') this.refreshToken = payload.refreshToken
         this.onChange?.(this)
       } catch (error) {
-        if (error instanceof SyncError && error.status >= 400 && error.status < 500) {
+        // Only an explicit revocation unlinks the phone. Anything else (rate
+        // limits, proxies, a restarting service) is temporary: keep the link and retry.
+        if (error instanceof SyncError && error.status === 401 && ['refresh_invalid', 'device_revoked'].includes(error.code)) {
           throw new SyncError('This phone was disconnected from your computer. Scan the QR again.', 'link_revoked', error.status)
         }
         throw error

@@ -789,6 +789,9 @@ window.addEventListener('hashchange', () => {
 })
 
 async function boot() {
+  // Ask Chrome/Safari never to evict the stored link under storage pressure,
+  // so the phone stays linked until it is disconnected on purpose.
+  try { void navigator.storage?.persist?.() } catch { /* not supported */ }
   const raw = linkFragment(location.hash)
   if (raw) {
     // The fragment carries a one-time token and the account key: strip it at once.
