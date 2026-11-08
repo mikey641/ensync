@@ -113,7 +113,7 @@ export class PhoneSync {
 
   #setStatus(state, error = null) {
     const failures = state === 'offline' ? this.status.failures + 1 : 0
-    const changed = this.status.state !== state || this.status.error?.message !== error?.message
+    const changed = this.status.state !== state || this.status.error?.message !== error?.message || failures === 2
     this.status = { state, failures, error }
     if (changed) this.#emit()
   }
