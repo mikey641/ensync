@@ -68,11 +68,18 @@ export async function createPhoneSyncHarness({ store = new MemorySyncStore(), po
   async function proxy(request, response) {
     const chunks = []
     for await (const chunk of request) chunks.push(chunk)
-    const upstream = await fetch(`${innerUrl}${request.url}`, {
-      method: request.method,
-      headers: Object.fromEntries(Object.entries(request.headers).filter(([key]) => !['host', 'connection', 'content-length'].includes(key))),
-      ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
-    })
+    let upstream
+    try {
+      upstream = await fetch(`${innerUrl}${request.url}`, {
+        method: request.method,
+        headers: Object.fromEntries(Object.entries(request.headers).filter(([key]) => !['host', 'connection', 'content-length'].includes(key))),
+        ...(chunks.length ? { body: Buffer.concat(chunks) } : {}),
+      })
+    } catch {
+      // The inner service closed during teardown while a phone request was in flight.
+      if (!response.headersSent) response.writeHead(502)
+      return response.end()
+    }
     const headers = {}
     upstream.headers.forEach((value, key) => { if (!['content-length', 'connection', 'transfer-encoding', 'keep-alive'].includes(key)) headers[key] = value })
     response.writeHead(upstream.status, headers)
