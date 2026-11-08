@@ -185,7 +185,7 @@ test('a connected phone broker keeps the Host busy, read through a lease that is
   await writeFile(descriptorPath, JSON.stringify({ pid: 4242, port: 55925, token: 'a'.repeat(64), instanceId: 'host-1' }))
 
   const calls = []
-  const host = (running, statusCode = 200, body = { running }) => async (url, init = {}) => {
+  const host = (running, statusCode = 200, body = { running, activeJobs: 1 }) => async (url, init = {}) => {
     const path = new URL(url).pathname
     calls.push({ path, owner: init.headers?.['x-ensync-owner'] ?? JSON.parse(init.body ?? '{}').ownerId })
     if (path === '/api/remote/broker/status') return new Response(JSON.stringify(body), { status: statusCode })
@@ -196,6 +196,9 @@ test('a connected phone broker keeps the Host busy, read through a lease that is
   assert.deepEqual(calls.map((call) => call.path), ['/api/daemon/claim', '/api/remote/broker/status', '/api/daemon/release'])
   assert.equal(new Set(calls.map((call) => call.owner)).size, 1)
   assert.match(calls[0].owner, /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/)
+
+  // A linked phone keeps the broker connected; idle, it must not block updates.
+  assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: host(true, 200, { running: true, activeJobs: 0 }) }), false)
 
   calls.length = 0
   assert.equal(await brokerKeepsHostBusy({ descriptorPath, fetchImpl: host(false) }), false)
