@@ -45,6 +45,7 @@ import {
   performIncrementalUpdate,
   readHostDescriptor,
   readMainCommit,
+  stopBundledSyncService,
   waitForProcessExit,
 } from './app-bundle-update.mjs'
 
@@ -122,6 +123,7 @@ export const defaultUpdateDependencies = Object.freeze({
   readHostDescriptor: () => readHostDescriptor(),
   waitForProcessExit,
   killApp: () => killApp(),
+  stopBundledSyncService: () => stopBundledSyncService(),
   launchApp: () => launchApp(),
 })
 
@@ -204,10 +206,11 @@ export async function runContinuousUpdateCheck({ hostOnly = false, ...overrides 
 
   // The app reconnects to any Host still running, so the old Host must be gone
   // before Ensync reopens or the new UI would talk to the old Host code.
-  const host = update.changed.some((file) => file.startsWith('host/'))
+  const host = update.changed.some((file) => file.startsWith('host/') || file === 'desktop-host-bootstrap.mjs')
     ? await deps.readHostDescriptor()
     : null
   await deps.killApp()
+  if (update.changed.includes('sync-service/server.mjs')) await deps.stopBundledSyncService?.()
   let hostRetired = null
   if (host) {
     hostRetired = await deps.waitForProcessExit(host.pid, { timeoutMs: deps.hostRetireTimeoutMs })

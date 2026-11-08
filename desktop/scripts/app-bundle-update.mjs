@@ -114,6 +114,33 @@ export async function updateHostFiles({ src = HOST_SRC, dest = HOST_DEST } = {})
   return changed
 }
 
+/**
+ * Files outside host/ and ui/ that the installed app also loads from
+ * Resources: the detached Host's entry point and the bundled Sync service.
+ * Skipping them pairs new Host code with an old bootstrap (no phone-sync state
+ * path) and an old Sync service (no phone-link routes).
+ */
+export async function updateRuntimeFiles({ repoRoot = REPO_ROOT, resources = RESOURCES } = {}) {
+  const pairs = [
+    ['desktop/src/host-bootstrap.mjs', 'desktop-host-bootstrap.mjs'],
+    ['sync-service/server.mjs', 'sync-service/server.mjs'],
+  ]
+  const changed = []
+  for (const [from, to] of pairs) {
+    if (!await pathExists(join(repoRoot, from))) continue
+    if (await copyIfChanged(join(repoRoot, from), join(resources, to))) changed.push(to)
+  }
+  return changed
+}
+
+/** The bundled Sync service outlives app relaunches; stop it so the relaunched shell starts the new code. */
+export async function stopBundledSyncService(appBundle = APP_BUNDLE) {
+  try {
+    await execFile('pkill', ['-f', `${join(appBundle, 'Contents', 'Resources', 'sync-service', 'server.mjs')}$`], { stdio: 'ignore' })
+    await new Promise((r) => setTimeout(r, 1000))
+  } catch { /* not running */ }
+}
+
 /** Build the renderer in `repoRoot`, which may be an exported commit. */
 export async function buildUi({ repoRoot = REPO_ROOT } = {}) {
   await execFile('npm', ['run', 'build'], { cwd: repoRoot, maxBuffer: 16 * 1024 * 1024 })
@@ -355,6 +382,9 @@ export async function performIncrementalUpdate({
 
   const hostChanged = await updateHostFiles({ src: hostSrc, dest: hostDest })
   changed.push(...hostChanged)
+  if (hostSrc === HOST_SRC || repoRoot !== REPO_ROOT) {
+    changed.push(...await updateRuntimeFiles({ repoRoot, resources: dirname(hostDest) }))
+  }
 
   if (rebuildUi) {
     const uiChanged = await updateUiFiles({ build: runUiBuild, src: distSrc, dest: uiDest, repoRoot })
@@ -369,6 +399,7 @@ export async function performIncrementalUpdate({
       return { changed, total: changed.length, relaunched: false, deferred: true }
     }
     await killApp(appBundle)
+    if (changed.includes('sync-service/server.mjs')) await stopBundledSyncService(appBundle)
     relaunched = await launchApp(appBundle)
   }
 
