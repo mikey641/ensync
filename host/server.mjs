@@ -48,6 +48,9 @@ import {
 } from './scheduled-task.mjs'
 import { SystemSpeechService } from './system-speech.mjs'
 import { SyncBrokerHostWorker } from './sync-broker-host.mjs'
+import { ConversationReplyWriter, outcomeFromTerminalEvent } from './conversation-reply-writer.mjs'
+import { HostSecretStore } from './host-secret-store.mjs'
+import { PhoneSyncService } from './phone-sync.mjs'
 import { TelegramBridgeError, TelegramBridgeService } from './telegram.mjs'
 import { TelegramChatRouter } from './telegram-router.mjs'
 import { displayCommand, launchTerminalCommand } from './terminal.mjs'
@@ -755,10 +758,59 @@ export function createEnsyncHost(options = {}) {
       return { jobId: admission.job.id, provider: selected.id, completion }
     },
   })
+  const conversationReplies = options.conversationReplyWriter ?? new ConversationReplyWriter({
+    accountSyncService: accountSync,
+    retryDelaysMs: options.conversationReplyRetryDelaysMs,
+    log: (message) => console.error('[ensync-phone-sync]', message),
+  })
   const syncBrokerHost = options.syncBrokerHostService ?? new SyncBrokerHostWorker({
     accountSyncService: accountSync,
     chatJobService: chatJobs,
     pollIntervalMs: options.syncBrokerPollIntervalMs,
+    onConversationJobFinished: ({ jobId, conversationId, messageId, request, terminalEvent }) => conversationReplies.enqueue({
+      jobId,
+      conversationId,
+      messageId,
+      request,
+      outcome: outcomeFromTerminalEvent(terminalEvent),
+    }),
+  })
+  // Capabilities refresh every provider status, which can take a while; the
+  // phone-link flow publishes them in the background through this helper.
+  const publishBrokerCapabilities = async () => {
+    const providers = (await statuses.list({ refresh: true }))
+      .filter((provider) => provider.chatExecution === 'supported')
+      .slice(0, 100)
+      .map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        available: provider.installed === true && provider.connectionState !== 'unavailable',
+      }))
+    const recentProjects = []
+    for (const project of await readGlobalRecentProjects(recentProjectsPath)) {
+      const path = typeof project.path === 'string' ? project.path.trim() : ''
+      if (!path || path.length > 1024) continue
+      const name = typeof project.name === 'string' ? project.name.trim() : ''
+      recentProjects.push(name && name.length <= 256 ? { path, name } : { path })
+      if (recentProjects.length >= 200) break
+    }
+    const capabilities = { providers, recentProjects }
+    await accountSync.publishBrokerCapabilities(capabilities)
+    return capabilities
+  }
+  // Without an explicit state path (tests, ad-hoc hosts) phone sync keeps no
+  // durable state and has no secret storage, so it can never touch the
+  // user's real keychain or resume a real account.
+  const phoneSync = options.phoneSyncService ?? new PhoneSyncService({
+    accountSyncService: accountSync,
+    syncBrokerHost,
+    secretStore: options.hostSecretStore ?? new HostSecretStore(options.phoneSyncStatePath
+      ? { filePath: join(dirname(options.phoneSyncStatePath), 'ensync-host-secrets-v1.json') }
+      : { backend: null }),
+    statePath: options.phoneSyncStatePath ?? null,
+    mobileUrl: options.mobilePwaUrl ?? process.env.ENSYNC_MOBILE_PWA_URL ?? undefined,
+    publishCapabilities: publishBrokerCapabilities,
+    log: (message) => console.error('[ensync-phone-sync]', message),
   })
   const daemonLeases = options.daemonLeaseService ?? null
   const systemSpeech = options.systemSpeechService ?? new SystemSpeechService()
@@ -890,7 +942,45 @@ export function createEnsyncHost(options = {}) {
       }
 
       if (request.method === 'GET' && url.pathname === '/api/account-sync/status') {
-        return sendJson(response, 200, accountSync.status(), origin)
+        return sendJson(response, 200, { ...accountSync.status(), phoneSync: phoneSync.status() }, origin)
+      }
+
+      // One-shot "Connect your phone": account, Host role, and a QR link whose
+      // secrets live only in the URL fragment.
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/phone-link') {
+        const body = await readJsonBody(request)
+        const link = await phoneSync.createLink({
+          syncUrl: typeof body.syncUrl === 'string' ? body.syncUrl : null,
+          label: typeof body.label === 'string' ? body.label : null,
+        })
+        return sendJson(response, 200, link, origin)
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/phones') {
+        return sendJson(response, 200, await phoneSync.listPhones(), origin)
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/account-sync/phones/revoke') {
+        const body = await readJsonBody(request)
+        return sendJson(response, 200, await phoneSync.revokePhone(body.pairingId), origin)
+      }
+
+      // Long-poll for a newer workspace revision. The Host holds the account
+      // key; the renderer pulls the decrypted document once this reports a change.
+      if (request.method === 'GET' && url.pathname === '/api/account-sync/workspace/wait') {
+        const controller = new AbortController()
+        const abort = () => controller.abort()
+        response.on('close', abort)
+        try {
+          const result = await accountSync.waitWorkspace(
+            Number(url.searchParams.get('after') ?? 0),
+            Number(url.searchParams.get('timeout') ?? 25),
+            controller.signal,
+          )
+          return sendJson(response, 200, result, origin)
+        } finally {
+          response.off('close', abort)
+        }
       }
 
       if (request.method === 'POST' && url.pathname === '/api/notifications/speech') {
@@ -951,6 +1041,10 @@ export function createEnsyncHost(options = {}) {
       }
 
       if (request.method === 'POST' && url.pathname === '/api/account-sync/logout') {
+        // Signing out stops sharing and keeps it off after a restart. A saved
+        // automatic account stays in the keychain so the next QR reuses it.
+        await syncBrokerHost.stop()
+        await phoneSync.disable()
         return sendJson(response, 200, await accountSync.logout(), origin)
       }
 
@@ -987,7 +1081,7 @@ export function createEnsyncHost(options = {}) {
           const label = typeof body.label === 'string' && body.label.trim()
             ? body.label.trim()
             : hostname()
-          const deviceId = remoteHostDeviceId ??= `host_${randomUUID()}`
+          const deviceId = remoteHostDeviceId ??= (await phoneSync.hostDeviceId()) ?? `host_${randomUUID()}`
           return sendJson(response, 200, await syncBrokerHost.connect({ label, deviceId }), origin)
         }
 
@@ -997,29 +1091,12 @@ export function createEnsyncHost(options = {}) {
 
         if (request.method === 'POST' && url.pathname === '/api/remote/broker/stop') {
           const body = await readJsonBody(request)
+          await phoneSync.disable()
           return sendJson(response, 200, await syncBrokerHost.disconnect({ revoke: body.revoke === true }), origin)
         }
 
         if (request.method === 'POST' && url.pathname === '/api/remote/broker/capabilities') {
-          const providers = (await statuses.list({ refresh: true }))
-            .filter((provider) => provider.chatExecution === 'supported')
-            .slice(0, 100)
-            .map((provider) => ({
-              id: provider.id,
-              name: provider.name,
-              available: provider.installed === true && provider.connectionState !== 'unavailable',
-            }))
-          const recentProjects = []
-          for (const project of await readGlobalRecentProjects(recentProjectsPath)) {
-            const path = typeof project.path === 'string' ? project.path.trim() : ''
-            if (!path || path.length > 1024) continue
-            const name = typeof project.name === 'string' ? project.name.trim() : ''
-            recentProjects.push(name && name.length <= 256 ? { path, name } : { path })
-            if (recentProjects.length >= 200) break
-          }
-          const capabilities = { providers, recentProjects }
-          await accountSync.publishBrokerCapabilities(capabilities)
-          return sendJson(response, 200, { capabilities }, origin)
+          return sendJson(response, 200, { capabilities: await publishBrokerCapabilities() }, origin)
         }
 
         if (request.method === 'POST' && url.pathname === '/api/remote/broker/client/register') {
@@ -1779,6 +1856,7 @@ export function createEnsyncHost(options = {}) {
     void scheduledTask.stop()
     void telegram.stopPolling?.()
     void syncBrokerHost.stop?.()
+    conversationReplies.stop?.()
   })
   server.ensyncServices = {
     accountSync,
@@ -1792,6 +1870,8 @@ export function createEnsyncHost(options = {}) {
     scheduledTask,
     systemSpeech,
     syncBrokerHost,
+    phoneSync,
+    conversationReplies,
   }
   return server
 }
@@ -1815,6 +1895,11 @@ export function startEnsyncHost(options = {}) {
     })
     server.ensyncServices?.scheduledTask?.start?.().catch((error) => {
       console.error('Ensync scheduled task failed to start:', error instanceof Error ? error.message : error)
+    })
+    // A phone linked before this restart keeps working without the user
+    // opening Settings.
+    server.ensyncServices?.phoneSync?.restore?.().catch((error) => {
+      console.error('Ensync phone sync failed to resume:', error instanceof Error ? error.message : error)
     })
   })
   return server

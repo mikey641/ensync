@@ -221,6 +221,8 @@ export class AccountSyncService {
   #session = null
   #brokerDevice = null
   #pendingCredentials = null
+  #credentials = null
+  #credentialStorage = 'host_memory_only'
   #lastSyncedAt = null
   #remoteRevision = 0
 
@@ -238,7 +240,7 @@ export class AccountSyncService {
       remoteRevision: this.#session ? this.#remoteRevision : null,
       lastSyncedAt: this.#lastSyncedAt,
       encryption: 'aes-256-gcm',
-      credentialStorage: 'host_memory_only',
+      credentialStorage: this.#session ? this.#credentialStorage : 'host_memory_only',
       brokerDevice: this.brokerDevice(),
     }
   }
@@ -268,11 +270,17 @@ export class AccountSyncService {
       )
     }
     const controller = new AbortController()
-    const timer = setTimeout(() => controller.abort(), 15_000)
+    const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : 15_000
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    const onAbort = () => controller.abort()
+    options.signal?.addEventListener?.('abort', onAbort, { once: true })
     let response
     try {
+      const fetchOptions = { ...options }
+      delete fetchOptions.timeoutMs
+      delete fetchOptions.signal
       response = await this.#fetch(`${this.#baseUrl}${path}`, {
-        ...options,
+        ...fetchOptions,
         redirect: 'error',
         signal: controller.signal,
         headers: {
@@ -288,6 +296,7 @@ export class AccountSyncService {
       })
     } catch (error) {
       clearTimeout(timer)
+      options.signal?.removeEventListener?.('abort', onAbort)
       const message = error?.name === 'AbortError'
         ? 'The account sync service timed out.'
         : 'The account sync service could not be reached.'
@@ -305,6 +314,7 @@ export class AccountSyncService {
       throw new AccountSyncError('sync_service_unavailable', message, 503)
     } finally {
       clearTimeout(timer)
+      options.signal?.removeEventListener?.('abort', onAbort)
     }
     let payload
     try {
@@ -333,6 +343,10 @@ export class AccountSyncService {
   }
 
   async #completeAuthentication(password, payload) {
+    // The password is retained only in Host memory so a later phone link can
+    // move it into OS-backed secret storage; it is never returned.
+    this.#credentials = typeof payload?.username === 'string' ? { username: payload.username, password } : null
+    this.#credentialStorage = 'host_memory_only'
     if (typeof payload.username !== 'string' || typeof payload.token !== 'string' || typeof payload.encryptionSalt !== 'string') {
       throw new AccountSyncError('sync_protocol_invalid', 'The account sync service returned an invalid login response.', 502)
     }
@@ -435,10 +449,72 @@ export class AccountSyncService {
       this.#session = null
       this.#brokerDevice = null
       this.#pendingCredentials = null
+      this.#credentials = null
+      this.#credentialStorage = 'host_memory_only'
       this.#remoteRevision = 0
       this.#lastSyncedAt = null
     }
     return this.status()
+  }
+
+  /** Credentials of the signed-in account for OS secret storage. Host-internal only. */
+  credentialsForPersistence() {
+    return this.#session && this.#credentials ? { ...this.#credentials } : null
+  }
+
+  markCredentialStorage(kind) {
+    if (this.#session) this.#credentialStorage = kind
+  }
+
+  /**
+   * Account username and raw workspace key for a QR link fragment. Host-internal:
+   * only the phone-link route may embed it, and only in a URL fragment.
+   */
+  linkSecret() {
+    const session = this.#requireSession()
+    return { username: session.username, key: Buffer.from(session.key).toString('base64url') }
+  }
+
+  async createBrokerLink(hostId) {
+    this.#requireSession()
+    if (typeof hostId !== 'string' || !DEVICE_ID_PATTERN.test(hostId)) {
+      throw new AccountSyncError('sync_broker_device_invalid', 'A valid Host ID is required.', 400)
+    }
+    const payload = await this.#request('/v1/broker/links', {
+      method: 'POST',
+      body: JSON.stringify({ hostId }),
+    })
+    if (typeof payload?.token !== 'string' || payload.token.length < 32 || typeof payload.expiresAt !== 'string') {
+      throw new AccountSyncError('sync_protocol_invalid', 'The sync service returned an invalid phone link.', 502)
+    }
+    return { token: payload.token, expiresAt: payload.expiresAt }
+  }
+
+  async listBrokerPairings() {
+    assertBrokerDevice(this.#brokerDevice)
+    const payload = await this.#request('/v1/broker/pairings')
+    if (!Array.isArray(payload?.pairings)) {
+      throw new AccountSyncError('sync_protocol_invalid', 'The sync service returned an invalid pairing list.', 502)
+    }
+    return payload.pairings
+  }
+
+  /**
+   * Long-polls the encrypted workspace revision. Resolves with `{ changed,
+   * revision }` and never returns the document; callers pull to decrypt.
+   */
+  async waitWorkspace(after, timeoutSeconds = 25, signal = null) {
+    this.#requireSession()
+    const revision = Number.isSafeInteger(after) && after >= 0 ? after : 0
+    const timeout = Number.isFinite(timeoutSeconds) ? Math.min(55, Math.max(0, timeoutSeconds)) : 25
+    const payload = await this.#request(`/v1/workspace/wait?after=${revision}&timeout=${timeout}`, {
+      timeoutMs: (timeout + 10) * 1000,
+      signal,
+    })
+    if (!Number.isSafeInteger(payload?.revision) || payload.revision < 0) {
+      throw new AccountSyncError('sync_protocol_invalid', 'The sync revision is invalid.', 502)
+    }
+    return { changed: payload.revision > revision, revision: payload.revision }
   }
 
   #requireSession() {

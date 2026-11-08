@@ -8,7 +8,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises'
-import { dirname, isAbsolute } from 'node:path'
+import { dirname, isAbsolute, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 // Keep this bootstrap dependency-free: packaged builds copy it beside the bundled
@@ -19,6 +19,8 @@ const stateFile = process.env.ENSYNC_HOST_STATE_FILE
 const journalFile = process.env.ENSYNC_HOST_JOB_JOURNAL_FILE
 const projectIsolationRoot = process.env.ENSYNC_HOST_PROJECT_ISOLATION_ROOT
 const syncConfigFile = process.env.ENSYNC_HOST_SYNC_CONFIG_FILE
+const phoneSyncStateFile = process.env.ENSYNC_HOST_PHONE_SYNC_STATE_FILE
+  || (stateFile && isAbsolute(stateFile) ? join(dirname(stateFile), 'ensync-phone-sync-v1.json') : null)
 const idleShutdownMs = Number(process.env.ENSYNC_HOST_IDLE_SHUTDOWN_MS || 60_000)
 const detachedMode = Boolean(token && stateFile && journalFile)
 
@@ -87,6 +89,10 @@ const server = startEnsyncHost({
   chatJobJournalPath: detachedMode ? journalFile : null,
   projectIsolationRoot: projectIsolationRoot || undefined,
   daemonLeaseService,
+  // The detached Host keeps phone-sync state beside its rendezvous file and
+  // the account credential in the OS keychain / DPAPI, so a linked phone keeps
+  // working after Ensync restarts.
+  phoneSyncStatePath: phoneSyncStateFile || undefined,
 })
 
 async function writeDescriptor(port) {
