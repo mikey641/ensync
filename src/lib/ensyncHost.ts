@@ -746,12 +746,16 @@ export class EnsyncHostClient {
     })
   }
 
+  /**
+   * `project` is null when Ensync Host has no folder to focus yet. `homePath` is
+   * the Host's home directory, which is never a project to focus or to keep.
+   */
   currentProject() {
-    return this.request<{ project: ProjectInspection }>('/projects/current')
+    return this.request<{ project: ProjectInspection | null; homePath?: string | null }>('/projects/current')
   }
 
   inspectProject(path: string) {
-    return this.request<{ project: ProjectInspection }>('/projects/inspect', {
+    return this.request<{ project: ProjectInspection; homePath?: string | null }>('/projects/inspect', {
       method: 'POST',
       body: JSON.stringify({ path }),
     })

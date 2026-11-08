@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto'
-import { readdir, stat } from 'node:fs/promises'
+import { readdir, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, join, relative, sep } from 'node:path'
-import { validateProjectPath } from './chat.mjs'
+import { isHomeDirectory, validateProjectPath } from './chat.mjs'
 
 const MAX_CONTEXT_FILES = 1_000
 const INSTRUCTION_FILES = [
@@ -97,14 +98,74 @@ export async function inspectProject(projectPath, options = {}) {
 export class ProjectInspectionService {
   constructor(options = {}) {
     this.allowedRoots = options.allowedRoots
-    this.defaultProjectPath = options.defaultProjectPath ?? process.cwd()
+    // `undefined` means "not configured", so a Host started inside a project
+    // folder still focuses it. An explicit `null` means the caller knows its
+    // working directory is not a project.
+    this.defaultProjectPath = options.defaultProjectPath === undefined
+      ? process.cwd()
+      : options.defaultProjectPath
+    this.homePath = options.homePath
+    this.listRecentProjects = options.listRecentProjects ?? (() => [])
   }
 
   inspect(projectPath) {
     return inspectProject(projectPath, { allowedRoots: this.allowedRoots })
   }
 
-  current() {
-    return this.inspect(this.defaultProjectPath)
+  /**
+   * The canonical home directory, reported alongside every project so each
+   * client applies one rule to it without guessing what home means on this
+   * machine. Project paths are canonical too, so the two compare directly.
+   */
+  homeDirectory() {
+    return realpath(this.homePath ?? homedir()).catch(() => null)
+  }
+
+  /**
+   * The project to focus when the app has not chosen one yet.
+   *
+   * The desktop shell runs the Host from the user's home directory, so the
+   * configured default can be the home directory itself. Answering with it only
+   * stranded the first run: a home directory holds everything a person owns and
+   * is refused as a project repository, so the user met "A home directory is too
+   * broad to become one Ensync project repository" after writing a prompt.
+   * Ensync therefore never focuses a home directory on the user's behalf. It
+   * offers the most recent project the shell recorded instead, and reports no
+   * project at all when there is none, so the interface can ask for a folder
+   * before a chat exists rather than after a run fails.
+   */
+  async current() {
+    for (const candidate of await this.#candidatePaths()) {
+      if (await isHomeDirectory(candidate, this.homePath)) continue
+      let project
+      try {
+        project = await this.inspect(candidate)
+      } catch {
+        continue
+      }
+      // The canonical path is what a run would use; a symlinked candidate can
+      // only now be revealed as the home directory.
+      if (await isHomeDirectory(project.path, this.homePath)) continue
+      return project
+    }
+    return null
+  }
+
+  async #candidatePaths() {
+    const paths = []
+    if (typeof this.defaultProjectPath === 'string' && this.defaultProjectPath) {
+      paths.push(this.defaultProjectPath)
+    }
+    let recent
+    try {
+      recent = await this.listRecentProjects()
+    } catch {
+      recent = []
+    }
+    for (const project of Array.isArray(recent) ? recent : []) {
+      const path = typeof project?.path === 'string' ? project.path : null
+      if (path && !paths.includes(path)) paths.push(path)
+    }
+    return paths
   }
 }

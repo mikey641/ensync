@@ -9,8 +9,10 @@ import { availabilityRank } from './provider-availability.mjs'
 import {
   getProviderDefinition,
   getProviderCatalog,
+  CLAUDE_NOT_AUTHENTICATED_RECHECKS,
   parseClaudeAuthentication,
   parseCodexAuthentication,
+  probeClaudeAuthentication,
   parseCursorAbout,
   parseCursorAuthentication,
   parseKiroAuthentication,
@@ -79,6 +81,46 @@ test('provider discovery checks user CLI directories when the app PATH is sparse
     homeDirectory,
     platform: process.platform,
   }), executable)
+})
+
+test('a transient Claude loggedIn:false is re-checked before it is reported', async () => {
+  const baseResult = { exitCode: 0, stderr: '', timedOut: false, error: null }
+  const loggedOut = { ...baseResult, exitCode: 1, stdout: JSON.stringify({ loggedIn: false, authMethod: 'none' }) }
+  const loggedIn = { ...baseResult, stdout: JSON.stringify({ loggedIn: true, authMethod: 'claude.ai', subscriptionType: 'max' }) }
+
+  const flaky = [loggedOut, loggedIn]
+  let flakyCalls = 0
+  const recovered = await probeClaudeAuthentication('claude', '2026-11-07T00:00:00.000Z', {
+    recheckPauseMs: 0,
+    runProcess: async (_executable, args) => {
+      assert.deepEqual(args, ['auth', 'status', '--json'])
+      return flaky[flakyCalls++]
+    },
+  })
+  assert.equal(recovered.state, 'authenticated')
+  assert.equal(recovered.exactPlan, 'max')
+  assert.equal(flakyCalls, 2)
+
+  let loggedOutCalls = 0
+  const stillOut = await probeClaudeAuthentication('claude', '2026-11-07T00:00:00.000Z', {
+    recheckPauseMs: 0,
+    runProcess: async () => {
+      loggedOutCalls += 1
+      return loggedOut
+    },
+  })
+  assert.equal(stillOut.state, 'not_authenticated')
+  assert.equal(loggedOutCalls, CLAUDE_NOT_AUTHENTICATED_RECHECKS + 1)
+
+  let authenticatedCalls = 0
+  await probeClaudeAuthentication('claude', '2026-11-07T00:00:00.000Z', {
+    recheckPauseMs: 0,
+    runProcess: async () => {
+      authenticatedCalls += 1
+      return loggedIn
+    },
+  })
+  assert.equal(authenticatedCalls, 1)
 })
 
 test('auth parsers only accept explicit CLI authentication signals', () => {

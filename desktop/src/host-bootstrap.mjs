@@ -81,7 +81,10 @@ const instanceId = randomUUID()
 const server = startEnsyncHost({
   host: '127.0.0.1',
   port: 0,
-  defaultProjectPath: process.env.ENSYNC_DEFAULT_PROJECT_PATH || process.cwd(),
+  // The desktop shell starts the Host from the user's home directory, which is
+  // never a project. Without an explicitly configured default the Host resolves
+  // the focused project from the shell's recent projects instead.
+  defaultProjectPath: process.env.ENSYNC_DEFAULT_PROJECT_PATH || null,
   authToken: detachedMode ? token : null,
   instanceId: detachedMode ? instanceId : null,
   chatJobJournalPath: detachedMode ? journalFile : null,

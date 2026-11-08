@@ -299,6 +299,8 @@ import {
 } from './lib/openedProjectHistory.mjs'
 import {
   getNativeRecentProjects,
+  nativeHomeDirectory,
+  recordHomeDirectory,
   rememberNativeRecentProject,
   subscribeNativeRecentProjects,
   type NativeRecentProject,
@@ -714,6 +716,25 @@ function verifiedProject(project: ProjectInspection): EnsyncProject {
   return { ...project, color: projectColor(project.path || project.id), verified: true }
 }
 
+function normalizedProjectPath(path: string) {
+  const normalized = path.replaceAll('\\', '/').replace(/\/+$/, '')
+  return /^[a-z]:\//i.test(normalized) || normalized.startsWith('//') ? normalized.toLowerCase() : normalized
+}
+
+/**
+ * A home directory is never a project Ensync can run in, so it is not kept as
+ * one to return to. The folder currently in focus is the exception: an explicit
+ * choice survives a reload instead of being dropped out from under the user.
+ */
+function keptProject(
+  project: { path?: string; id?: string },
+  activeProjectId: string | undefined,
+  home: string | null,
+) {
+  if (!home || !project.path) return true
+  return project.id === activeProjectId || normalizedProjectPath(project.path) !== normalizedProjectPath(home)
+}
+
 function supportsChat(provider: Provider): provider is Provider & { id: ChatProviderId } {
   return provider.chatExecution === 'supported'
 }
@@ -751,6 +772,28 @@ function providerForChat(
 /** True only when an executing run actually determines the displayed provider. */
 function runPinsDisplayedProvider(providers: Provider[], activeRun: PersistedInFlightRun | undefined) {
   return Boolean(activeRun) && providers.some((provider) => provider.id === activeRun?.provider)
+}
+
+const MAX_KEPT_MESSAGE_NOTES = 40
+
+function ProviderNoteCard({ note, provider, projectPath, onOpenFile }: {
+  note: { text: string; redacted: boolean }
+  provider: Provider
+  projectPath: string | null
+  onOpenFile: (path: string) => void
+}) {
+  return (
+    <div className="provider-live-note">
+      <ProviderMark provider={provider} small />
+      <div>
+        <strong>{provider.name} note</strong>
+        {typeof window.ensyncDesktop?.openPath === 'function'
+          ? <MessageContent content={note.text} projectPath={projectPath} />
+          : <MessageContent content={note.text} onOpenFile={onOpenFile} />}
+        {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
+      </div>
+    </div>
+  )
 }
 
 function ProviderMark({ provider, small = false }: { provider: Provider; small?: boolean }) {
@@ -932,12 +975,15 @@ function App() {
   const [contextOpen, setContextOpen] = useState(false)
   const [projectOpen, setProjectOpen] = useState(false)
   const [gitWorkflowMode, setGitWorkflowMode] = useState<'clone' | 'manage' | null>(null)
+  const [homeDirectoryPath, setHomeDirectoryPath] = useState<string | null>(nativeHomeDirectory)
   const [projects, setProjects] = useState<EnsyncProject[]>(() =>
-    (hydrated?.projects ?? []).map((project) => ({
-      ...project,
-      color: projectColor(project.path || project.id),
-      verified: false,
-    })),
+    (hydrated?.projects ?? [])
+      .filter((project) => keptProject(project, hydrated?.activeProjectId, nativeHomeDirectory()))
+      .map((project) => ({
+        ...project,
+        color: projectColor(project.path || project.id),
+        verified: false,
+      })),
   )
   const [nativeRecentProjects, setNativeRecentProjects] = useState<NativeRecentProject[]>(getNativeRecentProjects)
   const [activeProjectId, setActiveProjectId] = useState(hydrated?.activeProjectId ?? '')
@@ -1315,6 +1361,7 @@ function App() {
     }
     append(activeProject)
     for (const project of nativeRecentProjects) {
+      if (!keptProject(project, activeProject.id, homeDirectoryPath)) continue
       append({
         id: `recent:${project.path}`,
         name: project.name,
@@ -1326,9 +1373,11 @@ function App() {
         verified: false,
       })
     }
-    for (const project of projects) append(project)
+    for (const project of projects) {
+      if (keptProject(project, activeProject.id, homeDirectoryPath)) append(project)
+    }
     return options
-  }, [activeProject, nativeRecentProjects, projects])
+  }, [activeProject, homeDirectoryPath, nativeRecentProjects, projects])
   const projectChats = chats.filter((chat) => chat.projectId === activeProject.id)
   const projectChatIds = new Set(projectChats.map((chat) => chat.id))
   const projectTabs = tabs.filter((tab) => projectChatIds.has(tab.chatId))
@@ -1747,6 +1796,23 @@ function App() {
     }
   }, [commitWorkspace])
 
+  // Ensync Host reports its home directory with every project, which is how a
+  // window learns it when no desktop shell has already said so. Once it is
+  // known, a home directory this window was still remembering as a project is
+  // dropped, so the next workspace snapshot stops carrying one.
+  const noteHomeDirectory = useCallback((path?: string | null) => {
+    if (typeof path !== 'string' || !path) return
+    setHomeDirectoryPath(recordHomeDirectory(path))
+  }, [])
+
+  useEffect(() => {
+    if (!homeDirectoryPath) return
+    setProjects((current) => {
+      const kept = current.filter((project) => keptProject(project, activeProjectId, homeDirectoryPath))
+      return kept.length === current.length ? current : kept
+    })
+  }, [activeProjectId, homeDirectoryPath])
+
   useEffect(() => {
     let cancelled = false
     const remembered = nativeProjectLaunch
@@ -1761,6 +1827,15 @@ function App() {
           ? await ensyncHost.inspectProject(remembered.path)
           : await ensyncHost.currentProject()
         if (cancelled) return
+        noteHomeDirectory(response.homePath)
+        // Ensync Host reports no project when nothing has been opened yet. Ask
+        // for a folder now instead of letting the first run fail on one Ensync
+        // picked, and never invent a chat that has no project to run in.
+        if (!response.project) {
+          setProjectError('Open the project folder the agent should work in.')
+          setProjectOpen(true)
+          return
+        }
         const project = verifiedProject(response.project)
         setProjects((current) => [project, ...current.filter((item) => item.id !== project.id)])
         setActiveProjectId(project.id)
@@ -2133,6 +2208,7 @@ function App() {
     setProjectError(null)
     try {
       const response = await ensyncHost.inspectProject(projectPath)
+      noteHomeDirectory(response.homePath)
       await focusProject(verifiedProject(response.project), allowNativeRoute)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Ensync Host could not inspect the project folder.'
@@ -2728,6 +2804,12 @@ function App() {
 
     const extractedResponse = extractEnsyncContinuation(result.response)
     const agentMessageId = `msg-${turnId}-agent`
+    // Notes otherwise live only in the per-run event buffer, which the next
+    // run clears, so the reply keeps its own copy.
+    const turnNotes = (chatExecutionEventsRef.current[chatId] ?? [])
+      .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
+      .slice(-MAX_KEPT_MESSAGE_NOTES)
+      .map((note) => ({ provider: note.provider, text: note.text, redacted: note.redacted }))
     const completedChats = chatsRef.current.map((chat) => {
       if (chat.id !== chatId) return chat
       const completedMessages = chat.messages.map((messageItem) => messageItem.turnId === turnId && messageItem.role === 'user'
@@ -2746,6 +2828,7 @@ function App() {
             sessionResumable: Boolean(result.sessionId),
             content: extractedResponse.visibleResponse,
             time: timeNow(),
+            ...(turnNotes.length > 0 ? { notes: turnNotes } : {}),
           })
       return {
         ...chat,
@@ -5078,28 +5161,22 @@ function ConversationPane({
               ) : (
                 <div className="message message--agent" key={message.id}>
                   <ProviderMark provider={messageProvider} />
-                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>{messageProvider.name}</strong><span>{message.time}</span></div>{message.executionTarget && <div className="message__run-meta"><TerminalSquare size={11} /> {message.model ?? 'Model not reported by CLI'}{message.sizeTier ? ` · ${modelSizeLabel(message.sizeTier)}` : ' · Provider default'} · {message.executionTarget} · {message.sessionResumable ? 'session resumable' : 'new handoff next turn'}</div>}{message.notes && message.notes.length > 0 && <div className="provider-live-notes provider-live-notes--kept" aria-label="Provider notes">{message.notes.map((note, index) => <ProviderNoteCard key={index} note={note} provider={providers.find((item) => item.id === note.provider) ?? messageProvider} projectPath={projectPath} onOpenFile={onOpenFile} />)}</div>}{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               )
             })
           )}
           {sending && providerNotes.length > 0 && (
             <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
-              {providerNotes.map((note, index) => {
-                const noteProvider = providers.find((item) => item.id === note.provider) ?? provider
-                return (
-                  <div className="provider-live-note" key={`${note.sequence ?? note.at}-${index}`}>
-                    <ProviderMark provider={noteProvider} small />
-                    <div>
-                      <strong>{noteProvider.name} note</strong>
-                      {typeof window.ensyncDesktop?.openPath === 'function'
-                        ? <MessageContent content={note.text} projectPath={projectPath} />
-                        : <MessageContent content={note.text} onOpenFile={onOpenFile} />}
-                      {note.redacted && <small>Possible secret redacted by Ensync Host.</small>}
-                    </div>
-                  </div>
-                )
-              })}
+              {providerNotes.map((note, index) => (
+                <ProviderNoteCard
+                  key={`${note.sequence ?? note.at}-${index}`}
+                  note={note}
+                  provider={providers.find((item) => item.id === note.provider) ?? provider}
+                  projectPath={projectPath}
+                  onOpenFile={onOpenFile}
+                />
+              ))}
             </div>
           )}
           {/* What the agent wrote to the person before asking is an ordinary

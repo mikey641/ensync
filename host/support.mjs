@@ -185,10 +185,9 @@ export async function collectSupportDiagnostics(options = {}) {
   if (options.includeProjectContext !== false && options.projectService?.current) {
     try {
       const project = await options.projectService.current()
-      diagnostics.project = {
-        available: true,
-        value: projectDiagnostic(project),
-      }
+      diagnostics.project = project
+        ? { available: true, value: projectDiagnostic(project) }
+        : unavailableDiagnostic('No project folder is focused on this Ensync Host.')
     } catch {
       diagnostics.project = unavailableDiagnostic('Project diagnostics could not be collected.')
     }

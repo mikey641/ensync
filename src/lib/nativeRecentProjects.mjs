@@ -7,6 +7,7 @@ const MAX_SOURCE_WORKSPACES = 128
 const MAX_PROJECTS = 128
 
 let recentProjects = Object.freeze([])
+let homeDirectory = null
 const listeners = new Set()
 let removeNativeListener = null
 
@@ -99,8 +100,34 @@ export function collectNativeRecentProjectCandidates(storage, identity = getNati
   ])
 }
 
-function publish(value) {
-  recentProjects = Object.freeze(normalizeProjects(value))
+/**
+ * The shell reports which path is the home directory so every client applies one
+ * rule to it. A home directory is never a project Ensync can run in, so it is
+ * dropped from the candidates this scan recovers and from every published list,
+ * and it is only ever absent from the shell registry itself.
+ */
+function excludesHome(projects) {
+  if (!homeDirectory) return projects
+  const homeKey = pathKey(homeDirectory)
+  return projects.filter((project) => pathKey(project.path) !== homeKey)
+}
+
+export function nativeHomeDirectory() {
+  return homeDirectory
+}
+
+/**
+ * Ensync Host reports the same path with every project, which is how a browser
+ * workspace - one with no desktop shell to ask - learns which folder is home.
+ */
+export function recordHomeDirectory(path) {
+  if (typeof path === 'string' && path) homeDirectory = path
+  return homeDirectory
+}
+
+function publish(value, home) {
+  if (typeof home === 'string' && home) homeDirectory = home
+  recentProjects = Object.freeze(excludesHome(normalizeProjects(value)))
   for (const listener of listeners) listener([...recentProjects])
   return [...recentProjects]
 }
@@ -113,11 +140,15 @@ export async function initializeNativeRecentProjects(target = globalThis) {
     return { status: 'unavailable', projects: [] }
   }
   removeNativeListener?.()
-  removeNativeListener = bridge.onRecentProjectsChanged((state) => publish(state?.projects))
-  const candidates = collectNativeRecentProjectCandidates(target.localStorage)
+  removeNativeListener = bridge.onRecentProjectsChanged((state) => publish(state?.projects, state?.homePath))
+  // The home path is needed before the migration so a recovered home directory
+  // is never offered back to the shell in the first place.
+  const known = await bridge.getRecentProjects()
+  if (typeof known?.homePath === 'string' && known.homePath) homeDirectory = known.homePath
+  const candidates = excludesHome(collectNativeRecentProjectCandidates(target.localStorage))
   const state = await bridge.migrateRecentProjects(candidates)
   if (!state || !Array.isArray(state.projects)) throw new Error('Ensync could not load global recent projects.')
-  return { status: 'ready', projects: publish(state.projects) }
+  return { status: 'ready', projects: publish(state.projects, state.homePath) }
 }
 
 export function getNativeRecentProjects() {
@@ -134,5 +165,5 @@ export async function rememberNativeRecentProject(project, target = globalThis) 
   const bridge = target?.ensyncDesktop
   if (typeof bridge?.rememberRecentProject !== 'function') return getNativeRecentProjects()
   const state = await bridge.rememberRecentProject(project)
-  return state && Array.isArray(state.projects) ? publish(state.projects) : getNativeRecentProjects()
+  return state && Array.isArray(state.projects) ? publish(state.projects, state.homePath) : getNativeRecentProjects()
 }

@@ -14,7 +14,7 @@ import {
   probeAttachmentPaths,
 } from './chat-attachments.mjs'
 import { ChatImageError, ChatImageService } from './chat-images.mjs'
-import { ChatRunError, ChatRunService, redactTerminalText } from './chat.mjs'
+import { ChatRunError, ChatRunService, isHomeDirectory, redactTerminalText } from './chat.mjs'
 import { ChatJobError, ChatJobService, DELIVERY_REPAIR_WORKSPACE_PREFIX } from './chat-jobs.mjs'
 import { ChatJobJournal } from './chat-job-journal.mjs'
 import { DaemonLeaseError } from './daemon-lifecycle.mjs'
@@ -593,7 +593,17 @@ export function createEnsyncHost(options = {}) {
   const projects = options.projectService ?? new ProjectInspectionService({
     allowedRoots: options.allowedProjectRoots,
     defaultProjectPath: options.defaultProjectPath,
+    homePath: options.homePath,
+    // The shell-owned registry is the only record of folders this user actually
+    // works in, so it is what the Host falls back to before reporting none.
+    listRecentProjects: () => readGlobalRecentProjects(recentProjectsPath),
   })
+  // Reported with every project so clients know which path is the home
+  // directory: it is never a project to focus or to keep in recent projects,
+  // and only this Host can say what home is on this machine.
+  const hostHomeDirectory = () => (typeof projects.homeDirectory === 'function'
+    ? projects.homeDirectory()
+    : null)
   const supportRepairs = options.supportRepairService ?? new SupportRepairService({
     projectService: projects,
     chatService: chats,
@@ -1010,9 +1020,13 @@ export function createEnsyncHost(options = {}) {
               available: provider.installed === true && provider.connectionState !== 'unavailable',
             }))
           const recentProjects = []
+          // A phone cannot open a folder chooser, so it must never be offered a
+          // path this Host would refuse to run in.
+          const homePath = await hostHomeDirectory()
           for (const project of await readGlobalRecentProjects(recentProjectsPath)) {
             const path = typeof project.path === 'string' ? project.path.trim() : ''
             if (!path || path.length > 1024) continue
+            if (homePath && await isHomeDirectory(path, homePath)) continue
             const name = typeof project.name === 'string' ? project.name.trim() : ''
             recentProjects.push(name && name.length <= 256 ? { path, name } : { path })
             if (recentProjects.length >= 200) break
@@ -1145,14 +1159,16 @@ export function createEnsyncHost(options = {}) {
       }
 
       if (request.method === 'GET' && url.pathname === '/api/projects/current') {
-        const project = await projects.current()
-        return sendJson(response, 200, { project }, origin)
+        // A `null` project is a real answer: no folder is focused yet, and the
+        // interface must ask for one instead of assuming a project.
+        const [project, homePath] = await Promise.all([projects.current(), hostHomeDirectory()])
+        return sendJson(response, 200, { project, homePath }, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/projects/inspect') {
         const body = await readJsonBody(request)
-        const project = await projects.inspect(body.path)
-        return sendJson(response, 200, { project }, origin)
+        const [project, homePath] = await Promise.all([projects.inspect(body.path), hostHomeDirectory()])
+        return sendJson(response, 200, { project, homePath }, origin)
       }
 
       if (request.method === 'POST' && url.pathname === '/api/local-file') {

@@ -1,5 +1,6 @@
 import { execFile as execFileCallback } from 'node:child_process'
 import { open, realpath, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from 'node:path'
 import { promisify } from 'node:util'
 import { configuredHardTimeoutMs, describeProcessExit, runProcess, subscriptionEnvironment } from './command.mjs'
@@ -684,6 +685,22 @@ function asChatRunError(error, code, fallbackMessage, status = 400) {
 function pathIsWithin(candidate, root) {
   const pathFromRoot = relative(root, candidate)
   return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+}
+
+/**
+ * A home directory holds everything a person owns, so Ensync never focuses one
+ * on the user's behalf and never turns one into a project repository. An
+ * explicit choice is still honored: a home directory that already is a Git
+ * repository runs like any other project.
+ */
+export async function isHomeDirectory(directory, homePath) {
+  const home = await realpath(homePath ?? homedir()).catch(() => null)
+  if (!home) return false
+  if (resolve(directory) === resolve(home)) return true
+  // A remembered path can be written differently than the canonical one Git and
+  // the isolation layer would see, so compare what the filesystem resolves to.
+  const target = await realpath(directory).catch(() => null)
+  return Boolean(target) && resolve(target) === resolve(home)
 }
 
 export async function validateProjectPath(projectPath, options = {}) {

@@ -8,5 +8,8 @@ export function initializeNativeRecentProjects(target?: typeof globalThis): Prom
   projects: NativeRecentProject[]
 }>
 export function getNativeRecentProjects(): NativeRecentProject[]
+/** The home directory reported by the desktop shell or by Ensync Host. */
+export function nativeHomeDirectory(): string | null
+export function recordHomeDirectory(path: string | null | undefined): string | null
 export function subscribeNativeRecentProjects(listener: (projects: NativeRecentProject[]) => void): () => void
 export function rememberNativeRecentProject(project: NativeRecentProject, target?: typeof globalThis): Promise<NativeRecentProject[]>

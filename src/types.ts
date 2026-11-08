@@ -84,11 +84,19 @@ export type Message = {
   sessionResumable?: boolean
   /** Local files explicitly attached by the user for this turn. */
   attachments?: FileAttachment[]
+  /** Provider notes streamed during this agent turn, kept so they stay in the conversation after the run. */
+  notes?: MessageNote[]
   /** Local-only immutable receipt for idempotent cross-window handoff retries. */
   handoffTombstone?: Readonly<{
     handoffId: string
     queuedPromptIdentity: string
   }>
+}
+
+export type MessageNote = {
+  provider: ProviderId
+  text: string
+  redacted: boolean
 }
 
 export type FileAttachment = {

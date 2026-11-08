@@ -582,11 +582,27 @@ export function parseClaudeAuthentication(result, checkedAt = now()) {
   return unavailableAuthentication('Claude Code returned no recognized authentication status.', checkedAt)
 }
 
-async function probeClaudeAuthentication(executable, checkedAt) {
-  return parseClaudeAuthentication(
-    await runProcess(executable, ['auth', 'status', '--json']),
-    checkedAt,
-  )
+// Claude Code reads its login from the macOS keychain through a `security`
+// subprocess with a 2s timeout and treats a timed-out read as "no credentials".
+// Under heavy CPU load that makes `auth status` report `loggedIn: false` for a
+// signed-in user, so a negative answer is re-checked before it is believed. A
+// real logout still settles within a few fast probes.
+export const CLAUDE_NOT_AUTHENTICATED_RECHECKS = 2
+const CLAUDE_AUTH_RECHECK_PAUSE_MS = 1_000
+
+export async function probeClaudeAuthentication(executable, checkedAt, options = {}) {
+  const run = options.runProcess ?? runProcess
+  const pauseMs = options.recheckPauseMs ?? CLAUDE_AUTH_RECHECK_PAUSE_MS
+  let authentication = null
+  for (let attempt = 0; attempt <= CLAUDE_NOT_AUTHENTICATED_RECHECKS; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, pauseMs))
+    authentication = parseClaudeAuthentication(
+      await run(executable, ['auth', 'status', '--json']),
+      checkedAt,
+    )
+    if (authentication.state !== 'not_authenticated') return authentication
+  }
+  return authentication
 }
 
 export function parseCursorAuthentication(result, checkedAt = now(), account = null) {

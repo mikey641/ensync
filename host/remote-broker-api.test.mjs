@@ -87,11 +87,14 @@ test('remote broker API starts a Host, publishes capabilities, and runs an encry
   const recentDir = await mkdtemp(join(tmpdir(), 'ensync-remote-broker-'))
   context.after(() => rm(recentDir, { recursive: true, force: true }))
   const recentProjectsPath = join(recentDir, 'global-recent-projects-v1.json')
+  const homePath = await mkdtemp(join(tmpdir(), 'ensync-remote-broker-home-'))
+  context.after(() => rm(homePath, { recursive: true, force: true }))
   await writeFile(recentProjectsPath, JSON.stringify({
     payload: JSON.stringify({
       projects: [
         { path: '/repos/alpha', name: 'Alpha' },
         { path: '/repos/beta' },
+        { path: homePath, name: 'person' },
       ],
     }),
   }))
@@ -122,6 +125,7 @@ test('remote broker API starts a Host, publishes capabilities, and runs an encry
     chatJobService: chatJobs,
     statusService,
     recentProjectsPath,
+    projectService: { homeDirectory: async () => homePath },
     syncBrokerPollIntervalMs: 60_000,
   })
   const client = await startHostServer(context, { accountSyncService: clientAccount })
@@ -159,6 +163,7 @@ test('remote broker API starts a Host, publishes capabilities, and runs an encry
     { id: 'codex', name: 'Codex', available: true },
     { id: 'claude', name: 'Claude Code', available: false },
   ])
+  // A phone has no folder chooser, so the home directory is never offered to it.
   assert.deepEqual(capabilitiesBody.capabilities.recentProjects, [
     { path: '/repos/alpha', name: 'Alpha' },
     { path: '/repos/beta' },

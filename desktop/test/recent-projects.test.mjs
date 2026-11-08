@@ -62,3 +62,32 @@ test('checksummed store recovers newest staging and falls back to backup corrupt
     '/work/nadlan-desk',
   ])
 })
+
+test('the shell registry drops a home directory and cleans one already stored', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'ensync-recent-projects-'))
+  const filePath = join(directory, 'global-recent-projects-v1.json')
+  const homePath = '/Users/mikeyhasson'
+  // A registry written before Ensync stopped focusing the home directory.
+  const polluted = createRecentProjectStore({ filePath })
+  polluted.remember(project('mikeyhasson', homePath))
+  polluted.remember(project('Relay', '/Users/mikeyhasson/dev/relay'))
+  assert.deepEqual(polluted.list().map((item) => item.path), ['/Users/mikeyhasson/dev/relay', homePath])
+
+  const store = createRecentProjectStore({ filePath, homePath })
+  assert.deepEqual(store.list().map((item) => item.path), ['/Users/mikeyhasson/dev/relay'])
+  // Cleaned on disk, not only in memory, and not restorable by a later merge.
+  assert.deepEqual(
+    createRecentProjectStore({ filePath }).list().map((item) => item.path),
+    ['/Users/mikeyhasson/dev/relay'],
+  )
+  store.migrate([project('mikeyhasson', `${homePath}/`), project('Apartments', '/Users/mikeyhasson/apartment-finder')])
+  store.remember(project('mikeyhasson', homePath))
+  assert.deepEqual(store.list().map((item) => item.path), [
+    '/Users/mikeyhasson/dev/relay',
+    '/Users/mikeyhasson/apartment-finder',
+  ])
+
+  const handlers = createRecentProjectHandlers({ isAuthorized: () => true, store })
+  assert.equal(handlers.get({ sender: {} }).homePath, homePath)
+  assert.equal(handlers.remember({ sender: {} }, project('mikeyhasson', homePath)).homePath, homePath)
+})

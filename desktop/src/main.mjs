@@ -585,9 +585,13 @@ async function ensureRuntime() {
       bootstrapPath: paths.bootstrapPath,
       hostEntryPath: paths.hostEntryPath,
       executable: process.execPath,
+      // The Host runs outside any project so a deleted or moved folder can
+      // never strand it, but its working directory is not a project: passing
+      // the home directory as the default only stranded the first run in "A
+      // home directory is too broad to become one Ensync project repository."
+      // The Host resolves its own default from the shell's recent projects.
       cwd: app.getPath('home'),
       env: {
-        ENSYNC_DEFAULT_PROJECT_PATH: app.getPath('home'),
         ENSYNC_HOST_PROJECT_ISOLATION_ROOT: join(app.getPath('userData'), HOST_PROJECT_ISOLATION_DIRECTORY),
         ENSYNC_HOST_SYNC_CONFIG_FILE: join(app.getPath('userData'), HOST_SYNC_CONFIG_FILENAME),
         ...(effectiveSyncServiceUrl ? { ENSYNC_SYNC_SERVICE_URL: effectiveSyncServiceUrl } : {}),
@@ -809,6 +813,10 @@ if (!singleInstance) {
     })
     recentProjectStore = createRecentProjectStore({
       filePath: join(app.getPath('userData'), RECENT_PROJECTS_FILENAME),
+      // Recent projects are folders to pick up again; the home directory is
+      // never one Ensync can run in, so the registry drops it and tells the
+      // renderer which path that is.
+      homePath: app.getPath('home'),
     })
     devicePreferencesStore = createDevicePreferencesStore({
       filePath: join(app.getPath('userData'), DEVICE_PREFERENCES_FILENAME),

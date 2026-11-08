@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import { ChatRunError } from './chat.mjs'
-import { inspectProject } from './projects.mjs'
+import { inspectProject, ProjectInspectionService } from './projects.mjs'
 import { createEnsyncHost } from './server.mjs'
 
 async function projectFixture(context) {
@@ -78,4 +78,95 @@ test('project endpoints inspect explicit paths and the host working directory', 
   assert.equal(invalidResponse.status, 400)
   const invalid = await invalidResponse.json()
   assert.equal(invalid.code, 'invalid_project')
+})
+
+async function recentProjectsFixture(context, projects) {
+  const directory = await mkdtemp(join(tmpdir(), 'ensync-recent-projects-test-'))
+  context.after(() => rm(directory, { recursive: true, force: true }))
+  const filePath = join(directory, 'global-recent-projects-v1.json')
+  await writeFile(filePath, JSON.stringify({ payload: JSON.stringify({ projects }) }))
+  return filePath
+}
+
+test('the current project never becomes the home directory the Host runs from', async (context) => {
+  const homePath = await mkdtemp(join(tmpdir(), 'ensync-home-test-'))
+  context.after(() => rm(homePath, { recursive: true, force: true }))
+  const projectPath = await projectFixture(context)
+  const projects = new ProjectInspectionService({
+    defaultProjectPath: homePath,
+    homePath,
+    listRecentProjects: () => [{ name: 'project', path: projectPath, host: 'local' }],
+  })
+
+  const current = await projects.current()
+  assert.equal(current.path, await realpath(projectPath))
+})
+
+test('the current project is none when only unusable folders are known', async (context) => {
+  const homePath = await mkdtemp(join(tmpdir(), 'ensync-home-test-'))
+  context.after(() => rm(homePath, { recursive: true, force: true }))
+  const projects = new ProjectInspectionService({
+    defaultProjectPath: homePath,
+    homePath,
+    listRecentProjects: () => [
+      { name: 'home', path: homePath, host: 'local' },
+      { name: 'gone', path: join(tmpdir(), 'ensync-project-that-does-not-exist'), host: 'local' },
+    ],
+  })
+
+  assert.equal(await projects.current(), null)
+})
+
+test('a Host with no configured default project falls back to recent projects', async (context) => {
+  const projectPath = await projectFixture(context)
+  const recentProjectsPath = await recentProjectsFixture(context, [
+    { name: 'project', path: projectPath, host: 'local' },
+  ])
+  const server = createEnsyncHost({ defaultProjectPath: null, recentProjectsPath })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  context.after(() => server.close())
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/projects/current`)
+  assert.equal(response.status, 200)
+  const body = await response.json()
+  assert.equal(body.project.path, await realpath(projectPath))
+})
+
+test('the current project endpoint reports no project instead of an unusable one', async (context) => {
+  const homePath = await mkdtemp(join(tmpdir(), 'ensync-home-test-'))
+  context.after(() => rm(homePath, { recursive: true, force: true }))
+  const recentProjectsPath = await recentProjectsFixture(context, [
+    { name: 'home', path: homePath, host: 'local' },
+  ])
+  const server = createEnsyncHost({ defaultProjectPath: homePath, homePath, recentProjectsPath })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  context.after(() => server.close())
+
+  const response = await fetch(`http://127.0.0.1:${server.address().port}/api/projects/current`)
+  assert.equal(response.status, 200)
+  assert.deepEqual(await response.json(), { project: null, homePath: await realpath(homePath) })
+})
+
+test('project responses report the home directory so clients never keep it as a project', async (context) => {
+  const homePath = await mkdtemp(join(tmpdir(), 'ensync-home-test-'))
+  context.after(() => rm(homePath, { recursive: true, force: true }))
+  const projectPath = await projectFixture(context)
+  const server = createEnsyncHost({ defaultProjectPath: projectPath, homePath })
+  server.listen(0, '127.0.0.1')
+  await once(server, 'listening')
+  context.after(() => server.close())
+
+  const baseUrl = `http://127.0.0.1:${server.address().port}`
+  const current = await (await fetch(`${baseUrl}/api/projects/current`)).json()
+  const inspected = await (await fetch(`${baseUrl}/api/projects/inspect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: projectPath }),
+  })).json()
+
+  assert.equal(current.homePath, await realpath(homePath))
+  assert.equal(inspected.homePath, await realpath(homePath))
+  assert.equal(inspected.project.path, await realpath(projectPath))
 })

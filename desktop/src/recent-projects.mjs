@@ -87,8 +87,22 @@ function sameProjects(left, right) {
   return JSON.stringify(left) === JSON.stringify(right)
 }
 
-export function createRecentProjectStore({ filePath, now = () => new Date().toISOString() } = {}) {
+/**
+ * Recent projects are folders the user can pick up again, and a home directory
+ * never is one: Ensync refuses to make it a project repository, so an entry for
+ * it only leads back to "A home directory is too broad to become one Ensync
+ * project repository." One reached this registry automatically before the Host
+ * stopped focusing it, and the renderer's boot migration would keep restoring
+ * it from old workspace snapshots, so the registry drops it wherever it arrives
+ * and cleans an already-stored record the first time the store opens.
+ */
+function excludesHome(projects, homeKey) {
+  return homeKey ? projects.filter((project) => pathKey(project.path) !== homeKey) : projects
+}
+
+export function createRecentProjectStore({ filePath, homePath = null, now = () => new Date().toISOString() } = {}) {
   if (typeof filePath !== 'string' || !filePath) throw new TypeError('A recent-project state path is required.')
+  const homeKey = typeof homePath === 'string' && homePath ? pathKey(homePath) : null
   const stagingPath = `${filePath}.staging`
   const backupPath = `${filePath}.backup`
   const readCandidate = (path, priority) => {
@@ -106,7 +120,9 @@ export function createRecentProjectStore({ filePath, now = () => new Date().toIS
   ].filter(Boolean).sort((left, right) => right.revision - left.revision
     || right.committedAt.localeCompare(left.committedAt) || right.priority - left.priority)
   let revision = candidates[0]?.revision ?? 0
-  let projects = candidates[0]?.projects ?? []
+  const stored = candidates[0]?.projects ?? []
+  let projects = excludesHome(stored, homeKey)
+  const storedHome = projects.length !== stored.length
 
   // Promote a recovered staging/backup record without rotating corrupt bytes.
   if (candidates[0] && candidates[0].path !== filePath) {
@@ -133,15 +149,20 @@ export function createRecentProjectStore({ filePath, now = () => new Date().toIS
   }
 
   const merge = (incoming, promote) => {
-    const normalized = normalizeProjects(incoming) ?? []
+    const normalized = excludesHome(normalizeProjects(incoming) ?? [], homeKey)
     const source = promote ? [...normalized, ...projects] : [...projects, ...normalized]
-    const next = normalizeProjects(source) ?? []
+    const next = excludesHome(normalizeProjects(source) ?? [], homeKey)
     return sameProjects(next, projects)
       ? { projects: projects.map((project) => ({ ...project })), revision, changed: false }
       : persist(next)
   }
 
+  // A stored home directory is rewritten out now rather than at the next
+  // mutation, so the record is gone even if this session never focuses anything.
+  if (storedHome) persist(projects)
+
   return Object.freeze({
+    homePath: typeof homePath === 'string' && homePath ? homePath : null,
     list() { return projects.map((project) => ({ ...project })) },
     migrate(incoming) { return merge(incoming, false) },
     remember(project) { return merge([project], true) },
@@ -150,7 +171,7 @@ export function createRecentProjectStore({ filePath, now = () => new Date().toIS
 
 export function createRecentProjectHandlers({ isAuthorized, store, onChanged = () => {} }) {
   if (typeof isAuthorized !== 'function' || !store) throw new TypeError('Recent-project authorization and store are required.')
-  const response = (result) => ({ projects: result.projects, revision: result.revision })
+  const response = (result) => ({ projects: result.projects, revision: result.revision, homePath: store.homePath ?? null })
   const mutate = (operation) => (event, value) => {
     if (!isAuthorized(event)) return null
     const result = operation(value)
@@ -160,7 +181,7 @@ export function createRecentProjectHandlers({ isAuthorized, store, onChanged = (
   return Object.freeze({
     get(event) {
       if (!isAuthorized(event)) return null
-      return { projects: store.list() }
+      return { projects: store.list(), homePath: store.homePath ?? null }
     },
     migrate: mutate((projects) => store.migrate(projects)),
     remember: mutate((project) => store.remember(project)),

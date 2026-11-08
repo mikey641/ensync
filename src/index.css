@@ -258,6 +258,7 @@ h5.message-heading, h6.message-heading { color: var(--text-secondary); }
 .working-line > span:nth-child(2) { animation-delay: .15s; }.working-line > span:nth-child(3) { animation-delay: .3s; }
 .working-line em { margin-left: 6px; font-style: normal; font-size: 9px; }
 .provider-live-notes { margin: 5px 42px 7px; display: flex; flex-direction: column; gap: 7px; }
+.provider-live-notes--kept { margin: 4px 0 10px; }
 .provider-live-note { min-width: 0; padding: 9px 11px; display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 8px; border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--line)); border-radius: 8px; background: color-mix(in srgb, var(--accent) 5%, var(--panel)); }
 .provider-live-note > div { min-width: 0; }
 .provider-live-note > div > strong { display: block; margin-bottom: 2px; color: var(--text-secondary); font-size: var(--font-label); font-weight: 600; }

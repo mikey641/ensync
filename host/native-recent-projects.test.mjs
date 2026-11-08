@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { collectNativeRecentProjectCandidates } from '../src/lib/nativeRecentProjects.mjs'
+import {
+  collectNativeRecentProjectCandidates,
+  initializeNativeRecentProjects,
+  nativeHomeDirectory,
+} from '../src/lib/nativeRecentProjects.mjs'
 import { commitWorkspaceSnapshot } from '../src/lib/workspacePersistence.mjs'
 
 function storage() {
@@ -51,4 +55,36 @@ test('native recent-project migration ignores corrupt legacy state', () => {
     id: '11111111-1111-4111-8111-111111111111',
     kind: 'canonical',
   }), [])
+})
+
+test('native recent projects never offer or publish the home directory', async () => {
+  const localStorage = storage()
+  commitWorkspaceSnapshot(localStorage, {
+    projects: [
+      project('home', 'person', '/Users/person'),
+      project('relay', 'relay', '/Users/person/dev/relay'),
+    ],
+    activeProjectId: 'home',
+  }, { now: () => '2026-09-14T12:00:00.000Z' })
+
+  let offered = null
+  const relay = { name: 'relay', path: '/Users/person/dev/relay', host: 'local' }
+  const home = { name: 'person', path: '/Users/person', host: 'local' }
+  const result = await initializeNativeRecentProjects({
+    localStorage,
+    ensyncDesktop: {
+      getRecentProjects: async () => ({ projects: [], homePath: '/Users/person' }),
+      migrateRecentProjects: async (projects) => {
+        offered = projects
+        // Even a shell that still answers with one is not published to the UI.
+        return { projects: [...projects, home], revision: 2, homePath: '/Users/person' }
+      },
+      rememberRecentProject: async () => null,
+      onRecentProjectsChanged: () => () => {},
+    },
+  })
+
+  assert.equal(nativeHomeDirectory(), '/Users/person')
+  assert.deepEqual(offered, [relay])
+  assert.deepEqual(result.projects, [relay])
 })

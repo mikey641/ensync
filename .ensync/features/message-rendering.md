@@ -42,7 +42,14 @@ cells, and blockquotes, while code blocks and inline code stay LTR-isolated. All
 uses the shared semantic tokens in `theme.css`. Every stored user and agent message
 exposes the same copy action, which copies the original Markdown source unchanged rather
 than rendered text or bidi markup. The action appears on pointer hover and keyboard
-focus, stays visible for touch input, and does not apply to temporary provider notes.
+focus, stays visible for touch input, and does not apply to provider notes.
+
+Provider notes (CLI-visible progress text, never hidden reasoning) stream above the
+working line while a run is active. When the run completes, its notes (the last 40) are
+copied onto the agent reply as `message.notes` and render as the same note cards above
+the reply text, so they stay in the conversation after the run's event buffer is cleared
+by the next run, and persist and sync with the message. Failed or stopped runs produce no
+reply, so their notes remain only in the execution panel.
 
 Within a block, phrases written in the opposite direction render inside `<bdi>`. A cursor
 from `src/lib/bidiText.mjs` walks one block at a time — across bold, links, and plain text

@@ -1,9 +1,8 @@
 import { spawn } from 'node:child_process'
 import { lstat, realpath, stat } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path'
 import { inspectProject } from './projects.mjs'
-import { validateProjectPath } from './chat.mjs'
+import { isHomeDirectory, validateProjectPath } from './chat.mjs'
 
 const DEFAULT_TIMEOUT_MS = 30_000
 const DEFAULT_TERMINATION_GRACE_MS = 2_000
@@ -507,16 +506,6 @@ async function baselineCommitIdentity(cwd, run) {
   ])
   const configured = name.exitCode === 0 && name.stdout.trim() && email.exitCode === 0 && email.stdout.trim()
   return configured ? undefined : ENSYNC_BASELINE_IDENTITY
-}
-
-/**
- * A home directory holds everything a person owns, so it is never the folder
- * Ensync turns into one project repository. An existing repository there is
- * still used as it is; only creating one is refused.
- */
-export async function isHomeDirectory(directory, homePath) {
-  const home = await realpath(homePath ?? homedir()).catch(() => null)
-  return Boolean(home) && resolve(directory) === resolve(home)
 }
 
 /**
