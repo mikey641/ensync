@@ -298,7 +298,9 @@ export class BrokerClient {
 
 function compactRequest(request) {
   const result = {}
-  for (const key of ['provider', 'projectPath', 'prompt', 'workspaceKey', 'sessionId', 'model', 'conversationId', 'messageId']) {
+  // `control`/`targetJobId` turn the job into a Host control request (stop,
+  // steer, push a queued message, read delivery status) that never runs a provider.
+  for (const key of ['provider', 'projectPath', 'prompt', 'workspaceKey', 'sessionId', 'model', 'deliveryTarget', 'conversationId', 'messageId', 'control', 'targetJobId']) {
     const value = request?.[key]
     if (typeof value === 'string' && value) result[key] = value
   }

@@ -390,6 +390,21 @@ export class ChatJobService {
     } : null
   }
 
+  /**
+   * The running chat job for one conversation workspace (project + workspace
+   * key), if any. A paired phone uses it to stop or steer a turn that a desktop
+   * window started, without knowing that window's Host job ID.
+   */
+  runningForWorkspace(projectPath, workspaceKey) {
+    if (typeof projectPath !== 'string' || !projectPath || typeof workspaceKey !== 'string' || !workspaceKey) return null
+    const job = [...this.#jobs.values()].find((candidate) => (
+      candidate.state === 'running'
+      && candidate.request?.projectPath === projectPath
+      && candidate.request?.workspaceKey === workspaceKey
+    ))
+    return job ? this.#publicJob(job) : null
+  }
+
   sweep() {
     const changed = this.#trimExpiredJobs()
     if (changed) this.#flushPersist()

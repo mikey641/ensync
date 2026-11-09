@@ -210,6 +210,32 @@ button:disabled { opacity: .45; cursor: default; }
 .job-head .stop { margin-inline-start: auto; display: inline-flex; align-items: center; gap: 4px; min-height: 36px; padding: 0 12px; border-radius: 99px; background: var(--danger-soft); color: var(--danger); font-weight: 650; font-size: 14px; }
 .job-head .stop .icon { width: 16px; height: 16px; }
 .job-output { margin: 0; max-height: 9.5em; overflow: hidden; padding: 8px 10px; border-radius: 10px; background: var(--code-bg); color: var(--muted); font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; unicode-bidi: plaintext; display: flex; flex-direction: column; justify-content: flex-end; }
+/* Live provider progress, mirroring the desktop transcript. */
+.live-turn { display: grid; gap: 6px; }
+.live-notes { display: grid; gap: 7px; }
+.live-notes.kept { margin-bottom: 6px; }
+.live-note {
+  min-width: 0; padding: 9px 11px;
+  display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border)); border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--surface));
+}
+.live-note > div { min-width: 0; }
+.live-note strong { display: block; margin-bottom: 2px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.live-note .md { color: var(--muted); font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+.live-note small { display: block; margin-top: 5px; color: var(--danger); font-size: 12px; }
+.provider-mark {
+  width: 22px; height: 22px; display: grid; place-items: center; border-radius: 6px;
+  background: var(--accent-soft); color: var(--accent); font-size: 11px; font-weight: 700;
+}
+.working-line { display: flex; align-items: center; gap: 4px; min-height: 28px; padding-inline-start: 4px; color: var(--muted); }
+.working-line > span[aria-hidden] { width: 4px; height: 4px; border-radius: 50%; background: var(--accent); animation: live-bounce 1.2s infinite; }
+.working-line > span[aria-hidden]:nth-child(2) { animation-delay: .15s; }
+.working-line > span[aria-hidden]:nth-child(3) { animation-delay: .3s; }
+.working-line em { margin-inline-start: 6px; font-style: normal; font-size: 12px; font-variant-numeric: tabular-nums; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+@keyframes live-bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .35 } 30% { transform: translateY(-4px); opacity: 1 } }
+@media (prefers-reduced-motion: reduce) { .working-line > span[aria-hidden] { animation: none; opacity: .7; } }
 .job-notes { margin: 0; padding: 0; list-style: none; display: grid; gap: 3px; color: var(--muted); font-size: 13px; }
 .job-actions { display: flex; gap: 8px; }
 .job-actions button, .link-screen button, .sheet button { min-height: 44px; padding: 0 18px; border-radius: 12px; font-weight: 650; font-size: 15px; }
@@ -300,3 +326,30 @@ button:disabled { opacity: .45; cursor: default; }
 .link-actions .photo-button { min-height: 48px; border-radius: 14px; background: var(--surface-2); font-weight: 600; }
 
 .link-screen p { white-space: pre-line; }
+
+/* ---- running-turn controls (queue, stop, steer, push now) ---- */
+.composer.busy .send { background: var(--surface-2); color: var(--accent); border: 1px solid var(--accent); }
+.composer .steer { margin-inline-start: auto; min-height: 32px; display: inline-flex; align-items: center; gap: 4px; padding: 0 12px; border-radius: 99px; background: var(--warn-soft); color: var(--warn); font-weight: 650; font-size: 13px; }
+.composer .steer .icon { width: 14px; height: 14px; }
+.composer .steer:disabled { opacity: .5; }
+.live-turn-row { display: flex; align-items: center; gap: 8px; }
+.live-turn-row .stop, .job-card.queued .stop { margin-inline-start: auto; display: inline-flex; align-items: center; gap: 4px; min-height: 34px; padding: 0 12px; border-radius: 99px; background: var(--danger-soft); color: var(--danger); font-weight: 650; font-size: 13px; }
+.live-turn-row .stop .icon, .job-card.queued .stop .icon { width: 14px; height: 14px; }
+.job-card.queued { background: var(--surface-2); border-style: dashed; }
+.job-card.queued .job-head > .icon { width: 16px; height: 16px; color: var(--accent); }
+
+/* ---- delivery (mirrors the desktop delivery panel) ---- */
+.delivery-card { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.delivery-card.error { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); }
+.delivery-card.done { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
+.delivery-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.delivery-head strong { font-size: 14px; }
+.delivery-card.error .delivery-head strong { color: var(--danger); }
+.delivery-head small { color: var(--faint); font-size: 12px; }
+.delivery-description, .delivery-detail { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; unicode-bidi: plaintext; overflow-wrap: anywhere; }
+.delivery-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-wrap: wrap; gap: 4px; }
+.delivery-steps li { padding: 2px 8px; border-radius: 99px; background: var(--surface-2); color: var(--faint); font-size: 11px; font-weight: 600; }
+.delivery-steps li.done { background: var(--accent-soft); color: var(--accent); }
+.delivery-steps li.current { background: var(--accent); color: var(--accent-contrast); }
+.delivery-card.error .delivery-steps li.current { background: var(--danger); color: #fff; }
+.delivery-card a { color: var(--accent); font-size: 13px; font-weight: 600; }

@@ -118,7 +118,39 @@ Where the shipped code is more specific than the protocol above:
   last message. Desktop-run turns do not publish their session IDs, so a phone turn after a desktop turn has no
   `sessionId` and must carry the transcript in its prompt.
 
+## Live turns, queue, stop/steer and delivery (2026-11-09)
+
+The phone mirrors a running turn exactly like the desktop transcript, and can control it.
+
+- `chat.liveTurn` (encrypted doc, transient, whitelisted in `host/account-workspace.mjs`):
+  `{ turnId, status: 'running', provider, startedAt, updatedAt, origin: 'desktop'|'host', messageId?, jobId?,
+  notes: [{ provider, text, redacted, at }] }` — the last 6 CLI-visible notes (already redacted by the Host), never
+  terminal output, commands, paths or attachments. Desktop windows publish it for their running turns (throttled push,
+  ≤ 1 per 1.5 s; heartbeat every 60 s); the Host publishes it for brokered phone turns. Merge: freshest `updatedAt`
+  wins; it is dropped everywhere once the transcript settles the turn (agent reply, or prompt `completed`/`failed`/
+  `cancelled`). Readers ignore it after 3 minutes without a refresh. Old clients drop the unknown field.
+- `chat.liveQueue = { host?: { updatedAt, items }, desktop?: { updatedAt, items } }` lists prompts waiting for the
+  running turn (`items: [{ messageId?, turnId?, jobId?, queuedAt? }]`); each writer owns its block, freshest block per
+  writer wins, settled entries disappear.
+- Running prompts are written to the doc as `interrupted` (not runnable elsewhere); merging that copy back never
+  demotes the owning device's `pending`/`queued` message.
+- Busy conversation: a brokered phone turn whose workspace is occupied is **queued** by the Host (not rejected) and
+  starts automatically when the running turn ends (oldest first). Stopping a queued turn leaves the chat continuation
+  untouched.
+- Control requests are broker jobs whose request carries `control` (never reach a provider):
+  `cancel` (`targetJobId` and/or `projectPath`+`workspaceKey`; also removes a queued phone turn), `steer`
+  (`prompt`; live delivery is Codex-only like the desktop), `push_queued` (`targetJobId` of a queued phone turn: the
+  desktop's "Push now"; the message gets `steeredInto`), and `delivery_status` (`projectPath`+`workspaceKey` → bounded
+  records for the conversation branch `ensync/chat-<sha256(workspaceKey)[:24]>`: state, landing state, target, short
+  SHAs, description, https deployment URL).
+- Phone turns carry `deliveryTarget` (`production` default | `protected_branch`), chosen in the composer like the
+  desktop setting. Delivery is otherwise automatic (no manual push), so the phone shows the desktop panel's
+  Saved → Production progress for the conversation.
+
 ## Known limit
+
+A Host-side queued phone turn lives in Host memory: if the Host restarts while it waits, the turn ends as
+"reconciliation required" instead of starting later.
 
 A Cloudflare quick-tunnel URL changes when Ensync restarts, so a linked phone loses its Sync address. Until a stable
 URL exists, the phone must detect this and show "Your computer's address changed: scan the QR again" instead of a

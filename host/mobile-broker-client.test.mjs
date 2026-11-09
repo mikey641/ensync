@@ -102,6 +102,7 @@ test('phone claims a QR link and runs an encrypted brokered turn the Host can de
     prompt: 'שלום from the phone',
     workspaceKey: 'conversation:chat-1731000000000',
     sessionId: 'claude-session-1',
+    deliveryTarget: 'production',
     conversationId: 'chat-1731000000000',
     messageId: message.id,
   })

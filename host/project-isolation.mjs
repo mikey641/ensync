@@ -1107,3 +1107,8 @@ export class ProjectIsolationService {
     }
   }
 }
+
+/** The conversation branch Ensync uses for one validated workspace key. */
+export function conversationBranchName(rawWorkspaceKey) {
+  return `ensync/chat-${digest(workspaceKey(rawWorkspaceKey))}`
+}
