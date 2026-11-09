@@ -3,6 +3,7 @@ import { hostname } from 'node:os'
 
 import { AccountSyncError } from './account-sync.mjs'
 import { readJsonFile, writePrivateJson } from './host-secret-store.mjs'
+import { detectFunnelSyncUrl } from './tailscale-funnel.mjs'
 
 export const DEFAULT_MOBILE_PWA_URL = 'https://ensync.vercel.app/mobile/'
 const CREDENTIALS_SECRET = 'account-sync-credentials'
@@ -52,6 +53,8 @@ export class PhoneSyncService {
   #restoring = null
   #linking = null
 
+  #detectStableSyncUrl
+
   constructor(options = {}) {
     if (!options.accountSyncService || !options.syncBrokerHost || !options.secretStore) {
       throw new TypeError('Account sync, broker Host, and secret store are required for phone sync.')
@@ -63,6 +66,10 @@ export class PhoneSyncService {
     this.#mobileUrl = typeof options.mobileUrl === 'string' && options.mobileUrl ? options.mobileUrl : DEFAULT_MOBILE_PWA_URL
     this.#publishCapabilities = typeof options.publishCapabilities === 'function' ? options.publishCapabilities : null
     this.#log = typeof options.log === 'function' ? options.log : () => {}
+    // Only a real Host (with durable state) probes the machine's Tailscale.
+    this.#detectStableSyncUrl = typeof options.detectStableSyncUrl === 'function'
+      ? options.detectStableSyncUrl
+      : (this.#statePath ? detectFunnelSyncUrl : async () => null)
     this.restoreError = null
     this.state = null
   }
@@ -226,7 +233,10 @@ export class PhoneSyncService {
     if (!status.configured) {
       throw new AccountSyncError('sync_not_configured', 'Account sync is not configured for this Ensync build.', 503)
     }
-    const sync = publicSyncUrl(input.syncUrl) ?? publicSyncUrl(status.serviceUrl)
+    // A permanent address (Tailscale Funnel on the local Sync service) beats a
+    // quick tunnel, whose random URL dies with every restart.
+    const stable = publicSyncUrl(await this.#detectStableSyncUrl(status.serviceUrl).catch(() => null))
+    const sync = stable ?? publicSyncUrl(input.syncUrl) ?? publicSyncUrl(status.serviceUrl)
     if (!sync) {
       throw new AccountSyncError(
         'phone_link_sync_url_unavailable',
