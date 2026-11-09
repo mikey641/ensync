@@ -441,6 +441,41 @@ export async function findExecutable(command, options = {}) {
   return null
 }
 
+// Children a runProcess call has started and not yet seen close. A Host or
+// CLI that exits while a probe is still running (a quick `process.exit`, an
+// idle daemon retiring, a test runner tearing a file down) used to leave every
+// in-flight CLI behind as an orphan of launchd: a CLI that never exits on its
+// own (`amp --version`, `kiro-cli whoami`, the `junie` launcher) then lived for
+// weeks, and roughly a thousand of them accumulated. The 'exit' handler is
+// synchronous, so it can only send signals; that is all it needs to do.
+const liveChildren = new Set()
+let exitReaperInstalled = false
+function reapLiveChildren() {
+  for (const { child, group } of liveChildren) {
+    try {
+      if (group) process.kill(-child.pid, 'SIGKILL')
+      else child.kill('SIGKILL')
+    } catch {
+      // Already gone.
+    }
+  }
+  liveChildren.clear()
+}
+function trackLiveChild(child, group) {
+  if (!Number.isInteger(child.pid) || child.pid <= 0) return () => {}
+  if (!exitReaperInstalled) {
+    exitReaperInstalled = true
+    process.once('exit', reapLiveChildren)
+  }
+  const entry = { child, group }
+  liveChildren.add(entry)
+  return () => liveChildren.delete(entry)
+}
+/** Test seam: how many runProcess children are still being tracked. */
+export function liveRunProcessChildCount() {
+  return liveChildren.size
+}
+
 export function runProcess(executable, args, options = {}) {
   const legacyTimeoutMs = options.timeoutMs ?? 8_000
   const inactivityTimeoutMs = options.inactivityTimeoutMs ?? null
@@ -491,6 +526,7 @@ export function runProcess(executable, args, options = {}) {
       detached: killProcessTree && processTreePlatform !== 'win32',
       windowsHide: true,
     })
+    const untrackChild = trackLiveChild(child, killProcessTree && processTreePlatform !== 'win32')
 
     const sampleProcessTree = () => {
       if (!killProcessTree || processTreePlatform === 'win32' || treeSampleInFlight) return
@@ -656,6 +692,7 @@ export function runProcess(executable, args, options = {}) {
         return
       }
       settled = true
+      untrackChild()
       if (hardTimer) clearTimeout(hardTimer)
       if (inactivityTimer) clearTimeout(inactivityTimer)
       if (questionHoldTimer) clearTimeout(questionHoldTimer)

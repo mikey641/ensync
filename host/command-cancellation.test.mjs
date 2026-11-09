@@ -239,3 +239,25 @@ test('process capture reports when provider output was truncated', async () => {
   assert.equal(result.stdout, '12345')
   assert.equal(result.outputTruncated, true)
 })
+
+test('a process that exits mid-probe takes its runProcess children with it', { skip: process.platform === 'win32' }, async () => {
+  const { spawnSync } = await import('node:child_process')
+  const commandModule = new URL('./command.mjs', import.meta.url).href
+  const script = `
+    const { runProcess } = await import(${JSON.stringify(commandModule)})
+    void runProcess('/bin/sh', ['-c', 'echo $$; exec /bin/sleep 60'], {
+      timeoutMs: 60_000,
+      onStdout: (text) => { process.stdout.write(text); process.exit(0) },
+    })
+  `
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', timeout: 20_000 })
+  const pid = Number.parseInt(result.stdout.trim(), 10)
+  assert.ok(Number.isInteger(pid) && pid > 0, `expected the probe pid, got ${JSON.stringify(result.stdout)} ${result.stderr}`)
+  let alive = true
+  for (let attempt = 0; attempt < 40 && alive; attempt += 1) {
+    try { process.kill(pid, 0) } catch { alive = false }
+    if (alive) await new Promise((resolve) => setTimeout(resolve, 50))
+  }
+  if (alive) { try { process.kill(pid, 'SIGKILL') } catch {} }
+  assert.equal(alive, false, 'the probe outlived the process that started it')
+})
