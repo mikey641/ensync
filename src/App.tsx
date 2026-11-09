@@ -52,7 +52,7 @@ import {
   Wifi,
   X,
 } from 'lucide-react'
-import { defaultProviders, initialChats } from './data'
+import { defaultProviders, ENABLED_PROVIDERS, initialChats } from './data'
 import type { Chat, ConversationLayoutMode, FileAttachment, ModelSizeTier, NewTabPlacement, Provider, ProviderId, WorkspaceTab } from './types'
 import { DisplayPreferences, useDisplayPreferences } from './display-preferences'
 import { McpServerSettings } from './mcp-servers'
@@ -943,7 +943,8 @@ function App() {
     hydrated?.deliveryTarget === 'protected_branch' ? 'protected_branch' : 'production',
   )
   const [fallbackProviderOrder, setFallbackProviderOrder] = useState<ProviderId[]>(() =>
-    resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER),
+    resolveFallbackProviderOrder(window.localStorage, hydrated?.fallbackProviderOrder ?? DEFAULT_FALLBACK_PROVIDER_ORDER)
+      .filter((id) => ENABLED_PROVIDERS.includes(id)),
   )
   // The ranking is one device-wide choice, so it is written the moment it
   // changes rather than at the next workspace snapshot: another window, and the

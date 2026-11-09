@@ -15,7 +15,7 @@ import { claudeQuestionArguments, claudeUserMessageLine, createClaudeQuestionCha
 import { ProviderQuestionError } from './provider-questions.mjs'
 import { finalCodexResponse } from './codex-response.mjs'
 import { decodeJsonEventStream } from './json-event-repair.mjs'
-import { getProviderCatalog } from './providers.mjs'
+import { getProviderCatalog, isProviderEnabled } from './providers.mjs'
 import { splitConversationIdentity } from './conversation-reply-writer.mjs'
 
 const execFile = promisify(execFileCallback)
@@ -808,6 +808,13 @@ function validateRequest(request) {
       gatedReason
         ? `${providerLabel(request.provider)} chat execution is not enabled yet. ${gatedReason}`
         : `${request.provider} chat execution is not supported by Ensync Host yet. Use Codex, Claude Code, or Factory Droid.`,
+      422,
+    )
+  }
+  if (!isProviderEnabled(request.provider)) {
+    throw new ChatRunError(
+      'provider_disabled',
+      `${providerLabel(request.provider)} is turned off on this computer. Ensync runs Claude Code.`,
       422,
     )
   }
