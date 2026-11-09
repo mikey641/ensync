@@ -9,6 +9,7 @@ import test from 'node:test'
 import {
   AgentWorktreeClient,
   AgentWorktreeCommandError,
+  generatedHookScript,
   resolveAgentWorktreeExecutable,
   runAgentWorktreeCommand,
 } from './agent-worktree-client.mjs'
@@ -518,4 +519,28 @@ test('desktop packaging and local install both ship the staged runtime tool', as
     await readFile(join(repositoryRoot, 'scripts', 'install-app.mjs'), 'utf8'),
     /stageAgentWorktree/,
   )
+})
+
+test('generated Git hooks have no interpreter line on POSIX and still run through Git', async () => {
+  assert.equal(generatedHookScript('exit 0\n', 'darwin'), 'exit 0\n')
+  assert.equal(generatedHookScript('exit 0\n', 'linux'), 'exit 0\n')
+  assert.equal(generatedHookScript('exit 0\n', 'win32'), '#!/bin/sh\nexit 0\n')
+  if (process.platform === 'win32') return
+
+  const root = await mkdtemp(join(tmpdir(), 'ensync-hook-noshebang-'))
+  try {
+    const repository = join(root, 'repository')
+    const hooks = join(root, 'hooks')
+    const marker = join(root, 'marker')
+    await mkdir(hooks)
+    await runCommand('git', ['init', '-q', repository])
+    await runCommand('git', ['-C', repository, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'a'])
+    const hook = join(hooks, 'reference-transaction')
+    await writeFile(hook, generatedHookScript(`printf '%s\\n' "$1" >> '${marker}'\nexit 0\n`))
+    await chmod(hook, 0o700)
+    await runCommand('git', ['-C', repository, '-c', `core.hooksPath=${hooks}`, 'update-ref', 'refs/heads/guarded', 'HEAD'])
+    assert.equal(await readFile(marker, 'utf8'), 'prepared\ncommitted\n')
+  } finally {
+    await rm(root, { recursive: true, force: true })
+  }
 })

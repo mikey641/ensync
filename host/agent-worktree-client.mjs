@@ -33,8 +33,18 @@ post_create = []
 pre_merge = []
 post_merge = []
 `
-const REFERENCE_TRANSACTION_HOOK = `#!/bin/sh
-if test "$1" != "prepared"; then
+// Generated hooks deliberately have no `#!` line on POSIX. macOS sends every
+// exec of a freshly written `#!` script through a syspolicyd script assessment;
+// when syspolicyd is backlogged that exec blocks indefinitely before the shell
+// runs, which froze `git checkout`/`wt merge` and timed out every landing
+// (2026-11-08). A body without `#!` fails execve with ENOEXEC, and Git then runs
+// it through /bin/sh itself, so no new executable image is ever assessed. Git
+// for Windows needs the interpreter line to choose its shell.
+const SHEBANG = '#!/bin/sh\n'
+export function generatedHookScript(body, platform = process.platform) {
+  return platform === 'win32' ? `${SHEBANG}${body}` : body
+}
+const REFERENCE_TRANSACTION_HOOK_BODY = `if test "$1" != "prepared"; then
   exit 0
 fi
 while IFS=' ' read -r old new ref
@@ -49,8 +59,7 @@ do
 done
 exit 0
 `
-const PREPARE_COMMIT_MESSAGE_HOOK = `#!/bin/sh
-if test "$2" = "merge" && test -n "$ENSYNC_COMMIT_MESSAGE_FILE"; then
+const PREPARE_COMMIT_MESSAGE_HOOK_BODY = `if test "$2" = "merge" && test -n "$ENSYNC_COMMIT_MESSAGE_FILE"; then
   cat "$ENSYNC_COMMIT_MESSAGE_FILE" > "$1" || exit 1
 fi
 exit 0
@@ -377,7 +386,7 @@ async function withPublicationGuard(details, invoke) {
   await mkdir(guardsPath, { recursive: true, mode: 0o700 })
   await mkdir(guardPath, { mode: 0o700 })
   try {
-    await writeFile(hookPath, REFERENCE_TRANSACTION_HOOK, {
+    await writeFile(hookPath, generatedHookScript(REFERENCE_TRANSACTION_HOOK_BODY, details.platform), {
       encoding: 'utf8',
       mode: 0o700,
       flag: 'wx',
@@ -389,7 +398,7 @@ async function withPublicationGuard(details, invoke) {
         mode: 0o600,
         flag: 'wx',
       })
-      await writeFile(messageHookPath, PREPARE_COMMIT_MESSAGE_HOOK, {
+      await writeFile(messageHookPath, generatedHookScript(PREPARE_COMMIT_MESSAGE_HOOK_BODY, details.platform), {
         encoding: 'utf8',
         mode: 0o700,
         flag: 'wx',
