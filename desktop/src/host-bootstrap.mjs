@@ -19,6 +19,9 @@ const stateFile = process.env.ENSYNC_HOST_STATE_FILE
 const journalFile = process.env.ENSYNC_HOST_JOB_JOURNAL_FILE
 const projectIsolationRoot = process.env.ENSYNC_HOST_PROJECT_ISOLATION_ROOT
 const syncConfigFile = process.env.ENSYNC_HOST_SYNC_CONFIG_FILE
+// Ensync is a Claude Code wrapper: the Host offers, probes and runs only
+// Claude unless the operator explicitly lists more providers.
+process.env.ENSYNC_PROVIDERS ||= 'claude'
 const phoneSyncStateFile = process.env.ENSYNC_HOST_PHONE_SYNC_STATE_FILE
   || (stateFile && isAbsolute(stateFile) ? join(dirname(stateFile), 'ensync-phone-sync-v1.json') : null)
 const idleShutdownMs = Number(process.env.ENSYNC_HOST_IDLE_SHUTDOWN_MS || 60_000)

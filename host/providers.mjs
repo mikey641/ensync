@@ -971,6 +971,28 @@ async function inspectProvider(provider) {
   })
 }
 
+/**
+ * Providers this Host offers. `ENSYNC_PROVIDERS` is a comma list (the desktop
+ * app sets it to `claude`: Ensync is a Claude Code wrapper). Unset means every
+ * known provider, which keeps tests and ad-hoc Hosts unchanged.
+ */
+export function enabledProviderIds(env = process.env) {
+  const raw = typeof env.ENSYNC_PROVIDERS === 'string' ? env.ENSYNC_PROVIDERS.trim() : ''
+  if (!raw) return null
+  const ids = raw.split(',').map((value) => value.trim()).filter((value) => providerIds.has(value))
+  return ids.length ? new Set(ids) : null
+}
+
+export function isProviderEnabled(id, env = process.env) {
+  const enabled = enabledProviderIds(env)
+  return isProviderId(id) && (!enabled || enabled.has(id))
+}
+
+export function enabledProviderDefinitions(env = process.env) {
+  const enabled = enabledProviderIds(env)
+  return enabled ? providerDefinitions.filter((provider) => enabled.has(provider.id)) : providerDefinitions
+}
+
 export function isProviderId(value) {
   return providerIds.has(value)
 }
@@ -1034,7 +1056,8 @@ export class ProviderStatusService {
 
   constructor(options = {}) {
     this.#cacheDurationMs = options.cacheDurationMs ?? 60_000
-    this.#definitions = options.definitions ?? providerDefinitions
+    // Disabled providers are never probed, so their CLIs are never spawned.
+    this.#definitions = options.definitions ?? enabledProviderDefinitions()
     this.#inspect = options.inspectProvider ?? inspectProvider
     this.#verifiedUsageRetentionMs = options.verifiedUsageRetentionMs ?? VERIFIED_USAGE_RETENTION_MS
     this.#now = options.now ?? (() => Date.now())
@@ -1101,7 +1124,7 @@ export class ProviderStatusService {
   }
 
   async get(id, options = {}) {
-    if (!isProviderId(id)) return null
+    if (!isProviderId(id) || !this.#definitions.some((provider) => provider.id === id)) return null
     if (!options.refresh) {
       const providers = await this.list(options)
       return providers.find((provider) => provider.id === id) ?? null

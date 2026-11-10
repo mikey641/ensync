@@ -450,7 +450,12 @@ const providerNavigationOrder: Provider['id'][] = [
   'ollama',
 ]
 
-export const defaultProviders: Provider[] = providerNavigationOrder.map((providerId) => {
+// Ensync is a Claude Code wrapper. Every provider list in the app (pickers,
+// settings, usage, fallback order) derives from this, so only Claude appears;
+// older chats that named another provider fall back to Claude.
+export const ENABLED_PROVIDERS: readonly Provider['id'][] = ['claude']
+
+export const defaultProviders: Provider[] = providerNavigationOrder.filter((providerId) => ENABLED_PROVIDERS.includes(providerId)).map((providerId) => {
   const provider = defaultProviderCatalog.find((candidate) => candidate.id === providerId)
   if (!provider) throw new Error(`Missing default provider definition for ${providerId}.`)
   return { ...provider }

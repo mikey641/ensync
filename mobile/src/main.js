@@ -17,7 +17,6 @@ import {
 const LINK_KEY = 'ensync-phone-link-v1'
 const DRAFTS_KEY = 'ensync-phone-drafts-v1'
 const DEFAULT_PROVIDERS = [
-  { id: 'codex', name: 'Codex', available: true },
   { id: 'claude', name: 'Claude Code', available: true },
 ]
 
@@ -691,10 +690,12 @@ function updateComposer() {
   const chat = route.view === 'chat' ? sync.chat(route.chatId) : null
   const running = chat ? activeJob(chat.id) : null
   const providers = hostProviders()
-  const fallback = providers.find((provider) => provider.available !== false)?.id ?? 'codex'
-  const preferred = composer.provider ?? chat?.provider ?? fallback
+  const fallback = providers.find((provider) => provider.available !== false)?.id ?? 'claude'
+  // Ensync runs Claude Code: a chat that once used another provider continues
+  // with what this computer offers instead of naming a CLI it no longer runs.
+  const candidate = composer.provider ?? chat?.provider ?? fallback
+  const preferred = providers.some((provider) => provider.id === candidate) ? candidate : fallback
   const options = providers.map((provider) => h('option', { value: provider.id, disabled: provider.available === false }, provider.available === false ? `${provider.name} (unavailable)` : provider.name))
-  if (!providers.some((provider) => provider.id === preferred)) options.unshift(h('option', { value: preferred }, providerName(preferred)))
   const signature = options.map((option) => option.outerHTML).join('')
   if (composer.optionsSignature !== signature) {
     composer.select.replaceChildren(...options)
@@ -703,6 +704,8 @@ function updateComposer() {
   composer.select.value = preferred
   composer.select.onchange = () => { composer.provider = composer.select.value }
   composer.select.disabled = Boolean(running)
+  // One provider (Claude Code) needs no picker.
+  composer.select.hidden = providers.length <= 1
   composer.textarea.placeholder = running ? 'Steer the running agent…' : route.view === 'new' ? 'Describe the task' : 'Message'
   composer.button.setAttribute('aria-label', running ? 'Steer' : 'Send')
   composer.element.classList.toggle('steering', Boolean(running))
@@ -722,7 +725,7 @@ async function submitComposer() {
   const composer = shell.composer
   const prompt = composer.textarea.value.trim()
   if (!prompt) return
-  const provider = composer.select.value || 'codex'
+  const provider = composer.select.value || 'claude'
   const chatId = route.view === 'chat' ? route.chatId : null
   const running = chatId ? activeJob(chatId) : null
   const clear = () => {
