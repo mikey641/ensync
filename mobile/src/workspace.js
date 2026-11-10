@@ -190,8 +190,10 @@ export function continuationSessionId(chat, provider) {
 }
 
 /** The broker run request for one phone turn, matching the desktop's workspace and session identity. */
-export function turnRequest({ chat, project, provider, prompt, messageId }) {
+export function turnRequest({ chat, project, provider, prompt, messageId, deliveryTarget }) {
   return {
+    // Captured per prompt, like the desktop: Production (default) or Protected branch only.
+    ...(deliveryTarget === 'protected_branch' ? { deliveryTarget } : { deliveryTarget: 'production' }),
     provider,
     projectPath: project.path,
     prompt,

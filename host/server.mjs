@@ -777,13 +777,22 @@ export function createEnsyncHost(options = {}) {
     accountSyncService: accountSync,
     chatJobService: chatJobs,
     pollIntervalMs: options.syncBrokerPollIntervalMs,
-    onConversationJobFinished: ({ jobId, conversationId, messageId, request, terminalEvent }) => conversationReplies.enqueue({
+    onConversationJobFinished: ({ jobId, conversationId, messageId, request, terminalEvent, notes, neverStarted, transferredTo }) => conversationReplies.enqueue({
       jobId,
       conversationId,
       messageId,
       request,
+      notes,
+      neverStarted,
+      transferredTo,
       outcome: outcomeFromTerminalEvent(terminalEvent),
     }),
+    onConversationJobProgress: (progress) => conversationReplies.publishProgress?.(progress),
+    onConversationQueueChanged: (queue) => conversationReplies.publishQueue?.(queue),
+    // A paired phone reads the same delivery status the desktop panel shows.
+    deliveryStatus: (projectPath, branch) => deliveryCoordinator
+      ? deliveryCoordinator.status(projectPath, branch)
+      : null,
   })
   // Capabilities refresh every provider status, which can take a while; the
   // phone-link flow publishes them in the background through this helper.

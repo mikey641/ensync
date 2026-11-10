@@ -349,6 +349,27 @@ export class PhoneSync {
     return command
   }
 
+  /**
+   * Runs a Host control request (stop, steer or push into a running turn,
+   * or read delivery status) and resolves with its result. Control jobs are
+   * not turns: they never appear in the conversation.
+   */
+  async control(request, { timeoutMs = 20_000, pollMs = 400 } = {}) {
+    const hostId = this.client.host?.id
+    if (!hostId) throw new Error('No computer is linked. Scan the QR again.')
+    const jobId = `job_${crypto.randomUUID()}`
+    await this.client.submit({ hostId, jobId, request })
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const job = await this.client.job(jobId, 0)
+      const terminal = job.events.find((event) => ['completed', 'error', 'cancelled'].includes(event.type))
+      if (terminal?.type === 'completed') return terminal.result ?? {}
+      if (terminal) throw new Error(terminal.error ?? terminal.message ?? 'Your computer could not do that.')
+      await sleep(pollMs)
+    }
+    throw new Error(`${this.host?.label ?? 'Your computer'} did not answer in time.`)
+  }
+
   #scheduleJobs(delay) {
     clearTimeout(this.jobTimer)
     if (!this.running) return

@@ -121,8 +121,16 @@ import {
   type RemoteBrokerPairingOffer,
 } from './lib/remoteBrokerHost'
 import {
+  activeLiveTurn,
+  activeQueuedTurns,
+  buildLiveTurn,
+  desktopQueueBlock,
+  LIVE_TURN_HEARTBEAT_MS,
   mergeAccountWorkspace,
   prepareAccountWorkspace,
+  withLiveTurns,
+  type AccountLiveQueueBlock,
+  type AccountLiveTurn,
 } from './lib/accountWorkspaceSync.mjs'
 import {
   readSyncServiceUrl,
@@ -1065,6 +1073,12 @@ function App() {
   const executionTargetRef = useRef(executionTarget)
   const accountSyncInFlightRef = useRef<Promise<void> | null>(null)
   const accountSyncFingerprintRef = useRef<string | null>(null)
+  const accountWorkspaceFingerprintRef = useRef<string | null>(null)
+  const accountLiveTurnsRef = useRef<Record<string, AccountLiveTurn>>({})
+  const accountLiveQueuesRef = useRef<Record<string, AccountLiveQueueBlock>>({})
+  const accountPushTimerRef = useRef<number | null>(null)
+  const scheduleAccountWorkspacePushRef = useRef<() => void>(() => {})
+  const [accountLiveHeartbeat, setAccountLiveHeartbeat] = useState<string | null>(null)
   const accountSyncRevisionRef = useRef<number | null>(null)
   const automaticUpdateAttemptRef = useRef(false)
   const focusProjectRequestRef = useRef<(project: EnsyncProject, allowNativeRoute?: boolean) => Promise<void>>(async () => {})
@@ -1260,8 +1274,14 @@ function App() {
       setAccountSyncMessage(null)
       try {
         const pulled = await accountSyncHost.pull()
+        // This window's running turns publish their live progress (provider,
+        // start time, latest notes) so the phone mirrors the desktop mid-turn.
+        const portableWithLiveTurns = (state: StoredState) => prepareAccountWorkspace({
+          ...state,
+          chats: withLiveTurns(state.chats ?? [], accountLiveTurnsRef.current, accountLiveQueuesRef.current),
+        })
         let merged = mergeAccountWorkspace(workspaceSnapshotRef.current, pulled.state)
-        let portable = prepareAccountWorkspace(merged.state)
+        let portable = portableWithLiveTurns(merged.state)
         const remotePortable = pulled.state ? prepareAccountWorkspace(pulled.state as Record<string, unknown>) : null
         let revision = pulled.revision
         let updatedAt = pulled.updatedAt
@@ -1270,7 +1290,7 @@ function App() {
           const pushed = await accountSyncHost.push(portable, revision)
           if (pushed.status === 'conflict') {
             merged = mergeAccountWorkspace(merged.state, pushed.remoteState)
-            portable = prepareAccountWorkspace(merged.state)
+            portable = portableWithLiveTurns(merged.state)
             const retry = await accountSyncHost.push(portable, pushed.revision)
             if (retry.status === 'conflict') {
               throw new Error('Synchronized conversations changed again. Try Sync now once more.')
@@ -1456,9 +1476,42 @@ function App() {
     && supportsChat(supportProvider)
     && (supportProvider.usage === null || supportProvider.usage < 100)
   const currentTargetKey = targetKey(executionTarget)
+  // Live progress of this window's running turns. Keyed by a string so output
+  // events (which never enter the synchronized document) do not recompute it.
+  const accountLiveTurnsKey = useMemo(() => {
+    const liveTurns: Record<string, AccountLiveTurn> = {}
+    for (const chatId of sendingChatIds) {
+      const run = inFlightRuns[chatId]
+      if (!run?.turnId || !run.startedAt) continue
+      const liveTurn = buildLiveTurn({
+        turnId: run.turnId,
+        provider: run.provider,
+        startedAt: run.startedAt,
+        events: chatExecutionEvents[chatId] ?? [],
+        heartbeatAt: accountLiveHeartbeat,
+        origin: 'desktop',
+        ...(run.jobId ? { jobId: run.jobId } : {}),
+      })
+      if (liveTurn) liveTurns[chatId] = liveTurn
+    }
+    // Prompts this window queued behind a running turn, so the phone shows
+    // them as Queued rather than as finished messages.
+    const liveQueues: Record<string, AccountLiveQueueBlock> = {}
+    for (const [chatId, prompts] of Object.entries(promptQueues)) {
+      const block = desktopQueueBlock(prompts, sendingChatIds.has(chatId) ? accountLiveHeartbeat : null)
+      if (block) liveQueues[chatId] = block
+    }
+    return JSON.stringify({ liveTurns, liveQueues })
+  }, [accountLiveHeartbeat, chatExecutionEvents, inFlightRuns, promptQueues, sendingChatIds])
+  const accountLiveState = useMemo(
+    () => JSON.parse(accountLiveTurnsKey) as { liveTurns: Record<string, AccountLiveTurn>; liveQueues: Record<string, AccountLiveQueueBlock> },
+    [accountLiveTurnsKey],
+  )
+  accountLiveTurnsRef.current = accountLiveState.liveTurns
+  accountLiveQueuesRef.current = accountLiveState.liveQueues
   const accountWorkspaceDocument = useMemo(
-    () => prepareAccountWorkspace({ chats, projects }),
-    [chats, projects],
+    () => prepareAccountWorkspace({ chats: withLiveTurns(chats, accountLiveState.liveTurns, accountLiveState.liveQueues), projects }),
+    [accountLiveState, chats, projects],
   )
   const owningConversationTargets = useMemo<Record<string, ReferencedOwningConversation>>(() => {
     if (!isNativeWorkspaceIdentity(nativeWorkspaceIdentity)) return {}
@@ -1477,6 +1530,15 @@ function App() {
     () => JSON.stringify(accountWorkspaceDocument),
     [accountWorkspaceDocument],
   )
+  accountWorkspaceFingerprintRef.current = accountWorkspaceFingerprint
+  const anyChatSending = sendingChatIds.size > 0
+  // A running turn republishes periodically even without new notes, so a
+  // phone can tell a long quiet turn from a desktop that stopped mid-turn.
+  useEffect(() => {
+    if (!anyChatSending) return
+    const timer = window.setInterval(() => setAccountLiveHeartbeat(new Date().toISOString()), LIVE_TURN_HEARTBEAT_MS)
+    return () => window.clearInterval(timer)
+  }, [anyChatSending])
 
   const markChatRead = useCallback((chatId: string) => {
     const chat = chatsRef.current.find((item) => item.id === chatId)
@@ -1791,15 +1853,39 @@ function App() {
     return () => { cancelled = true }
   }, [synchronizeAccountWorkspace])
 
+  const scheduleAccountWorkspacePush = useCallback(() => {
+    // Throttled push: a burst of edits (or a stream of provider notes) becomes
+    // at most one encrypted upload every 1.5 s. Unlike a resetting debounce, a
+    // steady stream of notes cannot postpone the upload indefinitely.
+    if (accountPushTimerRef.current !== null) return
+    accountPushTimerRef.current = window.setTimeout(() => {
+      accountPushTimerRef.current = null
+      void synchronizeAccountWorkspace().then(() => {
+        // Changes made while the upload was in flight go out on the next slot.
+        if (accountWorkspaceFingerprintRef.current !== accountSyncFingerprintRef.current) {
+          scheduleAccountWorkspacePushRef.current()
+        }
+      }).catch(() => {})
+    }, 1_500)
+  }, [synchronizeAccountWorkspace])
+  scheduleAccountWorkspacePushRef.current = scheduleAccountWorkspacePush
+
   useEffect(() => {
     if (!accountSyncStatus.authenticated
       || accountWorkspaceFingerprint === accountSyncFingerprintRef.current) return
-    // Debounced push: a burst of edits becomes one encrypted upload.
-    const timer = window.setTimeout(() => {
-      void synchronizeAccountWorkspace().catch(() => {})
-    }, 1_500)
-    return () => window.clearTimeout(timer)
-  }, [accountSyncStatus.authenticated, accountWorkspaceFingerprint, synchronizeAccountWorkspace])
+    scheduleAccountWorkspacePush()
+  }, [accountSyncStatus.authenticated, accountWorkspaceFingerprint, scheduleAccountWorkspacePush])
+
+  useEffect(() => {
+    if (accountSyncStatus.authenticated) return
+    if (accountPushTimerRef.current !== null) window.clearTimeout(accountPushTimerRef.current)
+    accountPushTimerRef.current = null
+  }, [accountSyncStatus.authenticated])
+
+  useEffect(() => () => {
+    if (accountPushTimerRef.current !== null) window.clearTimeout(accountPushTimerRef.current)
+    accountPushTimerRef.current = null
+  }, [])
 
   useEffect(() => {
     if (!accountSyncStatus.authenticated) {
@@ -5023,6 +5109,15 @@ function ConversationPane({
   const providerNotes = executionEvents
     .filter((event): event is Extract<ChatExecutionEvent, { type: 'note' }> => event.type === 'note')
     .slice(-6)
+  // A turn sent from the phone runs in Ensync Host, not in this window; its
+  // progress and queue arrive through the synchronized document.
+  const remoteLiveTurn = !sending ? activeLiveTurn(chat) : null
+  const hostLiveTurn = remoteLiveTurn?.origin === 'host' ? remoteLiveTurn : null
+  const hostLiveProvider = providers.find((item) => item.id === hostLiveTurn?.provider) ?? provider
+  const hostElapsedLabel = useWorkingElapsedLabel(Boolean(hostLiveTurn), hostLiveTurn?.startedAt ?? null)
+  const remoteQueuedIds = new Set(activeQueuedTurns(chat)
+    .filter((item) => item.origin === 'host' && item.messageId)
+    .map((item) => item.messageId as string))
   // Derived from the same replayed event buffer the panel reads, so a window
   // that reconnects mid-turn still sees the question the provider is blocked on.
   const pendingQuestion = pendingQuestionsFromEvents(executionEvents)[0] ?? null
@@ -5225,7 +5320,7 @@ function ConversationPane({
               return message.role === 'user' ? (
                 <div className="message message--user" key={message.id}>
                   <div className="message__avatar user-avatar">MH</div>
-                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : message.deliveryStatus === 'transferred' ? ' · transferred to active run' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
+                  <div className="message__body"><div className="message__meta"><strong>You</strong><span>{message.time}{remoteQueuedIds.has(message.id) ? ' · queued on Ensync Host' : (message as { steeredInto?: string }).steeredInto ? ' · sent to the running turn' : message.deliveryStatus === 'queued' ? ` · queued ${queuedPrompts.findIndex((item) => item.turnId === message.turnId) + 1}` : message.deliveryStatus === 'failed' ? ' · run failed' : message.deliveryStatus === 'cancelled' ? ' · stopped' : message.deliveryStatus === 'interrupted' ? ' · interrupted' : message.deliveryStatus === 'transferred' ? ' · transferred to active run' : ''}</span></div>{isLongMessageContent(message.content) ? <MessageContent content={message.content} collapsible /> : typeof window.ensyncDesktop?.openPath === 'function' ? <MessageContent content={message.content} projectPath={projectPath} /> : <MessageContent content={message.content} onOpenFile={onOpenFile} />}{message.attachments && message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map((attachment) => <span key={attachment.path} title={attachment.path}><Paperclip size={12} />{attachment.name}</span>)}</div>}<div className="message-actions"><CopyTextButton text={message.content} label="Copy message" /></div></div>
                 </div>
               ) : (
                 <div className="message message--agent" key={message.id}>
@@ -5264,6 +5359,24 @@ function ConversationPane({
               </div>
             </div>
           )}
+          {hostLiveTurn && hostLiveTurn.notes.length > 0 && (
+            <div className="provider-live-notes" role="log" aria-live="polite" aria-label="Provider notes">
+              {hostLiveTurn.notes.map((note, index) => (
+                <ProviderNoteCard
+                  key={`${note.at ?? ''}-${index}`}
+                  note={note}
+                  provider={providers.find((item) => item.id === note.provider) ?? hostLiveProvider}
+                  projectPath={projectPath}
+                  onOpenFile={onOpenFile}
+                />
+              ))}
+            </div>
+          )}
+          {hostLiveTurn && <div className="working-line">
+            <span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" />
+            <em aria-hidden="true">{hostElapsedLabel ?? '• Working'}</em>
+            <span className="copy-announcement">{hostLiveProvider.name} is working in this chat from your phone.</span>
+          </div>}
           {sending && <div className="working-line">
             <span aria-hidden="true" /><span aria-hidden="true" /><span aria-hidden="true" />
             <em aria-hidden="true">{elapsedWorkingLabel ?? '• Working'}</em>

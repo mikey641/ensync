@@ -118,7 +118,7 @@ test('claimed broker jobs without a matching durable Host job are reconciled and
   assert.equal(reconciled.events.at(-1).event.safeToRetry, false)
 })
 
-test('occupied broker jobs fail safely without subscribing to a nonexistent local job', async (context) => {
+test('an occupied broker job queues without running or subscribing, and can be stopped while queued', async (context) => {
   let runs = 0
   const chatJobs = new ChatJobService({
     admit: async () => ({
@@ -148,15 +148,25 @@ test('occupied broker jobs fail safely without subscribing to a nonexistent loca
   })
 
   await worker.pollOnce()
-  const failed = await eventually(async () => {
+  await worker.pollOnce()
+  // Queued like a desktop prompt sent mid-turn: not rejected, not run, no events.
+  const queued = await client.brokerJob(submitted.id)
+  assert.equal(queued.state, 'claimed')
+  assert.equal(queued.events.length, 0)
+  assert.equal(runs, 0)
+  assert.equal(worker.status().activeJobs, 1)
+
+  await client.sendBrokerCommand(submitted, 'cancel')
+  const stopped = await eventually(async () => {
     await worker.pollOnce()
     const status = await client.brokerJob(submitted.id)
-    assert.equal(status.state, 'failed')
+    assert.equal(status.state, 'cancelled')
     return status
   })
-
   assert.equal(runs, 0)
-  assert.equal(failed.events.at(-1).event.code, 'chat_job_occupied')
-  assert.equal(failed.events.at(-1).event.safeToRetry, false)
-  assert.equal(worker.status().activeJobs, 0)
+  assert.equal(stopped.events.at(-1).event.type, 'cancelled')
+  await eventually(async () => {
+    await worker.pollOnce()
+    assert.equal(worker.status().activeJobs, 0)
+  })
 })
