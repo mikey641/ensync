@@ -195,6 +195,7 @@ import {
   resolveConversationWorkspaceKey,
 } from './lib/conversationWorkspaceKey.mjs'
 import {
+  AGENT_UPDATE_PREFERENCES_KEY,
   acknowledgeAgentUpdateReminder,
   agentUpdateDue,
   readAgentUpdatePreferences,
@@ -327,6 +328,8 @@ const STORAGE_KEY = 'ensync-workspace-v2'
 const LEGACY_STORAGE_KEY = 'ensync-workspace-v2'
 const PRODUCTION_NOTIFICATION_KEYS_STORAGE_KEY = 'ensync-production-notification-keys-v1'
 const MAX_PRODUCTION_NOTIFICATION_KEYS = 512
+const WORKSPACE_COMMIT_DEBOUNCE_MS = 400
+const WORKSPACE_COMMIT_MAX_WAIT_MS = 2_000
 const timeNow = () => new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 const telegramHostClient = createTelegramHostClient()
 const EMPTY_ACCOUNT_SYNC_STATUS: AccountSyncStatus = {
@@ -1776,7 +1779,10 @@ function App() {
 
   useEffect(() => {
     const synchronizePreferences = (event: StorageEvent) => {
-      if (event.storageArea === window.localStorage) {
+      // Other windows write multi-MB workspace snapshots here; only the agent
+      // update preference is read, so ignore every other key instead of
+      // re-rendering the whole app for each foreign snapshot write.
+      if (event.storageArea === window.localStorage && (event.key === null || event.key === AGENT_UPDATE_PREFERENCES_KEY)) {
         setAgentUpdatePreferences(readAgentUpdatePreferences(window.localStorage))
       }
     }
@@ -1932,12 +1938,35 @@ function App() {
     }
   }, [accountSyncStatus.authenticated, synchronizeAccountWorkspace])
 
-  useLayoutEffect(() => {
+  // The snapshot holds every conversation (several MB), and each commit parses,
+  // checksums and writes it three times. Committing on every state change made
+  // each keystroke in a composer cost a full snapshot write, so routine changes
+  // are coalesced: written once the window has been quiet for a moment, and at
+  // the latest every WORKSPACE_COMMIT_MAX_WAIT_MS. Hiding or closing the window
+  // still flushes synchronously below, and explicit commitWorkspace(overrides)
+  // calls for durable transitions stay immediate.
+  const pendingWorkspaceCommitRef = useRef<{ timer: number; firstAt: number } | null>(null)
+  const flushPendingWorkspaceCommit = useCallback(() => {
+    const pending = pendingWorkspaceCommitRef.current
+    if (pending) window.clearTimeout(pending.timer)
+    pendingWorkspaceCommitRef.current = null
     commitWorkspace()
-  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, commitWorkspace, conversationLayout, conversationSidebarWidth, deliveryPanelOpenByChat, deliveryTarget, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+  }, [commitWorkspace])
+  useLayoutEffect(() => {
+    const now = Date.now()
+    const pending = pendingWorkspaceCommitRef.current
+    if (pending) window.clearTimeout(pending.timer)
+    const firstAt = pending?.firstAt ?? now
+    const delay = Math.max(0, Math.min(WORKSPACE_COMMIT_DEBOUNCE_MS, firstAt + WORKSPACE_COMMIT_MAX_WAIT_MS - now))
+    pendingWorkspaceCommitRef.current = { firstAt, timer: window.setTimeout(flushPendingWorkspaceCommit, delay) }
+  }, [activeProjectId, activeTabId, autoContextSkill, autoFallback, chatErrors, chatExecutionEvents, chatSessions, chats, flushPendingWorkspaceCommit, conversationLayout, conversationSidebarWidth, deliveryPanelOpenByChat, deliveryTarget, draftAttachments, drafts, executionPanelOpenByChat, inFlightRuns, modelTelemetry, occupiedRuns, placement, projects, promptQueues, readCompletionByChat, splitLayout, tabs, visibility])
+
+  useEffect(() => () => {
+    if (pendingWorkspaceCommitRef.current) flushPendingWorkspaceCommit()
+  }, [flushPendingWorkspaceCommit])
 
   useEffect(() => {
-    const flush = () => commitWorkspace()
+    const flush = () => flushPendingWorkspaceCommit()
     const flushWhenHidden = () => {
       if (document.visibilityState === 'hidden') flush()
     }
@@ -1949,7 +1978,7 @@ function App() {
       window.removeEventListener('beforeunload', flush)
       document.removeEventListener('visibilitychange', flushWhenHidden)
     }
-  }, [commitWorkspace])
+  }, [flushPendingWorkspaceCommit])
 
   // Ensync Host reports its home directory with every project, which is how a
   // window learns it when no desktop shell has already said so. Once it is
