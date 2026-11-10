@@ -122,3 +122,68 @@ export function visibleMessageText(message, attachments) {
   const count = normalizeFileAttachments(attachments).length
   return count === 1 ? 'Attached 1 file.' : `Attached ${count} files.`
 }
+
+const PASTE_EXTENSIONS = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/gif': 'gif',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/tiff': 'tiff',
+  'application/pdf': 'pdf',
+}
+
+/** A clipboard image is usually named just "image.png"; give each paste its own name. */
+export function pastedAttachmentName(file, now = new Date(), index = 0) {
+  const stamp = now.toISOString().replace(/[-:]/g, '').replace(/\..*$/, '').replace('T', '-')
+  const original = nonEmptyString(file?.name)
+  const extension = original?.match(/\.([A-Za-z0-9]{1,8})$/)?.[1]?.toLowerCase()
+    ?? PASTE_EXTENSIONS[String(file?.type ?? '').toLowerCase()]
+    ?? 'bin'
+  const generic = !original || /^image\.[a-z0-9]+$/i.test(original)
+  if (!generic) return original
+  return `pasted-${stamp}${index > 0 ? `-${index + 1}` : ''}.${extension}`
+}
+
+/**
+ * Files pasted into a composer. A file copied in Finder still has a path and
+ * is attached like a drop; clipboard image data (a screenshot, an image copied
+ * from a browser) has no path, so the Host stores its bytes and the agent gets
+ * that stored path.
+ */
+export async function resolvePastedAttachments(files, pathForFile, hostOps, now = new Date()) {
+  const list = Array.from(files ?? [])
+  const withPath = []
+  const withoutPath = []
+  for (const file of list) {
+    let path = null
+    try {
+      path = typeof pathForFile === 'function' ? nonEmptyString(pathForFile(file)) : null
+    } catch {
+      path = null
+    }
+    if (path) withPath.push(file)
+    else withoutPath.push(file)
+  }
+  const dropped = withPath.length > 0
+    ? await resolveDroppedAttachments(withPath, pathForFile, hostOps)
+    : { attachments: [], unavailable: [] }
+  const attachments = [...dropped.attachments]
+  const unavailable = [...dropped.unavailable]
+  for (const [index, file] of withoutPath.entries()) {
+    const name = pastedAttachmentName(file, now, index)
+    if (!hostOps) {
+      unavailable.push(name)
+      continue
+    }
+    try {
+      const stored = await hostOps.storeChatAttachment(name, await file.arrayBuffer())
+      const storedPath = nonEmptyString(stored?.attachment?.path)
+      if (!storedPath) throw new Error('The host did not return a stored attachment path.')
+      attachments.push({ name, path: storedPath })
+    } catch {
+      unavailable.push(name)
+    }
+  }
+  return { attachments: normalizeFileAttachments(attachments), unavailable }
+}

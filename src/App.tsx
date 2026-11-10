@@ -320,6 +320,7 @@ import {
   messageTextWithAttachments,
   normalizeFileAttachments,
   resolveDroppedAttachments,
+  resolvePastedAttachments,
   visibleMessageText,
 } from './lib/fileAttachments.mjs'
 import { decorativeTrafficLightsVisible } from './lib/titlebar.mjs'
@@ -1064,6 +1065,7 @@ function App() {
   const activeTabIdRef = useRef(activeTabId)
   const draftsRef = useRef(drafts)
   const draftAttachmentsRef = useRef(draftAttachments)
+  const handleFilesPasteRef = useRef<((chatId: string, files: File[]) => Promise<void>) | null>(null)
   const providersRef = useRef(providers)
   const projectsRef = useRef(projects)
   const chatSessionsRef = useRef(chatSessions)
@@ -1776,6 +1778,22 @@ function App() {
   }, [refreshProviders])
 
   useEffect(() => subscribeNativeRecentProjects(setNativeRecentProjects), [])
+
+  // Pasting an image (a screenshot, an image copied from a browser, or a file
+  // copied in Finder) into a chat composer attaches it instead of inserting
+  // nothing. Plain text pastes are left to the textarea.
+  useEffect(() => {
+    const onPaste = (event: ClipboardEvent) => {
+      const target = event.target instanceof HTMLElement ? event.target.closest<HTMLElement>('[data-chat-composer]') : null
+      const chatId = target?.dataset.chatComposer
+      const files = Array.from(event.clipboardData?.files ?? [])
+      if (!chatId || files.length === 0) return
+      event.preventDefault()
+      void handleFilesPasteRef.current?.(chatId, files)
+    }
+    document.addEventListener('paste', onPaste)
+    return () => document.removeEventListener('paste', onPaste)
+  }, [])
 
   useEffect(() => {
     const synchronizePreferences = (event: StorageEvent) => {
@@ -3261,6 +3279,41 @@ function App() {
       }))
     }
   }
+
+  const handleFilesPaste = async (chatId: string, files: File[]) => {
+    if (executionTargetRef.current.kind !== 'local') {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: 'Pasted files are saved on this computer. Switch the chat to the local Ensync Host before pasting them.',
+      }))
+      return
+    }
+    const pasted = await resolvePastedAttachments(files, window.ensyncDesktop?.getPathForFile, {
+      probeAttachmentPaths: (paths: string[]) => ensyncHost.probeAttachmentPaths(paths),
+      storeChatAttachment: (name: string, bytes: ArrayBuffer) => ensyncHost.storeChatAttachment(name, bytes),
+    }).catch(() => null)
+    if (!pasted) {
+      setAttachmentErrors((current) => ({ ...current, [chatId]: 'Ensync could not attach the pasted image. Paste it again.' }))
+      return
+    }
+    if (!chatsRef.current.some((chat) => chat.id === chatId)) return
+    if (pasted.attachments.length > 0) {
+      const nextAttachments = {
+        ...draftAttachmentsRef.current,
+        [chatId]: appendFileAttachments(draftAttachmentsRef.current[chatId], pasted.attachments),
+      }
+      draftAttachmentsRef.current = nextAttachments
+      setDraftAttachments(nextAttachments)
+      setAttachmentErrors((current) => ({ ...current, [chatId]: null }))
+    }
+    if (pasted.unavailable.length > 0) {
+      setAttachmentErrors((current) => ({
+        ...current,
+        [chatId]: `Ensync could not attach ${pasted.unavailable.length === 1 ? pasted.unavailable[0] : `${pasted.unavailable.length} pasted files`}. Check that Ensync Host is running, then paste again.`,
+      }))
+    }
+  }
+  handleFilesPasteRef.current = handleFilesPaste
 
   const handleFilesChoose = async (chatId: string) => {
     if (executionTargetRef.current.kind !== 'local') {

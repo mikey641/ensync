@@ -23,3 +23,10 @@ export function resolveDroppedAttachments(
 ): Promise<{ attachments: FileAttachment[]; unavailable: string[] }>
 export function messageTextWithAttachments(message: unknown, attachments: unknown): string
 export function visibleMessageText(message: unknown, attachments: unknown): string
+export function pastedAttachmentName(file: { name?: string; type?: string } | null | undefined, now?: Date, index?: number): string
+export function resolvePastedAttachments(
+  files: ArrayLike<File> | Iterable<File> | null | undefined,
+  pathForFile?: ((file: File) => string) | null,
+  hostOps?: ChatAttachmentHostOps | null,
+  now?: Date,
+): Promise<{ attachments: FileAttachment[]; unavailable: string[] }>
