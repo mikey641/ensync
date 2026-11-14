@@ -1574,7 +1574,7 @@ function App() {
             ? candidate.questions.reduce((total, question) => total + question.question.length, 0)
             : candidate.type === 'question_resolved'
               ? candidate.answers.reduce((total, answer) => total + answer.answer.length, 0)
-              : candidate.message.length
+              : candidate.message.length + (candidate.type === 'finished' ? candidate.reply?.length ?? 0 : 0)
       if (retained.length > 0 && retainedCharacters + size > 1024 * 1024) break
       retained.unshift(candidate)
       retainedCharacters += size
@@ -6051,6 +6051,10 @@ function ExecutionPanel({
 }) {
   const outputRef = useRef<HTMLPreElement>(null)
   const latestProviderNote = [...events].reverse().find((event) => event.type === 'note')
+  const finalReplyEvent = sending ? undefined : [...events].reverse().find((event) => event.type === 'finished')
+  const finalReply = finalReplyEvent?.type === 'finished' && finalReplyEvent.reply
+    ? extractEnsyncContinuation(finalReplyEvent.reply).visibleResponse.trim()
+    : ''
 
   useLayoutEffect(() => {
     if (!open || !outputRef.current) return
@@ -6072,8 +6076,10 @@ function ExecutionPanel({
           <TerminalSquare size={14} />
           <strong>{sending ? 'Live CLI execution' : 'Previous CLI execution'}</strong>
           {sending && <span className="execution-panel__live"><i /> running</span>}
-          <small title={latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined}>
-            {latestProviderNote?.type === 'note'
+          <small title={finalReply || (latestProviderNote?.type === 'note' ? latestProviderNote.text : undefined)}>
+            {finalReply
+              ? `Final reply: ${finalReply.replace(/\s+/g, ' ')}`
+              : latestProviderNote?.type === 'note'
               ? `${sending ? 'Latest note' : 'Last run note'}: ${latestProviderNote.text.replace(/\s+/g, ' ').trim()}`
               : 'Provider notes and CLI-visible output · hidden reasoning is never available'}
           </small>
@@ -6112,8 +6118,10 @@ function ExecutionPanel({
                 </span>
               )
             }
+            const reply = event.reply ? extractEnsyncContinuation(event.reply).visibleResponse.trim() : ''
             return (
               <span className={`execution-panel__host execution-panel__host--${event.outcome}`} key={`${event.at}-${index}`}>
+                {reply && <span className="execution-panel__note">{'\n'}[{providerName} reply] {reply}{'\n'}</span>}
                 {'\n'}[Ensync Host] {event.message}{event.safeToRetry ? ' Safe to retry before verified activity.' : ''}{'\n'}
               </span>
             )

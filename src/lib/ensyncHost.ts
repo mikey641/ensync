@@ -522,6 +522,8 @@ export type ChatExecutionEvent =
       safeToRetry: boolean
       at: string
       sequence?: number
+      /** The provider's final answer, so the execution log ends with it rather than the last mid-turn note. */
+      reply?: string
     }
 
 type ChatStreamCompletedEvent = {
@@ -1022,6 +1024,7 @@ export class EnsyncHostClient {
             code: null,
             safeToRetry: false,
             at: event.at,
+            ...(typeof event.result?.response === 'string' && event.result.response.trim() ? { reply: event.result.response } : {}),
             sequence: event.sequence,
           })
         } else if (event.type === 'error') {
@@ -1166,6 +1169,7 @@ export class EnsyncHostClient {
             code: null,
             safeToRetry: false,
             at: event.at,
+            ...(typeof event.result?.response === 'string' && event.result.response.trim() ? { reply: event.result.response } : {}),
           })
         } else if (event.type === 'error') {
           onEvent({
